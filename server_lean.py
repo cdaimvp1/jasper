@@ -47,6 +47,9 @@ import team_room
 import projects
 import members as members_mod
 import inbox
+import retention
+import backup
+import paths
 from bus import init_bus, emit_event, query_events, latest_id, event_count
 
 from watchers import start_watchers, stop_watchers
@@ -1815,6 +1818,91 @@ async def api_cockpit_settings_get():
     was hardcoded to 20 in cockpit.html, now a real Settings control)."""
     window = config.get("cockpit", "chat_history_window")
     return JSONResponse({"chat_history_window": int(window) if window else 20})
+
+
+class RetentionCategoryBody(BaseModel):
+    days: Optional[int] = None
+    keep_days: Optional[int] = None
+
+
+class RetentionSnapshotsBody(BaseModel):
+    daily_keep: Optional[int] = None
+    weekly_keep: Optional[int] = None
+    monthly_keep: Optional[int] = None
+
+
+class RetentionSettingsBody(BaseModel):
+    enforcement_enabled: Optional[bool] = None
+    bus_worker_notifications: Optional[RetentionCategoryBody] = None
+    bus_events: Optional[RetentionCategoryBody] = None
+    socrates_retrieval_log: Optional[RetentionCategoryBody] = None
+    logs: Optional[RetentionCategoryBody] = None
+    raw_ingest_processed: Optional[RetentionCategoryBody] = None
+    db_snapshots: Optional[RetentionSnapshotsBody] = None
+
+
+@app.get("/api/settings/retention")
+async def api_settings_retention_get():
+    """Data & Retention Settings section - current policy config (merged with
+    defaults for anything not yet customized), plus the disk-usage dashboard
+    and last-run status, so the numbers on this page are always real, never
+    stale placeholders."""
+    def _cat(name: str, fallback: dict) -> dict:
+        val = config.get("retention", name)
+        return val if isinstance(val, dict) else fallback
+
+    snap_fallback = {"daily_keep": backup.DEFAULT_DAILY_KEEP, "weekly_keep": backup.DEFAULT_WEEKLY_KEEP,
+                      "monthly_keep": backup.DEFAULT_MONTHLY_KEEP}
+    return JSONResponse({
+        "enforcement_enabled": bool(config.get("retention", "enforcement_enabled")),
+        "categories": {
+            "bus_worker_notifications": _cat("bus_worker_notifications", {"days": 60}),
+            "bus_events": _cat("bus_events", {"days": 270}),
+            "socrates_retrieval_log": _cat("socrates_retrieval_log", {"days": 90}),
+            "logs": _cat("logs", {"keep_days": 60}),
+            "raw_ingest_processed": _cat("raw_ingest_processed", {"days": 730}),
+        },
+        "db_snapshots": _cat("db_snapshots", snap_fallback),
+        "disk_usage": retention.disk_usage_report(),
+        "last_retention_run": wg.get_cursor("retention", "last_run_date"),
+    })
+
+
+@app.post("/api/settings/retention")
+async def api_settings_retention_set(body: RetentionSettingsBody):
+    """Partial update - only fields actually present in the request body are
+    written; everything else keeps its current value. enforcement_enabled
+    defaults to False and is the ONE toggle that turns any of this from
+    report-only into an actual delete/archive - see retention.py's module
+    docstring for why that default matters."""
+    if body.enforcement_enabled is not None:
+        config.set_value(body.enforcement_enabled, "retention", "enforcement_enabled")
+    for field_name in ("bus_worker_notifications", "bus_events", "socrates_retrieval_log",
+                       "logs", "raw_ingest_processed"):
+        cat = getattr(body, field_name)
+        if cat is not None:
+            existing = config.get("retention", field_name) or {}
+            merged = dict(existing) if isinstance(existing, dict) else {}
+            if cat.days is not None:
+                if cat.days < 1:
+                    raise HTTPException(400, f"{field_name}.days must be at least 1")
+                merged["days"] = cat.days
+            if cat.keep_days is not None:
+                if cat.keep_days < 1:
+                    raise HTTPException(400, f"{field_name}.keep_days must be at least 1")
+                merged["keep_days"] = cat.keep_days
+            config.set_value(merged, "retention", field_name)
+    if body.db_snapshots is not None:
+        existing = config.get("retention", "db_snapshots") or {}
+        merged = dict(existing) if isinstance(existing, dict) else {}
+        for key in ("daily_keep", "weekly_keep", "monthly_keep"):
+            val = getattr(body.db_snapshots, key)
+            if val is not None:
+                if val < 1:
+                    raise HTTPException(400, f"db_snapshots.{key} must be at least 1")
+                merged[key] = val
+        config.set_value(merged, "retention", "db_snapshots")
+    return JSONResponse({"ok": True})
 
 
 @app.post("/api/cockpit/settings")

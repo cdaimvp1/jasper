@@ -429,3 +429,51 @@ def latest_id() -> int:
             row = conn.execute("SELECT MAX(id) AS m FROM events").fetchone()
             return int(row["m"] or 0)
         finally: conn.close()
+
+
+def count_worker_notifications_before(cutoff_ts: float) -> int:
+    """Retention support (added 2026-07-29) - report-only count, used by
+    retention.py to say what WOULD be deleted before enforcement is enabled."""
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute("SELECT COUNT(*) AS n FROM worker_notifications WHERE ts < ?", (cutoff_ts,)).fetchone()
+            return row["n"]
+        finally: conn.close()
+
+
+def get_events_before(cutoff_ts: float) -> list[dict]:
+    """Retention support (added 2026-07-29) - full rows (not just a count),
+    since bus_events archives before deleting (see retention.py._archive_events_jsonl)."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute("SELECT * FROM events WHERE ts < ? ORDER BY ts ASC", (cutoff_ts,)).fetchall()
+            return [dict(r) for r in rows]
+        finally: conn.close()
+
+
+def delete_old_worker_notifications(cutoff_ts: float) -> int:
+    """Retention support (added 2026-07-29, see retention.py) - per-worker poll/
+    UI plumbing, safe to age out aggressively since nothing downstream reads a
+    notification older than a worker's own poll cursor ever reaches. Returns
+    the number of rows actually deleted."""
+    with _lock:
+        conn = _connect()
+        try:
+            cur = conn.execute("DELETE FROM worker_notifications WHERE ts < ?", (cutoff_ts,))
+            return cur.rowcount
+        finally: conn.close()
+
+
+def delete_old_events(cutoff_ts: float) -> int:
+    """Retention support (added 2026-07-29, see retention.py) - the raw
+    observation/action/decision log. Kept much longer than worker_notifications
+    (this is the actual audit trail), but still not forever - see retention.py's
+    policy schema for the configured window. Returns rows deleted."""
+    with _lock:
+        conn = _connect()
+        try:
+            cur = conn.execute("DELETE FROM events WHERE ts < ?", (cutoff_ts,))
+            return cur.rowcount
+        finally: conn.close()

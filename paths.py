@@ -71,6 +71,18 @@ DOCUMENTS_RAW_ITEMS_DIR = DOCUMENTS_DIR / "raw_items"
 # real id, then removes the staging folder either way (dup or not).
 ATTACHMENT_STAGING_DIR = DATA_DIR / "raw_ingest_inbox" / "_mail_attachments_staging"
 
+# Automated backup snapshots (added 2026-07-29, after a real incident: the
+# previous ad hoc backup habit was a junk-drawer folder INSIDE the body/ code
+# repo - setup/_backups/ - that mixed genuinely-disposable pre-git snapshots
+# with an irreplaceable quarantined data copy, and got rm -rf'd along with the
+# former. Deliberately placed under DATA_DIR (the real data location), never
+# under the code repo, so a future "clean up the repo" pass structurally
+# cannot reach it - a different root entirely, not just a different folder
+# name within the same one.
+BACKUPS_DIR = DATA_DIR / "backups"
+DB_SNAPSHOTS_DIR = BACKUPS_DIR / "db_snapshots"
+CONFIG_SNAPSHOTS_DIR = BACKUPS_DIR / "config_snapshots"
+
 # --- workspace this team operates over -------------------------------------
 # For ARIA: OneDrive root where aria_sync/ and canon_doctrine/ live.
 # Generalizable: any directory the substrate observes / acts within.
@@ -93,5 +105,6 @@ def ensure_dirs() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     for d in (DOCUMENTS_REFERENCE_DIR, DOCUMENTS_ISSUES_DIR, DOCUMENTS_PROJECTS_DIR,
-              DOCUMENTS_CHAT_DIR, DOCUMENTS_RAW_ITEMS_DIR, ATTACHMENT_STAGING_DIR):
+              DOCUMENTS_CHAT_DIR, DOCUMENTS_RAW_ITEMS_DIR, ATTACHMENT_STAGING_DIR,
+              DB_SNAPSHOTS_DIR, CONFIG_SNAPSHOTS_DIR):
         d.mkdir(parents=True, exist_ok=True)

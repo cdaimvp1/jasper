@@ -1813,6 +1813,33 @@ def append_socrates_log(*, asked_ts: float, asker: Optional[str], question: str,
             conn.close()
 
 
+def count_socrates_log_before(cutoff_ts: float) -> int:
+    """Retention support (added 2026-07-29) - report-only count, used by
+    retention.py to say what WOULD be deleted before enforcement is enabled."""
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute("SELECT COUNT(*) AS n FROM socrates_retrieval_log WHERE asked_ts < ?", (cutoff_ts,)).fetchone()
+            return row["n"]
+        finally:
+            conn.close()
+
+
+def delete_old_socrates_log(cutoff_ts: float) -> int:
+    """Retention support (added 2026-07-29, see retention.py) - this is
+    diagnostic/tuning data (what Socrates retrieved and whether it helped),
+    not a business record; socrates_source_outcomes aggregates recent history,
+    not all-time, so pruning old rows doesn't change what that projection
+    means. Returns rows deleted."""
+    with _lock:
+        conn = _connect()
+        try:
+            cur = conn.execute("DELETE FROM socrates_retrieval_log WHERE asked_ts < ?", (cutoff_ts,))
+            return cur.rowcount
+        finally:
+            conn.close()
+
+
 def socrates_source_outcomes(signature: str) -> list[dict]:
     """Per-tier contribution tally for a question signature - the learned-
     routing projection (mirrors Theo's retrieval-log.sourceOutcomes). Ranked

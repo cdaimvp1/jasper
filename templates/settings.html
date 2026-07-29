@@ -76,6 +76,49 @@
     Connected via your Lilly sign-in. Manage source access with your admin.
   </div>
 
+  <!-- ── Data & Retention (added 2026-07-29) ───────────────────────────── -->
+  <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:26px 0 10px">Data &amp; retention</div>
+  <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px">
+
+    <div style="color:var(--muted,#667);font-size:13px;margin-bottom:12px">
+      Real supplier contracts and documents are <b>never</b> auto-deleted by anything below, under any setting — only the
+      operational data (activity log, diagnostic history) ages out, and only once you turn enforcement on.
+    </div>
+
+    <div id="ret-disk" style="display:flex;gap:18px;flex-wrap:wrap;padding:10px 0;border-bottom:1px solid var(--border,#eee);margin-bottom:12px;font-size:12px;color:var(--muted,#667)">Loading disk usage…</div>
+
+    <label style="display:flex;align-items:center;gap:8px;margin-bottom:14px;cursor:pointer">
+      <input type="checkbox" id="ret-enforce" style="width:16px;height:16px">
+      <span style="font-size:13px"><b>Enable automated cleanup</b> — until this is on, everything below only reports what it would do, nothing is ever deleted.</span>
+    </label>
+
+    <div style="display:grid;grid-template-columns:1fr auto;gap:8px 12px;align-items:center;font-size:13px;margin-bottom:6px">
+      <span>Worker notifications, kept for</span>
+      <span><input id="ret-notif-days" type="number" min="1" style="width:70px;border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:7px;padding:5px 8px;font:600 13px sans-serif;color:inherit"> days</span>
+      <span>Activity log (events), kept for</span>
+      <span><input id="ret-events-days" type="number" min="1" style="width:70px;border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:7px;padding:5px 8px;font:600 13px sans-serif;color:inherit"> days (archived, not deleted)</span>
+      <span>Ask-Jasper diagnostic log, kept for</span>
+      <span><input id="ret-socrates-days" type="number" min="1" style="width:70px;border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:7px;padding:5px 8px;font:600 13px sans-serif;color:inherit"> days</span>
+      <span>Server logs, kept for</span>
+      <span><input id="ret-logs-days" type="number" min="1" style="width:70px;border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:7px;padding:5px 8px;font:600 13px sans-serif;color:inherit"> days</span>
+      <span>Processed mail-ingest drop files, kept for</span>
+      <span><input id="ret-ingest-days" type="number" min="1" style="width:70px;border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:7px;padding:5px 8px;font:600 13px sans-serif;color:inherit"> days</span>
+    </div>
+
+    <div style="color:var(--muted,#667);font-size:12px;margin:12px 0 6px">Database snapshots — kept daily, then thinned to weekly, then monthly:</div>
+    <div style="display:flex;gap:10px;align-items:center;font-size:13px;margin-bottom:12px;flex-wrap:wrap">
+      <span>Daily ×<input id="ret-snap-daily" type="number" min="1" style="width:55px;border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:7px;padding:5px 8px;font:600 13px sans-serif;color:inherit"></span>
+      <span>Weekly ×<input id="ret-snap-weekly" type="number" min="1" style="width:55px;border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:7px;padding:5px 8px;font:600 13px sans-serif;color:inherit"></span>
+      <span>Monthly ×<input id="ret-snap-monthly" type="number" min="1" style="width:55px;border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:7px;padding:5px 8px;font:600 13px sans-serif;color:inherit"></span>
+    </div>
+
+    <div style="display:flex;align-items:center;gap:12px">
+      <button id="ret-save" style="border:1px solid var(--border,#ddd);background:var(--accent,#0f766e);color:#fff;font:600 13px sans-serif;padding:9px 16px;border-radius:9px;cursor:pointer">Save</button>
+      <span id="ret-fb" style="font-size:12px;color:var(--muted,#888)"></span>
+      <span id="ret-last-run" style="font-size:12px;color:var(--muted,#888);margin-left:auto"></span>
+    </div>
+  </div>
+
   <!-- ── Server · Settings #6 ──────────────────────────────────────────── -->
   <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:26px 0 10px">Server</div>
   <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px">
@@ -184,6 +227,70 @@
     if(!ms.length){ list.innerHTML='<div style="padding:16px;color:var(--muted,#667);font-size:14px">No workers yet — <a href="/getting-started">compose your cohort</a>.</div>'; return; }
     ms.forEach(m=>list.appendChild(row(m)));
   }).catch(()=>{ list.innerHTML='<div style="padding:16px;color:var(--muted,#667)">Could not load workers.</div>'; });
+
+  // ── Data & Retention ───────────────────────────────────────────────────
+  function fmtBytes(n){
+    if(!n) return '0 B';
+    const units=['B','KB','MB','GB'];
+    let i=0; let v=n;
+    while(v>=1024 && i<units.length-1){ v/=1024; i++; }
+    return v.toFixed(v<10&&i>0?1:0)+' '+units[i];
+  }
+  const retEls = {
+    enforce: document.getElementById('ret-enforce'),
+    notif: document.getElementById('ret-notif-days'),
+    events: document.getElementById('ret-events-days'),
+    socrates: document.getElementById('ret-socrates-days'),
+    logs: document.getElementById('ret-logs-days'),
+    ingest: document.getElementById('ret-ingest-days'),
+    snapDaily: document.getElementById('ret-snap-daily'),
+    snapWeekly: document.getElementById('ret-snap-weekly'),
+    snapMonthly: document.getElementById('ret-snap-monthly'),
+  };
+  const retFb = document.getElementById('ret-fb');
+  const retDisk = document.getElementById('ret-disk');
+  const retLastRun = document.getElementById('ret-last-run');
+  fetch('/api/settings/retention').then(r=>r.json()).then(d=>{
+    retEls.enforce.checked = !!d.enforcement_enabled;
+    retEls.notif.value = d.categories.bus_worker_notifications.days;
+    retEls.events.value = d.categories.bus_events.days;
+    retEls.socrates.value = d.categories.socrates_retrieval_log.days;
+    retEls.logs.value = d.categories.logs.keep_days;
+    retEls.ingest.value = d.categories.raw_ingest_processed.days;
+    retEls.snapDaily.value = d.db_snapshots.daily_keep;
+    retEls.snapWeekly.value = d.db_snapshots.weekly_keep;
+    retEls.snapMonthly.value = d.db_snapshots.monthly_keep;
+    const u = d.disk_usage;
+    retDisk.innerHTML =
+      '<span>Database: <b>'+fmtBytes(u.workgraph_db_bytes)+'</b></span>'+
+      '<span>Activity log: <b>'+fmtBytes(u.bus_db_bytes)+'</b></span>'+
+      '<span>Documents: <b>'+fmtBytes(u.documents_bytes)+'</b></span>'+
+      '<span>Backups: <b>'+fmtBytes(u.backups_bytes)+'</b></span>'+
+      '<span>Server logs: <b>'+fmtBytes(u.logs_bytes)+'</b></span>';
+    retLastRun.textContent = d.last_retention_run ? ('last ran '+d.last_retention_run) : 'never run yet';
+  }).catch(()=>{ retDisk.textContent = 'Could not load disk usage.'; });
+  document.getElementById('ret-save').addEventListener('click', async ()=>{
+    const body = {
+      enforcement_enabled: retEls.enforce.checked,
+      bus_worker_notifications: { days: parseInt(retEls.notif.value, 10) },
+      bus_events: { days: parseInt(retEls.events.value, 10) },
+      socrates_retrieval_log: { days: parseInt(retEls.socrates.value, 10) },
+      logs: { keep_days: parseInt(retEls.logs.value, 10) },
+      raw_ingest_processed: { days: parseInt(retEls.ingest.value, 10) },
+      db_snapshots: {
+        daily_keep: parseInt(retEls.snapDaily.value, 10),
+        weekly_keep: parseInt(retEls.snapWeekly.value, 10),
+        monthly_keep: parseInt(retEls.snapMonthly.value, 10),
+      },
+    };
+    retFb.textContent = 'saving…';
+    try{
+      const r = await fetch('/api/settings/retention',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+      const d = await r.json();
+      if(r.ok){ retFb.textContent='✓ saved'; setTimeout(()=>retFb.textContent='',2000); }
+      else { retFb.textContent = d.detail || 'error'; }
+    }catch(e){ retFb.textContent='error'; }
+  });
 
   // ── Server restart ────────────────────────────────────────────────────
   const restartBtn = document.getElementById('restart-btn');

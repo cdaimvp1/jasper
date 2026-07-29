@@ -36,6 +36,7 @@ import workgraph_alerts
 import workgraph_synthesis
 import workgraph_projects
 import outlook_com_ingest
+import retention
 
 from paths import DATA_DIR
 
@@ -335,6 +336,15 @@ def run() -> dict:
     #    run twice in one cycle the way classify does).
     synthesis_result = run_synthesis_oneshot()
 
+    # 7. Retention + DB snapshotting - gated to once/day internally (see
+    #    retention.run_daily_if_due), so calling it every one of the 5x/day
+    #    cycles is safe; it's a no-op on 4 of them. Never lets a retention
+    #    failure block the rest of an already-completed refresh cycle.
+    try:
+        retention_result = retention.run_daily_if_due()
+    except Exception as e:
+        retention_result = {"error": str(e)}
+
     summary = {
         "mail": mail_result,
         "classify_after_mail": classify_result_1,
@@ -345,6 +355,7 @@ def run() -> dict:
         "alerts_final": alerts_result_2,
         "project_grouping": grouping_result,
         "synthesis": synthesis_result,
+        "retention": retention_result,
     }
     _log(f"REFRESH ok mail_inserted={mail_result.get('inserted', '?')} "
         f"relay_ok={relay_result.get('ok')} relay_calendar_advanced={relay_result.get('cursor_advanced')} "
@@ -352,7 +363,8 @@ def run() -> dict:
         f"classified_total={classify_result_1.get('classify', {}).get('classified', 0) + classify_result_2.get('classify', {}).get('classified', 0)} "
         f"grouping_ok={grouping_result.get('ok')} grouping_skipped={grouping_result.get('skipped', False)} "
         f"synthesis_ok={synthesis_result.get('ok')} synthesis_skipped={synthesis_result.get('skipped', False)} "
-        f"synthesis_deferred={synthesis_result.get('deferred', 0)} synthesis_skipped_immaterial={synthesis_result.get('skipped_immaterial', 0)}")
+        f"synthesis_deferred={synthesis_result.get('deferred', 0)} synthesis_skipped_immaterial={synthesis_result.get('skipped_immaterial', 0)} "
+        f"retention_ran={retention_result is not None and 'error' not in retention_result}")
     return summary
 
 

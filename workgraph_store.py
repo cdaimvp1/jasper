@@ -28,6 +28,7 @@ alerts         — curated, deterministic attention-worthy events surfaced above
 from __future__ import annotations
 
 import json
+import random
 import re
 import sqlite3
 import threading
@@ -866,19 +867,32 @@ def create_task(
     depends_on: Optional[list[str]] = None, due: Optional[str] = None,
     action: Optional[str] = None, owner: Optional[str] = None,
 ) -> str:
-    task_id = next_task_id(issue_id)
+    """Confirmed race, 2026-07-29: next_task_id() computes-and-releases the
+    lock, then the INSERT re-acquires it separately - a writer landing in
+    that window gets the same id and the INSERT raises IntegrityError.
+    Reproduced with 20 concurrent callers (1 succeeded, 19 raised). Retrying
+    on that specific error with a freshly regenerated id closes the same-
+    process race exactly the way insert_raw_item already handles its own
+    dedupe collision, and is a real (if partial) backstop for a cross-process
+    race too, since _lock only ever protected same-process callers anyway."""
     now = time.time()
-    with _lock:
-        conn = _connect()
-        try:
-            conn.execute(
-                """INSERT INTO work_tasks (id, issue_id, label, state, depends_on, due, action, owner, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (task_id, issue_id, label, state, json.dumps(depends_on or []), due, action, owner, now, now),
-            )
-        finally:
-            conn.close()
-    return task_id
+    for attempt in range(25):
+        task_id = next_task_id(issue_id)
+        with _lock:
+            conn = _connect()
+            try:
+                conn.execute(
+                    """INSERT INTO work_tasks (id, issue_id, label, state, depends_on, due, action, owner, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (task_id, issue_id, label, state, json.dumps(depends_on or []), due, action, owner, now, now),
+                )
+                return task_id
+            except sqlite3.IntegrityError:
+                pass  # fall through to the jittered retry below - `continue` here would skip it
+            finally:
+                conn.close()
+        time.sleep(random.uniform(0, 0.01) * (attempt + 1))
+    raise RuntimeError(f"could not allocate a unique task id for issue {issue_id!r} after 25 attempts")
 
 
 def update_task(task_id: str, **fields: Any) -> None:
@@ -974,6 +988,28 @@ def next_issue_id() -> str:
         except (IndexError, ValueError):
             continue
     return f"marc-{max_n + 1:03d}"
+
+
+def create_issue_with_new_id(**kwargs: Any) -> str:
+    """next_issue_id() + create_issue(), but safe against the race between
+    them. Confirmed exploitable 2026-07-29: next_issue_id() computes-and-
+    releases the lock, then create_issue()'s INSERT re-acquires it separately
+    - a writer landing in that window computes the same id and its INSERT
+    raises IntegrityError. Reproduced with 20 concurrent callers (1
+    succeeded, 19 raised). Retrying with a freshly regenerated id on that
+    specific error closes the same-process race the same way
+    insert_raw_item already handles its own dedupe collision. Accepts the
+    same keyword arguments as create_issue() (everything except `id`, which
+    this generates). Returns the actually-used id."""
+    for attempt in range(25):
+        issue_id = next_issue_id()
+        try:
+            create_issue(id=issue_id, **kwargs)
+            return issue_id
+        except sqlite3.IntegrityError:
+            time.sleep(random.uniform(0, 0.01) * (attempt + 1))  # jitter - avoid a thundering-herd re-collision
+            continue
+    raise RuntimeError("could not allocate a unique issue id after 25 attempts")
 
 
 # --- evidence ---------------------------------------------------------------
@@ -1397,6 +1433,20 @@ def next_project_id() -> str:
         except (IndexError, ValueError):
             continue
     return f"proj-{max_n + 1:03d}"
+
+
+def create_project_with_new_id(**kwargs: Any) -> str:
+    """next_project_id() + create_project(), race-safe - same fix and same
+    rationale as create_issue_with_new_id(). Returns the actually-used id."""
+    for attempt in range(25):
+        project_id = next_project_id()
+        try:
+            create_project(id=project_id, **kwargs)
+            return project_id
+        except sqlite3.IntegrityError:
+            time.sleep(random.uniform(0, 0.01) * (attempt + 1))
+            continue
+    raise RuntimeError("could not allocate a unique project id after 25 attempts")
 
 
 def create_project(*, id: str, name: str, category: Optional[str] = None, status: str = "active") -> None:

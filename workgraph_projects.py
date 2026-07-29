@@ -203,8 +203,7 @@ def merge_issues(issue_id_a: str, issue_id_b: str, *, reason_label: str) -> str:
     else:
         parties = ws.list_parties_for_issue(issue_id_a)
         category = issue_a.get("category")
-        project_id = ws.next_project_id()
-        ws.create_project(id=project_id, name=_project_name_for(issue_a, category, parties), category=category)
+        project_id = ws.create_project_with_new_id(name=_project_name_for(issue_a, category, parties), category=category)
     ws.assign_issue_to_project(issue_id_a, project_id, reason=f"{reason_label} with {issue_id_b}")
     ws.assign_issue_to_project(issue_id_b, project_id, reason=f"{reason_label} with {issue_id_a}")
     return project_id

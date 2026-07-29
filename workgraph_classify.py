@@ -396,11 +396,10 @@ def cluster_and_link(limit: int = 500) -> dict:
             if item["item_class"] == "FYI-EVIDENCE":
                 skipped_fyi_standalone += 1
                 continue
-            issue_id = ws.next_issue_id()
             title = strip_subject_prefix(item.get("subject") or "(no subject)")
             state = "active" if item["item_class"] == "ACTIONABLE-ASK" else "waiting"
-            ws.create_issue(
-                id=issue_id, title=title, category=item.get("topic"),
+            issue_id = ws.create_issue_with_new_id(
+                title=title, category=item.get("topic"),
                 state=state, priority="med", confidence_tier=item.get("confidence") or "M",
             )
             ws.thread_map_set(thread_key, issue_id)

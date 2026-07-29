@@ -459,8 +459,18 @@ def backfill_reclassify() -> dict:
             subject=item.get("subject") or "", body_preview=item.get("body_preview") or "",
             from_actor=item.get("from_actor") or "",
         )
+        # Fixed 2026-07-29: this used to only COMPARE topic/item_class/
+        # signal_type, then WRITE direction/sentiment/anomaly_flag straight
+        # from the old stored row regardless - contradicting this function's
+        # own docstring claim to refresh the full classify_item() result. A
+        # future NEGATIVE_CUE/POSITIVE_CUE/OFF_CHANNEL/direction-cue change
+        # would have silently never reached the existing backlog. Now every
+        # field classify_item can produce is both compared and written.
         if (result["topic"] == item.get("topic") and result["item_class"] == item.get("item_class")
-                and result["signal_type"] == item.get("signal_type")):
+                and result["signal_type"] == item.get("signal_type")
+                and result["direction"] == item.get("direction")
+                and result["sentiment"] == item.get("sentiment")
+                and result["anomaly_flag"] == bool(item.get("anomaly_flag"))):
             continue  # already correct - nothing to update
 
         if item.get("issue_id") and result["topic"] and item["issue_id"] not in issue_new_topic:
@@ -468,10 +478,10 @@ def backfill_reclassify() -> dict:
 
         ws.classify_raw_item(
             item["id"], item_class=result["item_class"],
-            direction=item["direction"], direction_inferred=bool(item["direction_inferred"]),
+            direction=result["direction"], direction_inferred=result["direction_inferred"],
             topic=result["topic"], topic_inferred=result["topic_inferred"],
-            sentiment=item["sentiment"], sentiment_inferred=bool(item["sentiment_inferred"]),
-            anomaly_flag=bool(item["anomaly_flag"]),
+            sentiment=result["sentiment"], sentiment_inferred=result["sentiment_inferred"],
+            anomaly_flag=result["anomaly_flag"],
             signal_type=result["signal_type"], pr_number=result["pr_number"],
         )
         updated += 1

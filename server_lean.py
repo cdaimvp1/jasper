@@ -1451,6 +1451,52 @@ async def api_signal_rule_set(signal_type: str, body: SignalTreatmentBody):
     return JSONResponse({"ok": True, "signal_type": signal_type, "treatment": body.treatment})
 
 
+class CapabilitySuggestionBody(BaseModel):
+    origin: str
+    observation: str
+    suggestion: str
+    rationale: Optional[str] = None
+
+
+@app.post("/api/workgraph/capability-suggestions")
+async def api_capability_suggestion_create(body: CapabilitySuggestionBody):
+    """Any worker logs a NOTE here when it notices a real Jasper gap during
+    normal work - never a code change on its own. Sits pending until Marc
+    reviews it (or a chat request greenlights it directly)."""
+    if not body.observation.strip() or not body.suggestion.strip():
+        raise HTTPException(400, "observation and suggestion are both required")
+    sid = wg.create_capability_suggestion(
+        origin=body.origin, observation=body.observation,
+        suggestion=body.suggestion, rationale=body.rationale,
+    )
+    return JSONResponse({"ok": True, "id": sid})
+
+
+@app.get("/api/workgraph/capability-suggestions")
+async def api_capability_suggestions_list(status: str = "pending"):
+    if status not in ("pending", "confirmed", "rejected"):
+        raise HTTPException(400, f"unknown status: {status!r}")
+    return JSONResponse({"suggestions": sanitize_surrogates(wg.list_capability_suggestions(status=status))})
+
+
+class CapabilitySuggestionResolveBody(BaseModel):
+    status: str  # confirmed | rejected
+    resolution_note: Optional[str] = None
+
+
+@app.post("/api/workgraph/capability-suggestions/{suggestion_id}/resolve")
+async def api_capability_suggestion_resolve(suggestion_id: int, body: CapabilitySuggestionResolveBody):
+    """Marc's call, always - confirming here means 'worth building,' not a
+    trigger for anything automatic. The actual build is still a separate,
+    explicit step."""
+    if body.status not in ("confirmed", "rejected"):
+        raise HTTPException(400, "status must be 'confirmed' or 'rejected'")
+    if wg.get_capability_suggestion(suggestion_id) is None:
+        raise HTTPException(404, f"no such suggestion: {suggestion_id}")
+    wg.resolve_capability_suggestion(suggestion_id, body.status, resolution_note=body.resolution_note)
+    return JSONResponse({"ok": True})
+
+
 class SocratesAskBody(BaseModel):
     question: str
     issue_id: Optional[str] = None

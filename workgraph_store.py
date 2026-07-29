@@ -279,6 +279,31 @@ def init_workgraph() -> None:
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_project_suggestions_status ON pending_project_suggestions(status)")
 
+            # capability_suggestions - a NOTE any worker can log when it
+            # notices a real gap during normal work ("I keep seeing X pattern
+            # with no good handling"), never a code change on its own.
+            # Same pending/confirmed/rejected shape as pending_project_
+            # suggestions on purpose - Marc reviews and greenlights (or
+            # rejects) each one; nothing gets built until he does. Confirming
+            # one here is NOT an action, unlike confirm_suggestion for
+            # projects - it just means "worth building," the build itself is
+            # still a separate, explicit step (a conversation, same as every
+            # enhancement made this way so far).
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS capability_suggestions (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    origin           TEXT NOT NULL,
+                    observation      TEXT NOT NULL,
+                    suggestion       TEXT NOT NULL,
+                    rationale        TEXT,
+                    status           TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','confirmed','rejected')),
+                    created_ts       REAL NOT NULL,
+                    resolved_ts      REAL,
+                    resolution_note  TEXT
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_capability_suggestions_status ON capability_suggestions(status)")
+
             # --- Task ownership learning ---------------------------------------
             try:
                 conn.execute("ALTER TABLE work_tasks ADD COLUMN owner TEXT")
@@ -1479,6 +1504,55 @@ def resolve_project_suggestion(id: int, status: str) -> None:
             conn.execute(
                 "UPDATE pending_project_suggestions SET status = ?, resolved_ts = ? WHERE id = ?",
                 (status, time.time(), id),
+            )
+        finally:
+            conn.close()
+
+
+def create_capability_suggestion(*, origin: str, observation: str, suggestion: str,
+                                  rationale: Optional[str] = None) -> int:
+    with _lock:
+        conn = _connect()
+        try:
+            cur = conn.execute(
+                """INSERT INTO capability_suggestions (origin, observation, suggestion, rationale, created_ts)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (origin, observation, suggestion, rationale, time.time()),
+            )
+            return cur.lastrowid
+        finally:
+            conn.close()
+
+
+def list_capability_suggestions(status: str = "pending") -> list[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM capability_suggestions WHERE status = ? ORDER BY created_ts DESC", (status,)
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_capability_suggestion(id: int) -> Optional[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute("SELECT * FROM capability_suggestions WHERE id = ?", (id,)).fetchone()
+        finally:
+            conn.close()
+    return dict(row) if row else None
+
+
+def resolve_capability_suggestion(id: int, status: str, *, resolution_note: Optional[str] = None) -> None:
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                "UPDATE capability_suggestions SET status = ?, resolved_ts = ?, resolution_note = ? WHERE id = ?",
+                (status, time.time(), resolution_note, id),
             )
         finally:
             conn.close()

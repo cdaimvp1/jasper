@@ -60,6 +60,18 @@ _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 # by title generation.
 _SYSTEM_SENDER = re.compile(r"^(no-?reply|do-?not-?reply|notifications?|automated|system|admin)@", re.I)
 
+# Known automated-system DOMAINS (Ariba, Adobe Sign, DocuSign, ContractPodAI,
+# Concur) whose local part does NOT always match _SYSTEM_SENDER above -
+# "adobesign@adobesign.com" and "EmailReminderService@concursolutions.com"
+# both slipped through the local-part-only guard and were showing up as real
+# "external companies" (Adobesign: 9 issues, Concursolutions: 5 issues) in
+# production before this fix. Same domain set as workgraph_classify.
+# MACHINE_SIGNAL_SENDER and workgraph_signals.py's per-rule domains - kept as
+# a separate constant here (not imported) to avoid a circular import
+# (workgraph_classify already imports this module).
+_MACHINE_SIGNAL_DOMAIN = re.compile(
+    r"(ansmtp\.ariba\.com|@ariba\.com|adobesign|docusign|ironclad|contractpodai\.com|concursolutions\.com)", re.I)
+
 INTERNAL_DOMAIN = "lilly.com"
 
 # Distribution-list infrastructure, not a person - found in real data during
@@ -105,9 +117,11 @@ def classify_affiliation(email: str) -> dict:
     if domain == INTERNAL_DOMAIN:
         return {"affiliation": "internal", "affiliation_confidence": "M",
                 "affiliation_source": "domain_heuristic", "company": None}
-    if _SYSTEM_SENDER.match(email):
+    if _SYSTEM_SENDER.match(email) or _MACHINE_SIGNAL_DOMAIN.search(email):
         # A machine relay's domain label (e.g. "ansmtp" from
-        # no-reply@ansmtp.ariba.com) is not a supplier name - never guess one.
+        # no-reply@ansmtp.ariba.com, or "adobesign"/"concursolutions" from
+        # senders that don't happen to start with "no-reply") is not a
+        # supplier name - never guess one.
         return {"affiliation": "external", "affiliation_confidence": "H",
                 "affiliation_source": "system_sender", "company": None}
     return {"affiliation": "external", "affiliation_confidence": "H",
@@ -242,6 +256,24 @@ def extract_and_link_parties_for_issue(issue_id: str) -> dict:
 
     return {"issue_id": issue_id, "parties_linked": linked, "resolved_by_name": resolved_by_name,
             "skipped_name_only": skipped_name_only}
+
+
+def backfill_clear_machine_signal_companies() -> dict:
+    """One-time (or on-demand) repair pass: null out `company` on any
+    EXISTING party row whose email is a known machine-signal sender - upsert_
+    party never re-guesses company for a party that already exists (only
+    fills in display_name if missing), so a bad guess made before this fix
+    (or before _MACHINE_SIGNAL_DOMAIN existed) sticks forever unless
+    corrected here directly. Confirmed live 2026-07-29: 'Ansmtp' (63 issues),
+    'Adobesign' (9), 'Concursolutions' (5) were all showing up as real
+    external companies in production before this ran."""
+    parties = ws.list_all_parties()
+    cleared = 0
+    for p in parties:
+        if p.get("company") and (_SYSTEM_SENDER.match(p["primary_email"]) or _MACHINE_SIGNAL_DOMAIN.search(p["primary_email"])):
+            ws.clear_party_company(p["id"], affiliation_source="system_sender")
+            cleared += 1
+    return {"checked": len(parties), "companies_cleared": cleared}
 
 
 def run(issue_ids: list) -> dict:

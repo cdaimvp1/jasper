@@ -1236,6 +1236,27 @@ def upsert_party(
             conn.close()
 
 
+def clear_party_company(party_id: str, *, affiliation_source: Optional[str] = None) -> None:
+    """Null out a party's guessed `company` - for a known-bad domain-derived
+    guess (e.g. a machine-signal sender), NOT a human correction (that's
+    correct_party_affiliation, which also flips affiliation_source to
+    'manual_correction'). upsert_party's existing-row path only ever updates
+    display_name, never company/affiliation_source, so this is the only way
+    to fix a bad company already stored on an existing party row."""
+    with _lock:
+        conn = _connect()
+        try:
+            if affiliation_source is not None:
+                conn.execute(
+                    "UPDATE parties SET company = NULL, affiliation_source = ? WHERE id = ?",
+                    (affiliation_source, party_id),
+                )
+            else:
+                conn.execute("UPDATE parties SET company = NULL WHERE id = ?", (party_id,))
+        finally:
+            conn.close()
+
+
 def correct_party_affiliation(party_id: str, *, affiliation: str, company: Optional[str] = None, reason: Optional[str] = None) -> None:
     """A human (or a worker relaying a human's correction) overrides a
     party's affiliation - sticks permanently at 'H' confidence /

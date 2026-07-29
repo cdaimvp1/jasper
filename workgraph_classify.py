@@ -97,7 +97,7 @@ NOISE_CUE = re.compile(
 # Machine-signal senders — Tier-H candidates once wired into the NBA/issue
 # layer (that wiring is a later increment; here they just inform item_class).
 MACHINE_SIGNAL_SENDER = re.compile(
-    r"(ansmtp\.ariba\.com|@ariba\.com|adobesign|docusign|ironclad|contractpod\.com)", re.I)
+    r"(ansmtp\.ariba\.com|@ariba\.com|adobesign|docusign|ironclad|contractpodai\.com|concursolutions\.com)", re.I)
 
 # workgraph_signals.classify_signal's per-signal-type treatment, mapped onto
 # this module's item_class vocabulary. 'closure' maps to FYI-EVIDENCE (not

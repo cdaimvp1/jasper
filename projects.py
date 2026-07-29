@@ -45,8 +45,24 @@ def _slugify(title: str) -> str:
     return s[:40] or "project"
 
 
+_PROJECT_ID_RE = re.compile(r"^proj_[0-9a-f]{10}$")
+
+
 def _project_file(project_id: str) -> Optional[Path]:
-    """Find the file for a project_id (file pattern: <id>_<slug>.md)."""
+    """Find the file for a project_id (file pattern: <id>_<slug>.md).
+
+    Confirmed exploitable 2026-07-29: project_id flows straight from an HTTP
+    path param (/api/projects/{project_id} and friends) into an unsanitized
+    glob - a crafted id like "../secret/proj_zzz" matched a file OUTSIDE
+    PROJ_DIR in a live repro. Validating against the canonical shape
+    create_project() actually generates ("proj_" + 10 hex chars) before
+    globbing closes this the same way a "no such project" 404 already reads
+    to every caller - not found is not found, whether the id is merely
+    unknown or actively malicious. Every function that reaches PROJ_DIR from
+    a project_id (including rename_project's direct path construction)
+    passes through here first."""
+    if not _PROJECT_ID_RE.match(project_id or ""):
+        return None
     PROJ_DIR.mkdir(parents=True, exist_ok=True)
     matches = list(PROJ_DIR.glob(f"{project_id}_*.md"))
     return matches[0] if matches else None

@@ -52,12 +52,29 @@ def _ensure_dirs() -> None:
     ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _safe_member_path(base_dir: Path, member_id: str) -> Path:
+    """Resolve member_id into a path INSIDE base_dir, or raise ValueError.
+
+    Confirmed exploitable 2026-07-29: member_id/recipient/sender values reach
+    here from an unvalidated HTTP field (POST /api/team_room/messages'
+    `sender`, chained through a reaction -> inbox.send_message), and a bare
+    f-string join let "../../evil" escape INBOX_DIR entirely, or an absolute
+    path like "C:/Windows/Temp/pwned" discard it completely. Resolving the
+    candidate and checking it's still relative to base_dir catches both -
+    '..' traversal and an absolute-path override - regardless of what the
+    caller passes."""
+    candidate = (base_dir / f"{member_id}.md").resolve()
+    if not candidate.is_relative_to(base_dir.resolve()):
+        raise ValueError(f"invalid member id: {member_id!r}")
+    return candidate
+
+
 def _inbox_path(member_id: str) -> Path:
-    return INBOX_DIR / f"{member_id}.md"
+    return _safe_member_path(INBOX_DIR, member_id)
 
 
 def _archive_path(member_id: str) -> Path:
-    return ARCHIVE_DIR / f"{member_id}.md"
+    return _safe_member_path(ARCHIVE_DIR, member_id)
 
 
 def _new_message_id() -> str:
@@ -162,9 +179,7 @@ _BLOCK_RE = re.compile(r"\n?---\n(.*?)---\n(.+?)(?=\n---\nfrom:|\Z)", re.DOTALL)
 _FIELD_RE = re.compile(r"^(\w+):\s*(.+)$", re.MULTILINE)
 
 
-def list_messages(member_id: str) -> list[dict[str, Any]]:
-    """Parse the inbox file into structured messages, newest first."""
-    text = read_inbox(member_id)
+def _parse_messages(text: str) -> list[dict[str, Any]]:
     if not text: return []
     out = []
     for m in _BLOCK_RE.finditer(text):
@@ -185,6 +200,12 @@ def list_messages(member_id: str) -> list[dict[str, Any]]:
             "george_view": fields.get("george_view"),
             "body": body,
         })
+    return out
+
+
+def list_messages(member_id: str) -> list[dict[str, Any]]:
+    """Parse the inbox file into structured messages, newest first."""
+    out = _parse_messages(read_inbox(member_id))
     # Phase 2 of "delight George" substrate (TB tr_7008a84b3f 2026-05-03):
     # auto-fill george_view from heuristic when not author-provided.
     try:
@@ -196,17 +217,27 @@ def list_messages(member_id: str) -> list[dict[str, Any]]:
 
 
 def archive_inbox(member_id: str) -> int:
-    """Move all current messages to the archive file. Return count moved."""
-    msgs = list_messages(member_id)
-    if not msgs: return 0
-    text = read_inbox(member_id)
+    """Move all current messages to the archive file, atomically. Return
+    count moved.
+
+    Fixed 2026-07-29: the read used to happen BEFORE acquiring the lock, with
+    only the archive-append + truncate inside it - a message appended by a
+    concurrent send_message() in that unlocked window was captured in
+    NEITHER the archive nor the now-truncated live inbox, permanently lost.
+    Reproduced with two threads in one process. Now the read is inside the
+    same lock as the append+truncate, so the whole operation is one atomic
+    step."""
     with _lock:
+        text = read_inbox(member_id)
+        if not text:
+            return 0
         with _archive_path(member_id).open("a", encoding="utf-8") as f:
             f.write(text)
         _inbox_path(member_id).write_text("", encoding="utf-8")
+    count = len(_parse_messages(text))
     emit_event(source="inbox", kind="inbox.archived",
-               actor=member_id, payload={"count": len(msgs)})
-    return len(msgs)
+               actor=member_id, payload={"count": count})
+    return count
 
 
 def inbox_counts() -> dict[str, int]:

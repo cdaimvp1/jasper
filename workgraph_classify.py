@@ -96,8 +96,25 @@ NOISE_CUE = re.compile(
 
 # Machine-signal senders — Tier-H candidates once wired into the NBA/issue
 # layer (that wiring is a later increment; here they just inform item_class).
-MACHINE_SIGNAL_SENDER = re.compile(
-    r"(ansmtp\.ariba\.com|@ariba\.com|adobesign|docusign|ironclad|contractpodai\.com|concursolutions\.com)", re.I)
+# Real domain-boundary matches (workgraph_signals.domain_matches), NOT a
+# regex-substring check - confirmed exploitable 2026-07-29: the old
+# alternation-regex form matched "notariba.com" and
+# "ariba.com.evil-tracker.net" identically to the real domain, so a
+# lookalike/spoofed sender got the same automated-system trust as the real
+# one. "ironclad" has no confirmed real domain from this session's research
+# (unlike the other five) - kept as a bare substring pending that, since
+# demoting an untested entry isn't this fix's job.
+MACHINE_SIGNAL_DOMAINS = ["ansmtp.ariba.com", "ariba.com", "adobesign.com",
+                           "docusign.net", "contractpodai.com", "concursolutions.com"]
+_IRONCLAD_SENDER = re.compile(r"ironclad", re.I)
+
+
+def is_machine_signal_sender(from_actor: str) -> bool:
+    if not from_actor:
+        return False
+    if _IRONCLAD_SENDER.search(from_actor):
+        return True
+    return any(workgraph_signals.domain_matches(from_actor, d) for d in MACHINE_SIGNAL_DOMAINS)
 
 # workgraph_signals.classify_signal's per-signal-type treatment, mapped onto
 # this module's item_class vocabulary. 'closure' maps to FYI-EVIDENCE (not
@@ -190,7 +207,7 @@ def classify_item(*, subject: str, body_preview: str, from_actor: str) -> dict:
 
     anomaly_flag = bool(OFF_CHANNEL.search(text))
 
-    is_machine_signal = bool(from_actor and MACHINE_SIGNAL_SENDER.search(from_actor))
+    is_machine_signal = is_machine_signal_sender(from_actor)
     is_noise = bool(NOISE_CUE.search(text))
     is_actionable = bool(ACTIONABLE_CUE.search(text))
     is_closure = bool(CLOSURE_CUE.search(text))

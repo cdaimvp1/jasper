@@ -63,18 +63,18 @@ _RULES: list[tuple[str, Optional[str], "re.Pattern[str]", str]] = [
     ("ariba_role_changed_generic", "ariba.com",
      re.compile(r"^Notification:\s*Your role in .* has been changed", re.I), "fyi"),
 
-    ("signature_requested", "adobesign",
+    ("signature_requested", "adobesign.com",
      re.compile(r"^Signature requested on\b", re.I), "actionable"),
-    ("signature_signed_by_me", "adobesign",
+    ("signature_signed_by_me", "adobesign.com",
      re.compile(r"^You signed:", re.I), "fyi"),
-    ("signature_fully_executed", "adobesign",
+    ("signature_fully_executed", "adobesign.com",
      re.compile(r"is Signed and Filed!\s*$|^Completed:", re.I), "closure"),
-    ("signature_cc_notice", "adobesign",
+    ("signature_cc_notice", "adobesign.com",
      re.compile(r"has copied you on.*Contract Management System", re.I), "fyi"),
 
-    ("signature_completed_docusign", "docusign",
+    ("signature_completed_docusign", "docusign.net",
      re.compile(r"^Completed:|^Here is your signed document:", re.I), "closure"),
-    ("signature_requested_docusign", "docusign",
+    ("signature_requested_docusign", "docusign.net",
      re.compile(r"for Signature\s*$", re.I), "actionable"),
 
     ("contractpodai_obligations_update", "contractpodai.com",
@@ -95,6 +95,24 @@ def _escalation_target_is_owner(subject: str) -> bool:
     return bool(m and m.group(1).strip().upper() == OWNER_NAME_UPPER)
 
 
+def domain_matches(from_actor: str, target_domain: str) -> bool:
+    """Real domain-boundary match, not substring containment.
+
+    Confirmed exploitable 2026-07-29: "ariba.com" in "notariba.com" is True
+    in Python, and "ariba.com" in "ariba.com.evil-tracker.net" is ALSO True -
+    a lookalike/spoofed sender domain got the exact same automated-system
+    trust as the real one. Extracts the sender's actual domain (after '@')
+    and requires it to equal target_domain or be a genuine SUBDOMAIN of it
+    (ends with '.' + target_domain, e.g. "ansmtp.ariba.com" for target
+    "ariba.com") - a suffix-of-the-string match is not the same as a
+    dot-boundary subdomain match, and this only accepts the latter."""
+    if "@" not in (from_actor or ""):
+        return False
+    sender_domain = from_actor.rsplit("@", 1)[-1].lower()
+    target_domain = target_domain.lower()
+    return sender_domain == target_domain or sender_domain.endswith("." + target_domain)
+
+
 def classify_signal(*, subject: str, from_actor: str) -> Optional[dict]:
     """Returns {signal_type, treatment, pr_number} for a recognized automated
     signal email, or None when nothing matches (the email is NOT one of these
@@ -102,10 +120,9 @@ def classify_signal(*, subject: str, from_actor: str) -> Optional[dict]:
     `treatment` is the live override if one has been set for this signal_type,
     else the rule's own hardcoded default."""
     subject = subject or ""
-    from_lower = (from_actor or "").lower()
 
     for signal_type, domain, pattern, default_treatment in _RULES:
-        if domain and domain not in from_lower:
+        if domain and not domain_matches(from_actor, domain):
             continue
         if not pattern.search(subject):
             continue

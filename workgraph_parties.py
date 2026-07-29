@@ -48,6 +48,7 @@ from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import workgraph_store as ws
+import workgraph_signals
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
@@ -65,12 +66,19 @@ _SYSTEM_SENDER = re.compile(r"^(no-?reply|do-?not-?reply|notifications?|automate
 # "adobesign@adobesign.com" and "EmailReminderService@concursolutions.com"
 # both slipped through the local-part-only guard and were showing up as real
 # "external companies" (Adobesign: 9 issues, Concursolutions: 5 issues) in
-# production before this fix. Same domain set as workgraph_classify.
-# MACHINE_SIGNAL_SENDER and workgraph_signals.py's per-rule domains - kept as
-# a separate constant here (not imported) to avoid a circular import
-# (workgraph_classify already imports this module).
-_MACHINE_SIGNAL_DOMAIN = re.compile(
-    r"(ansmtp\.ariba\.com|@ariba\.com|adobesign|docusign|ironclad|contractpodai\.com|concursolutions\.com)", re.I)
+# production before this fix. Same domain list as workgraph_classify's
+# MACHINE_SIGNAL_DOMAINS; uses workgraph_signals.domain_matches (real
+# domain-boundary matching, not substring containment - a bare regex
+# alternation would match a spoofed/lookalike domain identically to a real
+# one, confirmed exploitable 2026-07-29).
+_MACHINE_SIGNAL_DOMAINS = ["ansmtp.ariba.com", "ariba.com", "adobesign.com",
+                           "docusign.net", "contractpodai.com", "concursolutions.com"]
+
+
+def _is_machine_signal_domain(email: str) -> bool:
+    if "ironclad" in email.lower():
+        return True
+    return any(workgraph_signals.domain_matches(email, d) for d in _MACHINE_SIGNAL_DOMAINS)
 
 INTERNAL_DOMAIN = "lilly.com"
 
@@ -117,7 +125,7 @@ def classify_affiliation(email: str) -> dict:
     if domain == INTERNAL_DOMAIN:
         return {"affiliation": "internal", "affiliation_confidence": "M",
                 "affiliation_source": "domain_heuristic", "company": None}
-    if _SYSTEM_SENDER.match(email) or _MACHINE_SIGNAL_DOMAIN.search(email):
+    if _SYSTEM_SENDER.match(email) or _is_machine_signal_domain(email):
         # A machine relay's domain label (e.g. "ansmtp" from
         # no-reply@ansmtp.ariba.com, or "adobesign"/"concursolutions" from
         # senders that don't happen to start with "no-reply") is not a
@@ -278,7 +286,7 @@ def backfill_clear_machine_signal_companies() -> dict:
     parties = ws.list_all_parties()
     cleared = 0
     for p in parties:
-        if p.get("company") and (_SYSTEM_SENDER.match(p["primary_email"]) or _MACHINE_SIGNAL_DOMAIN.search(p["primary_email"])):
+        if p.get("company") and (_SYSTEM_SENDER.match(p["primary_email"]) or _is_machine_signal_domain(p["primary_email"])):
             ws.clear_party_company(p["id"], affiliation_source="system_sender")
             cleared += 1
     return {"checked": len(parties), "companies_cleared": cleared}

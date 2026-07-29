@@ -419,6 +419,72 @@ def cluster_and_link(limit: int = 500) -> dict:
             "parties": party_result, "projects": project_result}
 
 
+def backfill_reclassify_signals() -> dict:
+    """One-time (or on-demand) repair pass: re-check every ALREADY-classified
+    raw_item against workgraph_signals.classify_signal, and update
+    item_class/topic/signal_type/pr_number ONLY for the ones that now match a
+    known signal template that didn't exist (or wasn't wired in) when they
+    were first classified - e.g. the Ariba/Adobe Sign/DocuSign/ContractPodAI
+    rules added 2026-07-29. Deliberately narrow: an item that matches no
+    signal is left completely untouched, so this can never reshuffle
+    classification for anything outside the specific gap it's meant to close.
+    Confirmed live 2026-07-29: 151 of 1051 already-classified raw_items had a
+    topic that would change, 54 of them on issues sitting in category='other'
+    - this is what actually closes that gap for the existing backlog, not
+    just future mail, without Marc reclassifying anything by hand."""
+    rows = ws.get_all_classified_raw_items()
+    updated = 0
+    touched_issues = set()
+    # issue_id -> the first signal-derived topic seen among its items, so the
+    # issue's OWN category (set once at creation time - see cluster_and_link -
+    # and never auto-recomputed from raw_items.topic since) can be corrected
+    # too. Only ever overwrites an issue currently sitting at 'other' - the
+    # lowest-confidence default - never a category someone/something else
+    # already assigned deliberately.
+    issue_signal_topic: dict[str, str] = {}
+
+    for item in rows:
+        signal = workgraph_signals.classify_signal(
+            subject=item.get("subject") or "", from_actor=item.get("from_actor") or "",
+        )
+        if signal is None:
+            continue
+        new_topic = _SIGNAL_TYPE_TOPIC.get(signal["signal_type"], item.get("topic"))
+        new_class = _SIGNAL_TREATMENT_TO_ITEM_CLASS[signal["treatment"]]
+        if item.get("issue_id") and new_topic and item["issue_id"] not in issue_signal_topic:
+            issue_signal_topic[item["issue_id"]] = new_topic
+        if new_topic == item.get("topic") and new_class == item.get("item_class") and item.get("signal_type") == signal["signal_type"]:
+            continue  # already correct - nothing to update
+        ws.classify_raw_item(
+            item["id"], item_class=new_class,
+            direction=item["direction"], direction_inferred=bool(item["direction_inferred"]),
+            topic=new_topic, topic_inferred=False,
+            sentiment=item["sentiment"], sentiment_inferred=bool(item["sentiment_inferred"]),
+            anomaly_flag=bool(item["anomaly_flag"]),
+            signal_type=signal["signal_type"], pr_number=signal["pr_number"],
+        )
+        updated += 1
+        if item.get("issue_id"):
+            touched_issues.add(item["issue_id"])
+
+    categories_updated = 0
+    for issue_id, new_category in issue_signal_topic.items():
+        issue = ws.get_issue(issue_id)
+        if issue and issue.get("category") == "other":
+            ws.update_issue(issue_id, category=new_category)
+            touched_issues.add(issue_id)
+            categories_updated += 1
+
+    for issue_id in touched_issues:
+        recompute_issue_state(issue_id)
+        title = compute_deterministic_title(issue_id)
+        if title:
+            ws.set_derived_title("issue", issue_id, title)
+
+    return {"checked": len(rows), "updated": updated, "issues_touched": len(touched_issues),
+            "issue_categories_updated": categories_updated}
+
+
 def backfill_recompute_all_states() -> dict:
     """One-time (or on-demand) repair pass: re-derive state for EVERY existing
     issue from its full evidence thread, fixing issues created before this

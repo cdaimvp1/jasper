@@ -533,6 +533,20 @@ def get_unclassified_raw_items(limit: int = 200) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def get_all_classified_raw_items() -> list[dict]:
+    """Every already-classified raw_item - used by
+    workgraph_classify.backfill_reclassify_signals to re-check historical
+    items against a signal ruleset that didn't exist (or wasn't wired in) at
+    the time they were first classified, without touching anything else."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute("SELECT * FROM raw_items WHERE classified = 1").fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
 def classify_raw_item(
     raw_item_id: int,
     *,

@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>JASPER focus icon — favicon — white</title>
+  <path
+    d="M22 9H9v13M42 9h13v13M9 42v13h13M55 42v13H42"
+    fill="none"
+    stroke="#FFFFFF"
+    stroke-width="8"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <g transform="translate(17.15 17.15) scale(.45)">
+    <path
+      fill="#FFFFFF"
+      d="M20 8h34v31c0 12-7.5 19-20 19-13 0-22-7-22-19v-6h12v6c0 5.5 3.2 8 9.5 8S42 44.5 42 39V20H20z"
+    />
+  </g>
+</svg>

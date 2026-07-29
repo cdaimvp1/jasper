@@ -4,7 +4,16 @@
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>JASPER · Lilly</title>
-<link rel="icon" type="image/svg+xml" href="/static/jasper-focus-favicon.svg">
+<!-- Fixed 2026-07-29: this was the ONLY icon reference anywhere on this page (a
+     single flat SVG, no manifest) - almost certainly why Edge's "Install as app"
+     picked the wrong icon. adaptive.svg embeds a prefers-color-scheme rule so the
+     tab favicon itself switches black/white with the tab's theme; favicon.ico is
+     the fallback for contexts that don't fetch SVG favicons; the manifest is what
+     the install/pin flow reads for the desktop/taskbar icon. -->
+<link rel="icon" href="/static/favicon.ico" sizes="any">
+<link rel="icon" href="/static/jasper-focus-favicon-adaptive.svg" type="image/svg+xml">
+<link rel="manifest" href="/static/site.webmanifest">
+<meta name="theme-color" content="#E2E6E1">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Libre+Franklin:wght@300;400;500;600;700;800&family=Roboto+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>

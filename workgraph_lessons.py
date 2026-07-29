@@ -137,6 +137,16 @@ def record_confirmed_or_rejected(*, issue_id_a: str, status: str) -> Optional[di
     n = (existing["hit_count"] + 1) if existing else 1
     verb = "the same project" if outcome == "confirmed" else "judged UNRELATED"
     statement = f"same-category ('{category}') threads involving {company} have been {verb} {n} time(s)"
+    # Confirmed bug, 2026-07-29: `company` is an unbounded external-party name
+    # (e.g. a long legal entity name) - a long enough one pushed this over
+    # MAX_STATEMENT_LEN, and validate_lesson_write rejects that on EVERY
+    # call, not just the first insert. Since this path also runs on repeat
+    # confirm/reject (the trust-bump path), that meant trust_score/hit_count
+    # could never update again for that situation_key - silently, forever,
+    # indistinguishable from "no lesson yet." Truncating here guarantees
+    # record_lesson always gets a statement within the cap.
+    if len(statement) > MAX_STATEMENT_LEN:
+        statement = statement[:MAX_STATEMENT_LEN - 1].rstrip() + "…"
     return record_lesson(situation_key_val=key, statement=statement, outcome=outcome, source_issue_id=issue_id_a)
 
 

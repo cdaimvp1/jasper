@@ -52,14 +52,13 @@ import workgraph_signals
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
-# Same guard as workgraph_classify._SYSTEM_SENDER / compute_deterministic_title's
-# no-reply skip - a no-reply/system sender's domain-derived "company" isn't a
-# real supplier name (e.g. 'Ansmtp' from no-reply@ansmtp.ariba.com was showing
-# up as a top "external company" with 57 issues before this fix - found during
-# the 2026-07-29 backlog profiling pass). Applied here too so the bogus name
-# never gets INTO the parties table in the first place, not just skipped later
-# by title generation.
-_SYSTEM_SENDER = re.compile(r"^(no-?reply|do-?not-?reply|notifications?|automated|system|admin)@", re.I)
+# workgraph_signals._SYSTEM_SENDER (canonical definition, was duplicated across 4
+# modules) - a no-reply/system sender's domain-derived "company" isn't a real
+# supplier name (e.g. 'Ansmtp' from no-reply@ansmtp.ariba.com was showing up as a
+# top "external company" with 57 issues before this fix - found during the
+# 2026-07-29 backlog profiling pass). Applied here so the bogus name never gets
+# INTO the parties table in the first place, not just skipped later by title
+# generation.
 
 # Known automated-system DOMAINS (Ariba, Adobe Sign, DocuSign, ContractPodAI,
 # Concur) whose local part does NOT always match _SYSTEM_SENDER above -
@@ -125,7 +124,7 @@ def classify_affiliation(email: str) -> dict:
     if domain == INTERNAL_DOMAIN:
         return {"affiliation": "internal", "affiliation_confidence": "M",
                 "affiliation_source": "domain_heuristic", "company": None}
-    if _SYSTEM_SENDER.match(email) or _is_machine_signal_domain(email):
+    if workgraph_signals._SYSTEM_SENDER.match(email) or _is_machine_signal_domain(email):
         # A machine relay's domain label (e.g. "ansmtp" from
         # no-reply@ansmtp.ariba.com, or "adobesign"/"concursolutions" from
         # senders that don't happen to start with "no-reply") is not a
@@ -286,7 +285,7 @@ def backfill_clear_machine_signal_companies() -> dict:
     parties = ws.list_all_parties()
     cleared = 0
     for p in parties:
-        if p.get("company") and (_SYSTEM_SENDER.match(p["primary_email"]) or _is_machine_signal_domain(p["primary_email"])):
+        if p.get("company") and (workgraph_signals._SYSTEM_SENDER.match(p["primary_email"]) or _is_machine_signal_domain(p["primary_email"])):
             ws.clear_party_company(p["id"], affiliation_source="system_sender")
             cleared += 1
     return {"checked": len(parties), "companies_cleared": cleared}

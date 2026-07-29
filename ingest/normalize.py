@@ -1,8 +1,11 @@
 """
 normalize.py — deterministic drop-file consumer, no LLM involved.
 
-Watches new_cohort/data/raw_ingest_inbox/*.json (written by relay per
-GRAPH_INGEST_ROUTINE.md), extracts stable_key/thread_key per source type, and
+Watches DATA_DIR/raw_ingest_inbox/*.json (paths.DATA_DIR, i.e. TEAM_DATA_DIR -
+written by relay per GRAPH_INGEST_ROUTINE.md, which resolves the same INBOX var
+rather than a hardcoded relative path, after a 2026-07-29 near-miss where a bare
+"new_cohort/data/..." string in that routine resolved relative to relay's
+subprocess cwd instead), extracts stable_key/thread_key per source type, and
 inserts into raw_items via workgraph_store. Archives each processed file to
 raw_ingest_processed/ (never deletes — auditable, matches this codebase's
 general never-silently-drop convention).

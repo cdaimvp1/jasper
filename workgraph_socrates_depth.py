@@ -117,6 +117,3 @@ def classify_depth(*, text: str = "", issue: Optional[dict] = None,
         "rationale": rationale,
     }
 
-
-def depth_rank(depth: str) -> int:
-    return DEPTH_RANK[depth]

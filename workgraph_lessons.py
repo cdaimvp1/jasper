@@ -37,9 +37,9 @@ nudge the score, never override real value/urgency signal.
 """
 from __future__ import annotations
 
-import re
 from typing import Optional
 
+import workgraph_signals
 import workgraph_store as ws
 
 MIN_TRUST = 0.6
@@ -58,10 +58,6 @@ MAX_STATEMENT_LEN = 240
 
 _OPPOSITE = {"confirmed": "rejected", "rejected": "confirmed"}
 
-# Same guard as workgraph_projects._SYSTEM_SENDER - a no-reply/system
-# sender's domain-derived "company" isn't a real supplier name.
-_SYSTEM_SENDER = re.compile(r"^(no-?reply|do-?not-?reply|notifications?|automated|system|admin)@", re.I)
-
 
 def situation_key(category: Optional[str], company: Optional[str]) -> Optional[str]:
     """Deterministic signature. None if there isn't enough real signal to
@@ -76,7 +72,7 @@ def situation_key(category: Optional[str], company: Optional[str]) -> Optional[s
 def _first_external_company(issue_id: str) -> Optional[str]:
     for p in ws.list_parties_for_issue(issue_id):
         if (p.get("affiliation") == "external" and p.get("company")
-                and not _SYSTEM_SENDER.match(p.get("primary_email") or "")):
+                and not workgraph_signals._SYSTEM_SENDER.match(p.get("primary_email") or "")):
             return p["company"]
     return None
 

@@ -677,7 +677,7 @@ async def projects_page(request: Request):
 
 
 @app.get("/api/projects")
-async def api_projects_list():
+async def api_projects_list_legacy():
     return JSONResponse({"projects": projects.list_projects()})
 
 
@@ -1995,17 +1995,6 @@ async function load(){
 }
 load(); setInterval(load, 15000);
 </script></body></html>"""
-
-
-def _is_fresh_cohort() -> bool:
-    """Fresh install = cohort not yet composed (only the orchestrator present, or none).
-    A new user sees the getting-started page until they've built their cohort with the
-    Team Builder; once >1 worker exists, '/' becomes the dashboard. (George's 10-step
-    onboarding, pp_50d22e75e0 / pp_b0e6abc29c.)"""
-    try:
-        return len([m for m in members_mod.list_members() if m.get("id")]) <= 1
-    except Exception:
-        return False
 
 
 def _getting_started_html() -> str:

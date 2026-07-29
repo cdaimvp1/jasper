@@ -205,20 +205,6 @@ _BANLIST_PREFIX_RE = re.compile(
 _FULL_BOLD_LEAD_RE = re.compile(r"(?:^|\n)\*\*([^*\n]{40,300}?)\*\*(?=\s|$)", re.MULTILINE)
 
 
-def apply_smart_brevity(body: str) -> tuple[str, list[str]]:
-    """v0.1 deterministic auto-fix DEPRECATED per @george tr_fa89a7dfe9 — translator scar applies.
-
-    The deterministic ban-list + un-bold rules were disabled because deterministic text-transform
-    cannot capture context (same scar as the deterministic-translator passthrough revert at
-    `tr_56f60b00b9`). LLM-based rewrite path replaces this — see `smart_brevity_rewrite` below
-    + `team_room.post_message` integration.
-
-    This function now returns the body unchanged (no-op) to preserve the existing call sites
-    in team_room.py and projects.py without raising. Will be removed in a follow-up sweep.
-    """
-    return body, []
-
-
 def audit_time_claims(body: str, server_ts: str) -> str:
     """
     Liveness Floor v0.2 substrate-enforcement candidate · muscle-memory-via-mechanism:

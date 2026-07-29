@@ -313,9 +313,6 @@ def run_classification(limit: int = 500) -> dict:
 # Deterministic clustering (stable-key only - thread_key already reliable).
 # ===========================================================================
 
-_SYSTEM_SENDER = re.compile(r"^(no-?reply|do-?not-?reply|notifications?|automated|system|admin)@", re.I)
-
-
 def compute_deterministic_title(issue_id: str) -> Optional[str]:
     """'Requestor - Supplier - short topic', built entirely from data already
     on hand (no LLM call) - a real name/company beats a raw email subject
@@ -330,7 +327,7 @@ def compute_deterministic_title(issue_id: str) -> Optional[str]:
     # A no-reply/system sender's domain-derived "company" (e.g. 'Ansmtp' from
     # no-reply@ansmtp.ariba.com) isn't a real supplier name - skip those.
     external = [p for p in parties if p.get("affiliation") == "external"
-                and not _SYSTEM_SENDER.match(p.get("primary_email") or "")]
+                and not workgraph_signals._SYSTEM_SENDER.match(p.get("primary_email") or "")]
     requestor = internal[0]["display_name"] if internal else None
     supplier = None
     if external:

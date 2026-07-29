@@ -90,6 +90,13 @@ _RULES: list[tuple[str, Optional[str], "re.Pattern[str]", str]] = [
 ]
 
 
+# Canonical definition (fixed 2026-07-29: was pasted verbatim in workgraph_classify.py,
+# workgraph_lessons.py, workgraph_projects.py, AND workgraph_parties.py - 4 independent
+# copies of the same literal that had to be kept in sync by hand). Every other module
+# that needs this now imports it from here instead of redefining it.
+_SYSTEM_SENDER = re.compile(r"^(no-?reply|do-?not-?reply|notifications?|automated|system|admin)@", re.I)
+
+
 def _escalation_target_is_owner(subject: str) -> bool:
     m = re.search(r"escalated to (.+?) for approval", subject or "", re.I)
     return bool(m and m.group(1).strip().upper() == OWNER_NAME_UPPER)

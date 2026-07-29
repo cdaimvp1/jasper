@@ -11,8 +11,11 @@ session) runs as a SCOPED ONE-SHOT headless `claude -p` invocation for
 `relay`, scoped to Bash only - same safety pattern already used for curator's
 action-bridge proof, not a persistent unsupervised agent left running.
 
-Logs one summary line per run to new_cohort/data/scheduled_refresh.log so
-Marc can check status without watching it happen live.
+Logs one summary line per run to DATA_DIR/scheduled_refresh.log (paths.DATA_DIR,
+i.e. TEAM_DATA_DIR - this file's own LOG_PATH already resolves it correctly in
+code below; only the GRAPH_INGEST_ROUTINE.md instructions relay follows had a
+hardcoded-relative-path version of this mistake, fixed 2026-07-29) so Marc can
+check status without watching it happen live.
 """
 from __future__ import annotations
 

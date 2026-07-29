@@ -32,7 +32,6 @@ confirm or reject via workgraph_store.resolve_project_suggestion.
 """
 from __future__ import annotations
 
-import re
 import sys
 import time
 from difflib import SequenceMatcher
@@ -41,18 +40,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import workgraph_store as ws
 import workgraph_lessons
+import workgraph_signals
 
 WEAK_SIGNAL_WINDOW_DAYS = 45
-
-# Same guard as workgraph_classify's title generator - a no-reply/system
-# sender's domain-derived "company" (e.g. 'Ansmtp' from no-reply@ansmtp.
-# ariba.com) isn't a real supplier name, so it shouldn't name a project either.
-_SYSTEM_SENDER = re.compile(r"^(no-?reply|do-?not-?reply|notifications?|automated|system|admin)@", re.I)
 
 
 def _project_name_for(issue: dict, category: str, parties: list) -> str:
     external = [p for p in parties if p.get("affiliation") == "external" and p.get("company")
-                and not _SYSTEM_SENDER.match(p.get("primary_email") or "")]
+                and not workgraph_signals._SYSTEM_SENDER.match(p.get("primary_email") or "")]
     if external:
         return f"{external[0]['company']} — {category}"
     return f"{issue['title'][:50]} — {category}"
@@ -71,7 +66,7 @@ def _shared_external_party(issue_id: str):
     scale (dozens to low hundreds of issues)."""
     parties = ws.list_parties_for_issue(issue_id)
     for party in parties:
-        if party.get("affiliation") != "external" or _SYSTEM_SENDER.match(party.get("primary_email") or ""):
+        if party.get("affiliation") != "external" or workgraph_signals._SYSTEM_SENDER.match(party.get("primary_email") or ""):
             continue
         for sibling_id in ws.list_issues_for_party(party["id"]):
             if sibling_id == issue_id:
@@ -92,7 +87,7 @@ def _shared_external_company(issue_id: str):
     parties = ws.list_parties_for_issue(issue_id)
     for party in parties:
         if (party.get("affiliation") != "external" or not party.get("company")
-                or _SYSTEM_SENDER.match(party.get("primary_email") or "")):
+                or workgraph_signals._SYSTEM_SENDER.match(party.get("primary_email") or "")):
             continue
         for sibling_id in ws.list_issues_for_company(party["company"]):
             if sibling_id == issue_id:
@@ -115,7 +110,7 @@ def _external_companies_for_issue(issue_id: str) -> set:
     return {
         p["company"].lower() for p in ws.list_parties_for_issue(issue_id)
         if p.get("affiliation") == "external" and p.get("company")
-        and not _SYSTEM_SENDER.match(p.get("primary_email") or "")
+        and not workgraph_signals._SYSTEM_SENDER.match(p.get("primary_email") or "")
     }
 
 

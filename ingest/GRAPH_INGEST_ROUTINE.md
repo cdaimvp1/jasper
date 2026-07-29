@@ -12,11 +12,24 @@ relay's only output is raw, provenanced JSON on disk.
 
 ## Steps, in order
 
-1. **Read cursors.** For each source in `teams_chat`, `calendar`, `sharepoint`:
+1. **Read cursors, and resolve the real inbox path.** For each source in `teams_chat`,
+   `calendar`, `sharepoint`:
    ```python
    import workgraph_store as ws
+   import paths
    cursor = ws.get_cursor(source, "default")  # None on first-ever wake
+   INBOX = paths.DATA_DIR / "raw_ingest_inbox"
    ```
+   **Always write drop files via `INBOX`, never via a bare relative path.** Confirmed
+   2026-07-29: this routine used to say to write to the literal relative path
+   `new_cohort/data/raw_ingest_inbox/...`, but relay's subprocess runs with its cwd set to
+   this repo (`body/`, not the Symphony root) - that relative path silently resolved to
+   `body/new_cohort/data/raw_ingest_inbox/`, a location `normalize.py` never watches. 11
+   real Teams/Calendar/SharePoint captures sat there, never processed, with no error
+   anywhere - `normalize.py`'s own sweep can't rescue drop files it never even scans.
+   `paths.DATA_DIR` resolves through the same `TEAM_DATA_DIR`-required path every other
+   part of this codebase uses (hard-fails loudly if unset, rather than guessing), so
+   writing through `INBOX` can't repeat this failure mode regardless of relay's cwd.
 
 2. **Teams chats — capped and rate-limit-aware.**
    - Call `teams_list_chats` (paginate with `cursor` param if `moreResults` is true, but don't
@@ -43,7 +56,7 @@ relay's only output is raw, provenanced JSON on disk.
      wake — write what you already have, update the cursor only past what was actually
      fetched, and let the next scheduled wake continue from there.
    - Write each chat's raw response verbatim (unmodified) to
-     `new_cohort/data/raw_ingest_inbox/teams_chat_<unix_ts>.json`, one file per chat, as:
+     `INBOX/teams_chat_<unix_ts>.json`, one file per chat, as:
      ```json
      {"source": "teams_chat", "chat_id": "...", "chat_meta": {...from teams_list_chats...}, "messages_raw": {...from read_resource...}}
      ```
@@ -57,7 +70,7 @@ relay's only output is raw, provenanced JSON on disk.
      ```json
      {"source": "calendar", "events": [ {...one event...}, {...} ]}
      ```
-   - Write to `new_cohort/data/raw_ingest_inbox/calendar_<unix_ts>.json`.
+   - Write to `INBOX/calendar_<unix_ts>.json`.
 
 4. **SharePoint — enabled 2026-07-28, query derived from open issues (Marc's choice).**
    - Check `workgraph_store.get_cursor("sharepoint", "enabled") == "1"` before doing anything
@@ -75,7 +88,7 @@ relay's only output is raw, provenanced JSON on disk.
      ```json
      {"source": "sharepoint", "results": [ {...one document...}, {...} ]}
      ```
-   - Write to `new_cohort/data/raw_ingest_inbox/sharepoint_<unix_ts>.json`.
+   - Write to `INBOX/sharepoint_<unix_ts>.json`.
 
 5. **Update cursors** — only forward, only past what was actually fetched this wake (never
    optimistically past a source you skipped or that 429'd):

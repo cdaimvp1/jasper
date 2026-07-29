@@ -65,7 +65,23 @@ def _extract_candidates(text: str) -> tuple[Optional[str], Optional[str]]:
     what's actually on record (never a fixed/hardcoded vocabulary, so it can't
     drift from real data). Longest-name-first so a company name that contains
     a shorter one isn't shadowed. Either or both can come back None - that is
-    a normal, expected 'not enough signal' outcome, not a failure."""
+    a normal, expected 'not enough signal' outcome, not a failure.
+
+    Company matching is case-SENSITIVE for short names (confirmed false
+    positives, 2026-07-29: case-insensitive matching made "Sap", "Reply", and
+    "H1" - all real companies in the data - match ordinary English usage:
+    "this will really sap morale", "please reply", "our H1 2026 priorities").
+    A real company mention is virtually always written ALL-CAPS (an acronym,
+    "SAP") or Title-Case (the stored form, "Sap"); a common word in ordinary
+    prose is virtually always plain lowercase mid-sentence. Not foolproof - a
+    sentence-initial "Reply to this..." still capitalizes the common word -
+    so a small explicit stoplist covers the one term where even that doesn't
+    help ("H1" conventionally stays capitalized whether it means the company
+    or "first half of the year"). Longer names keep case-insensitive
+    matching - a coincidental collision gets less likely as names get longer."""
+    _SHORT_NAME_MAX = 6
+    _AMBIGUOUS_EVEN_CAPITALIZED = {"h1"}
+
     lowered = (text or "").lower()
     category = None
     for cat in sorted(ws.list_known_categories(), key=len, reverse=True):
@@ -74,7 +90,16 @@ def _extract_candidates(text: str) -> tuple[Optional[str], Optional[str]]:
             break
     company = None
     for comp in sorted(ws.list_known_companies(), key=len, reverse=True):
-        if comp and re.search(r"\b" + re.escape(comp.lower()) + r"\b", lowered):
+        if not comp:
+            continue
+        if comp.lower() in _AMBIGUOUS_EVEN_CAPITALIZED:
+            continue
+        if len(comp) <= _SHORT_NAME_MAX:
+            if (re.search(r"\b" + re.escape(comp.upper()) + r"\b", text or "")
+                    or re.search(r"\b" + re.escape(comp[:1].upper() + comp[1:].lower()) + r"\b", text or "")):
+                company = comp
+                break
+        elif re.search(r"\b" + re.escape(comp.lower()) + r"\b", lowered):
             company = comp
             break
     return category, company

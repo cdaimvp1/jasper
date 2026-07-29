@@ -168,8 +168,16 @@ def _resolve_bare_name(name: str, by_display_name: dict, by_local_part: dict) ->
     if not key:
         return None
     exact = by_display_name.get(key)
-    if exact and len(exact) == 1:
-        return exact[0]
+    if exact:
+        # Confirmed bug, 2026-07-29: when 2+ known parties genuinely share the
+        # same display_name (a real, detected collision - e.g. two different
+        # "John Smith"s, one internal, one at another supplier), this used to
+        # just fall through to the WEAKER local-part guess below instead of
+        # abstaining - which could then confidently resolve to a THIRD,
+        # unrelated party, worse than either real match. An ambiguous exact
+        # match must abstain immediately, same discipline the local-part step
+        # already applies to itself.
+        return exact[0] if len(exact) == 1 else None
 
     matched: dict[str, dict] = {}
     for cand in _name_to_local_part_candidates(name):

@@ -1757,7 +1757,7 @@ async def api_worker_rename(worker_id: str, body: WorkerRenameBody):
             roles = cfg.get("roles")
             if isinstance(roles, dict) and isinstance(roles.get(worker_id), dict):
                 roles[worker_id]["display_name"] = new_name
-                _CONFIG_PATH.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+                config.write_json_atomic(_CONFIG_PATH, cfg)
     except Exception as e:
         raise HTTPException(500, f"failed writing config.roles display_name: {e}")
     # 2. members.json display_name — the runtime read (mtime-bump invalidates members cache)
@@ -1771,7 +1771,7 @@ async def api_worker_rename(worker_id: str, body: WorkerRenameBody):
                 changed = True
         if not changed:
             raise HTTPException(404, f"worker {worker_id} not present in members.json")
-        mp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        config.write_json_atomic(mp, data)
     except HTTPException:
         raise
     except Exception as e:

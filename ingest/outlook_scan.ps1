@@ -154,34 +154,46 @@ try {
     foreach ($item in $items) {
         if ($item.Class -ne 43) { continue }  # olMail only (43) - skip meeting/other item classes
 
-        $receivedEpoch = To-Epoch $item.ReceivedTime
-        if (-not $UnreadOnly -and $receivedEpoch -le $SinceEpoch) { break }  # sorted newest-first: everything after this is older (cursor mode only — the sweep has no cursor boundary to respect)
+        # 2026-07-29: one malformed/encrypted item (e.g. .Body throwing) used
+        # to kill the WHOLE batch via the outer try/catch below - and the
+        # Python side discarded every already-valid item's JSON on any
+        # non-zero exit, so one bad email could silently lose an otherwise-
+        # good wake. Per-item try/catch (same pattern Save-RealAttachments
+        # already uses for itself) logs to stderr - never stdout, that's the
+        # JSON-lines stream - and moves on to the next item.
+        try {
+            $receivedEpoch = To-Epoch $item.ReceivedTime
+            if (-not $UnreadOnly -and $receivedEpoch -le $SinceEpoch) { break }  # sorted newest-first: everything after this is older (cursor mode only — the sweep has no cursor boundary to respect)
 
-        $senderSmtp = Resolve-SenderSmtp $item
+            $senderSmtp = Resolve-SenderSmtp $item
 
-        # Best-effort participant list: sender + To/CC display names, semicolon-joined by Outlook.
-        $participants = @($senderSmtp)
-        if ($item.To) { $participants += ($item.To -split ';' | ForEach-Object { $_.Trim() }) }
-        if ($item.CC) { $participants += ($item.CC -split ';' | ForEach-Object { $_.Trim() }) }
-        $participants = $participants | Where-Object { $_ -and $_.Trim().Length -gt 0 } | Select-Object -Unique
+            # Best-effort participant list: sender + To/CC display names, semicolon-joined by Outlook.
+            $participants = @($senderSmtp)
+            if ($item.To) { $participants += ($item.To -split ';' | ForEach-Object { $_.Trim() }) }
+            if ($item.CC) { $participants += ($item.CC -split ';' | ForEach-Object { $_.Trim() }) }
+            $participants = $participants | Where-Object { $_ -and $_.Trim().Length -gt 0 } | Select-Object -Unique
 
-        $attResult = Save-RealAttachments -item $item -stagingDir $StagingDir
+            $attResult = Save-RealAttachments -item $item -stagingDir $StagingDir
 
-        $obj = [ordered]@{
-            conversation_id        = $item.ConversationID
-            entry_id               = $item.EntryID
-            subject                = $item.Subject
-            sender                 = $senderSmtp
-            sender_name            = $item.SenderName
-            participants           = $participants
-            received_epoch         = $receivedEpoch
-            body_preview           = $item.Body.Substring(0, [Math]::Min(500, $item.Body.Length))
-            attachments            = $attResult.saved
-            attachments_staged_dir = $attResult.dir
+            $obj = [ordered]@{
+                conversation_id        = $item.ConversationID
+                entry_id               = $item.EntryID
+                subject                = $item.Subject
+                sender                 = $senderSmtp
+                sender_name            = $item.SenderName
+                participants           = $participants
+                received_epoch         = $receivedEpoch
+                body_preview           = $item.Body.Substring(0, [Math]::Min(500, $item.Body.Length))
+                attachments            = $attResult.saved
+                attachments_staged_dir = $attResult.dir
+            }
+            $obj | ConvertTo-Json -Compress -Depth 4
+            $count++
+            if ($count -ge $MaxItems) { break }
+        } catch {
+            Write-Warning "skipping one item due to an error: $($_.Exception.Message)"
+            continue
         }
-        $obj | ConvertTo-Json -Compress -Depth 4
-        $count++
-        if ($count -ge $MaxItems) { break }
     }
 } catch {
     Write-Error "ERROR: $($_.Exception.Message)"

@@ -8,6 +8,7 @@ file mtime changed.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -16,6 +17,19 @@ from typing import Any
 from paths import CONFIG_DIR
 
 SETTINGS_PATH = CONFIG_DIR / "settings.json"
+
+
+def write_json_atomic(path: Path, data: Any) -> None:
+    """Write-temp-then-rename, not a direct write_text(). A crash mid-write
+    (or two writers landing at once) used to be able to leave settings.json
+    truncated or half-written - every reader of it (config.get, several
+    server_lean.py endpoints) would then silently degrade or throw on the
+    next read, with no obvious cause. os.replace() is atomic on both
+    Windows and POSIX: the target is always either the old complete content
+    or the new complete content, never a partial write."""
+    tmp = path.with_suffix(path.suffix + f".tmp{os.getpid()}")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
 
 _lock = threading.Lock()
 _cache: dict[str, Any] = {}
@@ -62,7 +76,7 @@ def set_value(value: Any, *keys: str) -> None:
                 cur[k] = {}
             cur = cur[k]
         cur[keys[-1]] = value
-        SETTINGS_PATH.write_text(json.dumps(d, indent=2), encoding="utf-8")
+        write_json_atomic(SETTINGS_PATH, d)
         global _cache_mtime
         _cache_mtime = SETTINGS_PATH.stat().st_mtime
 

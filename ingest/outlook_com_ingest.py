@@ -92,8 +92,14 @@ def run(folder: str = "Careful", max_items: int = 500) -> dict:
         ],
         capture_output=True, encoding="utf-8", timeout=120,
     )
-    if proc.returncode not in (0,):
-        return {"ok": False, "error": proc.stderr.strip() or f"exit code {proc.returncode}", "inserted": 0, "duplicates": 0}
+    # Fixed 2026-07-29: this used to return immediately on any non-zero exit,
+    # discarding every already-valid JSON line PowerShell had already printed
+    # for items processed before whatever failed - one bad email (or, after
+    # this session's outlook_scan.ps1 fix, a catastrophic mid-scan COM
+    # failure) could silently lose an otherwise-good batch. Now the valid
+    # lines are always salvaged and inserted; a non-zero exit is reported
+    # alongside the salvaged counts instead of in place of them.
+    had_error = proc.returncode not in (0,)
 
     inserted = 0
     duplicates = 0
@@ -148,8 +154,11 @@ def run(folder: str = "Careful", max_items: int = 500) -> dict:
     if max_seen_ts > float(since_epoch):
         ws.set_cursor(_SOURCE, f"folder:{folder}", str(max_seen_ts))
 
-    return {"ok": True, "inserted": inserted, "duplicates": duplicates,
-            "attachments_absorbed": attachments_absorbed, "cursor": max_seen_ts}
+    result = {"ok": not had_error, "inserted": inserted, "duplicates": duplicates,
+              "attachments_absorbed": attachments_absorbed, "cursor": max_seen_ts}
+    if had_error:
+        result["error"] = proc.stderr.strip() or f"exit code {proc.returncode}"
+    return result
 
 
 def sweep_unread(folder: str = "Careful", max_items: int = 200) -> dict:
@@ -175,9 +184,9 @@ def sweep_unread(folder: str = "Careful", max_items: int = 200) -> dict:
         ],
         capture_output=True, encoding="utf-8", timeout=180,
     )
-    if proc.returncode not in (0,):
-        return {"ok": False, "error": proc.stderr.strip() or f"exit code {proc.returncode}",
-                "inserted": 0, "duplicates": 0, "unread_seen": 0}
+    # Same fix as run() above: salvage already-valid lines instead of
+    # discarding the whole batch on a non-zero exit.
+    had_error = proc.returncode not in (0,)
 
     inserted = 0
     duplicates = 0
@@ -221,8 +230,11 @@ def sweep_unread(folder: str = "Careful", max_items: int = 200) -> dict:
         if staged_dir_str:
             shutil.rmtree(Path(staged_dir_str), ignore_errors=True)
 
-    return {"ok": True, "unread_seen": unread_seen, "inserted": inserted,
-            "duplicates": duplicates, "attachments_absorbed": attachments_absorbed}
+    result = {"ok": not had_error, "unread_seen": unread_seen, "inserted": inserted,
+              "duplicates": duplicates, "attachments_absorbed": attachments_absorbed}
+    if had_error:
+        result["error"] = proc.stderr.strip() or f"exit code {proc.returncode}"
+    return result
 
 
 if __name__ == "__main__":

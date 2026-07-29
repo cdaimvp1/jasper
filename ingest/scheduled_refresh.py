@@ -38,6 +38,35 @@ from paths import DATA_DIR
 
 LOG_PATH = DATA_DIR / "scheduled_refresh.log"
 
+
+def _run_headless_with_tree_kill(args: list, *, cwd: str, env: dict, timeout: int) -> subprocess.CompletedProcess:
+    """Like subprocess.run(..., capture_output=True, text=True, timeout=...),
+    but kills the WHOLE process tree on timeout, not just the immediate
+    child. Confirmed gap, 2026-07-29: subprocess.run()'s own timeout handling
+    only terminates the `claude` process itself - any grandchild it spawned
+    via its own Bash tool calls (this session's own work is a live example of
+    that pattern) survives as an orphan past the timeout, potentially still
+    running and racing the very NEXT scheduled_refresh pass against the same
+    workgraph.db. CREATE_NEW_PROCESS_GROUP (so taskkill's /T can find the
+    whole tree by process-group, not just the one PID) + taskkill /T /F on
+    timeout closes that. Re-raises TimeoutExpired after killing, same as
+    subprocess.run() would have - every call site's existing try/except
+    around this call needs no change."""
+    proc = subprocess.Popen(
+        args, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True, timeout=15)
+        except Exception:
+            pass
+        proc.communicate()  # drain pipes so the now-dying process can fully exit
+        raise
+    return subprocess.CompletedProcess(args, proc.returncode, stdout, stderr)
+
 RELAY_PROMPT = (
     "You are relay, a Symphony worker (scout archetype) for this cohort. "
     "Follow the routine in ingest/GRAPH_INGEST_ROUTINE.md exactly, steps 1-8 "
@@ -133,8 +162,19 @@ def run_relay_oneshot() -> dict:
     (GRAPH_INGEST_ROUTINE.md - "low volume, no pacing concern"), regardless of
     whether any new events exist. That makes it the one deterministic,
     code-verifiable proof relay's routine actually executed that far, wholly
-    independent of anything relay claims about itself."""
+    independent of anything relay claims about itself.
+
+    Extended 2026-07-29: calendar alone is blind to a SharePoint-specific
+    failure while Teams/Calendar succeed - and SharePoint had ZERO code-
+    verifiable success signal of its own, meaning an auth failure or an
+    accidentally-cleared 'enabled' flag could persist forever with nothing
+    noticing. SharePoint's cursor gets the SAME unconditional
+    this-wake's-timestamp update as calendar's, per the routine's own step 5
+    ("only if enabled+ran") - so when the enabled flag is on, checking it
+    the same way is just as reliable a proxy, at no extra cost."""
     calendar_cursor_before = ws.get_cursor("calendar", "default")
+    sharepoint_enabled = ws.get_cursor("sharepoint", "enabled") == "1"
+    sharepoint_cursor_before = ws.get_cursor("sharepoint", "default") if sharepoint_enabled else None
 
     env_prefix = {
         "SYMPHONY_WORKER": "relay",
@@ -148,18 +188,27 @@ def run_relay_oneshot() -> dict:
     env = os.environ.copy()
     env.update(env_prefix)
     try:
-        proc = subprocess.run(
+        proc = _run_headless_with_tree_kill(
             ["claude", "-p", RELAY_PROMPT, "--allowedTools", "Bash",
              "--add-dir", str(BODY), "--model", "claude-haiku-4-5-20251001"],
-            cwd=str(BODY), env=env, capture_output=True, text=True, timeout=900,
+            cwd=str(BODY), env=env, timeout=900,
         )
         calendar_cursor_after = ws.get_cursor("calendar", "default")
         cursor_advanced = (calendar_cursor_after is not None
                             and calendar_cursor_after != calendar_cursor_before)
+
+        sharepoint_advanced = True  # vacuously true when not enabled - nothing to check
+        if sharepoint_enabled:
+            sharepoint_cursor_after = ws.get_cursor("sharepoint", "default")
+            sharepoint_advanced = (sharepoint_cursor_after is not None
+                                    and sharepoint_cursor_after != sharepoint_cursor_before)
+
         return {
-            "ok": proc.returncode == 0 and cursor_advanced,
+            "ok": proc.returncode == 0 and cursor_advanced and sharepoint_advanced,
             "returncode": proc.returncode,
             "cursor_advanced": cursor_advanced,
+            "sharepoint_enabled": sharepoint_enabled,
+            "sharepoint_advanced": sharepoint_advanced,
             "calendar_cursor_before": calendar_cursor_before,
             "calendar_cursor_after": calendar_cursor_after,
             "stdout_tail": proc.stdout[-1000:], "stderr_tail": proc.stderr[-1000:],
@@ -203,9 +252,9 @@ def run_synthesis_oneshot() -> dict:
     env = os.environ.copy()
     env.update(env_prefix)
     try:
-        proc = subprocess.run(
+        proc = _run_headless_with_tree_kill(
             ["claude", "-p", SYNTHESIS_PROMPT, "--allowedTools", "Bash", "--add-dir", str(BODY)],
-            cwd=str(BODY), env=env, capture_output=True, text=True, timeout=1500,
+            cwd=str(BODY), env=env, timeout=1500,
         )
         return {"ok": proc.returncode == 0, "returncode": proc.returncode,
                 "stale_count": len(stale), **stats,
@@ -239,9 +288,9 @@ def run_project_grouping_oneshot() -> dict:
     env = os.environ.copy()
     env.update(env_prefix)
     try:
-        proc = subprocess.run(
+        proc = _run_headless_with_tree_kill(
             ["claude", "-p", PROJECT_GROUPING_PROMPT, "--allowedTools", "Bash", "--add-dir", str(BODY)],
-            cwd=str(BODY), env=env, capture_output=True, text=True, timeout=1200,
+            cwd=str(BODY), env=env, timeout=1200,
         )
         return {"ok": proc.returncode == 0, "returncode": proc.returncode,
                 "pending_count": len(pending),
@@ -295,7 +344,8 @@ def run() -> dict:
         "synthesis": synthesis_result,
     }
     _log(f"REFRESH ok mail_inserted={mail_result.get('inserted', '?')} "
-        f"relay_ok={relay_result.get('ok')} "
+        f"relay_ok={relay_result.get('ok')} relay_calendar_advanced={relay_result.get('cursor_advanced')} "
+        f"relay_sharepoint_enabled={relay_result.get('sharepoint_enabled')} relay_sharepoint_advanced={relay_result.get('sharepoint_advanced')} "
         f"classified_total={classify_result_1.get('classify', {}).get('classified', 0) + classify_result_2.get('classify', {}).get('classified', 0)} "
         f"grouping_ok={grouping_result.get('ok')} grouping_skipped={grouping_result.get('skipped', False)} "
         f"synthesis_ok={synthesis_result.get('ok')} synthesis_skipped={synthesis_result.get('skipped', False)} "

@@ -125,19 +125,7 @@ def _recall_evidence(issue: Optional[dict], category: Optional[str], company: Op
     if key is None:
         return _no_evidence("not enough signal to key a precedent lookup (need a category + supplier)"), []
 
-    best = None
-    for outcome in ("confirmed", "resolved"):
-        lesson = ws.get_lesson_by_situation(key, outcome)
-        if lesson is None:
-            continue
-        if not (0.0 <= lesson["trust_score"] <= 1.0):
-            continue
-        if ws.get_issue(lesson["source_issue_id"]) is None:
-            continue
-        if lesson["trust_score"] < workgraph_lessons.MIN_TRUST:
-            continue
-        if best is None or lesson["trust_score"] > best["trust_score"]:
-            best = lesson
+    best = workgraph_lessons.best_lesson_for_key(key)
     if best is None:
         return _no_evidence(f"no confirmed precedent for {key}"), []
     band = workgraph_lessons.confidence_band(best["trust_score"])

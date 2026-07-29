@@ -151,16 +151,32 @@ def _name_to_local_part_candidates(name: str) -> list[str]:
     ]))
 
 
+# Generational and professional suffixes (fixed 2026-07-29): "John Smith" stored
+# vs. "John Smith Jr." or "John Smith, PhD" mentioned in a Socrates query used to
+# be a guaranteed exact-match miss - the suffix, not a name difference, broke the
+# lookup. Comma-optional (", Jr." and " Jr." both common), trailing-period-optional.
+_NAME_SUFFIX_RE = re.compile(
+    r",?\s+(?:jr|sr|ii|iii|iv|v|phd|md|esq)\.?$", re.IGNORECASE)
+
+
+def _normalize_person_name(name: str) -> str:
+    """Shared key-builder for both sides of bare-name resolution (index build
+    AND lookup) - kept as one function so they can't drift out of sync with
+    each other, same discipline as workgraph_signals._SYSTEM_SENDER."""
+    collapsed = re.sub(r"\s+", " ", name.strip().lower())
+    return _NAME_SUFFIX_RE.sub("", collapsed).strip()
+
+
 def _build_party_indexes() -> tuple[dict, dict]:
     """Two in-memory indexes over every known party, built once per run() -
-    by exact display_name (lowercased), and by email local-part (lowercased,
-    the part before '@'). Personal-scale table, so a full fetch is cheap and
-    far simpler than a query per candidate name."""
+    by exact display_name (lowercased, suffix-stripped), and by email
+    local-part (lowercased, the part before '@'). Personal-scale table, so a
+    full fetch is cheap and far simpler than a query per candidate name."""
     by_display_name: dict[str, list[dict]] = {}
     by_local_part: dict[str, list[dict]] = {}
     for p in ws.list_all_parties():
         if p.get("display_name"):
-            key = re.sub(r"\s+", " ", p["display_name"].strip().lower())
+            key = _normalize_person_name(p["display_name"])
             by_display_name.setdefault(key, []).append(p)
         local = p["primary_email"].split("@", 1)[0].lower()
         by_local_part.setdefault(local, []).append(p)
@@ -171,7 +187,7 @@ def _resolve_bare_name(name: str, by_display_name: dict, by_local_part: dict) ->
     """Resolve a bare display name to an EXISTING party, or None (never
     fabricates a new one). See module docstring for the two-step approach and
     why ambiguity means abstain."""
-    key = re.sub(r"\s+", " ", name.strip().lower())
+    key = _normalize_person_name(name)
     if not key:
         return None
     exact = by_display_name.get(key)

@@ -164,16 +164,16 @@ def precedent_prefilter(issue: dict) -> Optional[str]:
     return None
 
 
-def find_matching_lesson(issue: dict) -> Optional[dict]:
-    """Read path for NBA scoring / cockpit display. Re-validates trust_score
-    range and that the cited source issue still exists - a lesson failing
-    either check is treated as absent (abstain), never applied. Only
-    'confirmed'/'resolved' outcomes are ever surfaced as a positive
-    precedent boost - a 'rejected' lesson (these two are NOT the same
+def best_lesson_for_key(key: str) -> Optional[dict]:
+    """Shared read path (fixed 2026-07-29: this exact 'confirmed'/'resolved'
+    scan + trust_score/source-issue-existence revalidation + highest-trust-wins
+    pick was pasted identically into find_matching_lesson below AND
+    workgraph_socrates.py's precedent lookup - one now calls the other).
+    Re-validates trust_score range and that the cited source issue still
+    exists - a lesson failing either check is treated as absent (abstain),
+    never applied. Only 'confirmed'/'resolved' outcomes are ever surfaced as a
+    positive precedent boost - a 'rejected' lesson (these two are NOT the same
     project) has nothing useful to say about priority."""
-    key = situation_key_for_issue(issue)
-    if key is None:
-        return None
     best = None
     for outcome in ("confirmed", "resolved"):
         lesson = ws.get_lesson_by_situation(key, outcome)
@@ -188,6 +188,15 @@ def find_matching_lesson(issue: dict) -> Optional[dict]:
         if best is None or lesson["trust_score"] > best["trust_score"]:
             best = lesson
     return best
+
+
+def find_matching_lesson(issue: dict) -> Optional[dict]:
+    """Read path for NBA scoring / cockpit display. See best_lesson_for_key
+    for the actual matching/validation logic."""
+    key = situation_key_for_issue(issue)
+    if key is None:
+        return None
+    return best_lesson_for_key(key)
 
 
 def apply_precedent_boost(base_score: float, lesson: Optional[dict]) -> float:

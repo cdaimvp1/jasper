@@ -750,6 +750,30 @@ def list_issue_state_history(issue_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def list_issue_state_history_for_issues(issue_ids: list[str]) -> dict[str, list[dict]]:
+    """Batched form of list_issue_state_history - one query for N issues instead
+    of N queries (fixed 2026-07-29: workgraph_alerts.refresh_alerts was calling
+    the single-issue form inside a loop over up to 1000 issues on every
+    periodic tick). Returns {issue_id: [rows...]}, missing ids simply absent
+    (empty list), same as calling the single form on an issue with no history."""
+    if not issue_ids:
+        return {}
+    with _lock:
+        conn = _connect()
+        try:
+            placeholders = ",".join("?" * len(issue_ids))
+            rows = conn.execute(
+                f"SELECT * FROM issue_state_history WHERE issue_id IN ({placeholders}) ORDER BY changed_ts ASC",
+                issue_ids,
+            ).fetchall()
+        finally:
+            conn.close()
+    out: dict[str, list[dict]] = {}
+    for r in rows:
+        out.setdefault(r["issue_id"], []).append(dict(r))
+    return out
+
+
 def get_issue(id: str) -> Optional[dict]:
     with _lock:
         conn = _connect()
@@ -821,7 +845,14 @@ def list_issues(states: Optional[list[str]] = None, limit: int = 200) -> list[di
         placeholders = ", ".join("?" for _ in states)
         sql += f" WHERE issues.state IN ({placeholders})"
         args.extend(states)
-    sql += " ORDER BY issues.priority_score DESC NULLS LAST, issues.updated_at DESC LIMIT ?"
+    # issues.id ASC as a final tie-break (fixed 2026-07-29): priority_score is a
+    # rounded float and updated_at a wall-clock second - either can tie exactly
+    # (two brand-new issues with identical inputs, or a batch backfill landing
+    # several in the same second), and SQLite doesn't guarantee stable order
+    # for tied sort keys. Without a fully-unique final column, the Morning
+    # Queue's row order for tied issues could silently shuffle between
+    # otherwise-identical runs (e.g. after a VACUUM or an index change).
+    sql += " ORDER BY issues.priority_score DESC NULLS LAST, issues.updated_at DESC, issues.id ASC LIMIT ?"
     args.append(limit)
     with _lock:
         conn = _connect()
@@ -1052,6 +1083,27 @@ def list_evidence(issue_id: str) -> list[dict]:
         finally:
             conn.close()
     return [dict(r) for r in rows]
+
+
+def list_evidence_for_issues(issue_ids: list[str]) -> dict[str, list[dict]]:
+    """Batched form of list_evidence - see list_issue_state_history_for_issues
+    for why (same N+1 call site, same fix)."""
+    if not issue_ids:
+        return {}
+    with _lock:
+        conn = _connect()
+        try:
+            placeholders = ",".join("?" * len(issue_ids))
+            rows = conn.execute(
+                f"SELECT * FROM evidence WHERE issue_id IN ({placeholders}) ORDER BY ts DESC",
+                issue_ids,
+            ).fetchall()
+        finally:
+            conn.close()
+    out: dict[str, list[dict]] = {}
+    for r in rows:
+        out.setdefault(r["issue_id"], []).append(dict(r))
+    return out
 
 
 # --- ingest_cursors ---------------------------------------------------------

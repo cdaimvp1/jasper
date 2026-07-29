@@ -42,6 +42,7 @@ import re
 import sys
 import time
 from pathlib import Path
+from types import MappingProxyType
 from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -50,7 +51,18 @@ import workgraph_lessons
 
 DAY = 86400.0
 
-DEFAULT_WEIGHTS = {"is_your_step": 0.45, "staleness": 0.25, "due": 0.12, "value": 0.18}
+# Named (fixed 2026-07-29): was a bare `14.0` literal independently duplicated in
+# _staleness_urgency and _due_urgency below - same "two weeks" concept in both
+# (staleness saturation, due-date decay window), but nothing tied them together,
+# so tuning one without noticing the other was an easy way to drift them apart.
+STALENESS_SATURATION_DAYS = 14.0
+
+# MappingProxyType - same reasoning as workgraph_alerts.DEFAULT_THRESHOLDS (fixed
+# 2026-07-29 alongside it): used directly as score_issue()'s mutable default
+# argument; a read-only view turns an accidental in-place edit into an immediate
+# TypeError instead of silently corrupting every future call's weights.
+DEFAULT_WEIGHTS = MappingProxyType(
+    {"is_your_step": 0.45, "staleness": 0.25, "due": 0.12, "value": 0.18})
 
 # Fixed 2026-07-29: two confirmed gaps beyond the module's own disclosed
 # "an unrelated figure gets picked up too" limitation. (1) "billion"/"bn"/"b"
@@ -76,6 +88,35 @@ _VALUE_LOG_LOW = 3.0         # log10(1,000)
 _VALUE_LOG_SPAN = 5.0        # log10(100,000,000) - log10(1,000)
 
 
+# Per-raw_item cache (fixed 2026-07-29): recompute_all() re-scores every open issue
+# on every periodic tick "even with zero new evidence" (its own docstring), which
+# used to mean re-running this regex over the SAME issue's SAME raw_item text every
+# single tick forever. raw_items are append-only/immutable once inserted (subject +
+# body_preview never change after ingest - confirmed, no update path exists for
+# them), so caching the per-item extracted value by raw_item id is always safe: no
+# invalidation logic needed, and a newly-linked raw_item just computes+caches on
+# first encounter like normal.
+_value_cache: dict[int, float] = {}
+
+
+def _extract_item_value(item: dict) -> float:
+    key = item.get("id")
+    if key is not None and key in _value_cache:
+        return _value_cache[key]
+    best = 0.0
+    text = " ".join(filter(None, [item.get("subject"), item.get("body_preview")]))
+    for match in _DOLLAR_RE.finditer(text):
+        suffix = (match.group(3) or "").lower()
+        multiplier = _DOLLAR_SUFFIX_MULTIPLIER.get(suffix, 1)
+        for group in (match.group(1), match.group(2)):
+            if group is None:
+                continue
+            best = max(best, float(group.replace(",", "")) * multiplier)
+    if key is not None:
+        _value_cache[key] = best
+    return best
+
+
 def _extract_value_amount(issue_id: str) -> float:
     """Best-effort deterministic dollar-value extraction from this issue's own
     thread text (subject + body_preview of every linked raw_item). Takes the
@@ -85,14 +126,7 @@ def _extract_value_amount(issue_id: str) -> float:
     the resulting signal is capped at a modest weight, not trusted outright."""
     best = 0.0
     for item in ws.get_raw_items_for_issue(issue_id):
-        text = " ".join(filter(None, [item.get("subject"), item.get("body_preview")]))
-        for match in _DOLLAR_RE.finditer(text):
-            suffix = (match.group(3) or "").lower()
-            multiplier = _DOLLAR_SUFFIX_MULTIPLIER.get(suffix, 1)
-            for group in (match.group(1), match.group(2)):
-                if group is None:
-                    continue
-                best = max(best, float(group.replace(",", "")) * multiplier)
+        best = max(best, _extract_item_value(item))
     return best
 
 
@@ -108,7 +142,7 @@ def _is_your_step(state: str) -> float:
 
 def _staleness_urgency(updated_at: float, now: float) -> float:
     days = max(0.0, (now - updated_at) / DAY)
-    return min(1.0, days / 14.0)  # saturates at 14 days quiet, same threshold Field Guide used
+    return min(1.0, days / STALENESS_SATURATION_DAYS)  # same threshold Field Guide used
 
 
 def _due_urgency(due_iso: str | None, now: float) -> float:
@@ -131,7 +165,7 @@ def _due_urgency(due_iso: str | None, now: float) -> float:
     days_until = (due_ts - now) / DAY
     if days_until <= 0:
         return 1.0  # overdue
-    return max(0.0, 1.0 - (days_until / 14.0))
+    return max(0.0, 1.0 - (days_until / STALENESS_SATURATION_DAYS))
 
 
 def score_issue(issue: dict, now: float, weights: dict = DEFAULT_WEIGHTS) -> tuple[float, str, Optional[int]]:

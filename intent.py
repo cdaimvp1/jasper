@@ -124,12 +124,24 @@ PROPOSAL_PATTERNS = [
     re.compile(r"^\s*(proposal|recommendation|recommend|suggest|let'?s|i propose|propose to)\b", re.IGNORECASE | re.MULTILINE),
     re.compile(r"\bdecision:\s+", re.IGNORECASE),
 ]
-HANDOFF_PATTERNS = [
-    # Per scar 2026-05-01 #18 (`tr_a7871b0e6c` family): bare `action` matched word-internal `action-button`.
-    # Tightened to `action item|take action|action for` — explicit handoff verb-shapes only.
-    re.compile(r"\b(ab|cb|cs|tb|oc)[:,]\s+(please|can you|could you|need you to|own this|take this|action item|take action|action for)\b", re.IGNORECASE),
-    re.compile(r"\b(handing off to|handoff to|over to|action item for|ownership goes to)\s+(ab|cb|cs|tb|oc)\b", re.IGNORECASE),
-]
+def _handoff_patterns():
+    """Fixed 2026-07-29: this used to be a module-level list hardcoding short
+    codes (ab|cb|cs|tb|oc) from an older cohort's roster naming scheme. The
+    current real roster (tia/relay/curator/bridge, config/members.json) has no
+    member whose `short` matches any of those - handoff-intent detection was
+    silently dead against today's actual cohort. Built fresh per call from the
+    live roster instead, same pattern _needs_manager_patterns() already uses,
+    so a roster change takes effect immediately, no restart needed."""
+    shorts = [s for s in members_mod.short_to_slug().keys() if s]
+    if not shorts:
+        return []
+    alt = "|".join(re.escape(s) for s in shorts)
+    return [
+        # Per scar 2026-05-01 #18 (`tr_a7871b0e6c` family): bare `action` matched word-internal `action-button`.
+        # Tightened to `action item|take action|action for` — explicit handoff verb-shapes only.
+        re.compile(rf"\b({alt})[:,]\s+(please|can you|could you|need you to|own this|take this|action item|take action|action for)\b", re.IGNORECASE),
+        re.compile(rf"\b(handing off to|handoff to|over to|action item for|ownership goes to)\s+({alt})\b", re.IGNORECASE),
+    ]
 COMPLETED_PATTERNS = [
     re.compile(r"\b(done|shipped|landed|merged|completed|finished|wrote|built|deployed|published)\b.{0,80}\b(it|that|this|the .+|to .+)\b", re.IGNORECASE),
     re.compile(r"^\s*(✓|✅|done\.|shipped\.|complete\.|finished\.)", re.IGNORECASE | re.MULTILINE),
@@ -184,7 +196,7 @@ def classify_message(text: str, actor: Optional[str] = None) -> list[dict[str, A
                                 "target": target, "confidence": 0.6})
                 break
 
-    for pat in HANDOFF_PATTERNS:
+    for pat in _handoff_patterns():
         m = pat.search(text)
         if m:
             intents.append({"kind": "handoff", "snippet": _snippet_around(text, m),

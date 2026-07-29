@@ -26,17 +26,23 @@ import json
 import sys
 import time
 from pathlib import Path
+from types import MappingProxyType
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import workgraph_store as ws
 
 DAY = 86400.0
 
-DEFAULT_THRESHOLDS = {
+# MappingProxyType (fixed 2026-07-29): this dict is used directly as a mutable
+# default argument on run() below - nothing mutates it today, but a caller doing
+# `custom = DEFAULT_THRESHOLDS; custom["stale_warn_days"] = 3` (forgetting to
+# .copy() first) would silently corrupt the shared default for every future call.
+# A read-only view makes that TypeError immediately instead of silently wrong.
+DEFAULT_THRESHOLDS = MappingProxyType({
     "stale_warn_days": 5,
     "stale_critical_days": 12,
     "stuck_action_minutes": 30,
-}
+})
 
 
 def _last_activity_ts(issue: dict, evidence: list[dict], state_history: list[dict]) -> float:
@@ -94,12 +100,19 @@ def run(now: float | None = None, thresholds: dict = DEFAULT_THRESHOLDS) -> dict
 
     by_kind = {"stale": 0, "high_priority_ask": 0, "anomaly": 0, "stuck_action": 0}
 
-    # 1. Stale waiting/blocked issues.
-    for issue in ws.list_issues(states=["waiting", "blocked"], limit=1000):
+    # 1. Stale waiting/blocked issues. Evidence + state history fetched ONCE for
+    # the whole batch (fixed 2026-07-29: this used to be 2 queries per issue
+    # inside the loop - up to ~2000 queries per tick at 1000 issues, every
+    # periodic tick, even with zero new evidence).
+    stale_candidates = ws.list_issues(states=["waiting", "blocked"], limit=1000)
+    candidate_ids = [i["id"] for i in stale_candidates]
+    evidence_by_issue = ws.list_evidence_for_issues(candidate_ids)
+    history_by_issue = ws.list_issue_state_history_for_issues(candidate_ids)
+    for issue in stale_candidates:
         if (issue["id"], "stale") in existing_issue_kind:
             continue
-        evidence = ws.list_evidence(issue["id"])
-        state_history = ws.list_issue_state_history(issue["id"])
+        evidence = evidence_by_issue.get(issue["id"], [])
+        state_history = history_by_issue.get(issue["id"], [])
         last_ts = _last_activity_ts(issue, evidence, state_history)
         result = _evaluate_stale(issue, now, last_ts, thresholds)
         if result is None:

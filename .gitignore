@@ -1,0 +1,35 @@
+# Real business data - NEVER commit (this repo is public).
+data/
+new_cohort/
+scratch/
+*.db
+*.db-*
+*.db.bak*
+*.sqlite*
+*.log
+
+# Local/session/identity config - environment-specific, not portable source.
+.claude/
+config/
+workers/*/settings.json
+workers/*/*.md
+workers/*/memory/
+workers/*_active.md
+setup/_backups/
+
+# Raw scan/ingest output - real email content, names, addresses. Never source.
+ingest/scan_wide.jsonl
+*.jsonl
+setup/_diff_*.txt
+setup/_refresh_live_run.log
+setup/relay_status.txt
+setup/_roster_add_*.json
+relay_hello.txt
+
+# Python
+__pycache__/
+*.pyc
+
+# OS/editor cruft
+.DS_Store
+Thumbs.db

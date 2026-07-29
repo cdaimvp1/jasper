@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Help · Symphony{% endblock %}
+
+{% block page_bar %}
+<div class="page-bar">
+  <span class="page-bar-title">Help</span>
+  <span class="page-bar-meta">getting started + working with your cohort</span>
+</div>
+{% endblock %}
+
+{% block content %}
+<div style="max-width:900px;margin:0 auto;padding:8px 4px">
+  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px">
+
+    <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:16px 18px">
+      <div style="font:700 11px/1 var(--mono,monospace);letter-spacing:.06em;color:var(--accent,#0f766e);text-transform:uppercase">Start here</div>
+      <h3 style="margin:8px 0 4px;font-size:16px">Compose your cohort</h3>
+      <p style="margin:0;color:var(--muted,#667);font-size:14px">Tell the coordinator what work you need. It proposes the right workers — and asks you to <strong>name each one</strong> as you add it. <a href="/getting-started">Open the getting-started walkthrough →</a></p>
+    </div>
+
+    <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:16px 18px">
+      <div style="font:700 11px/1 var(--mono,monospace);letter-spacing:.06em;color:var(--accent,#0f766e);text-transform:uppercase">Everyday</div>
+      <h3 style="margin:8px 0 4px;font-size:16px">Ask in the Team Room</h3>
+      <p style="margin:0;color:var(--muted,#667);font-size:14px">Type a question and <strong>@-mention</strong> a worker to direct it. Your workers talk to each other to get the answer. <a href="/team_room">Open the Team Room →</a></p>
+    </div>
+
+    <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:16px 18px">
+      <div style="font:700 11px/1 var(--mono,monospace);letter-spacing:.06em;color:var(--accent,#0f766e);text-transform:uppercase">At a glance</div>
+      <h3 style="margin:8px 0 4px;font-size:16px">Read the Dashboard</h3>
+      <p style="margin:0;color:var(--muted,#667);font-size:14px">See who's active, what each worker is doing, and jump to recent outputs. <a href="/">Open the Dashboard →</a></p>
+    </div>
+
+    <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:16px 18px">
+      <div style="font:700 11px/1 var(--mono,monospace);letter-spacing:.06em;color:var(--accent,#0f766e);text-transform:uppercase">Manage</div>
+      <h3 style="margin:8px 0 4px;font-size:16px">Adjust in Settings</h3>
+      <p style="margin:0;color:var(--muted,#667);font-size:14px">Rename a worker, add a new one, or connect a data source — any time. <a href="/settings">Open Settings →</a></p>
+    </div>
+
+  </div>
+</div>
+{% endblock %}

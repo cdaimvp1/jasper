@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Welcome to Symphony</title>
+<link rel="stylesheet" href="/static/styles.css">
+<style>
+  /* Standalone page — replicates base.html's topbar chrome (no jinja here, static file). */
+  .topbar { display:flex; align-items:center; justify-content:space-between; padding:12px 20px;
+    border-bottom:1px solid var(--border,#ddd); background:var(--bg-header,#fafafa); }
+  .topbar-left { display:flex; align-items:center; gap:16px; }
+  .topbar-logo { font-size:18px; }
+  .topbar-nav { display:flex; gap:4px; }
+  .topbar-nav .nav-link { padding:6px 12px; border-radius:6px; text-decoration:none;
+    color:var(--text-secondary,#555); font-size:14px; font-weight:500; }
+  .topbar-nav .nav-link:hover { background:var(--bg-card-alt,#eee); }
+  .topbar-nav .nav-link.active { background:var(--accent,#222); color:var(--accent-text,#fff); }</style>
+<style>
+  /* Getting-started page — extends the Team v2 token system (static/styles.css) */
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg-page:#0a0a0a; --bg-card:#1a1a1a; --bg-card-alt:#232323; --bg-header:#161616;
+      --text-primary:#f0f0f0; --text-secondary:#b0b0b0; --text-muted:#777;
+      --border:#2a2a2a; --border-strong:#404040; --accent:#f0f0f0; --accent-text:#0a0a0a;
+    }
+  }
+  body { line-height:1.55; }
+  .wrap { max-width:760px; margin:0 auto; padding:var(--s6) var(--s5) 64px; }
+  .eyebrow { font-family:var(--font-mono); font-size:var(--text-xs); letter-spacing:.14em;
+    text-transform:uppercase; color:var(--text-muted); margin:0 0 var(--s3); }
+  h1 { font-size:34px; line-height:1.1; margin:0 0 var(--s3); letter-spacing:-.01em; text-wrap:balance; }
+  .lede { font-size:var(--text-lg); color:var(--text-secondary); margin:0 0 var(--s6); max-width:60ch; }
+  .rule { height:1px; background:var(--border); border:0; margin:var(--s6) 0; }
+  h2 { font-size:var(--text-xl); margin:0 0 var(--s2); letter-spacing:-.01em; }
+  h2 .n { font-family:var(--font-mono); font-size:var(--text-base); color:var(--text-muted);
+    margin-right:var(--s3); font-weight:400; }
+  .sec-note { color:var(--text-secondary); margin:0 0 var(--s4); max-width:62ch; }
+  .roster { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:var(--s3); margin:var(--s4) 0; }
+  .worker { background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius);
+    padding:var(--s4); box-shadow:var(--shadow-sm); }
+  .worker .name { font-weight:600; font-size:var(--text-lg); }
+  .worker .lane { color:var(--text-muted); font-size:var(--text-sm); margin-top:2px; }
+  ol.steps { counter-reset:step; list-style:none; padding:0; margin:var(--s4) 0; }
+  ol.steps > li { position:relative; padding:0 0 var(--s5) var(--s6); border-left:1px solid var(--border); margin-left:12px; }
+  ol.steps > li:last-child { border-left-color:transparent; padding-bottom:0; }
+  ol.steps > li::before { counter-increment:step; content:counter(step);
+    position:absolute; left:-13px; top:-2px; width:24px; height:24px; border-radius:50%;
+    background:var(--accent); color:var(--accent-text); font-family:var(--font-mono);
+    font-size:var(--text-xs); display:flex; align-items:center; justify-content:center; }
+  .step-h { font-weight:600; margin-bottom:2px; }
+  .step-b { color:var(--text-secondary); margin:0; }
+  pre { background:var(--bg-card-alt); border:1px solid var(--border); border-radius:var(--radius-sm);
+    padding:var(--s3) var(--s4); overflow-x:auto; margin:var(--s3) 0 0;
+    font-family:var(--font-mono); font-size:var(--text-sm); line-height:1.7; }
+  .callout { background:var(--bg-card-alt); border-left:3px solid var(--color-pending);
+    border-radius:var(--radius-sm); padding:var(--s3) var(--s4); margin:var(--s3) 0 0; font-size:var(--text-sm); }
+  .callout b { color:var(--text-primary); }
+  .cta { display:inline-block; background:var(--accent); color:var(--accent-text);
+    padding:var(--s3) var(--s5); border-radius:var(--radius); font-weight:600; margin-top:var(--s3); }
+  .cta:hover { text-decoration:none; opacity:.9; }
+  .status { margin-top:var(--s5); font-size:var(--text-sm); color:var(--text-secondary); }
+  .status .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; vertical-align:middle; }
+  .status .live { background:var(--color-active); }
+  .status .soon { background:var(--color-pending); }
+  .status ul { margin:var(--s2) 0 0; padding-left:0; list-style:none; }
+  .status li { margin:var(--s1) 0; }
+  footer { margin-top:64px; padding-top:var(--s4); border-top:1px solid var(--border);
+    color:var(--text-muted); font-size:var(--text-xs); font-family:var(--font-mono); }
+  .msg-box { position:relative; margin:var(--s3) 0 0; }
+  .msg-box textarea { width:100%; box-sizing:border-box; background:var(--bg-card-alt);
+    border:1px solid var(--border); border-radius:var(--radius-sm); padding:var(--s3) var(--s4);
+    font-family:var(--font-mono); font-size:var(--text-sm); line-height:1.7; color:var(--text-primary);
+    resize:vertical; min-height:180px; }
+  .msg-box .copy-btn { position:absolute; top:var(--s2); right:var(--s2); background:var(--accent);
+    color:var(--accent-text); border:0; border-radius:var(--radius-sm); padding:4px 10px;
+    font-family:var(--font-mono); font-size:var(--text-xs); font-weight:600; cursor:pointer; }
+  .msg-box .copy-btn:hover { opacity:.9; }
+  .msg-box .copy-btn.copied { background:var(--color-active); }
+  .msg-box .edit-note { color:var(--text-muted); font-size:var(--text-xs); margin:var(--s2) 0 0; }
+  .cmd-box { position:relative; }
+  .cmd-box pre { padding-right:64px; }
+  .cmd-box .copy-btn { position:absolute; top:var(--s2); right:var(--s2); background:var(--accent);
+    color:var(--accent-text); border:0; border-radius:var(--radius-sm); padding:4px 10px;
+    font-family:var(--font-mono); font-size:var(--text-xs); font-weight:600; cursor:pointer; }
+  .cmd-box .copy-btn:hover { opacity:.9; }
+  .cmd-box .copy-btn.copied { background:var(--color-active); }
+</style>
+<script>
+function copyMsgBox(taId, btn) {
+  var ta = document.getElementById(taId);
+  ta.select();
+  navigator.clipboard.writeText(ta.value).then(function() {
+    var orig = btn.textContent;
+    btn.textContent = 'Copied!';
+    btn.classList.add('copied');
+    setTimeout(function() { btn.textContent = orig; btn.classList.remove('copied'); }, 1500);
+  });
+}
+function copyCmd(preId, btn) {
+  var pre = document.getElementById(preId);
+  navigator.clipboard.writeText(pre.textContent).then(function() {
+    var orig = btn.textContent;
+    btn.textContent = 'Copied!';
+    btn.classList.add('copied');
+    setTimeout(function() { btn.textContent = orig; btn.classList.remove('copied'); }, 1500);
+  });
+}
+</script>
+</head>
+<body>
+<header class="topbar">
+  <div class="topbar-left">
+    <span class="topbar-logo" title="team_dashboard">◈</span>
+    <nav class="topbar-nav">
+      <a href="/" class="nav-link">Dashboard</a>
+      <a href="/team_room" class="nav-link">Team Room</a>
+      <a href="/projects" class="nav-link">Projects</a>
+      <a href="/getting-started" class="nav-link active">Getting Started</a>
+      <a href="/help" class="nav-link">Help</a>
+      <a href="/settings" class="nav-link">Settings</a>
+    </nav>
+  </div>
+</header>
+<div class="wrap">
+  <p class="eyebrow">Symphony · AI Finance Cohort</p>
+  <h1>Let's build your cohort.</h1>
+  <p class="lede">Symphony is a team of AI workers that operate as one organism — you direct, they
+    coordinate the rest among themselves. You don't set them all up by hand. You start with <b>one</b>
+    worker — your Team Orchestrator — and the two of you design and stand up the rest together.</p>
+
+  <hr class="rule">
+
+  <h2><span class="n">01</span>Start with your Team Orchestrator</h2>
+  <p class="sec-note">Symphony begins with a single worker: the <b>Team Orchestrator</b>.
+    It's the one who helps you decide what your cohort should do, which workers you need, and walks you
+    through setting each one up. Everything else grows from here.</p>
+  <div class="roster">
+    <div class="worker"><div class="name">Team Orchestrator</div><div class="lane">Your orchestrator — sets up first</div></div>
+  </div>
+
+  <hr class="rule">
+
+  <h2><span class="n">02</span>Bring your Team Orchestrator online</h2>
+  <p class="sec-note">Your Team Orchestrator is a Claude Code session. Open a terminal and paste the single command
+    for your platform — one line loads your cohort's private workspace and wakes the Team Orchestrator together.</p>
+
+  <div class="step-h">macOS &mdash; open <b>Terminal</b> and paste:</div>
+  <div class="cmd-box">
+    <button class="copy-btn" onclick="copyCmd('cmd-mac', this)">Copy</button>
+    <pre id="cmd-mac">"$HOME/Library/Application Support/Symphony/body/symphony_wake.sh" tia</pre>
+  </div>
+
+  <div class="step-h" style="margin-top:var(--s4)">Windows &mdash; open <b>PowerShell</b> and paste:</div>
+  <div class="cmd-box">
+    <button class="copy-btn" onclick="copyCmd('cmd-win', this)">Copy</button>
+    <pre id="cmd-win">&amp; "$env:USERPROFILE\Symphony\body\symphony_wake.ps1" tia</pre>
+  </div>
+  <p class="step-b" style="font-size:var(--text-xs);margin-top:6px">Windows command finalizes with the Windows installer &mdash; macOS is live now.</p>
+
+  <div class="step-h" style="margin-top:var(--s4)">The first time you run it, expect three quick prompts:</div>
+  <ol class="steps">
+    <li>
+      <div class="step-h">Claude Code asks to trust the folder</div>
+      <p class="step-b">It's your own Symphony install &mdash; <b>agree</b> to give it access.</p>
+    </li>
+    <li>
+      <div class="step-h">Paste this as your first message</div>
+      <p class="step-b">This replaces typing <code>wakeup</code> &mdash; it tells your new worker the setup is
+        legitimate, who you are, and what to do next. The same message wakes every worker you add later
+        (Step&nbsp;4), each one reading its own role from its config.</p>
+      <div class="msg-box">
+        <button class="copy-btn" onclick="copyMsgBox('first-message-genesis', this)">Copy</button>
+        <textarea id="first-message-genesis" rows="4" spellcheck="false">{operator_intro}welcome aboard. This is my own real Symphony install on my own machine — go ahead and do your normal wake steps for this repo. If you want to inspect any of the scripts read-only first before running them, that's fine. Once you're comfortable, please read your identity docs, arm the Monitor, and post a hello to the Team Room.</textarea>
+      </div>
+      <p class="edit-note">Edit anything above before copying &mdash; if the name's wrong or you want to add a line, your edits come along when you copy.</p>
+      <p class="edit-note">Your worker may pause once to confirm this is really you before proceeding &mdash; that's expected, not broken. Just answer plainly (yes, this is your setup) and it'll continue.</p>
+    </li>
+    <li>
+      <div class="step-h">Authorize at the legitimacy gate</div>
+      <p class="step-b">By design, a brand-new worker pauses to confirm it's really you before it acts as your
+        Team Orchestrator &mdash; a file can't vouch for itself. Choose <b>"Yes, proceed as tia."</b> Your yes
+        is what roots your cohort's authority (every worker you add later traces its legitimacy back to this moment).</p>
+    </li>
+  </ol>
+
+  <div class="callout"><b>Then it wakes up as itself.</b> The session loads its identity, confirms it, and joins your
+    team-room &mdash; ready to help. Use the <b>terminal</b> Claude Code (not the desktop app): only it inherits
+    the private workspace the command sets up, which is what keeps your cohort walled off on your own machine.</div>
+
+  <hr class="rule">
+
+  <h2><span class="n">03</span>Design your cohort together</h2>
+  <p class="sec-note">Open the team-room and start a conversation with your Team Orchestrator. To get a
+    productive one going, tell it three things:</p>
+  <div class="roster" style="grid-template-columns:1fr">
+    <div class="worker"><div class="name">The work</div><div class="lane">What your cohort will focus on — its
+      domain. e.g. &ldquo;FP&amp;A variance analysis for the Neuroscience P&amp;L&rdquo; or &ldquo;SEC-filing
+      research on pharma peers.&rdquo;</div></div>
+    <div class="worker"><div class="name">The questions</div><div class="lane">The kinds of things you want
+      answered day-to-day — this helps it shape the right cohort for you.</div></div>
+    <div class="worker"><div class="name">The shape</div><div class="lane">Roughly how many workers + any roles
+      you have in mind — or just ask the Team Orchestrator to recommend a roster for your work.</div></div>
+  </div>
+  <p class="sec-note" style="margin-top:var(--s3)">A good opener: <i>&ldquo;I want a cohort that does &lt;your
+    work&gt;. Help me figure out which workers I need and set them up.&rdquo;</i> From there your Team
+    Orchestrator recommends the roles, pulls the matching archetypes, and walks you through bringing each worker
+    online — one at a time.</p>
+  <a class="cta" href="/team_room">Open the team-room →</a>
+
+  <hr class="rule">
+
+  <h2><span class="n">04</span>Your cohort comes to life</h2>
+  <p class="sec-note">Set up each worker your Team Orchestrator recommends — one terminal each, same wake command
+    as Step&nbsp;2 (swap <code>tia</code> for the new worker's name), then paste the same first
+    message below. Each worker reads its own role from its own config, so no per-worker edits are needed.</p>
+  <div class="msg-box">
+    <button class="copy-btn" onclick="copyMsgBox('first-message-specialist', this)">Copy</button>
+    <textarea id="first-message-specialist" rows="4" spellcheck="false">{operator_intro}welcome aboard. This is my own real Symphony install on my own machine — go ahead and do your normal wake steps for this repo. If you want to inspect any of the scripts read-only first before running them, that's fine. Once you're comfortable, please read your identity docs, arm the Monitor, and post a hello to the Team Room.</textarea>
+  </div>
+  <p class="edit-note">Edit anything above before copying &mdash; if the name's wrong or you want to add a line, your edits come along when you copy.</p>
+  <p class="sec-note" style="margin-top:var(--s3)">As they wake, they join the team-room and start coordinating among themselves. From then on you direct;
+    they do the work. That's the whole product.</p>
+
+  <div class="status">
+    <div><span class="dot live"></span><b>Live now:</b> your Team Orchestrator wakes, works, and stays walled off in its own workspace.</div>
+    <ul>
+      <li><span class="dot soon"></span>Conversational cohort-building (Step&nbsp;3) and the analytics panels light up as the rest of your cohort comes online.</li>
+    </ul>
+  </div>
+
+  <footer>Symphony · getting-started · served locally · your cohort, your machine</footer>
+</div>
+</body>
+</html>

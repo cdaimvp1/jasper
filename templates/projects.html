@@ -1,0 +1,1746 @@
+{% extends "base.html" %}
+{% block title %}Projects{% endblock %}
+{% block content %}
+<div class="page-bar" id="proj-page-bar">
+  <h2 class="page-bar-title">Projects</h2>
+  <span class="page-bar-meta">v0.01 · multi-party threaded persistent work</span>
+  <span class="page-bar-spacer" style="flex:1 1 auto;"></span>
+  <input id="proj-search-input" type="search" class="proj-search-input" placeholder="🔍 Search posts…" autocomplete="off" />
+  <button id="proj-toggle-archived" class="header-btn" title="Show deleted projects (archived to _archive/)">📦 Show archive</button>
+  <button id="proj-new-btn" class="header-btn" title="Create new project">+ New project</button>
+</div>
+
+<div id="proj-shell" class="proj-shell">
+  <p class="empty-state">Loading…</p>
+</div>
+<!-- Jump-to-bottom (George's ask 2026-07-23, mirrors team_room.html's tr-jump-bottom pattern —
+     lives OUTSIDE #proj-shell so it survives shell.innerHTML rebuilds on every render. -->
+<button id="proj-jump-bottom" class="mt-jump-bottom" style="display:none">↓ Jump to latest <span id="proj-jump-count"></span></button>
+
+<!-- Add-members modal (v0.1 · per @george tr_166ed6986f · picker not typed) -->
+<div id="proj-add-members-modal" class="msg-modal" style="display:none;">
+  <div class="msg-modal-inner">
+    <h3>Add members</h3>
+    <fieldset class="proj-member-picker">
+      <legend>Cohort workers (not already in this project)</legend>
+      <div id="proj-add-members-list"><!-- populated on open --></div>
+    </fieldset>
+    <div class="msg-modal-actions">
+      <button type="button" id="proj-add-members-confirm" class="header-btn">Add</button>
+      <button type="button" id="proj-add-members-cancel" class="header-btn">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- New project modal (v0.1 — member-picker UI replaces CSV input; closes substrate scar #19 root cause) -->
+<div id="proj-new-modal" class="msg-modal" style="display:none;">
+  <div class="msg-modal-inner">
+    <h3>New project</h3>
+    <label>Title <input id="proj-new-title" type="text" placeholder="What is this project about?" /></label>
+    <fieldset class="proj-member-picker">
+      <legend>Members</legend>
+      <div id="proj-member-picker-list"><!-- populated by JS from known worker list --></div>
+    </fieldset>
+    <label>Initial post (optional)
+      <textarea id="proj-new-body" rows="4" placeholder="Optional opening message…"></textarea>
+    </label>
+    <div class="msg-modal-actions">
+      <button type="button" id="proj-new-create" class="header-btn">Create</button>
+      <button type="button" id="proj-new-cancel" class="header-btn">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  const managerId = {{ manager_id|tojson }};
+  const memberNames = {};
+  const memberDisplayNames = {};
+  ({{ members|tojson }}).forEach(m => {
+    memberNames[m.id] = m.display_name || m.name;
+    if (m.display_name) memberDisplayNames[m.id] = m.display_name;
+  });
+  // Friendly label fallbacks for known workers (in case substrate members list is missing a slug)
+  // Built from the user's OWN cohort (memberNames from {{ members|tojson }}), single-source;
+  // only _all + the manager are constants (George preview #2 · Mira C1 · Atlas born-scoping).
+  const WORKER_DISPLAY = { "_all": "All workers" };
+  WORKER_DISPLAY["{{ manager_id }}"] = "{{ manager_id }}";
+  Object.keys(memberNames).forEach(slug => { WORKER_DISPLAY[slug] = memberNames[slug]; });
+  function displayName(id) {
+    return memberNames[id] || WORKER_DISPLAY[id] || id;
+  }
+
+  // Filter chips state (Block 4 parity per @george m_c313b7c082)
+  const PROJ_FILTER_KEY = "proj_active_filter";
+  let projActiveFilter = (() => {
+    try { return localStorage.getItem(PROJ_FILTER_KEY) || "all"; } catch { return "all"; }
+  })();
+
+  // Long-post collapse (Block 4 parity sweep — ported from team_room).
+  // Per @george tr_82f599a218 + tr_6b5b3929f8: collapse threshold tuned (3 → 6 lines · richer preview).
+  const PROJ_LONG_POST_CHAR_THRESHOLD = 400;
+  const PROJ_LONG_POST_LINE_THRESHOLD = 6;
+  const PROJ_EXPANDED_IDS_KEY = "proj_post_expanded_ids";
+  let projExpandedIds = new Set((() => {
+    try { return JSON.parse(localStorage.getItem(PROJ_EXPANDED_IDS_KEY) || "[]"); } catch { return []; }
+  })());
+  function projIsLongPost(body) {
+    if (!body) return false;
+    if (body.length > PROJ_LONG_POST_CHAR_THRESHOLD) return true;
+    return body.split("\n").length > PROJ_LONG_POST_LINE_THRESHOLD;
+  }
+  function projLongPostPreview(body) {
+    // 6 lines preview · captures lead + supporting detail to avoid all-bold-appearance
+    const lines = body.split("\n");
+    const previewLines = [];
+    let visible = 0;
+    for (const line of lines) {
+      previewLines.push(line);
+      if (line.trim() !== "") visible++;
+      if (visible >= 6) break;
+    }
+    let preview = previewLines.join("\n");
+    if (preview.length > 480) preview = preview.slice(0, 480) + "…";
+    return preview;
+  }
+
+  // Module-level mention map (hoisted out of attachComposeMentionHandlers so renderBody can use it).
+  // MENTION_MAP = the user's OWN cohort (from {{ members|tojson }}), single-source, no dev list
+  // (George preview #1/#2 · Mira C1 · Atlas born-scoping).
+  const MENTION_MAP = { "all": "_all", "everyone": "_all" };
+  MENTION_MAP["{{ manager_id }}".toLowerCase()] = "{{ manager_id }}";
+  MENTION_MAP["{{ manager_tag }}".toLowerCase()] = "{{ manager_id }}";
+  Object.keys(memberNames).forEach(slug => {
+    MENTION_MAP[String(slug).toLowerCase()] = slug;
+    const nm = memberNames[slug];
+    if (nm) MENTION_MAP[String(nm).toLowerCase()] = slug;
+  });
+
+  const shell = document.getElementById("proj-shell");
+  let currentProjectId = null;  // null = list view; set = detail view
+  let projectsCache = [];
+  let detailCache = null;
+
+  function esc(s) { return s == null ? "" : String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
+  function fmtTime(iso) {
+    if (!iso) return "";
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return iso;
+    return d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  }
+
+  // Body renderer — ported from team_room renderRich (per @george m_f0a0ef11b3 — match TR rendering).
+  // Order matters: tables/lists/headers must run BEFORE the \n→<br> conversion (they're block-level).
+  function renderBody(text) {
+    if (text == null) return "";
+    let s = esc(String(text));
+    const codes = [];
+    s = s.replace(/`([^`\n]+)`/g, (m, c) => { codes.push(c); return "\x00CD" + (codes.length - 1) + "\x00"; });
+    // @-mentions (use the same MENTION_MAP defined elsewhere in this template)
+    s = s.replace(/@(\w+)/g, (m, name) => {
+      const slug = (typeof MENTION_MAP !== "undefined" ? MENTION_MAP[name.toLowerCase()] : null);
+      if (!slug) return m;
+      const isYou = slug === managerId;
+      const isAll = slug === "_all";
+      const cls = "mention" + (isYou ? " mention-you" : "") + (isAll ? " mention-all" : "");
+      return '<span class="' + cls + '" data-slug="' + slug + '">@' + esc(name) + '</span>';
+    });
+    // Markdown pipe-tables (block-level; before \n→<br>)
+    s = s.replace(/(?:^[ \t]*\|.+\|[ \t]*$\n?){2,}/gm, (block) => {
+      const lines = block.replace(/\n+$/, "").split("\n").map(l => l.trim());
+      if (lines.length < 2) return block;
+      const sepRe = /^\|(?:\s*:?-+:?\s*\|)+\s*$/;
+      if (!sepRe.test(lines[1])) return block;
+      const splitRow = (line) => line.replace(/^\||\|$/g, "").split("|").map(c => c.trim());
+      const headers = splitRow(lines[0]);
+      const rows = lines.slice(2).map(splitRow);
+      let html = '<table class="chat-table"><thead><tr>';
+      for (const h of headers) html += '<th>' + h + '</th>';
+      html += '</tr></thead><tbody>';
+      for (const r of rows) {
+        html += '<tr>';
+        for (let i = 0; i < headers.length; i++) html += '<td>' + (r[i] || "") + '</td>';
+        html += '</tr>';
+      }
+      html += '</tbody></table>';
+      return html;
+    });
+    // Bold: lazy match through asterisks so nested italics survive (`**outer *inner* outer**`)
+    // Per scar 2026-05-01: original `[^*\n]+` excluded asterisks, broke nested emphasis.
+    s = s.replace(/\*\*((?:[^*\n]|\*(?!\*))+)\*\*/g, "<strong>$1</strong>");
+    s = s.replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, "<em>$1</em>");
+    s = s.replace(/^### (.+)$/gm, "<h4 class='log-h'>$1</h4>");
+    s = s.replace(/^## (.+)$/gm, "<h3 class='log-h'>$1</h3>");
+    s = s.replace(/^# (.+)$/gm, "<h2 class='log-h'>$1</h2>");
+    s = s.replace(/(^|\n)((?:- [^\n]+\n?)+)/g, (m, pre, block) => {
+      const items = block.trim().split("\n").map(line => "<li>" + line.replace(/^- /, "") + "</li>").join("");
+      return pre + "<ul class='chat-bullets'>" + items + "</ul>";
+    });
+    // Auto-link refs (tr_/pp_/file paths)
+    s = s.replace(/\b(tr_[a-z0-9_]{2,60})\b/g, '<a class="tr-ref-link" href="/team_room#$1" target="_blank">$1</a>');
+    s = s.replace(/\b(pp_[a-z0-9_]{2,60})\b/g, '<a class="tr-ref-link" href="#$1">$1</a>');
+    s = s.replace(/\b(proj_[a-z0-9_]{2,60})\b/g, '<a class="tr-ref-link" href="/projects?project=$1" title="Open project $1">$1</a>');
+    s = s.replace(/\b((?:aria_sync|team_lab|canon_doctrine|aria_canon|aria)\/[\w\-./]+\.md)\b/g,
+      '<a class="tr-ref-link" href="/file?path=$1" target="_blank">$1</a>');
+    // Newline → <br> (run AFTER block-level transforms so tables/lists/headers stay structured)
+    s = s.replace(/\n/g, "<br>");
+    // Restore code spans (tr_/pp_ inside backticks auto-link too)
+    // NOTE: `inner` is already HTML-escaped (esc() ran on the full text at function entry, before
+    // backticks were extracted into codes). Re-escaping caused &lt; → &amp;lt; double-encoding.
+    s = s.replace(/\x00CD(\d+)\x00/g, (m, i) => {
+      const inner = codes[parseInt(i, 10)];
+      if (/^tr_[a-z0-9_]{2,60}$/.test(inner)) {
+        return '<a class="tr-ref-link tr-ref-link-code" href="/team_room#' + inner + '" target="_blank">' + inner + '</a>';
+      }
+      if (/^pp_[a-z0-9_]{2,60}$/.test(inner)) {
+        return '<a class="tr-ref-link tr-ref-link-code" href="#' + inner + '">' + inner + '</a>';
+      }
+      if (/^proj_[a-z0-9_]{2,60}$/.test(inner)) {
+        return '<a class="tr-ref-link tr-ref-link-code" href="/projects?project=' + inner + '" title="Open project ' + inner + '">' + inner + '</a>';
+      }
+      return "<code>" + inner + "</code>";
+    });
+    return s;
+  }
+
+  let showArchived = false;  // toggled via 📦 Show archive button
+
+  async function loadList() {
+    const jb = document.getElementById("proj-jump-bottom");
+    if (jb) jb.style.display = "none";  // no thread to jump within on the list view
+    try {
+      const url = showArchived ? "/api/projects/archived" : "/api/projects";
+      const r = await fetch(url);
+      const d = await r.json();
+      projectsCache = d.projects || [];
+      renderList();
+    } catch (e) {
+      shell.innerHTML = '<p class="empty-state">error: ' + esc(e.message) + '</p>';
+    }
+  }
+
+  let sortMode = (() => { try { return localStorage.getItem("proj_sort_mode") || "activity"; } catch { return "activity"; } })();
+
+  function sortProjects(arr) {
+    const copy = arr.slice();
+    if (sortMode === "activity") {
+      copy.sort((a, b) => (b.last_activity || "").localeCompare(a.last_activity || ""));
+    } else if (sortMode === "created") {
+      copy.sort((a, b) => (b.created || "").localeCompare(a.created || ""));
+    } else if (sortMode === "alpha") {
+      copy.sort((a, b) => (a.title || "").localeCompare(b.title || ""));
+    } else if (sortMode === "unread") {
+      copy.sort((a, b) => {
+        const aSeen = projGetSeenAt(a.project_id);
+        const bSeen = projGetSeenAt(b.project_id);
+        const aHas = aSeen && a.last_activity ? (a.last_activity > aSeen ? 1 : 0) : (a.last_activity ? 1 : 0);
+        const bHas = bSeen && b.last_activity ? (b.last_activity > bSeen ? 1 : 0) : (b.last_activity ? 1 : 0);
+        if (bHas !== aHas) return bHas - aHas;
+        return (b.last_activity || "").localeCompare(a.last_activity || "");
+      });
+    }
+    return copy;
+  }
+
+  function renderList() {
+    if (!projectsCache.length) {
+      shell.innerHTML = (
+        '<div class="proj-empty-state">' +
+          '<div class="proj-empty-icon">📋</div>' +
+          '<div class="proj-empty-title">' + (showArchived ? 'No archived projects' : 'No projects yet') + '</div>' +
+          '<div class="proj-empty-hint">' + (showArchived ? 'Deleted projects appear here. Click <strong>Hide archive</strong> in the toolbar to return to active projects.' : 'Click <strong>+ New project</strong> in the toolbar to start a project with one or more workers. Projects are durable, threaded, and notified to all members.') + '</div>' +
+        '</div>'
+      );
+      return;
+    }
+    const archiveBanner = showArchived
+      ? '<div class="proj-archive-banner">📦 Showing <strong>archived/deleted</strong> projects. Click <em>↶ Restore</em> on any item to move it back to active.</div>'
+      : '';
+    const sortBar = (
+      '<div class="proj-sort-bar">' +
+        '<span class="proj-sort-label">Sort:</span>' +
+        '<button type="button" class="proj-sort-btn' + (sortMode === "activity" ? " proj-sort-active" : "") + '" data-sort="activity">↻ Latest activity</button>' +
+        '<button type="button" class="proj-sort-btn' + (sortMode === "unread" ? " proj-sort-active" : "") + '" data-sort="unread">● Unread first</button>' +
+        '<button type="button" class="proj-sort-btn' + (sortMode === "created" ? " proj-sort-active" : "") + '" data-sort="created">+ Created</button>' +
+        '<button type="button" class="proj-sort-btn' + (sortMode === "alpha" ? " proj-sort-active" : "") + '" data-sort="alpha">A-Z</button>' +
+      '</div>'
+    );
+    const sorted = sortProjects(projectsCache);
+    const cards = sorted.map(p => {
+      const memberLabels = (p.members || []).map(id => displayName(id)).join(" · ");
+      const lastFromName = p.last_post_from ? displayName(p.last_post_from) : "—";
+      const lastTime = p.last_activity ? fmtTime(p.last_activity) : "";
+      // Unread indicator: last_activity > localStorage seenAt for this project
+      const seenAt = projGetSeenAt(p.project_id);
+      const hasUnread = !showArchived && p.last_activity && (!seenAt || p.last_activity > seenAt);
+      const unreadBadge = hasUnread ? '<span class="proj-card-unread" title="New activity since your last visit">● new</span>' : '';
+      // Archive view: two restore paths depending on how the item was archived
+      // - archive_kind="deleted" (file in _archive/) → POST /restore
+      // - archive_kind="flagged" (status=archived in active dir) → POST /status with active
+      const restoreBtn = showArchived
+        ? (p.archive_kind === "flagged"
+            ? '<button type="button" class="proj-restore-btn" data-action="proj-unarchive" data-pid="' + esc(p.project_id) + '" title="Set status back to active">↶ Unarchive</button>'
+            : '<button type="button" class="proj-restore-btn" data-action="proj-restore" data-pid="' + esc(p.project_id) + '" title="Move file out of _archive/ and back to active">↶ Restore</button>')
+        : '';
+      return (
+        '<div class="proj-card' + (hasUnread ? ' proj-card-has-unread' : '') + (showArchived ? ' proj-card-archived' : '') + '" data-pid="' + esc(p.project_id) + '">' +
+          '<div class="proj-card-header">' +
+            '<span class="proj-card-title">' + esc(p.title) + '</span>' +
+            unreadBadge +
+            '<span class="proj-card-status proj-status-' + esc(p.status) + '">' + esc(p.status) + '</span>' +
+            restoreBtn +
+          '</div>' +
+          '<div class="proj-card-meta">' +
+            '<span class="proj-card-members">' + esc(memberLabels) + '</span>' +
+            '<span class="proj-card-posts">' + p.post_count + ' post' + (p.post_count === 1 ? '' : 's') + '</span>' +
+            (lastTime ? '<span class="proj-card-last">last: ' + esc(lastFromName) + ' · ' + esc(lastTime) + '</span>' : '') +
+          '</div>' +
+        '</div>'
+      );
+    }).join("");
+    shell.innerHTML = archiveBanner + sortBar + '<div class="proj-list">' + cards + '</div>';
+  }
+
+  function projSeenKey(pid) { return "proj_seen_at_" + pid; }
+  function projGetSeenAt(pid) {
+    try { return localStorage.getItem(projSeenKey(pid)); } catch { return null; }
+  }
+  function projSetSeenAt(pid, iso) {
+    try { localStorage.setItem(projSeenKey(pid), iso); } catch {}
+  }
+
+  async function loadDetail(projectId, opts) {
+    opts = opts || {};
+    // George's catch 2026-07-23: opening a project via the normal list-card click never updated
+    // the URL (only the search-hit path at the pushState call below did) — so the browser/nav
+    // refresh button always reloaded to the bare list view, losing which project was open. Sync
+    // the URL on every detail-view entry so a reload (or the nav refresh button) stays put.
+    if (opts.initialView && window.location.search.indexOf("project=" + encodeURIComponent(projectId)) === -1) {
+      history.pushState({}, "", "?project=" + encodeURIComponent(projectId));
+    }
+    try {
+      const r = await fetch("/api/projects/" + encodeURIComponent(projectId) + "?viewer=" + encodeURIComponent(managerId));
+      if (!r.ok) {
+        shell.innerHTML = '<p class="empty-state">project not found · <a href="#" id="proj-back">back to list</a></p>';
+        return;
+      }
+      detailCache = await r.json();
+      // Hide page-bar when entering detail view (per @george tr_4135be7a34 — redundant with detail header)
+      const pageBar = document.getElementById("proj-page-bar");
+      if (pageBar) pageBar.style.display = "none";
+      document.body.classList.add("proj-in-detail");
+      renderDetail();
+      // Scroll: explicit flashPostId (post-send) → flash that specific post; otherwise first-unread (TR-style).
+      // Important: don't use scrollIntoView (it scrolls the WINDOW too, hiding the detail header).
+      // Only the .proj-thread container should scroll; the page itself stays at top.
+      requestAnimationFrame(() => {
+        const threadEl = document.querySelector(".proj-thread");
+        if (!threadEl) return;
+        let target = null;
+        // Explicit flashPostId (e.g. from postToProject) ALWAYS wins over the URL hash.
+        // Otherwise an old hash anchor would re-flash its target on every subsequent post-send,
+        // making it look like the previous message keeps glowing.
+        if (opts.flashPostId) {
+          target = document.getElementById(opts.flashPostId);
+        }
+        // Hash-anchor fallback (Block 4: clicking pp_xxx ref from another surface lands here + flashes)
+        if (!target) {
+          const hashMid = (window.location.hash || "").replace(/^#/, "");
+          if (hashMid && /^pp_[a-z0-9_]{2,60}$/.test(hashMid)) {
+            target = document.getElementById(hashMid);
+          }
+        }
+        // Find-first-unread flash fires ONLY on initial entry (opts.initialView), not on
+        // every action-triggered re-render. Without this, any reaction/edit/status-change
+        // would re-flash an older "first unread" post — confusing when the user just acted.
+        if (!target && !opts.flashPostId && opts.initialView) {
+          const seenAt = projGetSeenAt(projectId);
+          if (seenAt) {
+            const seenMs = new Date(seenAt).getTime();
+            for (const post of (detailCache.posts || [])) {
+              if (!post.ts) continue;
+              const postMs = new Date(post.ts).getTime();
+              if (postMs > seenMs) {
+                target = document.getElementById(post.message_id);
+                if (target) break;
+              }
+            }
+          }
+        }
+        if (target) {
+          // Compute target position relative to thread container; set scrollTop directly (does NOT touch document scroll)
+          const threadRect = threadEl.getBoundingClientRect();
+          const targetRect = target.getBoundingClientRect();
+          threadEl.scrollTop += (targetRect.top - threadRect.top) - 8;  // -8 for slight padding above target
+          target.classList.add("proj-post-unread-flash");
+          setTimeout(() => target.classList.remove("proj-post-unread-flash"), 2400);
+        } else {
+          // No unread (or first visit): scroll to bottom of thread container (NOT window)
+          threadEl.scrollTop = threadEl.scrollHeight;
+        }
+        // Make sure document is at top so the detail header is visible (Pillar 1 bug fix per @george tr_6b1cc0ab0b screenshots)
+        window.scrollTo(0, 0);
+        // Update last-seen to now
+        projSetSeenAt(projectId, new Date().toISOString());
+      });
+    } catch (e) {
+      shell.innerHTML = '<p class="empty-state">error: ' + esc(e.message) + '</p>';
+    }
+  }
+
+  // Reactions toolbar (port from team_room — shared shape; uses /api/team_room/reactions for both surfaces)
+  // Per @george tr_5553c13f27 sig 2026-05-08 — TASK row + CULTURE row · clarify dropped.
+  const REACTION_KINDS = [
+    // task
+    { kind: "ack",        icon: "👍", label: "Ack — I saw it · no action needed from me" },
+    { kind: "approved",   icon: "✅", label: "Approved — I sig this · I will do / I agree" },
+    { kind: "thinking",   icon: "👀", label: "Thinking — engaging · response coming" },
+    { kind: "celebrate",  icon: "🎉", label: "Celebrate — shape is good / nice ship" },
+    { kind: "disagree",   icon: "❌", label: "Disagree — text reply coming within 5min" },
+    // culture
+    { kind: "thank_you",  icon: "🙏", label: "Thank you — gratitude · for the helper" },
+    { kind: "model",      icon: "🌟", label: "Model this — cohort should imitate this behavior" },
+    { kind: "more_info",  icon: "🤔", label: "More info — invite elaboration" },
+    { kind: "capability", icon: "🛠", label: "Capability-honest — I lack the substrate for this" },
+    { kind: "anchor",     icon: "📍", label: "Anchor this — worth codifying as doctrine" },
+    // workflow (kept on projects surface for bookmark only — 🚀 doesn't make sense in-project per m_9357a7f972)
+    { kind: "bookmark",   icon: "🔖", label: "Bookmark (private)" },
+  ];
+
+  const TOGGLE_KINDS = new Set([
+    "ack","approved","thinking","celebrate","disagree",
+    "thank_you","model","more_info","capability","anchor",
+    "bookmark",
+  ]);
+  const ACTION_KINDS = new Set();
+
+  // Per @george tr_4e00e21abe item 2 — tooltip shows actors (not just count). Bookmark stays private.
+  function _projReactBtn(message_id, kind, icon, label, isOn, n, actors) {
+    const cls = "tr-react-btn" + (isOn ? " tr-react-on" : "");
+    const countHtml = n > 0 ? '<span class="tr-react-count">' + n + '</span>' : '';
+    const actorList = (actors && actors.length) ? "\n— " + actors.map(a => "@" + a).join(", ") : "";
+    const tooltip = label + (isOn ? " — click to remove" : "") + actorList;
+    return '<button type="button" class="' + cls + '" data-action="proj-react" data-mid="' + esc(message_id) + '" data-kind="' + kind + '" title="' + esc(tooltip) + '">' + icon + countHtml + '</button>';
+  }
+
+  function _projActorsByKind(reactions) {
+    const m = {};
+    for (const r of reactions || []) {
+      if (r.kind === "bookmark") continue;
+      (m[r.kind] = m[r.kind] || []).push(r.actor);
+    }
+    return m;
+  }
+
+  function reactionsToolbarHtml(message_id, reactions) {
+    const myReacts = new Set((reactions || []).filter(r => r.actor === managerId).map(r => r.kind));
+    const counts = {};
+    for (const r of reactions || []) counts[r.kind] = (counts[r.kind] || 0) + 1;
+    const actors = _projActorsByKind(reactions);
+    const toggleButtons = REACTION_KINDS
+      .filter(rk => TOGGLE_KINDS.has(rk.kind))
+      .map(({kind, icon, label}) => _projReactBtn(message_id, kind, icon, label, myReacts.has(kind), counts[kind] || 0, actors[kind]))
+      .join("");
+    return '<div class="tr-reactions tr-reactions-toggle">' + toggleButtons + '</div>';
+  }
+
+  function actionReactionsHtml(message_id, reactions) {
+    const myReacts = new Set((reactions || []).filter(r => r.actor === managerId).map(r => r.kind));
+    const counts = {};
+    for (const r of reactions || []) counts[r.kind] = (counts[r.kind] || 0) + 1;
+    return REACTION_KINDS
+      .filter(rk => ACTION_KINDS.has(rk.kind))
+      .map(({kind, icon, label}) => _projReactBtn(message_id, kind, icon, label, myReacts.has(kind), counts[kind] || 0))
+      .join("");
+  }
+
+  async function toggleProjReaction(message_id, kind, currentlyOn) {
+    const method = currentlyOn ? "DELETE" : "POST";
+    // Preserve scroll position across rerender
+    const scrollY = window.scrollY;
+    const threadEl = document.querySelector(".proj-thread");
+    const threadScroll = threadEl ? threadEl.scrollTop : 0;
+    try {
+      await fetch("/api/team_room/reactions", {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message_id, kind, actor: managerId }),
+      });
+      // Optimistic local update
+      if (detailCache) {
+        const post = detailCache.posts.find(x => x.message_id === message_id);
+        if (post) {
+          post.reactions = post.reactions || [];
+          if (currentlyOn) {
+            post.reactions = post.reactions.filter(r => !(r.actor === managerId && r.kind === kind));
+          } else {
+            post.reactions.push({ actor: managerId, kind, ts: new Date().toISOString() });
+          }
+        }
+      }
+      renderDetail();
+      // Restore scroll
+      window.scrollTo(0, scrollY);
+      const newThreadEl = document.querySelector(".proj-thread");
+      if (newThreadEl) newThreadEl.scrollTop = threadScroll;
+    } catch (e) {}
+  }
+
+  // Preserve compose textarea state across rerenders. Per @george m_9357a7f972 — clicking
+  // any action button (reaction toggle, status change, edit cancel, etc.) was wiping the user's
+  // in-flight draft because renderDetail rebuilds shell.innerHTML from scratch. Same root family
+  // as TB scar #2 in EoD reflection: rerender resets ephemeral DOM state. Capture before, restore after.
+  function _preserveCompose() {
+    const ta = document.getElementById("proj-body");
+    if (!ta) return null;
+    return {
+      value: ta.value,
+      selectionStart: ta.selectionStart,
+      selectionEnd: ta.selectionEnd,
+      hadFocus: document.activeElement === ta,
+    };
+  }
+  function _restoreCompose(state) {
+    if (!state) return;
+    const ta = document.getElementById("proj-body");
+    if (!ta) return;
+    ta.value = state.value;
+    if (state.hadFocus) {
+      ta.focus();
+      try { ta.setSelectionRange(state.selectionStart, state.selectionEnd); } catch {}
+    }
+  }
+  function _renderDetailInner() {
+    const p = detailCache;
+    if (!p) return;
+    const memberLabels = (p.members || []).map(id => displayName(id)).join(" · ");
+    // Read-mark separator: inserted before first post with ts > seenAt
+    const seenAt = projGetSeenAt(p.project_id);
+    const seenMs = seenAt ? new Date(seenAt).getTime() : null;
+    let readMarkInserted = false;
+    // Filter posts per active filter chip (per @george m_c313b7c082)
+    const filteredPosts = (p.posts || []).filter(post => {
+      if (projActiveFilter === "all") return true;
+      if (projActiveFilter === "mentions") {
+        // body @-mentions viewer's slug or short form
+        const re = /@(\w+)/g;
+        let m;
+        while ((m = re.exec(post.body || "")) !== null) {
+          const slug = MENTION_MAP[m[1].toLowerCase()];
+          if (slug === managerId) return true;
+        }
+        return false;
+      }
+      if (projActiveFilter === "bookmarked") {
+        return (post.reactions || []).some(r => r.kind === "bookmark" && r.actor === managerId);
+      }
+      return true;
+    });
+    const posts = filteredPosts.map(post => {
+      const fromName = displayName(post.from);
+      const isMine = post.from === managerId;
+      const isDeleted = !!post.deleted;
+      const editCount = post.edit_count || 0;
+      let cls = "proj-post" + (isMine ? " proj-post-mine" : "");
+      if (isDeleted) cls += " proj-post-deleted";
+      const reactionsHtml = (post.message_id && !isDeleted) ? reactionsToolbarHtml(post.message_id, post.reactions) : '';
+      const actionReacts = (post.message_id && !isDeleted) ? actionReactionsHtml(post.message_id, post.reactions) : '';
+      const replyBtn = (post.message_id && !isDeleted) ? '<button type="button" class="tr-reply-btn" data-action="proj-reply" data-mid="' + esc(post.message_id) + '" title="Reply — insert ref into compose box">↩ Reply</button>' : '';
+      // Edit/delete buttons — only on own posts that aren't already deleted
+      const editBtn = (isMine && !isDeleted && post.message_id)
+        ? '<button type="button" class="tr-reply-btn proj-edit-btn" data-action="proj-edit" data-mid="' + esc(post.message_id) + '" title="Edit this post">✎ Edit</button>'
+        : '';
+      const deleteBtn = (isMine && !isDeleted && post.message_id)
+        ? '<button type="button" class="tr-reply-btn proj-delete-btn" data-action="proj-delete" data-mid="' + esc(post.message_id) + '" title="Delete this post">🗑 Delete</button>'
+        : '';
+      const editedIndicator = editCount > 0
+        ? ' <span class="proj-post-edited" title="This post has been edited ' + editCount + ' time(s)">edited' + (editCount > 1 ? ` ${editCount}x` : '') + '</span>'
+        : '';
+      // Read-mark separator: prepend before first post with ts > seenAt
+      let readMarkHtml = '';
+      if (!readMarkInserted && seenMs !== null && post.ts) {
+        const postMs = new Date(post.ts).getTime();
+        if (postMs > seenMs) {
+          readMarkHtml = '<div class="proj-read-mark"><span class="proj-read-mark-label">─ Last seen ' + esc(fmtTime(seenAt)) + ' · new posts below ─</span></div>';
+          readMarkInserted = true;
+        }
+      }
+      // Long-post collapse (Block 4 parity per @george pp_4bc489938b)
+      // Render-body: use body_english if API attached translation (light level for pp_* default
+      // per @george pp_55cf42e372 + AB DM ab_to_tb_pp_render_priority); fall back to native body.
+      // Phase 1+2 of "delight George" substrate (TB tr_7008a84b3f 2026-05-03):
+      // george_view (author-provided OR auto-generated) wins over body-truncation in collapsed view.
+      const renderBodyText = post.body_english || post.body;
+      const hasGeorgeView = !!post.george_view;
+      const isLong = !isDeleted && projIsLongPost(renderBodyText);
+      const isExpanded = projExpandedIds.has(post.message_id);
+      // v1.16 (per @george m_0c6f0fe249): George's own posts collapse the same way cohort posts do —
+      // his messages are often long and the `!isMine` exclusion forced him to scroll past his own walls.
+      const shouldCollapse = (isLong || hasGeorgeView) && !isExpanded;
+      const previewText = post.george_view || projLongPostPreview(renderBodyText);
+      const bodyHtml = shouldCollapse
+        ? '<div class="proj-post-body proj-post-body-preview" data-mid="' + esc(post.message_id || "") + '">' + renderBody(previewText) + '</div>'
+        : '<div class="proj-post-body" data-mid="' + esc(post.message_id || "") + '">' + renderBody(renderBodyText) + '</div>';
+      const isCollapsibleHeader = (isLong || hasGeorgeView);
+      const chevron = isCollapsibleHeader
+        ? '<span class="tr-meta-chevron">' + (shouldCollapse ? '▶' : '▼') + '</span>'
+        : '';
+      const metaCls = "proj-post-meta" + (isCollapsibleHeader ? " chat-meta-toggle" : "");
+      const metaAttrs = isCollapsibleHeader
+        ? ' data-action="' + (shouldCollapse ? "proj-expand" : "proj-collapse") + '" data-mid="' + esc(post.message_id || "") + '" title="' + (shouldCollapse ? "Click to expand" : "Click to collapse") + '" role="button" tabindex="0"'
+        : '';
+      const cardCls = cls + (shouldCollapse ? " proj-post-collapsed" : "");
+      return (
+        readMarkHtml +
+        '<div class="' + cardCls + '" id="' + esc(post.message_id || "") + '">' +
+          '<div class="' + metaCls + '"' + metaAttrs + '>' +
+            chevron +
+            '<span class="proj-post-from">' + esc(fromName) + '</span>' +
+            '<span class="proj-post-time">' + esc(fmtTime(post.ts)) + '</span>' +
+            editedIndicator +
+            '<span class="proj-post-mid">' + esc(post.message_id || "") + '</span>' +
+          '</div>' +
+          bodyHtml +
+          ((reactionsHtml || actionReacts || replyBtn || editBtn || deleteBtn)
+            ? '<div class="proj-post-actions tr-actions-row">' + reactionsHtml + '<div class="tr-actions-right">' + actionReacts + replyBtn + editBtn + deleteBtn + '</div></div>'
+            : '') +
+        '</div>'
+      );
+    }).join("");
+    // Compact header (v0.2 — per @george pp_5e70e00f34): title row + meta row only.
+    // Status transitions, rename, delete now live in the ⋯ overflow menu (was 4-row header).
+    const cs = p.status;
+    const statusTransitions = {
+      active:   [["paused","⏸ Pause"], ["done","✓ Mark Done"], ["archived","📦 Archive"]],
+      paused:   [["active","▶ Resume"], ["done","✓ Mark Done"], ["archived","📦 Archive"]],
+      done:     [["active","↶ Reopen"], ["archived","📦 Archive"]],
+      archived: [["active","↶ Unarchive"]],
+    };
+    const statusItems = (statusTransitions[cs] || []).map(([s, label]) =>
+      '<button type="button" class="proj-overflow-item" data-action="proj-status" data-status="' + esc(s) + '">' + esc(label) + '</button>'
+    ).join("");
+    const overflowMenu = (
+      '<div class="proj-overflow-menu" id="proj-overflow-menu" style="display:none;">' +
+        '<button type="button" class="proj-overflow-item" data-action="proj-rename">✎ Rename</button>' +
+        statusItems +
+        '<div class="proj-overflow-divider"></div>' +
+        '<button type="button" class="proj-overflow-item proj-overflow-danger" data-action="proj-delete">🗑 Delete project</button>' +
+      '</div>'
+    );
+    // Member chips: clickable to remove (except the creator and self) per @george m_4507d49772
+    const creatorId = p.creator || "";
+    const memberChips = (p.members || []).map(id => {
+      const removable = id !== creatorId && id !== managerId;
+      const cls = "proj-member-chip" + (removable ? " proj-member-chip-removable" : "");
+      const attrs = removable
+        ? ' data-action="proj-remove-member" data-member="' + esc(id) + '" title="Click to remove @' + esc(id) + ' from this project"'
+        : (id === creatorId ? ' title="Creator (always a member)"' : ' title="That\'s you"');
+      return '<span class="' + cls + '"' + attrs + '>' + esc(displayName(id)) + (removable ? ' <span class="proj-member-chip-x">×</span>' : '') + '</span>';
+    }).join("") +
+      '<button type="button" class="proj-member-chip proj-member-chip-add" data-action="proj-add-member" title="Add a cohort member to this project">+ add</button>';
+    shell.innerHTML = (
+      '<div class="proj-detail">' +
+        '<div class="proj-detail-header proj-detail-header-compact">' +
+          '<div class="proj-detail-titlerow">' +
+            '<button type="button" id="proj-back" class="proj-back-btn" title="Back to projects">← Back</button>' +
+            '<h3 class="proj-detail-title" id="proj-detail-title" data-action="proj-rename-inline" title="Click to rename">' + esc(p.title) + '</h3>' +
+            '<span class="proj-card-status proj-status-' + esc(p.status) + '">' + esc(p.status) + '</span>' +
+            '<span class="proj-detail-spacer"></span>' +
+            '<div class="proj-overflow-wrap">' +
+              '<button type="button" class="proj-overflow-btn" id="proj-overflow-btn" title="More actions">⋯</button>' +
+              overflowMenu +
+            '</div>' +
+          '</div>' +
+          '<div class="proj-detail-meta">' +
+            '<span class="proj-member-chips">' + memberChips + '</span>' +
+            ' · Created ' + esc(fmtTime(p.created)) + ' by ' + esc(p.creator ? displayName(p.creator) : '?') +
+            (p.source_message_id ? ' · <a href="/team_room#' + esc(p.source_message_id) + '" class="proj-source-link" title="View the team_room post that started this project">↑ View source post (' + esc(p.source_message_id) + ')</a>' : '') +
+            '<span class="proj-detail-spacer"></span>' +
+            '<span class="proj-filter-chips">' +
+              ['all','mentions','bookmarked'].map(k => {
+                const labels = { all: 'All', mentions: '@me', bookmarked: '🔖' };
+                const titles = { all: 'All posts', mentions: 'Posts that @-mention you', bookmarked: 'Your bookmarked posts' };
+                const active = projActiveFilter === k;
+                return '<button type="button" class="proj-filter-chip' + (active ? ' proj-filter-chip-active' : '') + '" data-action="proj-filter" data-filter="' + k + '" title="' + titles[k] + '">' + labels[k] + '</button>';
+              }).join("") +
+            '</span>' +
+          '</div>' +
+        '</div>' +
+        '<div class="proj-thread">' + (posts || '<div class="proj-empty-state proj-empty-state-thread"><div class="proj-empty-icon">💬</div><div class="proj-empty-title">No posts yet</div><div class="proj-empty-hint">Start the thread below — your post will notify the other members via inbox.</div></div>') + '</div>' +
+        '<form class="proj-compose" onsubmit="return false;">' +
+          '<textarea id="proj-body" class="proj-compose-textarea" placeholder="Post to this project… (⌘+Enter; @ for mention)" rows="4"></textarea>' +
+          '<div id="proj-mention-popup" class="tr-mention-popup" style="display: none;"></div>' +
+          '<button type="button" id="proj-send" class="proj-compose-send" title="Post (⌘+Enter)">◈</button>' +
+        '</form>' +
+      '</div>'
+    );
+    attachComposeMentionHandlers();
+  }
+
+  // Wrapper that preserves compose-textarea state across rerenders.
+  function renderDetail() {
+    const composeState = _preserveCompose();
+    _renderDetailInner();
+    _restoreCompose(composeState);
+    attachJumpToBottom();
+  }
+
+  // Jump-to-bottom (George's ask 2026-07-23 — "add a button like in TR"). Mirrors team_room.html's
+  // tr-jump-bottom exactly: track whether the user is scrolled near the bottom, show the button
+  // when they're not, and let it snap back down on click. Re-attached on every render since
+  // .proj-thread is rebuilt from scratch each time (same reason the button itself lives outside
+  // #proj-shell, in the static page markup).
+  const projJumpBtn = document.getElementById("proj-jump-bottom");
+  const projJumpCount = document.getElementById("proj-jump-count");
+  let projStickToBottom = true;
+  function projIsAtBottom(el) {
+    const tolerance = 60;
+    return el ? (el.scrollHeight - el.scrollTop - el.clientHeight) < tolerance : true;
+  }
+  function updateProjJumpButton() {
+    if (!projJumpBtn) return;
+    if (projStickToBottom) {
+      projJumpBtn.style.display = "none";
+    } else {
+      projJumpBtn.style.display = "inline-flex";
+      if (projJumpCount) projJumpCount.textContent = "";
+    }
+  }
+  function attachJumpToBottom() {
+    const t = document.querySelector(".proj-thread");
+    if (!t) { if (projJumpBtn) projJumpBtn.style.display = "none"; return; }
+    projStickToBottom = projIsAtBottom(t);
+    updateProjJumpButton();
+    t.addEventListener("scroll", () => {
+      projStickToBottom = projIsAtBottom(t);
+      updateProjJumpButton();
+    });
+  }
+  if (projJumpBtn) {
+    projJumpBtn.addEventListener("click", () => {
+      const t = document.querySelector(".proj-thread");
+      if (t) t.scrollTop = t.scrollHeight;
+      projStickToBottom = true;
+      updateProjJumpButton();
+    });
+  }
+
+  // @-mention autocomplete attached to the dynamically-rendered proj-body textarea
+  function attachComposeMentionHandlers() {
+    const ta = document.getElementById("proj-body");
+    const popup = document.getElementById("proj-mention-popup");
+    if (!ta || !popup) return;
+    // Auto-expand height (per @george m_5ff236b373 — manual resize handle removed; auto-grow only)
+    function autoGrow() {
+      ta.style.height = "auto";
+      const max = parseInt(getComputedStyle(ta).maxHeight, 10) || 320;
+      ta.style.height = Math.min(ta.scrollHeight, max) + "px";
+    }
+    ta.addEventListener("input", autoGrow);
+    requestAnimationFrame(autoGrow);  // initial sizing on every renderDetail
+    let state = null;
+
+    function buildList(query) {
+      const q = (query || "").toLowerCase();
+      const seen = new Set(), items = [];
+      for (const [key, slug] of Object.entries(MENTION_MAP)) {
+        if (seen.has(slug)) continue;
+        const display = memberDisplayNames[slug];
+        // George's catch 2026-07-23: an arbitrary "<= 6 chars" cutoff silently excluded his
+        // 7-char tag ("george1"), falling back to his full name ("George J Antony") as the
+        // suggested @-mention text. No magic-number threshold needed — just take the genuinely
+        // shortest matching key; a tag will always be shorter than a full name regardless of
+        // its exact length.
+        const shorts = Object.keys(MENTION_MAP).filter(k => MENTION_MAP[k] === slug);
+        const shortest = shorts.sort((a,b) => a.length - b.length)[0] || key;
+        const insertToken = display || shortest;
+        const longest = Object.keys(MENTION_MAP).filter(k => MENTION_MAP[k] === slug).sort((a,b) => b.length - a.length)[0] || key;
+        if (q && !insertToken.toLowerCase().startsWith(q) && !shortest.toLowerCase().startsWith(q) && !longest.toLowerCase().startsWith(q)) continue;
+        seen.add(slug);
+        const sub = slug === "_all" ? "all workers" : (display ? shortest : (memberNames[slug] || longest));
+        items.push({
+          insert: insertToken,
+          label: insertToken,
+          sublabel: sub,
+        });
+      }
+      return items;
+    }
+
+    function show() {
+      if (!state || !state.items.length) { hide(); return; }
+      popup.innerHTML = state.items.map((it, i) =>
+        '<div class="tr-mention-item' + (i === state.activeIdx ? ' tr-mention-active' : '') + '" data-idx="' + i + '">' +
+          '<span class="tr-mention-key">@' + esc(it.label) + '</span>' +
+          '<span class="tr-mention-sub">' + esc(it.sublabel) + '</span>' +
+        '</div>'
+      ).join("");
+      popup.style.display = "block";
+    }
+    function hide() { popup.style.display = "none"; state = null; }
+
+    function detectCtx() {
+      const cursor = ta.selectionStart;
+      const text = ta.value.slice(0, cursor);
+      const lastAt = text.lastIndexOf("@");
+      if (lastAt < 0) return null;
+      const before = lastAt === 0 ? " " : text[lastAt - 1];
+      if (!/[\s(]/.test(before)) return null;
+      const afterAt = text.slice(lastAt + 1);
+      if (/\s/.test(afterAt)) return null;
+      return { startIdx: lastAt, query: afterAt };
+    }
+
+    ta.addEventListener("input", () => {
+      const ctx = detectCtx();
+      if (!ctx) { hide(); return; }
+      const items = buildList(ctx.query);
+      if (!items.length) { hide(); return; }
+      state = { startIdx: ctx.startIdx, query: ctx.query, items, activeIdx: 0 };
+      show();
+    });
+    ta.addEventListener("keydown", (e) => {
+      if (!state || popup.style.display === "none") return;
+      if (e.key === "ArrowDown") { e.preventDefault(); state.activeIdx = (state.activeIdx + 1) % state.items.length; show(); }
+      else if (e.key === "ArrowUp") { e.preventDefault(); state.activeIdx = (state.activeIdx - 1 + state.items.length) % state.items.length; show(); }
+      else if (e.key === "Tab" || e.key === "Enter") {
+        e.preventDefault();
+        const it = state.items[state.activeIdx];
+        if (it) {
+          const cursor = ta.selectionStart;
+          const before = ta.value.slice(0, state.startIdx);
+          const after = ta.value.slice(cursor);
+          const insert = "@" + it.insert + " ";
+          ta.value = before + insert + after;
+          const newPos = before.length + insert.length;
+          ta.setSelectionRange(newPos, newPos);
+        }
+        hide();
+      } else if (e.key === "Escape") { hide(); }
+    });
+    ta.addEventListener("blur", () => setTimeout(hide, 150));
+    popup.addEventListener("mousedown", (e) => {
+      const item = e.target.closest(".tr-mention-item");
+      if (!item || !state) return;
+      e.preventDefault();
+      const idx = parseInt(item.getAttribute("data-idx"), 10);
+      const it = state.items[idx];
+      if (it) {
+        const cursor = ta.selectionStart;
+        const before = ta.value.slice(0, state.startIdx);
+        const after = ta.value.slice(cursor);
+        const insert = "@" + it.insert + " ";
+        ta.value = before + insert + after;
+        const newPos = before.length + insert.length;
+        ta.setSelectionRange(newPos, newPos);
+        ta.focus();
+      }
+      hide();
+    });
+  }
+
+  async function postToProject() {
+    const ta = document.getElementById("proj-body");
+    if (!ta) return;
+    const body = ta.value.trim();
+    if (!body) return;
+    const btn = document.getElementById("proj-send");
+    const origLabel = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Posting…";
+    // Optimistic post insertion — show your own post immediately, even before server confirms
+    const optimisticId = "pp_optimistic_" + Date.now();
+    const optimisticPost = {
+      from: managerId,
+      ts: new Date().toISOString(),
+      message_id: optimisticId,
+      body: body,
+      reactions: [],
+    };
+    if (detailCache) {
+      detailCache.posts = (detailCache.posts || []).concat(optimisticPost);
+      detailCache.post_count = (detailCache.post_count || 0) + 1;
+      renderDetail();
+      // Scroll to bottom to see the new post
+      requestAnimationFrame(() => {
+        const threadEl = document.querySelector(".proj-thread");
+        if (threadEl) threadEl.scrollTop = threadEl.scrollHeight;
+      });
+    }
+    // Clear the NEW textarea (renderDetail rebuilt shell.innerHTML; the original `ta` reference is now
+    // detached and setting its value has no visible effect — per @george m_9246cd8233).
+    // Fix is the converse of m_9357a7f972 fix #3: that one preserved compose across rerender; this one
+    // explicitly resets it AFTER the optimistic-insert rerender, since the user just posted (not just clicked).
+    const newTa = document.getElementById("proj-body");
+    if (newTa) {
+      newTa.value = "";
+      newTa.style.height = "auto";  // shrink back to min-height (autoGrow listener doesn't fire on programmatic .value=)
+    }
+    try {
+      const r = await fetch("/api/projects/" + encodeURIComponent(currentProjectId) + "/posts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sender: managerId, body }),
+      });
+      if (r.ok) {
+        const d = await r.json().catch(() => ({}));
+        // Clear any stale URL hash before re-loading so it doesn't override flashPostId
+        if (window.location.hash) {
+          history.replaceState({}, "", window.location.pathname + window.location.search);
+        }
+        await loadDetail(currentProjectId, { flashPostId: d.message_id });
+      } else {
+        // Rollback optimistic on error — re-query textarea to get the post-rerender element
+        if (detailCache) {
+          detailCache.posts = (detailCache.posts || []).filter(p => p.message_id !== optimisticId);
+          detailCache.post_count = (detailCache.post_count || 0) - 1;
+          renderDetail();
+        }
+        const restoreTa = document.getElementById("proj-body");
+        if (restoreTa) restoreTa.value = body;
+        showToast("Post failed — try again", "error");
+      }
+    } catch (e) {
+      // v1.24 fix (per @george optimistic-post-drop scar 2026-05-04): rollback the optimistic
+      // post from detailCache so it doesn't linger forever as `pp_optimistic_*`. Was previously
+      // only rolling back the textarea, leaving the optimistic post stuck in the UI.
+      if (detailCache) {
+        detailCache.posts = (detailCache.posts || []).filter(p => p.message_id !== optimisticId);
+        detailCache.post_count = Math.max(0, (detailCache.post_count || 0) - 1);
+        renderDetail();
+      }
+      const restoreTa = document.getElementById("proj-body");
+      if (restoreTa) restoreTa.value = body;
+      showToast("Network error — try again", "error");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = origLabel;
+    }
+  }
+
+  // Edit/delete own posts (Pillar 3)
+  function startEditPost(message_id) {
+    if (!detailCache) return;
+    const post = (detailCache.posts || []).find(p => p.message_id === message_id);
+    if (!post || post.from !== managerId) return;
+    const bodyEl = document.querySelector('.proj-post-body[data-mid="' + message_id + '"]');
+    if (!bodyEl) return;
+    // Replace body with editable textarea + Save/Cancel
+    const origText = post.body || "";
+    bodyEl.dataset.editing = "1";
+    bodyEl.innerHTML = (
+      '<textarea class="proj-edit-textarea" data-mid="' + esc(message_id) + '">' + esc(origText) + '</textarea>' +
+      '<div class="proj-edit-actions">' +
+        '<button type="button" class="header-btn proj-edit-save" data-mid="' + esc(message_id) + '">💾 Save</button>' +
+        '<button type="button" class="header-btn proj-edit-cancel" data-mid="' + esc(message_id) + '">✕ Cancel</button>' +
+      '</div>'
+    );
+    const ta = bodyEl.querySelector("textarea");
+    if (ta) {
+      ta.focus();
+      ta.setSelectionRange(origText.length, origText.length);
+      // Auto-grow
+      ta.style.height = "auto";
+      ta.style.height = Math.min(ta.scrollHeight + 4, 320) + "px";
+      // Keyboard shortcuts (per @george m_9357a7f972): ⌘+Enter saves · Esc cancels.
+      // stopPropagation on Esc so the document-level back-to-list Esc handler doesn't fire after
+      // cancelEditPost destroys the textarea (per @george m_fd39929030).
+      ta.addEventListener("keydown", (e) => {
+        if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+          e.preventDefault();
+          e.stopPropagation();
+          saveEditPost(message_id);
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          e.stopPropagation();
+          cancelEditPost(message_id);
+        }
+      });
+    }
+  }
+
+  async function saveEditPost(message_id) {
+    if (!detailCache) return;
+    const ta = document.querySelector('textarea.proj-edit-textarea[data-mid="' + message_id + '"]');
+    if (!ta) return;
+    const newBody = ta.value.trim();
+    if (!newBody) { showToast("Body required", "error"); return; }
+    try {
+      const r = await fetch("/api/projects/" + encodeURIComponent(currentProjectId) + "/posts/" + encodeURIComponent(message_id), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ body: newBody, actor: managerId }),
+      });
+      if (r.ok) {
+        await loadDetail(currentProjectId);
+        showToast("Saved", "info");
+      } else {
+        const err = await r.text();
+        showToast("Edit failed: " + err.slice(0, 80), "error");
+      }
+    } catch (e) {
+      showToast("Network error", "error");
+    }
+  }
+
+  function cancelEditPost(message_id) {
+    // Re-render the detail view to revert to the original post body
+    renderDetail();
+  }
+
+  function confirmDeletePost(message_id) {
+    if (!confirm("Delete this post? Soft-delete preserves it in the file but marks it deleted to viewers.")) return;
+    deletePost(message_id);
+  }
+
+  async function deletePost(message_id) {
+    try {
+      const r = await fetch("/api/projects/" + encodeURIComponent(currentProjectId) + "/posts/" + encodeURIComponent(message_id), {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ actor: managerId }),
+      });
+      if (r.ok) {
+        await loadDetail(currentProjectId);
+        showToast("Deleted", "info");
+      } else {
+        const err = await r.text();
+        showToast("Delete failed: " + err.slice(0, 80), "error");
+      }
+    } catch (e) {
+      showToast("Network error", "error");
+    }
+  }
+
+  // Toast feedback (Pillar 2)
+  function showToast(msg, kind) {
+    let toast = document.getElementById("proj-toast");
+    if (!toast) {
+      toast = document.createElement("div");
+      toast.id = "proj-toast";
+      toast.className = "proj-toast";
+      document.body.appendChild(toast);
+    }
+    toast.textContent = msg;
+    toast.className = "proj-toast proj-toast-" + (kind || "info") + " proj-toast-visible";
+    setTimeout(() => toast.classList.remove("proj-toast-visible"), 3000);
+  }
+
+  // Overflow menu: ⋯ button toggles visibility; click outside closes; Esc closes.
+  // Must be document-level (shell click delegation runs first; we want this BEFORE shell handler).
+  document.addEventListener("click", (e) => {
+    const menu = document.getElementById("proj-overflow-menu");
+    if (!menu) return;
+    const btn = document.getElementById("proj-overflow-btn");
+    if (e.target.closest("#proj-overflow-btn")) {
+      e.preventDefault();
+      menu.style.display = menu.style.display === "none" || !menu.style.display ? "flex" : "none";
+      return;
+    }
+    // Close on click outside the menu (and not on the toggle button)
+    if (menu.style.display === "flex" && !e.target.closest("#proj-overflow-menu")) {
+      menu.style.display = "none";
+    }
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      const menu = document.getElementById("proj-overflow-menu");
+      if (menu && menu.style.display === "flex") menu.style.display = "none";
+    }
+  });
+
+  // Project rename — inline edit on title click OR rename-from-overflow-menu.
+  function startProjectRename() {
+    const titleEl = document.getElementById("proj-detail-title");
+    if (!titleEl) return;
+    const oldTitle = titleEl.textContent.trim();
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "proj-detail-title proj-title-edit";
+    input.value = oldTitle;
+    titleEl.replaceWith(input);
+    input.focus();
+    input.setSelectionRange(0, input.value.length);
+    let committed = false;
+    const commit = async () => {
+      if (committed) return;
+      committed = true;
+      const newTitle = input.value.trim();
+      if (!newTitle || newTitle === oldTitle) {
+        await loadDetail(currentProjectId);
+        return;
+      }
+      try {
+        const r = await fetch("/api/projects/" + encodeURIComponent(currentProjectId), {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title: newTitle, actor: managerId }),
+        });
+        if (r.ok) {
+          await loadDetail(currentProjectId);
+        } else {
+          await loadDetail(currentProjectId);
+          showToast("Rename failed — try again", "error");
+        }
+      } catch { await loadDetail(currentProjectId); }
+    };
+    input.addEventListener("blur", commit);
+    input.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") { ev.preventDefault(); input.blur(); }
+      else if (ev.key === "Escape") { ev.preventDefault(); committed = true; loadDetail(currentProjectId); }
+    });
+  }
+
+  async function confirmDeleteProject() {
+    if (!currentProjectId) return;
+    const name = (detailCache && detailCache.title) || currentProjectId;
+    if (!window.confirm("Delete project \"" + name + "\"?\n\nFile will be moved to aria_sync/projects/_archive/. Audit trail preserved; can be restored manually.")) return;
+    try {
+      const r = await fetch("/api/projects/" + encodeURIComponent(currentProjectId) + "?actor=" + encodeURIComponent(managerId), { method: "DELETE" });
+      if (r.ok) {
+        currentProjectId = null;
+        loadList();
+      } else {
+        showToast("Delete failed — try again", "error");
+      }
+    } catch (e) { showToast("Delete error: " + e.message, "error"); }
+  }
+
+  shell.addEventListener("click", (e) => {
+    // Overflow-menu items (project-level: rename · status · delete)
+    const overflowItem = e.target.closest(".proj-overflow-item");
+    if (overflowItem) {
+      e.preventDefault();
+      const action = overflowItem.getAttribute("data-action");
+      const menu = document.getElementById("proj-overflow-menu");
+      if (menu) menu.style.display = "none";
+      if (action === "proj-rename") { startProjectRename(); return; }
+      if (action === "proj-delete") { confirmDeleteProject(); return; }
+      if (action === "proj-status") {
+        const newStatus = overflowItem.getAttribute("data-status");
+        if (!newStatus || !currentProjectId) return;
+        (async () => {
+          try {
+            const r = await fetch("/api/projects/" + encodeURIComponent(currentProjectId) + "/status", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ status: newStatus, actor: managerId }),
+            });
+            if (r.ok) await loadDetail(currentProjectId);
+          } catch {}
+        })();
+        return;
+      }
+    }
+    // Click on title to start inline rename
+    if (e.target.id === "proj-detail-title") {
+      e.preventDefault();
+      startProjectRename();
+      return;
+    }
+    // Add-member affordance — opens picker modal (per @george tr_166ed6986f · was prompt, now picker)
+    const addMemberBtn = e.target.closest('[data-action="proj-add-member"]');
+    if (addMemberBtn) {
+      e.preventDefault();
+      if (!currentProjectId) return;
+      openAddMembersModal();
+      return;
+    }
+    // Member chip removal (per @george m_4507d49772) — click on a removable member chip prompts + removes
+    const memberChip = e.target.closest(".proj-member-chip-removable");
+    if (memberChip) {
+      e.preventDefault();
+      const memberId = memberChip.getAttribute("data-member");
+      if (!memberId || !currentProjectId) return;
+      if (!window.confirm("Remove @" + memberId + " from this project?\n\nThey'll stop receiving notifications about new posts. Audit-trail post records the change.")) return;
+      (async () => {
+        try {
+          const r = await fetch("/api/projects/" + encodeURIComponent(currentProjectId) + "/remove_members", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ members: [memberId], actor: managerId }),
+          });
+          if (r.ok) await loadDetail(currentProjectId);
+          else showToast("Remove failed — try again", "error");
+        } catch (e) { showToast("Remove error: " + e.message, "error"); }
+      })();
+      return;
+    }
+
+    // Filter chip click (per @george m_c313b7c082)
+    const chipBtn = e.target.closest(".proj-filter-chip");
+    if (chipBtn) {
+      e.preventDefault();
+      const filter = chipBtn.getAttribute("data-filter") || "all";
+      projActiveFilter = filter;
+      try { localStorage.setItem(PROJ_FILTER_KEY, filter); } catch {}
+      renderDetail();
+      return;
+    }
+
+    // Long-post collapse trigger (header-as-trigger on collapsible post-meta) — must run before
+    // other handlers because the meta row contains other clickable elements (mid, mention links, etc.)
+    const collapseTrigger = e.target.closest(".proj-post-meta.chat-meta-toggle");
+    if (collapseTrigger) {
+      // Don't intercept clicks inside nested buttons or links
+      if (e.target.closest(".tr-reply-btn") || e.target.closest(".tr-react-btn") ||
+          e.target.closest("a") || e.target.closest("button")) return;
+      const action = collapseTrigger.getAttribute("data-action");
+      const mid = collapseTrigger.getAttribute("data-mid");
+      if (!mid) return;
+      e.preventDefault();
+      // Preserve scroll position across the rerender — measure the toggled post's offset relative
+      // to the thread BEFORE rerender, then restore after. Without this, renderDetail's scroll-target
+      // logic kicks in and may jump to find-first-unread or scroll-to-bottom (per @george m_bee5f55522).
+      const threadEl = document.querySelector(".proj-thread");
+      const triggerEl = document.getElementById(mid);
+      const offsetBefore = (threadEl && triggerEl)
+        ? (triggerEl.getBoundingClientRect().top - threadEl.getBoundingClientRect().top)
+        : null;
+      if (action === "proj-expand") projExpandedIds.add(mid);
+      else projExpandedIds.delete(mid);
+      try { localStorage.setItem(PROJ_EXPANDED_IDS_KEY, JSON.stringify([...projExpandedIds])); } catch {}
+      renderDetail();
+      // Restore scroll so the toggled post stays in the same screen position
+      requestAnimationFrame(() => {
+        const newThread = document.querySelector(".proj-thread");
+        const newTrigger = document.getElementById(mid);
+        if (newThread && newTrigger && offsetBefore !== null) {
+          const offsetAfter = newTrigger.getBoundingClientRect().top - newThread.getBoundingClientRect().top;
+          newThread.scrollTop += (offsetAfter - offsetBefore);
+        }
+      });
+      return;
+    }
+
+    const reactBtn = e.target.closest(".tr-react-btn");
+    if (reactBtn && reactBtn.getAttribute("data-action") === "proj-react") {
+      e.preventDefault();
+      const mid = reactBtn.getAttribute("data-mid");
+      const kind = reactBtn.getAttribute("data-kind");
+      const currentlyOn = reactBtn.classList.contains("tr-react-on");
+      if (mid && kind) toggleProjReaction(mid, kind, currentlyOn);
+      return;
+    }
+    const replyBtn = e.target.closest(".tr-reply-btn");
+    if (replyBtn) {
+      const action = replyBtn.getAttribute("data-action");
+      const mid = replyBtn.getAttribute("data-mid");
+      if (action === "proj-reply" && mid) {
+        e.preventDefault();
+        const ta = document.getElementById("proj-body");
+        if (ta) {
+          const existing = ta.value;
+          const sep = existing && !existing.endsWith(" ") && !existing.endsWith("\n") ? " " : "";
+          ta.value = existing + sep + "`" + mid + "` ";
+          ta.focus();
+          ta.setSelectionRange(ta.value.length, ta.value.length);
+        }
+        return;
+      }
+      if (action === "proj-edit" && mid) {
+        e.preventDefault();
+        startEditPost(mid);
+        return;
+      }
+      if (action === "proj-delete" && mid) {
+        e.preventDefault();
+        confirmDeletePost(mid);
+        return;
+      }
+    }
+    const editSaveBtn = e.target.closest(".proj-edit-save");
+    if (editSaveBtn) {
+      e.preventDefault();
+      const mid = editSaveBtn.getAttribute("data-mid");
+      if (mid) saveEditPost(mid);
+      return;
+    }
+    const editCancelBtn = e.target.closest(".proj-edit-cancel");
+    if (editCancelBtn) {
+      e.preventDefault();
+      const mid = editCancelBtn.getAttribute("data-mid");
+      if (mid) cancelEditPost(mid);
+      return;
+    }
+    const statusBtn = e.target.closest(".proj-status-btn");
+    if (statusBtn && statusBtn.getAttribute("data-action") === "proj-status") {
+      e.preventDefault();
+      const newStatus = statusBtn.getAttribute("data-status");
+      if (!newStatus || !currentProjectId) return;
+      (async () => {
+        try {
+          const r = await fetch("/api/projects/" + encodeURIComponent(currentProjectId) + "/status", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ status: newStatus, actor: managerId }),
+          });
+          if (r.ok) await loadDetail(currentProjectId);
+        } catch (e) {}
+      })();
+      return;
+    }
+    const sortBtn = e.target.closest(".proj-sort-btn");
+    if (sortBtn) {
+      e.preventDefault();
+      sortMode = sortBtn.getAttribute("data-sort");
+      try { localStorage.setItem("proj_sort_mode", sortMode); } catch {}
+      renderList();
+      return;
+    }
+    // Restore / Unarchive button on archived card (must run BEFORE card-click delegation)
+    const restoreBtn = e.target.closest(".proj-restore-btn");
+    if (restoreBtn) {
+      e.preventDefault();
+      e.stopPropagation();
+      const pid = restoreBtn.getAttribute("data-pid");
+      const action = restoreBtn.getAttribute("data-action");
+      if (!pid) return;
+      (async () => {
+        try {
+          let r;
+          if (action === "proj-unarchive") {
+            // Status-flag archived: flip back to active via /status endpoint
+            r = await fetch("/api/projects/" + encodeURIComponent(pid) + "/status", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ status: "active", actor: managerId }),
+            });
+          } else {
+            // _archive/ file: move back via /restore endpoint
+            r = await fetch("/api/projects/" + encodeURIComponent(pid) + "/restore?actor=" + encodeURIComponent(managerId), { method: "POST" });
+          }
+          if (r.ok) {
+            await loadList();
+          } else {
+            showToast("Restore failed — try again", "error");
+          }
+        } catch (e) { showToast("Restore error: " + e.message, "error"); }
+      })();
+      return;
+    }
+    const card = e.target.closest(".proj-card");
+    if (card) {
+      // Archived cards aren't openable (file lives in _archive/); user must restore first
+      if (card.classList.contains("proj-card-archived")) return;
+      currentProjectId = card.getAttribute("data-pid");
+      loadDetail(currentProjectId, { initialView: true });
+      return;
+    }
+    if (e.target.id === "proj-back") {
+      currentProjectId = null;
+      loadList();
+      return;
+    }
+    if (e.target.id === "proj-send") {
+      e.preventDefault();
+      postToProject();
+      return;
+    }
+  });
+  document.addEventListener("keydown", (e) => {
+    if (currentProjectId && (e.metaKey || e.ctrlKey) && e.key === "Enter") {
+      const ta = document.getElementById("proj-body");
+      if (ta && document.activeElement === ta) {
+        e.preventDefault();
+        postToProject();
+      }
+    }
+    // Esc → back to list (when in detail view AND not typing in textarea/input)
+    if (currentProjectId && e.key === "Escape") {
+      const ae = document.activeElement;
+      const isTyping = ae && (ae.tagName === "TEXTAREA" || ae.tagName === "INPUT");
+      if (isTyping) return;  // let Esc close the focus first
+      // Don't close if a modal is open
+      const newModal = document.getElementById("proj-new-modal");
+      if (newModal && newModal.style.display !== "none") return;
+      e.preventDefault();
+      currentProjectId = null;
+      loadList();
+    }
+  });
+
+  // Add-members modal (per @george tr_166ed6986f — picker, not typed)
+  const addMembersModal = document.getElementById("proj-add-members-modal");
+  function openAddMembersModal() {
+    const list = document.getElementById("proj-add-members-list");
+    if (!list) return;
+    const current = new Set();
+    document.querySelectorAll(".proj-member-chip[data-member]").forEach(el => {
+      const m = el.getAttribute("data-member"); if (m) current.add(m);
+    });
+    document.querySelectorAll(".proj-member-chip:not(.proj-member-chip-removable):not(.proj-member-chip-add)").forEach(el => {
+      const txt = (el.textContent || "").trim();
+      Object.entries(WORKER_DISPLAY).forEach(([id, lbl]) => { if (lbl.startsWith(txt) || txt === id) current.add(id); });
+    });
+    const candidates = Object.keys(WORKER_DISPLAY).filter(id => id !== "_all" && id !== managerId && !current.has(id));
+    if (!candidates.length) {
+      list.innerHTML = '<div class="proj-empty-state">All known cohort workers are already in this project.</div>';
+    } else {
+      list.innerHTML = candidates.map(id =>
+        '<label class="proj-member-pick">' +
+          '<input type="checkbox" name="proj-add-member" value="' + esc(id) + '"> ' +
+          '<span class="proj-member-label">' + esc(WORKER_DISPLAY[id]) + '</span>' +
+          '<span class="proj-member-id">' + esc(id) + '</span>' +
+        '</label>'
+      ).join("");
+    }
+    addMembersModal.style.display = "flex";
+  }
+  document.getElementById("proj-add-members-cancel").addEventListener("click", () => {
+    addMembersModal.style.display = "none";
+  });
+  document.getElementById("proj-add-members-confirm").addEventListener("click", async () => {
+    const checks = document.querySelectorAll('input[name="proj-add-member"]:checked');
+    const members = Array.from(checks).map(el => el.value);
+    if (!members.length) { addMembersModal.style.display = "none"; return; }
+    try {
+      const r = await fetch("/api/projects/" + encodeURIComponent(currentProjectId) + "/add_members", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ members: members, actor: managerId }),
+      });
+      if (r.ok) {
+        const j = await r.json().catch(() => ({}));
+        const addedN = (j.added || []).length;
+        showToast(addedN ? ("Added " + addedN + " member" + (addedN > 1 ? "s" : "")) : "Already members — no change", addedN ? "success" : "info");
+        addMembersModal.style.display = "none";
+        await loadDetail(currentProjectId);
+      } else {
+        showToast("Add failed — try again", "error");
+      }
+    } catch (err) { showToast("Add error: " + err.message, "error"); }
+  });
+
+  // New project modal — member-picker UI (v0.1)
+  const newModal = document.getElementById("proj-new-modal");
+  // Known workers — drives the picker. Manager (george) auto-checked + locked (project always includes the creator).
+  // Built from the user's OWN cohort (single-source from /api/members via memberNames) + the
+  // manager (locked — always a member as creator). No hardcoded/dev list (George preview #2 · Mira C1).
+  const KNOWN_WORKERS = [{ id: managerId, label: displayName(managerId) + " (you)", locked: true }]
+    .concat(Object.keys(memberNames)
+      .filter(id => id !== managerId)
+      .map(id => ({ id: id, label: displayName(id) })));
+
+  function populateMemberPicker() {
+    const list = document.getElementById("proj-member-picker-list");
+    if (!list) return;
+    list.innerHTML = KNOWN_WORKERS.map(w => {
+      const checked = w.id === managerId ? ' checked disabled' : '';
+      return (
+        '<label class="proj-member-pick">' +
+          '<input type="checkbox" name="proj-member" value="' + esc(w.id) + '"' + checked + '> ' +
+          '<span class="proj-member-label">' + esc(w.label) + '</span>' +
+          '<span class="proj-member-id">' + esc(w.id) + '</span>' +
+        '</label>'
+      );
+    }).join("");
+  }
+
+  document.getElementById("proj-new-btn").addEventListener("click", () => {
+    populateMemberPicker();
+    newModal.style.display = "flex";
+  });
+
+  document.getElementById("proj-toggle-archived").addEventListener("click", async () => {
+    showArchived = !showArchived;
+    const btn = document.getElementById("proj-toggle-archived");
+    btn.textContent = showArchived ? "← Hide archive" : "📦 Show archive";
+    btn.title = showArchived ? "Return to active projects" : "Show deleted projects (archived to _archive/)";
+    await loadList();
+  });
+  document.getElementById("proj-new-cancel").addEventListener("click", () => {
+    newModal.style.display = "none";
+  });
+  document.getElementById("proj-new-create").addEventListener("click", async () => {
+    const title = document.getElementById("proj-new-title").value.trim();
+    // Gather checked members from the picker (manager's checkbox is disabled-but-checked → still in this query)
+    const checks = document.querySelectorAll('input[name="proj-member"]:checked');
+    const members = Array.from(checks).map(el => el.value);
+    // Always include manager (defensive — the disabled checkbox should still be in the list)
+    if (!members.includes(managerId)) members.push(managerId);
+    const body = document.getElementById("proj-new-body").value.trim();
+    if (!title || members.length < 2) {
+      alert("title + at least one OTHER member required (you're auto-included)");
+      return;
+    }
+    try {
+      const r = await fetch("/api/projects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title, members })
+      });
+      const d = await r.json();
+      if (d.ok && d.project_id) {
+        if (body) {
+          await fetch("/api/projects/" + encodeURIComponent(d.project_id) + "/posts", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ sender: managerId, body })
+          });
+        }
+        newModal.style.display = "none";
+        document.getElementById("proj-new-title").value = "";
+        document.getElementById("proj-new-body").value = "";
+        currentProjectId = d.project_id;
+        await loadDetail(currentProjectId);
+      }
+    } catch (e) {
+      alert("create failed: " + e.message);
+    }
+  });
+
+  // Restore page-bar when returning to list view
+  const _origLoadList2 = loadList;
+  loadList = async function() {
+    const pageBar = document.getElementById("proj-page-bar");
+    if (pageBar) pageBar.style.display = "";
+    document.body.classList.remove("proj-in-detail");
+    await _origLoadList2();
+  };
+
+  // ─── Live updates via SSE (Block 3 v0.3) ────────────────────────────────
+  // Replaces the prior setInterval polling (15s list / 10s detail) — browser tab throttling
+  // suppressed it on background tabs (per @george m_c799c17e60 empirical). EventSource pushes
+  // are tab-throttling-immune; we react to project.* bus events as they fire on the server.
+  // A 60s fallback poll remains as safety net in case the EventSource drops without auto-recovery.
+  function _reactionsFingerprint(posts) {
+    // Cheap fingerprint of all reactions across all posts: actor+kind+message_id triples.
+    // Used to detect reaction-state changes since cache (per SSE fix 2026-05-01: post_count
+    // alone misses reaction-add/remove events).
+    if (!posts) return "";
+    const parts = [];
+    for (const p of posts) {
+      const r = p.reactions || [];
+      if (r.length) parts.push(p.message_id + ":" + r.map(x => x.actor + "/" + x.kind).sort().join(","));
+    }
+    return parts.join("|");
+  }
+
+  function refreshDetailIfChanged() {
+    if (currentProjectId === null) return;
+    // Skip rerender if user is actively typing in compose (avoid clobbering input)
+    try {
+      const ta = document.getElementById("proj-body");
+      if (ta && document.activeElement === ta && ta.value.trim()) return;
+    } catch {}
+    fetch("/api/projects/" + encodeURIComponent(currentProjectId) + "?viewer=" + encodeURIComponent(managerId))
+      .then(r => r.ok ? r.json() : null)
+      .then(fresh => {
+        if (!fresh) return;
+        const postsChanged = !detailCache
+          || (fresh.post_count !== detailCache.post_count)
+          || (fresh.status !== detailCache.status)
+          || (fresh.title !== detailCache.title)
+          || (_reactionsFingerprint(fresh.posts) !== _reactionsFingerprint(detailCache.posts));
+        if (!postsChanged) return;
+        const threadEl = document.querySelector(".proj-thread");
+        const scrollTop = threadEl ? threadEl.scrollTop : 0;
+        const wasNearBottom = threadEl ? (threadEl.scrollHeight - threadEl.scrollTop - threadEl.clientHeight < 80) : false;
+        detailCache = fresh;
+        renderDetail();
+        requestAnimationFrame(() => {
+          const newThread = document.querySelector(".proj-thread");
+          if (!newThread) return;
+          newThread.scrollTop = wasNearBottom ? newThread.scrollHeight : scrollTop;
+        });
+      })
+      .catch(() => {});
+  }
+
+  // SSE — single EventSource for the page; routes events by kind + project_id payload filter.
+  let _projEs = null;
+  function startProjSSE() {
+    if (_projEs) _projEs.close();
+    _projEs = new EventSource("/api/events/stream");
+    _projEs.addEventListener("bus", (e) => {
+      let ev;
+      try { ev = JSON.parse(e.data); } catch { return; }
+      const kind = ev.kind || "";
+      const payload = ev.payload || {};
+      // Two event families trigger refresh: project.* (post/edit/delete/membership)
+      // AND team_room.reaction.* on pp_* message_ids (reactions on project posts).
+      // Pre-fix: reactions only filtered by `project.*` were skipped, so multi-actor
+      // reactions never surfaced live — required polling cycle. Per @george empirical
+      // pp_102dd920af: "looks like it's not working" → root cause SSE filter gap.
+      const isProjectEvent = kind.startsWith("project.");
+      const isProjectReaction = kind.startsWith("team_room.reaction.")
+        && (payload.message_id || "").startsWith("pp_");
+      if (!isProjectEvent && !isProjectReaction) return;
+      // List-view: any qualifying event invalidates the list (status/title/membership/reactions may have shifted)
+      if (currentProjectId === null) {
+        loadList();
+        return;
+      }
+      // Detail-view: refresh if the event is about THIS project (project.* events) OR
+      // the reaction targets a post in THIS project (reaction events; we don't have project_id
+      // on reaction payload directly, so we always refresh on pp_*-reactions when a project is open
+      // — false-positive cost is one fetch, eliminated by the postsChanged short-circuit anyway).
+      if (isProjectEvent && payload.project_id === currentProjectId) {
+        refreshDetailIfChanged();
+      } else if (isProjectReaction) {
+        refreshDetailIfChanged();
+      } else if (kind === "project.deleted" && payload.project_id === currentProjectId) {
+        currentProjectId = null;
+        loadList();
+      }
+    });
+    _projEs.onerror = () => setTimeout(startProjSSE, 3000);
+  }
+
+  // Visibility-change: when tab returns to foreground, do a one-shot refresh in case events were missed
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+      if (currentProjectId !== null) refreshDetailIfChanged();
+      else loadList();
+    }
+  });
+
+  // Fallback poll — safety net for missed/dropped SSE events (the EventSource has no
+  // Last-Event-ID replay, so a connection blip silently loses events until this catches up).
+  // George's live repro 2026-07-23: posts landed out-of-order minutes late, only surfacing once
+  // this timer finally fired. Was 60s (felt like "nothing's happening" while actively watching);
+  // 5s is cheap (one small GET, same request either view already makes) and keeps the gap small
+  // without needing a full SSE-replay redesign.
+  let _fallbackTimer = setInterval(() => {
+    if (currentProjectId !== null) refreshDetailIfChanged();
+    else loadList();
+  }, 5000);
+  // No-op stubs (kept for any code that still calls them)
+  function startListPolling() {}
+  function stopListPolling() {}
+  function startDetailPolling() {}
+  function stopDetailPolling() {}
+
+  // Re-render list when returning from a project (so unread badges update immediately)
+  const _origLoadList = loadList;
+  loadList = async function() {
+    await _origLoadList();
+  };
+  const _origLoadDetail = loadDetail;
+  loadDetail = async function(pid, opts) {
+    await _origLoadDetail(pid, opts);
+  };
+
+  startProjSSE();
+
+  // Deep-link support: ?project=<id> opens detail view directly (used by 🚀 boost flow from team_room)
+  const _urlParams = new URLSearchParams(window.location.search);
+  const _initialProjectId = _urlParams.get("project");
+  if (_initialProjectId) {
+    currentProjectId = _initialProjectId;
+    loadDetail(_initialProjectId, { initialView: true });
+  } else {
+    loadList();
+  }
+
+  // ─── Search ────────────────────────────────────────────────────────────
+  // Substring-match across all (non-archived) project posts. Debounced 200ms.
+  // When query is non-empty, replaces the project list with grouped results;
+  // empty query restores the normal list view. Highlights the match in body
+  // preview. Clicking a hit navigates to the project (deep-link) — anchor to
+  // the specific post is best-effort via URL hash.
+  const searchInput = document.getElementById("proj-search-input");
+  let searchTimer = null;
+  let searchQuery = "";
+
+  function highlightMatch(body, q) {
+    if (!q) return esc(body);
+    const idx = body.toLowerCase().indexOf(q.toLowerCase());
+    if (idx < 0) return esc(body);
+    // Show ~80 chars of context on each side of the match
+    const ctxStart = Math.max(0, idx - 80);
+    const ctxEnd = Math.min(body.length, idx + q.length + 80);
+    const before = (ctxStart > 0 ? "…" : "") + body.slice(ctxStart, idx);
+    const match = body.slice(idx, idx + q.length);
+    const after = body.slice(idx + q.length, ctxEnd) + (ctxEnd < body.length ? "…" : "");
+    return esc(before) + '<mark class="proj-search-hit">' + esc(match) + '</mark>' + esc(after);
+  }
+
+  function renderSearchResults(hits, q) {
+    if (!hits.length) {
+      shell.innerHTML =
+        '<div class="proj-empty-state">' +
+          '<div class="proj-empty-icon">🔍</div>' +
+          '<div class="proj-empty-title">No matches for "' + esc(q) + '"</div>' +
+          '<div class="proj-empty-hint">Try a shorter or different keyword. Search is case-insensitive substring match across all active project posts.</div>' +
+        '</div>';
+      return;
+    }
+    // Group hits by project_id, preserving most-recent-first order
+    const byProj = new Map();
+    for (const h of hits) {
+      if (!byProj.has(h.project_id)) byProj.set(h.project_id, { title: h.project_title, hits: [] });
+      byProj.get(h.project_id).hits.push(h);
+    }
+    const banner =
+      '<div class="proj-search-banner">' +
+        '<strong>' + hits.length + '</strong> match' + (hits.length === 1 ? '' : 'es') +
+        ' across <strong>' + byProj.size + '</strong> project' + (byProj.size === 1 ? '' : 's') +
+        ' for "' + esc(q) + '"' +
+      '</div>';
+    let html = banner;
+    for (const [pid, group] of byProj) {
+      html += '<div class="proj-search-group">';
+      html += '<div class="proj-search-proj-title"><a href="?project=' + encodeURIComponent(pid) + '" class="proj-search-proj-link">' + esc(group.title) + '</a></div>';
+      for (const h of group.hits) {
+        const fromName = displayName(h.from);
+        html +=
+          '<div class="proj-search-hit-row" data-pid="' + pid + '" data-mid="' + esc(h.message_id) + '">' +
+            '<div class="proj-search-hit-meta"><span class="proj-search-hit-from">' + esc(fromName) + '</span>' +
+              '<span class="proj-search-hit-time">' + esc(fmtTime(h.ts)) + '</span>' +
+              '<span class="proj-search-hit-mid">' + esc(h.message_id) + '</span></div>' +
+            '<div class="proj-search-hit-body">' + highlightMatch(h.body, q) + '</div>' +
+          '</div>';
+      }
+      html += '</div>';
+    }
+    shell.innerHTML = html;
+    // Wire hit-row clicks to navigate
+    shell.querySelectorAll(".proj-search-hit-row").forEach(el => {
+      el.addEventListener("click", (e) => {
+        if (e.target.closest("a")) return;  // let project-title link work
+        const pid = el.getAttribute("data-pid");
+        const mid = el.getAttribute("data-mid");
+        if (pid) {
+          history.pushState({}, "", "?project=" + encodeURIComponent(pid) + (mid ? "#" + mid : ""));
+          currentProjectId = pid;
+          loadDetail(pid, { initialView: true });
+        }
+      });
+    });
+  }
+
+  async function runSearch(q) {
+    searchQuery = q;
+    if (!q || q.trim().length < 2) {
+      // Empty / too-short query → restore normal list view
+      loadList();
+      return;
+    }
+    try {
+      const r = await fetch("/api/projects/search?q=" + encodeURIComponent(q));
+      const d = await r.json();
+      renderSearchResults(d.hits || [], q);
+    } catch (e) {
+      shell.innerHTML = '<p class="empty-state">search error: ' + esc(e.message) + '</p>';
+    }
+  }
+
+  if (searchInput) {
+    searchInput.addEventListener("input", (e) => {
+      const v = e.target.value;
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => runSearch(v), 200);
+    });
+    searchInput.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        searchInput.value = "";
+        runSearch("");
+      }
+    });
+  }
+})();
+</script>
+{% endblock %}

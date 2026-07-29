@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}Team{% endblock %}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&family=Merriweather:wght@400;700&display=swap">
+  <link rel="stylesheet" href="/static/styles.css?v={{ static_version('styles.css') }}">
+</head>
+<body data-theme="light">
+  <header class="topbar">
+    <div class="topbar-left">
+      <span class="topbar-logo" title="team_dashboard">◈</span>
+      <nav class="topbar-nav">
+        <a href="/" class="nav-link {% if active_page == 'dashboard' %}active{% endif %}">Dashboard</a>
+        <a href="/team_room" class="nav-link {% if active_page == 'team_room' %}active{% endif %}">Team Room</a>
+        <a href="/projects" class="nav-link {% if active_page == 'projects' %}active{% endif %}">Projects</a>
+        <a href="/cockpit" class="nav-link {% if active_page == 'cockpit' %}active{% endif %}">Cockpit</a>
+        <a href="/getting-started" class="nav-link {% if active_page == 'getting_started' %}active{% endif %}">Getting Started</a>
+        <a href="/help" class="nav-link {% if active_page == 'help' %}active{% endif %}">Help</a>
+        <a href="/settings" class="nav-link {% if active_page == 'settings' %}active{% endif %}">Settings</a>
+        <!-- 6 shipped tabs: Dashboard · Team Room · Projects · Getting Started · Help · Settings.
+             Getting Started added as a persistent tab (George pp, 2026-07-20) so a user can return to
+             grab the ready-made first-message prompt for each new worker they compose — must stay in
+             sync with the dashboard's inline <nav> in server_lean.py (two nav surfaces). Dropped dev-only
+             links (Cockpit/PM/DMs/Comms/Symphony/ProMeet/Meetings/Docs) still stay out — 404 in lean. -->
+      </nav>
+    </div>
+    <div class="topbar-right">
+      <div style="position:relative;display:inline-block">
+        <button class="header-btn dm-pill" id="dm-pill" title="Unread DMs from cohort · click to view" style="position:relative;display:inline-flex;align-items:center;gap:6px;cursor:pointer;padding:4px 10px;font-size:15px">
+          <span>💬</span>
+          <span id="dm-pill-count" style="display:none;background:#e53935;color:#fff;border-radius:12px;padding:3px 11px;font-size:15px;font-weight:700;min-width:28px;text-align:center;line-height:1.2">0</span>
+        </button>
+        <div id="dm-pill-menu" style="display:none;position:absolute;right:0;top:calc(100% + 6px);min-width:340px;max-width:420px;max-height:480px;overflow-y:auto;background:var(--surface,#fff);border:1px solid var(--border,#ddd);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,0.15);z-index:9999;padding:6px"></div>
+      </div>
+      <button class="header-btn" id="refresh-btn" title="Refresh now">↻</button>
+    </div>
+  </header>
+
+  {% block page_bar %}{% endblock %}
+
+  <main class="main">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="footer">
+    <span>◈ FAITH/ARIA</span>
+    <span>{{ now_iso }}</span>
+  </footer>
+
+  <script>
+  (function () {
+    "use strict";
+    // Dark mode removed (George preview #3 — was inconsistently applied; light-only for now).
+    document.body.setAttribute("data-theme", "light");
+    const rb = document.getElementById("refresh-btn");
+    if (rb) rb.addEventListener("click", () => window.location.reload());
+
+    // Universal dismiss: ESC closes modals + meatballs; outside-click closes them too.
+    function isModalOpen(m) {
+      return m.style.display && m.style.display !== "none";
+    }
+    document.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape") return;
+      // Close any open meatball menus first (cheap, no state)
+      document.querySelectorAll("details.meatball[open]").forEach(d => d.removeAttribute("open"));
+      // Close the topmost open modal
+      const openModals = Array.from(document.querySelectorAll(".msg-modal")).filter(isModalOpen);
+      if (openModals.length) {
+        openModals[openModals.length - 1].style.display = "none";
+      }
+    });
+    document.addEventListener("click", (e) => {
+      // Modal backdrop click — clicked on the modal element itself, not its inner content
+      document.querySelectorAll(".msg-modal").forEach(modal => {
+        if (isModalOpen(modal) && e.target === modal) modal.style.display = "none";
+      });
+      // Meatball: close on outside click OR when a menu item is clicked
+      const menuItem = e.target.closest(".meatball-menu button, .meatball-menu a");
+      document.querySelectorAll("details.meatball[open]").forEach(d => {
+        if (menuItem && d.contains(menuItem)) d.removeAttribute("open");
+        else if (!d.contains(e.target)) d.removeAttribute("open");
+      });
+    });
+  })();
+  </script>
+  <script>
+  // DM pill — universal unread-DM badge + click-to-open dropdown across all pages.
+  // George tr_a20ed9ebe4 / tr_c430924393 fix: lives on TR + projects, never opens cockpit.
+  (function () {
+    const pill = document.getElementById("dm-pill");
+    const count = document.getElementById("dm-pill-count");
+    const menu = document.getElementById("dm-pill-menu");
+    if (!pill || !count || !menu) return;
+    let lastChannels = [];
+    // Inactive workers — hidden from the DM dropdown + count. Empty by default for a fresh
+    // cohort (nothing to hide); populated only if a cohort explicitly marks a worker inactive.
+    const DM_INACTIVE = new Set();  // no hardcoded dev workers — a cohort hides nothing by default (Mira C1)
+
+    function render() {
+      if (!lastChannels.length) {
+        menu.innerHTML = '<div style="padding:14px;color:#777;font-size:13px">No DM activity.</div>';
+        return;
+      }
+      const rows = lastChannels
+        .slice()
+        .sort((a, b) => (b.unread || 0) - (a.unread || 0))
+        .map(c => {
+          const wid = c.worker_id;
+          const name = c.worker_name || wid;
+          const unread = c.unread || 0;
+          const last = c.last_dm || {};
+          const snippet = (last.body || "(no recent DMs)").replace(/[<>]/g, "").slice(0, 90);
+          const ts = last.ts ? new Date(last.ts).toLocaleString([], {month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}) : "";
+          const badge = unread > 0 ? `<span style="background:#e53935;color:#fff;border-radius:9px;padding:1px 7px;font-size:11px;font-weight:700">${unread}</span>` : '';
+          return `<a href="/chat/${wid}" target="_blank" rel="noopener" style="display:flex;gap:10px;padding:10px;border-radius:6px;text-decoration:none;color:inherit;border-bottom:1px solid var(--border,#eee)" onmouseover="this.style.background='var(--row-hover,#f5f5f5)'" onmouseout="this.style.background='transparent'">
+            <div style="flex:1;min-width:0">
+              <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline"><strong style="font-size:13px">${name}</strong><span style="font-size:11px;color:#888">${ts}</span></div>
+              <div style="font-size:12px;color:#666;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px">${snippet}</div>
+            </div>
+            <div style="display:flex;align-items:center">${badge}</div>
+          </a>`;
+        }).join("");
+      menu.innerHTML = `<div style="padding:6px 10px;font-size:11px;color:#888;font-weight:600;text-transform:uppercase;letter-spacing:0.05em">DMs · click a worker to open thread</div>${rows}`;
+    }
+
+    async function refresh() {
+      try {
+        const r = await fetch("/api/cockpit/dm-summary", { cache: "no-store" });
+        if (!r.ok) return;
+        const d = await r.json();
+        lastChannels = (d.channels || []).filter(c => !DM_INACTIVE.has(c.worker_id));
+        const total = lastChannels.reduce((s, c) => s + (c.unread || 0), 0);
+        if (total > 0) {
+          count.textContent = total > 99 ? "99+" : String(total);
+          count.style.display = "inline-block";
+        } else {
+          count.style.display = "none";
+        }
+        if (menu.style.display === "block") render();
+      } catch (e) { /* silent */ }
+    }
+
+    pill.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (menu.style.display === "block") {
+        menu.style.display = "none";
+      } else {
+        render();
+        menu.style.display = "block";
+      }
+    });
+    document.addEventListener("click", (e) => {
+      if (!menu.contains(e.target) && e.target !== pill) menu.style.display = "none";
+    });
+
+    refresh();
+    setInterval(refresh, 30000);
+  })();
+  </script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

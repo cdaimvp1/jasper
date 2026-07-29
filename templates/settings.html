@@ -1,0 +1,209 @@
+{% extends "base.html" %}
+{% block title %}Settings · Symphony{% endblock %}
+
+{% block page_bar %}
+<div class="page-bar">
+  <span class="page-bar-title">Settings</span>
+  <span class="page-bar-meta">you, your team &amp; your workers</span>
+</div>
+{% endblock %}
+
+{% block content %}
+<div style="max-width:760px;margin:0 auto;padding:8px 4px">
+
+  <!-- ── You (the operator) · Settings #5d ─────────────────────────────── -->
+  <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:6px 0 10px">You</div>
+  <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px">
+    <div style="color:var(--muted,#667);font-size:13px;margin-bottom:10px">How your workers address you in the Team Room.</div>
+    <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
+      <label style="flex:2;min-width:180px">
+        <span style="display:block;font-size:12px;color:var(--muted,#667);margin-bottom:4px">Your name</span>
+        <input id="mgr-name" placeholder="e.g. George" aria-label="Your name"
+          style="width:100%;border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:9px;padding:8px 11px;font:600 14px sans-serif;color:inherit">
+      </label>
+      <label style="flex:1;min-width:120px">
+        <span style="display:block;font-size:12px;color:var(--muted,#667);margin-bottom:4px">@tag <span style="font-weight:400">(optional)</span></span>
+        <input id="mgr-tag" placeholder="auto" aria-label="Your @tag"
+          style="width:100%;border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:9px;padding:8px 11px;font:600 14px monospace;color:inherit">
+      </label>
+      <button id="mgr-save" style="border:1px solid var(--border,#ddd);background:var(--accent,#0f766e);color:#fff;font:600 13px sans-serif;padding:9px 16px;border-radius:9px;cursor:pointer">Save</button>
+      <span id="mgr-fb" style="font-size:12px;color:var(--muted,#888)"></span>
+    </div>
+  </div>
+
+  <!-- ── Team name · Settings #7 ───────────────────────────────────────── -->
+  <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:26px 0 10px">Team name</div>
+  <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px">
+    <div style="color:var(--muted,#667);font-size:13px;margin-bottom:10px">What this team is called. This is just a label — renaming it never affects how your workers coordinate.</div>
+    <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
+      <label style="flex:1;min-width:180px">
+        <span style="display:block;font-size:12px;color:var(--muted,#667);margin-bottom:4px">Name</span>
+        <input id="cohort-name" placeholder="e.g. Finance Crew" aria-label="Team name"
+          style="width:100%;border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:9px;padding:8px 11px;font:600 14px sans-serif;color:inherit">
+      </label>
+      <button id="cohort-save" style="border:1px solid var(--border,#ddd);background:var(--accent,#0f766e);color:#fff;font:600 13px sans-serif;padding:9px 16px;border-radius:9px;cursor:pointer">Save</button>
+      <span id="cohort-fb" style="font-size:12px;color:var(--muted,#888)"></span>
+    </div>
+  </div>
+
+  <!-- ── Workers · rename any time (existing) ──────────────────────────── -->
+  <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:26px 0 10px">Workers · rename any time</div>
+  <div id="worker-list" style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;overflow:hidden">
+    <div style="padding:16px;color:var(--muted,#667);font-size:14px">Loading…</div>
+  </div>
+  <div id="add-worker" style="margin-top:10px">
+    <a href="/getting-started" style="color:var(--accent,#0f766e);font-weight:600;text-decoration:none;font-size:14px">+ Add a worker</a>
+  </div>
+
+  <!-- ── Cockpit · chat history window ─────────────────────────────────── -->
+  <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:26px 0 10px">Cockpit</div>
+  <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px">
+    <div style="color:var(--muted,#667);font-size:13px;margin-bottom:10px">How many messages of each worker's conversation thread stays visible in the cockpit's chat panel. Each worker keeps its own independent window — this applies per thread, not as one shared pool.</div>
+    <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
+      <label style="flex:1;min-width:140px">
+        <span style="display:block;font-size:12px;color:var(--muted,#667);margin-bottom:4px">Messages per worker thread</span>
+        <input id="chat-window" type="number" min="5" max="200" placeholder="20" aria-label="Chat history window"
+          style="width:100%;border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:9px;padding:8px 11px;font:600 14px sans-serif;color:inherit">
+      </label>
+      <button id="chat-window-save" style="border:1px solid var(--border,#ddd);background:var(--accent,#0f766e);color:#fff;font:600 13px sans-serif;padding:9px 16px;border-radius:9px;cursor:pointer">Save</button>
+      <span id="chat-window-fb" style="font-size:12px;color:var(--muted,#888)"></span>
+    </div>
+  </div>
+
+  <!-- ── Data sources (existing) ───────────────────────────────────────── -->
+  <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:26px 0 10px">Data sources</div>
+  <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px;color:var(--muted,#667);font-size:14px">
+    Connected via your Lilly sign-in. Manage source access with your admin.
+  </div>
+
+  <!-- ── Server · Settings #6 ──────────────────────────────────────────── -->
+  <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:26px 0 10px">Server</div>
+  <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px">
+    <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+      <div style="flex:1;min-width:180px;color:var(--muted,#667);font-size:13px">Restart Symphony. Occasionally a change needs a fresh start to take hold. Your team and its history are kept.</div>
+      <button id="restart-btn" style="border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);color:inherit;font:600 13px sans-serif;padding:9px 16px;border-radius:9px;cursor:pointer">Restart server</button>
+      <span id="restart-fb" style="font-size:12px;color:var(--muted,#888)"></span>
+    </div>
+  </div>
+
+</div>
+
+<script>
+(function(){
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+  // ── Cockpit · chat history window ─────────────────────────────────────
+  const chatWindowInput = document.getElementById('chat-window');
+  const chatWindowFb = document.getElementById('chat-window-fb');
+  fetch('/api/cockpit/settings').then(r=>r.json()).then(d=>{
+    chatWindowInput.value = d.chat_history_window || 20;
+  }).catch(()=>{});
+  document.getElementById('chat-window-save').addEventListener('click', async ()=>{
+    const n = parseInt(chatWindowInput.value, 10);
+    if(!n || n < 5 || n > 200){ chatWindowFb.textContent = 'must be between 5 and 200'; return; }
+    chatWindowFb.textContent = 'saving…';
+    try{
+      const r = await fetch('/api/cockpit/settings',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({chat_history_window:n})});
+      const d = await r.json();
+      if(r.ok){ chatWindowFb.textContent='✓ saved'; setTimeout(()=>chatWindowFb.textContent='',2000); }
+      else { chatWindowFb.textContent = d.detail || 'error'; }
+    }catch(e){ chatWindowFb.textContent='error'; }
+  });
+
+  // ── You (operator) ────────────────────────────────────────────────────
+  const mgrName = document.getElementById('mgr-name');
+  const mgrTag  = document.getElementById('mgr-tag');
+  const mgrFb   = document.getElementById('mgr-fb');
+  fetch('/api/manager').then(r=>r.json()).then(d=>{
+    if(d.id)  mgrName.value = d.id;
+    if(d.tag) mgrTag.value  = d.tag;
+  }).catch(()=>{});
+  document.getElementById('mgr-save').addEventListener('click', async ()=>{
+    const id = mgrName.value.trim();
+    if(!id){ mgrFb.textContent='your name cannot be empty'; return; }
+    mgrFb.textContent='saving…';
+    try{
+      const r = await fetch('/api/manager',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({id:id, tag:mgrTag.value.trim()||null})});
+      const d = await r.json();
+      if(r.ok){ mgrTag.value=d.tag||''; mgrFb.textContent='✓ saved'; setTimeout(()=>mgrFb.textContent='',2000); }
+      else { mgrFb.textContent = d.detail || d.error || 'error'; }
+    }catch(e){ mgrFb.textContent='error'; }
+  });
+
+  // ── Team name (cohort display) ────────────────────────────────────────
+  const cohortName = document.getElementById('cohort-name');
+  const cohortFb   = document.getElementById('cohort-fb');
+  fetch('/api/cohort').then(r=>r.json()).then(d=>{ if(d.display_name) cohortName.value = d.display_name; }).catch(()=>{});
+  document.getElementById('cohort-save').addEventListener('click', async ()=>{
+    const dn = cohortName.value.trim();
+    if(!dn){ cohortFb.textContent='name cannot be empty'; return; }
+    cohortFb.textContent='saving…';
+    try{
+      const r = await fetch('/api/cohort/rename',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({display_name:dn})});
+      const d = await r.json();
+      if(r.ok){ cohortFb.textContent='✓ saved'; setTimeout(()=>cohortFb.textContent='',2000); }
+      else { cohortFb.textContent = d.detail || d.error || 'error'; }
+    }catch(e){ cohortFb.textContent='error'; }
+  });
+
+  // ── Workers (rename) ──────────────────────────────────────────────────
+  const list = document.getElementById('worker-list');
+  function row(m){
+    const name = m.display_name || m.name || m.id;
+    const role = m.archetype || m.role || '';
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'display:flex;gap:12px;align-items:center;padding:13px 16px;border-top:1px solid var(--border,#eee);flex-wrap:wrap';
+    wrap.innerHTML =
+      '<input value="'+esc(name)+'" aria-label="Worker name" '+
+        'style="flex:1;min-width:150px;border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:9px;padding:8px 11px;font:600 14px sans-serif;color:inherit">'+
+      '<span style="font:500 12px monospace;color:var(--muted,#888)">'+esc(role)+'</span>'+
+      '<button style="border:1px solid var(--border,#ddd);background:var(--accent,#0f766e);color:#fff;font:600 13px sans-serif;padding:8px 14px;border-radius:9px;cursor:pointer">Save</button>'+
+      '<span class="fb" style="font-size:12px;color:var(--muted,#888)"></span>';
+    const input = wrap.querySelector('input');
+    const btn = wrap.querySelector('button');
+    const fb = wrap.querySelector('.fb');
+    btn.addEventListener('click', async ()=>{
+      const dn = input.value.trim();
+      if(!dn){ fb.textContent='name cannot be empty'; return; }
+      fb.textContent='saving…';
+      try{
+        const r = await fetch('/api/workers/'+encodeURIComponent(m.id)+'/rename',
+          {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({display_name:dn})});
+        const d = await r.json();
+        if(r.ok){ fb.textContent='✓ saved'; setTimeout(()=>fb.textContent='',2000); }
+        else { fb.textContent = d.detail || d.error || 'error'; }
+      }catch(e){ fb.textContent='error'; }
+    });
+    return wrap;
+  }
+  fetch('/api/members').then(r=>r.json()).then(ms=>{
+    list.innerHTML='';
+    if(!ms.length){ list.innerHTML='<div style="padding:16px;color:var(--muted,#667);font-size:14px">No workers yet — <a href="/getting-started">compose your cohort</a>.</div>'; return; }
+    ms.forEach(m=>list.appendChild(row(m)));
+  }).catch(()=>{ list.innerHTML='<div style="padding:16px;color:var(--muted,#667)">Could not load workers.</div>'; });
+
+  // ── Server restart ────────────────────────────────────────────────────
+  const restartBtn = document.getElementById('restart-btn');
+  const restartFb  = document.getElementById('restart-fb');
+  restartBtn.addEventListener('click', async ()=>{
+    if(!confirm('Restart the Symphony server? It will be back in a few seconds.')) return;
+    restartBtn.disabled = true;
+    restartFb.textContent = 'restarting…';
+    try{ await fetch('/api/server/restart',{method:'POST'}); }catch(e){ /* the process re-execs; a dropped connection is expected */ }
+    // Poll the homepage until the server answers again, then reload.
+    let tries = 0;
+    const poll = setInterval(async ()=>{
+      tries++;
+      try{
+        const r = await fetch('/',{cache:'no-store'});
+        if(r.ok){ clearInterval(poll); restartFb.textContent='✓ back — reloading'; setTimeout(()=>window.location.reload(),600); }
+      }catch(e){ /* still down, keep polling */ }
+      if(tries > 40){ clearInterval(poll); restartFb.textContent='taking longer than usual — reload manually'; restartBtn.disabled=false; }
+    }, 1000);
+  });
+})();
+</script>
+{% endblock %}

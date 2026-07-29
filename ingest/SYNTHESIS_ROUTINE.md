@@ -1,0 +1,102 @@
+# Synthesis routine — curator's (Colleen's) wake checklist
+
+**What this is for:** curator's synthesis job is real judgment — reading communications, extracting
+facts, and writing a narrative — never mechanical (that's `relay`'s job, see
+`GRAPH_INGEST_ROUTINE.md`), and never a wholesale re-read of an entity's whole history on every
+wake (Marc's explicit requirement). The deterministic staleness check
+(`workgraph_synthesis.list_stale_entities()`) has already decided WHAT needs your attention before
+you ever wake for this — your job here is only to do the actual synthesis work for the entities it
+names, incrementally, using what's genuinely new since last time.
+
+**Two entity types, one mechanism.** A Project aggregates ALL of its constituent issues' evidence
+into one synthesis (a Project can span multiple email threads/Teams chats that are really the same
+underlying negotiation — Marc wants ONE synthesis reflecting the whole thing). A standalone Issue
+not yet grouped into a Project is synthesized the same way, on its own. Don't treat these as two
+different jobs.
+
+## Steps, in order
+
+1. **Get the work list.**
+   ```
+   python workgraph_synthesis.py --list-stale
+   ```
+   This is pure/deterministic (no LLM call inside it) — it just diffs each entity's current
+   evidence marker against its stored `synthesized_from_marker`. Each item gives you
+   `entity_type`, `entity_id`, `name`, `current_marker`, `previous_marker`, and
+   `previous_summary` (null if this entity has never been synthesized before).
+
+2. **For each stale entity, gather context — the DELTA, not the whole history:**
+   - The prior synthesis (`previous_summary` above, plus fetch the full row via
+     `GET /api/workgraph/{entity_type}/{entity_id}/synthesis` for `next_steps`/`suggested_actions`
+     if you need them) — this is your "here's what I said before" anchor.
+   - For a project: every issue in it (`GET /api/workgraph/projects/{project_id}` gives you the
+     issue list). For a standalone issue: just that one issue
+     (`GET /api/workgraph/issues/{issue_id}`).
+   - The evidence and raw_items for those issue(s) — but only what's NEW since `previous_marker`
+     (parse the `count:`/`max_ts:` out of both markers; anything with `ts`/`occurred_ts` newer than
+     the previous `max_ts` is new). If `previous_marker` is null, this entity has never been
+     synthesized — treat everything as new, but this only happens once per entity.
+   - Each new raw_item's existing `raw_item_extractions` row, if one already exists.
+
+3. **Extract any newly-seen raw_item that doesn't have an extraction yet.** This is real LLM
+   judgment — reading the item and pulling out `asks`, `decisions`, `dates_mentioned`,
+   `commitments`, `key_facts` — deterministic code cannot do this part, that's why it's yours.
+   Write each one via:
+   ```
+   POST /api/workgraph/raw_items/{raw_item_id}/extraction
+   {"extracted_json": {"asks": [...], "decisions": [...], "dates_mentioned": [...],
+                        "commitments": [...], "key_facts": [...]}}
+   ```
+   Computed ONCE per raw_item, permanently — never re-extract an item that already has a row here
+   (check first; the routes list above tell you which raw_items already have one).
+
+4. **Write the updated synthesis** — a 2-4 sentence narrative (who asked what, what's happened,
+   where it stands now, informed by the prior synthesis plus what's new), `next_steps` grounded in
+   the sourcing-process phase model where applicable, and `suggested_actions` tied to SPECIFIC
+   tasks with a one-line rationale each (never a bare label with no "why" — Marc's explicit
+   "in-depth, not oversimplified" requirement). Each `next_steps` item MAY also carry a duration
+   estimate (see step 5) — omit `estimate_*` fields entirely on a step rather than guessing one:
+   ```
+   POST /api/workgraph/{entity_type}/{entity_id}/synthesis
+   {"summary": "...",
+    "next_steps": [{"step": "...", "current": true,
+                     "estimate_days_low": 3, "estimate_days_high": 5,
+                     "estimate_confidence": "documented", "estimate_note": "per the SOW review SLA"}, ...],
+    "suggested_actions": [{"task_id": "...", "label": "...", "rationale": "..."}, ...],
+    "estimated_completion": {"note": "...", "confidence": "documented"}}
+   ```
+   The server computes and stores `synthesized_from_marker` itself at write time (from the current
+   evidence marker) — you never send one.
+
+5. **Ground timeline/duration/next-step language in
+   `$TEAM_DATA_DIR/documents/reference/sourcing_process_knowledge_base.md`** (the shared document
+   library, not a worker-private memory file — any worker can read it) — the negotiation ->
+   ATC/ATS approval -> signature phase model, TPRM/review branches, etc. Its own confidence labels
+   map directly onto `estimate_confidence`/the top-level `estimated_completion.confidence`:
+   - `[DOCUMENTED]` (a real Lilly SharePoint figure) -> `"documented"`.
+   - `[MARC'S MODEL]` (his own skill-suite's considered estimate, not an official SLA) -> `"model"`.
+   - `[UNKNOWN / GAP]` (not in either source) -> `"unknown"`, and say so in the note plainly
+     ("not documented — routing to TPRM directly would confirm") rather than inventing a number.
+   Never state a `"model"` or `"unknown"` figure as though it were `"documented"` — that mislabeling
+   is the one thing this whole feature exists to prevent. `estimated_completion` is a roof-level
+   read across all remaining `next_steps` (sum the ranges, or say plainly why you can't - e.g. an
+   open-ended external dependency with no committed date). Leaving `estimated_completion` out
+   entirely (or a step's `estimate_*` fields out) is a normal, correct outcome when nothing in the
+   knowledge base supports even a `"model"`-tier guess - do not fill it with an `"unknown"` entry
+   just to have something there.
+
+6. **Report your status** (per the cockpit's worker_status mechanism):
+   ```python
+   import workgraph_store as ws
+   ws.set_worker_status("curator", state="idle", current_task=None, detail="synthesis wake complete")
+   ```
+
+7. **Stop.** Nothing else this wake — no ingestion, no re-classification, no team_room posts beyond
+   what this routine itself calls for.
+
+## Safety net
+
+`list_stale_entities()` is safe to re-run at any time (it's read-only and deterministic) — if a
+synthesis wake dies partway through, the next one will simply see the entities you didn't get to
+still listed as stale, and any you already wrote as no longer stale. There is no partial-write
+hazard: each entity's extraction/synthesis writes are independent, self-contained REST calls.

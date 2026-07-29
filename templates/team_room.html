@@ -1,0 +1,1509 @@
+{% extends "base.html" %}
+{% block title %}Team Room · Team{% endblock %}
+
+{% block page_bar %}
+<div class="page-bar tr-page-bar">
+  <span class="page-bar-title">Team Room</span>
+  <span class="page-bar-status-live">● ambient</span>
+  <span class="page-bar-meta">culture surface · always open · no moderator</span>
+  <span class="page-bar-spacer"></span>
+  <span id="tr-fb" class="team-feedback"></span>
+</div>
+<div class="tr-toolbar" role="toolbar" aria-label="Team Room view controls">
+  <div class="tr-toolbar-group" id="tr-density-group" aria-label="Density">
+    <button class="tr-density-btn" data-density="compact" title="Compact density">⊟</button>
+    <button class="tr-density-btn tr-density-btn-active" data-density="comfy" title="Comfy density (default)">≡</button>
+    <button class="tr-density-btn" data-density="spacious" title="Spacious density">☰</button>
+  </div>
+  <div class="tr-toolbar-divider"></div>
+  <div class="tr-toolbar-group" id="tr-chip-group" aria-label="Filter chips">
+    <button class="tr-chip tr-chip-active" data-chip="all">All</button>
+    <button class="tr-chip" data-chip="me">@me</button>
+    <button class="tr-chip" data-chip="action">⚡ Action</button>
+    <button class="tr-chip" data-chip="acks">✓ Acks</button>
+    <button class="tr-chip" data-chip="bookmarked">🔖 Bookmarks</button>
+    <!-- Per-worker filter chips (dynamic · your cohort's members) injected by renderWorkerChips().
+         George pp 2026-07-16: tags = the workers created for each user, not dev-cohort topics
+         (dropped 📜 Doctrine / 🛠 Substrate / ⚐ System — dev jargon a new cohort has no use for). -->
+    <span id="tr-worker-chips" style="display:inline-flex;gap:inherit"></span>
+  </div>
+  <div class="tr-toolbar-divider"></div>
+  {# View-mode EN/AI toggle removed per @george tr_1b0880be1e empirical (2026-05-02 ~12:48 ET):
+     translator v0.2 is near-passthrough — toggle does nothing visible. Server endpoint + cache
+     preserved at /api/translate for future first-encounter-audience use-case. YAGNI for UI. #}
+  <button class="tr-toolbar-action" id="tr-mark-all-seen" title="Mark everything as read; jump to bottom">↡ All read</button>
+  <span id="tr-toolbar-count" class="tr-toolbar-count"></span>
+</div>
+{% endblock %}
+
+{% block content %}
+
+<div class="chat-shell tr-shell">
+  <div class="chat-thread tr-thread density-comfy" id="team-room-thread">
+    <p class="empty-state">loading…</p>
+  </div>
+  <button id="tr-jump-bottom" class="mt-jump-bottom" style="display:none">↓ Jump to latest <span id="tr-jump-count"></span></button>
+  <form class="chat-compose" onsubmit="return false" style="position: relative;">
+    <textarea id="tr-body" class="tr-compose-textarea" placeholder="Type a message to the team room… (⌘+Enter; @ for autocomplete)" rows="5"></textarea>
+    <div id="tr-mention-popup" class="tr-mention-popup" style="display: none;"></div>
+    <button id="tr-send" class="chat-compose-send" title="Send (⌘+Enter)">→</button>
+    <span id="tr-send-fb" class="team-feedback chat-compose-fb"></span>
+  </form>
+</div>
+
+<!-- 🚀 Boost-to-project modal (Phase B v0.2 — opens pre-populated from a 🚀 reaction; replaces silent auto-create) -->
+<div id="tr-boost-modal" class="msg-modal" style="display:none;">
+  <div class="msg-modal-inner">
+    <h3>🚀 Start project from this post</h3>
+    <p class="tr-boost-subtitle" style="color:var(--muted, #666); font-size:0.9em; margin-top:-0.5em;">Review members + title before creating. Source post stays in team_room.</p>
+    <label>Title <input id="tr-boost-title" type="text" /></label>
+    <fieldset class="proj-member-picker">
+      <legend>Members</legend>
+      <div id="tr-boost-member-list"></div>
+    </fieldset>
+    <details style="margin: 0.5em 0;">
+      <summary style="cursor:pointer; font-size:0.9em; color:var(--muted, #666);">Show seed-post preview</summary>
+      <pre id="tr-boost-seed-preview" style="white-space:pre-wrap; max-height:160px; overflow-y:auto; background:var(--bg-soft, #f6f6f6); padding:0.5em; border-radius:4px; font-size:0.85em; margin-top:0.4em;"></pre>
+    </details>
+    <div class="msg-modal-actions">
+      <button type="button" id="tr-boost-create" class="header-btn">Create project</button>
+      <button type="button" id="tr-boost-cancel" class="header-btn">Cancel</button>
+    </div>
+    <span id="tr-boost-fb" class="team-feedback" style="display:block; margin-top:0.4em;"></span>
+  </div>
+</div>
+
+<!-- 🗓 Schedule-meeting modal (v0.1 — same shape as 🚀 boost; opens pre-populated from a 🗓 reaction) -->
+<div id="tr-meeting-modal" class="msg-modal" style="display:none;">
+  <div class="msg-modal-inner">
+    <h3>🗓 Schedule meeting from this post</h3>
+    <p class="tr-boost-subtitle" style="color:var(--muted, #666); font-size:0.9em; margin-top:-0.5em;">Review participants + title + when to meet. Source post stays in team_room and is captured in the meeting description.</p>
+    <label>Title <input id="tr-meeting-title" type="text" /></label>
+    <fieldset class="proj-member-picker">
+      <legend>Participants</legend>
+      <div id="tr-meeting-participant-list"></div>
+    </fieldset>
+    <label>Schedule for (optional) <input id="tr-meeting-schedule" type="datetime-local" /></label>
+    <details style="margin: 0.5em 0;">
+      <summary style="cursor:pointer; font-size:0.9em; color:var(--muted, #666);">Show description (source post)</summary>
+      <pre id="tr-meeting-desc-preview" style="white-space:pre-wrap; max-height:160px; overflow-y:auto; background:var(--bg-soft, #f6f6f6); padding:0.5em; border-radius:4px; font-size:0.85em; margin-top:0.4em;"></pre>
+    </details>
+    <div class="msg-modal-actions">
+      <button type="button" id="tr-meeting-create" class="header-btn">Create meeting</button>
+      <button type="button" id="tr-meeting-cancel" class="header-btn">Cancel</button>
+    </div>
+    <span id="tr-meeting-fb" class="team-feedback" style="display:block; margin-top:0.4em;"></span>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  "use strict";
+  const managerId = {{ manager_id|tojson }};
+  const thread = document.getElementById("team-room-thread");
+  const sendFb = document.getElementById("tr-send-fb");
+  const toolbarCount = document.getElementById("tr-toolbar-count");
+
+  // Member name lookup (loaded async)
+  let memberNames = {};       // slug -> display label (display_name if set, else name)
+  let memberDisplayNames = {}; // slug -> display_name (only if set) — for popup label
+  fetch("/api/members").then(r => r.json()).then(ms => {
+    ms.forEach(m => {
+      memberNames[m.id] = m.display_name || m.name;
+      // MENTION_MAP = the user's cohort, single-source: id, name, AND display_name all -> the slug.
+      MENTION_MAP[String(m.id).toLowerCase()] = m.id;
+      if (m.name) MENTION_MAP[String(m.name).toLowerCase()] = m.id;
+      if (m.display_name) {
+        memberDisplayNames[m.id] = m.display_name;
+        MENTION_MAP[String(m.display_name).toLowerCase()] = m.id;
+      }
+    });
+    if (typeof renderWorkerChips === "function") renderWorkerChips(ms);  // George #2: per-worker filter chips
+    if (cachedMessages.length) rerender();
+  });
+
+  function esc(s) { return s == null ? "" : String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
+
+  // Built DYNAMICALLY from the cohort's OWN members (see the /api/members fetch above) — only
+  // @all + the manager are constants; every worker tag is the user's composed roster, never a
+  // hardcoded/dev list (George preview #1 · Mira C1 single-source).
+  const MENTION_MAP = { "all": "_all", "everyone": "_all" };
+  MENTION_MAP["{{ manager_id }}".toLowerCase()] = "{{ manager_id }}";
+  MENTION_MAP["{{ manager_tag }}".toLowerCase()] = "{{ manager_id }}";
+
+  // ─── Persistent state (localStorage) ──────────────────────────────────────
+  const SEEN_KEY = "team_room_seen_at";
+  const SEEN_IDS_KEY = "team_room_seen_ids";              // mark-all-seen + scroll progress
+  const NO_REPLY_IDS_KEY = "team_room_no_reply_ids";       // L15 mark-as-seen-no-reply
+  const FILTER_KEY = "team_room_filter_chips";             // active chip set
+  const DENSITY_KEY = "team_room_density";                 // comfy/compact/spacious
+  const EXPANDED_IDS_KEY = "team_room_expanded_ids";       // long-post + old-msg expanded set
+
+  function lsGet(k, dflt) {
+    try { const v = localStorage.getItem(k); return v == null ? dflt : JSON.parse(v); }
+    catch { return dflt; }
+  }
+  function lsSet(k, v) {
+    try { localStorage.setItem(k, JSON.stringify(v)); } catch {}
+  }
+
+  let seenAt = lsGet(SEEN_KEY, null);    // ISO timestamp string OR null
+  let seenIds = new Set(lsGet(SEEN_IDS_KEY, []));
+  let noReplyIds = new Set(lsGet(NO_REPLY_IDS_KEY, []));
+  let activeChips = new Set(lsGet(FILTER_KEY, ["all"]));
+  let densityMode = lsGet(DENSITY_KEY, "compact");  // Per @george tr_cb58982aa8 — at-a-glance default
+  let expandedIds = new Set(lsGet(EXPANDED_IDS_KEY, []));
+  let cachedMessages = [];
+  let _isEditing = false;  // guard for rerender() — set true while edit textarea is open
+  let _firstRenderComplete = false;
+  // View-mode for cohort AI-only-coms translation (per @george tr_819d4c9d7e + tr_56f60b00b9 + tr_ee7e77b3b9).
+  // native (default for ALL viewers · density beats verbose-expansion for repeat-viewers) · english (opt-in toggle).
+  // EN translation is preserved as on-demand option for first-encounter audiences or genuinely-novel-jargon.
+  const VIEW_MODE_KEY = "team_room_view_mode";
+  let viewMode = lsGet(VIEW_MODE_KEY, "native");
+
+  // ─── L8 Auto-classification ────────────────────────────────────────────────
+  // Returns array of tags: ["me", "action", "doctrine", "substrate", "system", "acks"]
+  const ACTION_VERBS_RE = /\b(close|approve|decide|review|verify|run|restart|test|validate|sign[- ]?off|kick[- ]?off|trigger|compact)\b/i;
+  const DOCTRINE_RE = /\b(PRE_HANDOFF|TEAM_PRACTICE|IDENTITY|METHODOLOGY|WORKER_IDENTITY|CONTEXT_ENGINEERING|GROUND_TRUTH|TELEMETRY|QUALITY|CANON_CONTRACT|canon_doctrine|doctrine|amendment|sig[- ]off)\b/i;
+  const SUBSTRATE_RE = /\b(team_room\.py|meetings\.py|server\.py|template|styles\.css|monitor|hook|substrate|dashboard|\/team|\/team_room|api\/team_room|aria_sync\/team_room)\b/i;
+  const URGENT_RE = /\b(your call|urgent|truly[- ]?ready|need (?:your|to)|please (?:close|approve|decide|review|run|restart|verify))\b/i;
+
+  function classify(msg, viewerId) {
+    const tags = new Set();
+    const body = msg.body || "";
+    const from = msg.from || "";
+
+    // System
+    if (msg.kind === "system" || from === "_system") tags.add("system");
+
+    // @me — body @-mentions viewer's slug (or shortname)
+    const mentionRe = /@(\w+)/g;
+    let m;
+    while ((m = mentionRe.exec(body)) !== null) {
+      const slug = MENTION_MAP[m[1].toLowerCase()];
+      if (viewerId && slug === viewerId) tags.add("me");
+    }
+
+    // Action — STRICT marker-based per @george tr_19a5954038 (2026-05-03):
+    // ONLY tag when body contains an explicit standardized action-required marker.
+    // Pattern: `🔴 ACTION:` or `🔴 ACTION REQUIRED:` or `**ACTION:**` at message start.
+    // Drops the broad heuristic detection that produced 58/100 false positives.
+    if (/^\s*(?:🔴\s*ACTION(?:\s+REQUIRED)?:|\*\*ACTION:\*\*|\*\*🔴\s*ACTION:\*\*)/im.test(body)) {
+      tags.add("action");
+    }
+    // Manager-side: George's posts that contain an @-mention AND a question or imperative
+    // remain action-shape for the cohort even without the explicit marker (manager is exempt).
+    if (from === managerId && /@\w+/.test(body) && /[?]|\b(please|can you|do you|do we|fix|approve|decide|run|verify|ship)\b/i.test(body)) {
+      tags.add("action");
+    }
+
+    // Doctrine — body mentions doctrine names or amendment/sig language
+    if (DOCTRINE_RE.test(body)) tags.add("doctrine");
+
+    // Substrate — body mentions substrate code/UI elements
+    if (SUBSTRATE_RE.test(body)) tags.add("substrate");
+
+    // Acks — short post + ack-marker
+    const len = body.length;
+    if (len > 0 && len < 280) {
+      if (/^(✓|ack|got it|received|confirmed|noted|sig:|locked|YES|right call|accept|agreed)\b/i.test(body) ||
+          /\b(sig (?:converts to|stands)|ack noted|caught up|holding silence)\b/i.test(body) ||
+          /^\(\s*echo of own post|^\(\s*holding/i.test(body)) {
+        tags.add("acks");
+      }
+    }
+
+    return tags;
+  }
+
+  function classificationReason(tags, body, from) {
+    const reasons = [];
+    if (tags.has("me")) reasons.push("@-mentions you");
+    if (tags.has("action")) reasons.push("contains action-verb or urgent phrasing or *truly-ready*");
+    if (tags.has("doctrine")) reasons.push("mentions a doctrine/amendment");
+    if (tags.has("substrate")) reasons.push("mentions substrate code or UI");
+    if (tags.has("system")) reasons.push("system message");
+    if (tags.has("acks")) reasons.push("short ack/confirmation");
+    return reasons.length ? reasons.join(" · ") : "no automatic classification";
+  }
+
+  // ─── L14 Targeting shape detection ────────────────────────────────────────
+  // Returns "all" | "specific" | "none"
+  function targetingShape(body) {
+    if (!body) return "none";
+    const re = /@(\w+)/g;
+    let foundAll = false, foundSpecific = false, m;
+    while ((m = re.exec(body)) !== null) {
+      const slug = MENTION_MAP[m[1].toLowerCase()];
+      if (!slug) continue;
+      if (slug === "_all") foundAll = true;
+      else foundSpecific = true;
+    }
+    if (foundAll && !foundSpecific) return "all";
+    if (foundSpecific) return "specific";
+    return "none";
+  }
+
+  // ─── L16 Long-post detection + preview ────────────────────────────────────
+  // Per @george tr_82f599a218 + tr_6b5b3929f8 2026-05-02 ~16:07 ET: collapse threshold tuned.
+  // 3-line preview was too short (entire visible window = bold lead + blank + bold header →
+  // appeared "fully bolded"). Wider preview shows body variation between emphasis + detail.
+  const LONG_POST_CHAR_THRESHOLD = 400;  // collapse posts >6 lines OR >400 chars
+  const LONG_POST_LINE_THRESHOLD = 6;
+
+  function isLongPost(body) {
+    if (!body) return false;
+    if (body.length > LONG_POST_CHAR_THRESHOLD) return true;
+    const lineCount = body.split("\n").length;
+    return lineCount > LONG_POST_LINE_THRESHOLD;
+  }
+
+  function longPostPreview(body) {
+    // 6 lines max (skip empty lines for richer preview · captures lead + supporting detail)
+    const lines = body.split("\n").filter(l => l.trim() !== "" || true);  // keep structure
+    // Take first 6 visible lines (or all if short)
+    const previewLines = [];
+    let visible = 0;
+    for (const line of lines) {
+      previewLines.push(line);
+      if (line.trim() !== "") visible++;
+      if (visible >= 6) break;
+    }
+    let preview = previewLines.join("\n");
+    if (preview.length > 480) preview = preview.slice(0, 480) + "…";
+    return preview;
+  }
+
+  // ─── Read-mark logic ──────────────────────────────────────────────────────
+  // The read-mark = boundary between messages whose ts <= seenAt (already-read) and ts > seenAt (unread).
+  // First-time visitors: seenAt is null → no read-mark renders.
+
+  function isUnread(msg) {
+    if (!seenAt) return false;          // first-time visitor: nothing is "unread" until they engage
+    if (!msg.ts) return false;
+    return new Date(msg.ts).getTime() > new Date(seenAt).getTime();
+  }
+
+  function isOldMsg(msg) {
+    // Old = before read-mark (already-seen). Render compact by default.
+    if (!seenAt) return false;
+    if (!msg.ts) return false;
+    return new Date(msg.ts).getTime() <= new Date(seenAt).getTime();
+  }
+
+  // ─── Markdown rendering ───────────────────────────────────────────────────
+  function renderRich(text, viewerId) {
+    if (text == null) return "";
+    let s = esc(String(text));
+    const codeSpans = [];
+    s = s.replace(/`([^`\n]+)`/g, (m, c) => { codeSpans.push(c); return "\x00CODE" + (codeSpans.length - 1) + "\x00"; });
+    s = s.replace(/@(\w+)/g, (m, name) => {
+      const slug = MENTION_MAP[name.toLowerCase()];
+      if (!slug) return m;
+      const isYou = viewerId && slug === viewerId;
+      const isAll = slug === "_all";
+      const cls = "mention" + (isYou ? " mention-you" : "") + (isAll ? " mention-all" : "");
+      return '<span class="' + cls + '" data-slug="' + slug + '">@' + esc(name) + '</span>';
+    });
+    // Markdown pipe-tables
+    s = s.replace(/(?:^[ \t]*\|.+\|[ \t]*$\n?){2,}/gm, (block) => {
+      const lines = block.replace(/\n+$/, "").split("\n").map(l => l.trim());
+      if (lines.length < 2) return block;
+      const sepRe = /^\|(?:\s*:?-+:?\s*\|)+\s*$/;
+      if (!sepRe.test(lines[1])) return block;
+      const splitRow = (line) => line.replace(/^\||\|$/g, "").split("|").map(c => c.trim());
+      const headers = splitRow(lines[0]);
+      const rows = lines.slice(2).map(splitRow);
+      let html = '<table class="chat-table"><thead><tr>';
+      for (const h of headers) html += '<th>' + h + '</th>';
+      html += '</tr></thead><tbody>';
+      for (const r of rows) {
+        html += '<tr>';
+        for (let i = 0; i < headers.length; i++) html += '<td>' + (r[i] || "") + '</td>';
+        html += '</tr>';
+      }
+      html += '</tbody></table>';
+      return html;
+    });
+    // Bold: lazy match through asterisks so nested italics survive (`**outer *inner* outer**`)
+    // Per scar 2026-05-01: original `[^*\n]+` excluded asterisks, broke nested emphasis (e.g., `**C. *G* tension**` rendered as literal `**`s + italic).
+    s = s.replace(/\*\*((?:[^*\n]|\*(?!\*))+)\*\*/g, "<strong>$1</strong>");
+    s = s.replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, "<em>$1</em>");
+    s = s.replace(/^### (.+)$/gm, "<h4 class='log-h'>$1</h4>");
+    s = s.replace(/^## (.+)$/gm, "<h3 class='log-h'>$1</h3>");
+    s = s.replace(/^# (.+)$/gm, "<h2 class='log-h'>$1</h2>");
+    s = s.replace(/(^|\n)((?:- [^\n]+\n?)+)/g, (m, pre, block) => {
+      const items = block.trim().split("\n").map(line => "<li>" + line.replace(/^- /, "") + "</li>").join("");
+      return pre + "<ul class='chat-bullets'>" + items + "</ul>";
+    });
+    // Markdown link syntax `[text](url)` — extract to placeholders first so the bare-URL
+    // auto-linker below doesn't re-wrap the URL inside the href attribute (per @george
+    // tr_f2139c7c41 scar: nested-anchor garbage breaks all link rendering on the row).
+    const mdLinks = [];
+    s = s.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)<>"]+)\)/g, (_m, txt, url) => {
+      mdLinks.push({ txt, url });
+      return "\x00MDLINK" + (mdLinks.length - 1) + "\x00";
+    });
+    // Auto-link bare http(s) URLs (per @george tr_dcbcf981ea 2026-05-03 — links must be clickable).
+    // Match before tr_xxx auto-link to avoid greedy-conflict on URLs that contain tr_ patterns.
+    s = s.replace(/\b(https?:\/\/[^\s<>"]+)/g, '<a href="$1" target="_blank" rel="noopener" class="tr-url-link">$1</a>');
+    // Restore markdown-link placeholders as anchors with their custom display text.
+    s = s.replace(/\x00MDLINK(\d+)\x00/g, (_m, i) => {
+      const { txt, url } = mdLinks[parseInt(i, 10)];
+      return '<a href="' + url + '" target="_blank" rel="noopener" class="tr-url-link">' + txt + '</a>';
+    });
+    // Auto-link references to other room posts: tr_xxx → clickable to jump within room
+    s = s.replace(/\b(tr_[a-z0-9_]{2,60})\b/g, '<a class="tr-ref-link" href="#$1" data-mid="$1" title="Jump to post $1">$1</a>');
+    // Project mention auto-link (per @george pp_abfbb41fc7 2026-05-01): proj_xxx → /projects?project=<id>
+    s = s.replace(/\b(proj_[a-z0-9_]{2,60})\b/g, '<a class="tr-ref-link" href="/projects?project=$1" target="_blank" title="Open project $1">$1</a>');
+    // Restore code spans — also auto-link tr_xxx INSIDE code spans (workers use `tr_xxx` markdown convention)
+    // NOTE: `inner` is already HTML-escaped (esc() ran on the full text at function entry, before
+    // backticks were extracted into codeSpans). Re-escaping caused &lt; → &amp;lt; double-encoding.
+    s = s.replace(/\x00CODE(\d+)\x00/g, (m, i) => {
+      const inner = codeSpans[parseInt(i, 10)];
+      const trMatch = /^tr_[a-z0-9_]{2,60}$/.exec(inner);
+      if (trMatch) {
+        return '<a class="tr-ref-link tr-ref-link-code" href="#' + inner + '" data-mid="' + inner + '" title="Jump to post ' + inner + '">' + inner + '</a>';
+      }
+      const projMatch = /^proj_[a-z0-9_]{2,60}$/.exec(inner);
+      if (projMatch) {
+        return '<a class="tr-ref-link tr-ref-link-code" href="/projects?project=' + inner + '" target="_blank" title="Open project ' + inner + '">' + inner + '</a>';
+      }
+      return "<code>" + inner + "</code>";
+    });
+    return s;
+  }
+
+  function hasMentionOf(text, viewerId) {
+    if (!text || !viewerId) return false;
+    const re = /@(\w+)/g;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      const slug = MENTION_MAP[m[1].toLowerCase()];
+      if (slug === viewerId) return true;
+    }
+    return false;
+  }
+
+  function fmtTime(iso) {
+    if (!iso) return "";
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return iso;
+    return d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  }
+
+  // ─── Bubble rendering ─────────────────────────────────────────────────────
+  function systemLineHtml(m) {
+    return (
+      '<div class="meeting-system-line">' +
+        '<span class="meeting-system-tag">⚐ SYSTEM</span>' +
+        (m.ts ? '<span class="meeting-system-time">' + esc(fmtTime(m.ts)) + '</span>' : '') +
+        '<span class="meeting-system-body">' + esc(m.body) + '</span>' +
+      '</div>'
+    );
+  }
+
+  function chipBadgesHtml(tags, body, from) {
+    const order = ["action", "me", "doctrine", "substrate", "system", "acks"];
+    let html = '';
+    for (const t of order) {
+      if (!tags.has(t)) continue;
+      const label = ({action: "⚡", me: "@", doctrine: "📜", substrate: "🛠", system: "⚐", acks: "✓"})[t];
+      const reason = classificationReason(tags, body, from);
+      html += '<span class="tr-badge tr-badge-' + t + '" data-tag="' + t + '" title="' + esc(reason + ' — click to filter room by this tag') + '">' + label + '</span>';
+    }
+    return html;
+  }
+
+  function bubbleHtml(m) {
+    if (m.kind === "system" || m.from === "_system") return systemLineHtml(m);
+    const isMine = m.from === managerId;
+    const fromName = memberNames[m.from] || m.from;
+    const mentionsYou = hasMentionOf(m.body, managerId);
+    const tags = classify(m, managerId);
+    const targeting = targetingShape(m.body);
+    const long = isLongPost(m.body);
+    const old = isOldMsg(m);
+    const expanded = expandedIds.has(m.message_id);
+    const noReply = noReplyIds.has(m.message_id);
+
+    // Apply collapse: long-post collapses unless expanded; old-msg collapses unless expanded;
+    // any worker post with a Smart Brevity preview also collapses by default
+    // (per @george tr_df02ffdf47 — short SA posts had no expand/collapse because shouldCollapse
+    // was false; preview now drives default-collapse so original shows on expand).
+    const hasSmartPreview = !!m.body_preview_smart;
+    // Phase 1 of "delight George" substrate (TB tr_38c55b8899 2026-05-03): explicit george_view
+    // field collapses the post by default and renders as collapsed body — the author-written
+    // one-sentence summary George sees without expanding.
+    const hasGeorgeView = !!m.george_view;
+    const shouldCollapse = !expanded && (long || old || hasSmartPreview || hasGeorgeView);
+
+    const bubbleCls = [
+      "chat-bubble",
+      mentionsYou ? "bubble-mentions-you" : "",
+      targeting === "specific" ? "bubble-targeted" : (targeting === "all" ? "bubble-broadcast" : ""),
+      shouldCollapse ? "bubble-collapsed" : "",
+      noReply ? "bubble-no-reply" : "",
+      m.deleted ? "bubble-deleted" : "",
+    ].filter(Boolean).join(" ");
+
+    const cls = isMine ? "chat-msg chat-msg-mine" : "chat-msg chat-msg-theirs";
+    // View-mode: english (default for manager) · native (cohort-default · density preserved) · both (split)
+    // Per @george tr_819d4c9d7e — translator deterministic; cohort-native preserved as ground-truth.
+    const renderBody = (viewMode === "english" && m.body_english) ? m.body_english : m.body;
+    // v0.4 collapsed-view rewriter (per @george tr_fd6b07ff40): if substrate has cached a
+    // Smart Brevity preview for this message, use it for the collapsed view. Expanded view
+    // always renders the original body verbatim — author intent + @-refs preserved by design.
+    // Phase 1 priority order (TB tr_38c55b8899): explicit george_view > smart_preview > body-truncate.
+    const collapsedBody = m.george_view || m.body_preview_smart || longPostPreview(renderBody);
+    const bodyHtml = shouldCollapse
+      ? '<div class="chat-body-text chat-body-preview">' + renderRich(collapsedBody, managerId) + '</div>'
+      : '<div class="chat-body-text">' + renderRich(renderBody, managerId) + '</div>';
+
+    const chipBadges = chipBadgesHtml(tags, m.body, m.from);
+    const seenButtonHtml = isMine ? '' :
+      '<button class="tr-seen-btn" data-action="toggle-no-reply" data-mid="' + esc(m.message_id || "") + '" title="' + (noReply ? "Marked as seen-no-reply" : "Mark as seen; no reply needed") + '">' + (noReply ? "✓ seen" : "○") + '</button>';
+
+    // Header is clickable when the message is collapsible (long-post, old-msg, OR has smart preview).
+    // Chevron indicates state: ▶ collapsed, ▼ expanded.
+    // Per @george tr_fc26a5cf88 — manager messages collapsible too.
+    // Per @george tr_df02ffdf47 — posts with Smart Brevity preview are collapsible (preview shown
+    // by default; full body on expand).
+    const isCollapsible = (long || old || hasSmartPreview || hasGeorgeView);
+    const chevron = isCollapsible
+      ? '<span class="tr-meta-chevron">' + (shouldCollapse ? '▶' : '▼') + '</span> '
+      : '';
+    const metaCls = "chat-meta" + (isCollapsible ? " chat-meta-toggle" : "");
+    const metaAttrs = isCollapsible
+      ? ' data-action="' + (shouldCollapse ? "expand" : "collapse") + '" data-mid="' + esc(m.message_id || "") + '" title="' + (shouldCollapse ? "Click to expand" : "Click to collapse") + '" role="button" tabindex="0"'
+      : '';
+
+    const isDeleted = !!m.deleted;
+    const editCount = m.edit_count || 0;
+    const togglesHtml = (m.message_id && !isDeleted) ? reactionsToolbarHtml(m.message_id, m.reactions) : '';
+    const actionReacts = (m.message_id && !isDeleted) ? actionReactionsHtml(m.message_id, m.reactions) : '';
+    const replyBtnHtml = (m.message_id && !isDeleted)
+      ? '<button class="tr-reply-btn" data-action="reply-quote" data-mid="' + esc(m.message_id) + '" title="Reply — insert ref into compose box + focus">↩ Reply</button>'
+      : '';
+    // Edit/Delete (own posts only, not deleted) — parity with Projects per Block 4 sweep
+    const editBtnHtml = (isMine && !isDeleted && m.message_id)
+      ? '<button class="tr-reply-btn tr-edit-btn" data-action="tr-edit" data-mid="' + esc(m.message_id) + '" title="Edit this message">✎ Edit</button>'
+      : '';
+    const deleteBtnHtml = (isMine && !isDeleted && m.message_id)
+      ? '<button class="tr-reply-btn tr-delete-btn" data-action="tr-delete" data-mid="' + esc(m.message_id) + '" title="Delete this message">🗑 Delete</button>'
+      : '';
+    // Two-group actions row: toggles on left (👍✅❓🔖), actions on right (🚀 + ↩ Reply + ✎ Edit + 🗑 Delete).
+    // Per @george tr_cb58982aa8 + ss34.png: hidden-by-default, hover-reveal, BUT show when reactions exist
+    // (cohort-engagement signal stays visible at-a-glance).
+    const hasReactions = (m.reactions && m.reactions.length > 0);
+    const actionsRowHtml = (togglesHtml || actionReacts || replyBtnHtml || editBtnHtml || deleteBtnHtml)
+      ? '<div class="tr-actions-row' + (hasReactions ? ' has-reactions' : '') + '">' + togglesHtml + '<div class="tr-actions-right">' + actionReacts + replyBtnHtml + editBtnHtml + deleteBtnHtml + '</div></div>'
+      : '';
+    // Edited indicator
+    const editedIndicator = editCount > 0
+      ? ' <span class="proj-post-edited" title="Edited ' + editCount + ' time(s)">edited' + (editCount > 1 ? ` ${editCount}x` : '') + '</span>'
+      : '';
+    // Message id moves into the header (top-right) — replaces bottom chat-mid-row per @george m_da42bab5ef
+    const midTopHtml = m.message_id
+      ? ' <span class="chat-mid chat-mid-top">' + esc(m.message_id) + '</span>'
+      : '';
+    return (
+      '<div class="' + cls + '" data-from="' + esc(m.from) + '" data-mid="' + esc(m.message_id || "") + '" id="' + esc(m.message_id || "") + '">' +
+        '<div class="' + bubbleCls + '">' +
+          '<div class="' + metaCls + '"' + metaAttrs + '>' +
+            chevron +
+            '<span class="chat-from">' + esc(fromName) + '</span>' +
+            ' <span class="chat-time">' + esc(fmtTime(m.ts)) + '</span>' +
+            editedIndicator +
+            (chipBadges ? ' <span class="tr-badges">' + chipBadges + '</span>' : '') +
+            ' <span class="tr-meta-spacer"></span>' +
+            seenButtonHtml +
+            midTopHtml +
+          '</div>' +
+          bodyHtml +
+          actionsRowHtml +
+        '</div>' +
+      '</div>'
+    );
+  }
+
+  function readMarkHtml() {
+    const seenLabel = seenAt ? new Date(seenAt).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
+    return '<div class="tr-read-mark" id="tr-read-mark"><span class="tr-read-mark-label">─ Last seen ' + esc(seenLabel) + ' ─</span></div>';
+  }
+
+  // ─── Filter logic ─────────────────────────────────────────────────────────
+  function passesFilters(msg, viewerId) {
+    if (activeChips.has("all")) return true;
+    // Bookmark filter (v0.2): special chip — show only messages with active bookmark from viewer
+    if (activeChips.has("bookmarked")) {
+      const myBookmark = (msg.reactions || []).some(r => r.kind === "bookmark" && r.actor === viewerId);
+      if (myBookmark) return true;
+      // If only "bookmarked" is active, fail messages without bookmark
+      if (activeChips.size === 1) return false;
+    }
+    // Per-worker chips (data-chip="worker:<slug>") → match the message sender (George #2).
+    for (const chip of activeChips) {
+      if (chip.indexOf("worker:") === 0 && msg.from === chip.slice(7)) return true;
+    }
+    const tags = classify(msg, viewerId);
+    for (const chip of activeChips) {
+      if (chip === "bookmarked" || chip.indexOf("worker:") === 0) continue;  // handled above
+      if (tags.has(chip)) return true;
+    }
+    return false;
+  }
+
+  // ─── Smart-scroll ─────────────────────────────────────────────────────────
+  function isAtBottom() {
+    const tolerance = 60;
+    return (thread.scrollHeight - thread.scrollTop - thread.clientHeight) < tolerance;
+  }
+  let seenBefore = !!seenAt;
+  let stickToBottom = seenBefore;
+
+  thread.addEventListener("scroll", () => {
+    stickToBottom = isAtBottom();
+    updateJumpButton();
+    if (isAtBottom()) {
+      // Advance read-mark to now
+      seenAt = new Date().toISOString();
+      lsSet(SEEN_KEY, seenAt);
+      seenBefore = true;
+    }
+  });
+
+  let unreadCount = 0;
+  const jumpBtn = document.getElementById("tr-jump-bottom");
+  const jumpCount = document.getElementById("tr-jump-count");
+
+  function updateJumpButton() {
+    if (!jumpBtn) return;
+    if (stickToBottom) {
+      jumpBtn.style.display = "none";
+      unreadCount = 0;
+    } else {
+      jumpBtn.style.display = "inline-flex";
+      jumpCount.textContent = unreadCount > 0 ? "(" + unreadCount + " new)" : "";
+    }
+  }
+  if (jumpBtn) {
+    jumpBtn.addEventListener("click", () => {
+      stickToBottom = true;
+      unreadCount = 0;
+      maybeScrollToBottom(true);
+    });
+  }
+
+  function maybeScrollToBottom(force) {
+    if (force || stickToBottom) {
+      requestAnimationFrame(() => {
+        thread.scrollTop = thread.scrollHeight;
+        stickToBottom = true;
+        unreadCount = 0;
+        updateJumpButton();
+      });
+    } else {
+      updateJumpButton();
+    }
+  }
+
+  function scrollToReadMark() {
+    const mark = document.getElementById("tr-read-mark");
+    if (mark) {
+      mark.scrollIntoView({ block: "center" });
+    } else {
+      thread.scrollTop = thread.scrollHeight;
+    }
+  }
+
+  // ─── Density modes (L9) ───────────────────────────────────────────────────
+  function applyDensity(mode) {
+    densityMode = mode;
+    lsSet(DENSITY_KEY, mode);
+    thread.classList.remove("density-comfy", "density-compact", "density-spacious");
+    thread.classList.add("density-" + mode);
+    document.querySelectorAll(".tr-density-btn").forEach(b => {
+      b.classList.toggle("tr-density-btn-active", b.getAttribute("data-density") === mode);
+    });
+  }
+  applyDensity(densityMode);
+  document.querySelectorAll(".tr-density-btn[data-density]").forEach(b => {
+    b.addEventListener("click", () => applyDensity(b.getAttribute("data-density")));
+  });
+
+  // ─── View-mode (cohort AI-only-coms ↔ English translation) ────────────────
+  function applyViewMode(mode) {
+    viewMode = mode;
+    lsSet(VIEW_MODE_KEY, mode);
+    document.querySelectorAll("[data-view-mode]").forEach(b => {
+      b.classList.toggle("tr-density-btn-active", b.getAttribute("data-view-mode") === mode);
+    });
+    // Re-fetch with translate flag if switching INTO english mode and we don't have body_english yet
+    const haveEnglish = cachedMessages.length > 0 && cachedMessages[0].body_english !== undefined;
+    if ((mode === "english" || mode === "both") && !haveEnglish) {
+      loadMessages();
+    } else {
+      rerender();
+    }
+  }
+  applyViewMode(viewMode);
+  document.querySelectorAll("[data-view-mode]").forEach(b => {
+    b.addEventListener("click", () => applyViewMode(b.getAttribute("data-view-mode")));
+  });
+
+  // ─── Filter chips (L8) ────────────────────────────────────────────────────
+  function applyChips() {
+    document.querySelectorAll(".tr-chip").forEach(c => {
+      c.classList.toggle("tr-chip-active", activeChips.has(c.getAttribute("data-chip")));
+    });
+    rerender();
+  }
+
+  // Event delegation on the chip group → supports the static chips AND the dynamic
+  // per-worker chips injected by renderWorkerChips() (George #2).
+  document.getElementById("tr-chip-group").addEventListener("click", (e) => {
+    const c = e.target.closest(".tr-chip");
+    if (!c) return;
+    const chip = c.getAttribute("data-chip");
+    if (chip === "all") {
+      activeChips = new Set(["all"]);
+    } else {
+      activeChips.delete("all");
+      if (activeChips.has(chip)) activeChips.delete(chip);
+      else activeChips.add(chip);
+      if (activeChips.size === 0) activeChips.add("all");
+    }
+    lsSet(FILTER_KEY, [...activeChips]);
+    applyChips();
+  });
+
+  // Render one filter chip per cohort member (dynamic, from /api/members) — "tags = your workers".
+  function renderWorkerChips(ms) {
+    const host = document.getElementById("tr-worker-chips");
+    if (!host) return;
+    host.innerHTML = "";
+    (ms || []).forEach(m => {
+      if (!m.id) return;
+      const b = document.createElement("button");
+      b.className = "tr-chip";
+      b.setAttribute("data-chip", "worker:" + m.id);
+      b.textContent = "@" + (m.display_name || m.name || m.id);
+      host.appendChild(b);
+    });
+    applyChips();  // reflect any persisted active state on the freshly-rendered chips
+  }
+
+  applyChips();
+
+  // ─── Mark-all-seen ────────────────────────────────────────────────────────
+  document.getElementById("tr-mark-all-seen").addEventListener("click", () => {
+    seenAt = new Date().toISOString();
+    lsSet(SEEN_KEY, seenAt);
+    seenBefore = true;
+    stickToBottom = true;
+    rerender();
+    setTimeout(() => maybeScrollToBottom(true), 50);
+  });
+
+  // ─── Expand / collapse / no-reply event delegation ────────────────────────
+  thread.addEventListener("click", (e) => {
+    // Click classification badge → toggle filter chip for that tag
+    const badge = e.target.closest(".tr-badge");
+    if (badge) {
+      const tag = badge.getAttribute("data-tag");
+      if (tag && ["action", "me", "doctrine", "substrate", "system", "acks"].includes(tag)) {
+        // Toggle: if currently active, reset to "all"; otherwise activate this tag only
+        if (activeChips.has(tag) && activeChips.size === 1) {
+          activeChips = new Set(["all"]);
+        } else {
+          activeChips = new Set([tag]);
+        }
+        lsSet(FILTER_KEY, [...activeChips]);
+        applyChips();
+        e.preventDefault();
+        return;
+      }
+    }
+    // Click-to-copy on tr_xxx removed per @george tr_b22ec2d803 — reply button replaces it.
+    // Auto-link tr_xxx references — intercept to scroll-flash instead of full nav
+    const refLink = e.target.closest(".tr-ref-link");
+    if (refLink) {
+      const mid = refLink.getAttribute("data-mid");
+      if (mid) {
+        const target = document.getElementById(mid);
+        if (target) {
+          e.preventDefault();
+          target.scrollIntoView({ block: "center", behavior: "smooth" });
+          target.classList.add("tr-flash");
+          setTimeout(() => target.classList.remove("tr-flash"), 2000);
+          return;
+        }
+      }
+      // If target not in current view, fall through to default href navigation (page jump)
+    }
+    const reactBtn = e.target.closest(".tr-react-btn");
+    if (reactBtn) {
+      e.preventDefault();
+      const mid = reactBtn.getAttribute("data-mid");
+      const kind = reactBtn.getAttribute("data-kind");
+      if (!mid || !kind) return;
+      const currentlyOn = reactBtn.classList.contains("tr-react-on");
+      toggleReaction(mid, kind, currentlyOn);
+      return;
+    }
+    const replyBtn = e.target.closest(".tr-reply-btn");
+    if (replyBtn) {
+      const action = replyBtn.getAttribute("data-action");
+      const mid = replyBtn.getAttribute("data-mid");
+      if (!mid) return;
+      if (action === "reply-quote") {
+        e.preventDefault();
+        const ta = document.getElementById("tr-body");
+        if (!ta) return;
+        const existing = ta.value;
+        const sep = existing && !existing.endsWith(" ") && !existing.endsWith("\n") ? " " : "";
+        ta.value = existing + sep + "`" + mid + "` ";
+        ta.focus();
+        ta.setSelectionRange(ta.value.length, ta.value.length);
+        ta.dispatchEvent(new Event("input"));
+        return;
+      }
+      if (action === "tr-edit") {
+        e.preventDefault();
+        startTrEdit(mid);
+        return;
+      }
+      if (action === "tr-delete") {
+        e.preventDefault();
+        confirmTrDelete(mid);
+        return;
+      }
+    }
+    const expandBtn = e.target.closest(".tr-expand-btn, .chat-meta-toggle");
+    if (expandBtn) {
+      // Don't capture clicks inside the seen-button or any nested actionable element within the header
+      if (e.target.closest(".tr-seen-btn") || e.target.closest(".tr-react-btn") || e.target.closest(".tr-reply-btn")) return;
+      const mid = expandBtn.getAttribute("data-mid");
+      const action = expandBtn.getAttribute("data-action");
+      if (!mid) return;
+      if (action === "expand") expandedIds.add(mid);
+      else expandedIds.delete(mid);
+      lsSet(EXPANDED_IDS_KEY, [...expandedIds]);
+      rerender();
+      return;
+    }
+    const seenBtn = e.target.closest(".tr-seen-btn");
+    if (seenBtn) {
+      const mid = seenBtn.getAttribute("data-mid");
+      if (!mid) return;
+      if (noReplyIds.has(mid)) noReplyIds.delete(mid);
+      else noReplyIds.add(mid);
+      lsSet(NO_REPLY_IDS_KEY, [...noReplyIds]);
+      rerender();
+      return;
+    }
+  });
+
+  // ─── Render pipeline ──────────────────────────────────────────────────────
+  function rerender() {
+    // Skip re-render if user has an edit-in-progress (per @george tr_ec14f0f6da 2026-05-02 ~20:19 ET).
+    // Guard via _isEditing flag (cleared in saveTrEdit/cancel) so save+cancel paths can rerender.
+    if (_isEditing) return;
+    if (!cachedMessages.length) {
+      thread.innerHTML = '<p class="empty-state">No messages yet — first to post starts the room.</p>';
+      if (toolbarCount) toolbarCount.textContent = "";
+      return;
+    }
+    const filtered = cachedMessages.filter(m => passesFilters(m, managerId));
+    if (toolbarCount) {
+      const totalLabel = filtered.length === cachedMessages.length
+        ? cachedMessages.length + " messages"
+        : filtered.length + " of " + cachedMessages.length + " (filtered)";
+      toolbarCount.textContent = totalLabel;
+    }
+    if (!filtered.length) {
+      thread.innerHTML = '<p class="empty-state">No messages match the active filter. Click <strong>All</strong> to reset.</p>';
+      return;
+    }
+
+    // Find read-mark insertion index — the first message that's unread.
+    let readMarkIdx = -1;
+    if (seenAt) {
+      for (let i = 0; i < filtered.length; i++) {
+        if (isUnread(filtered[i])) { readMarkIdx = i; break; }
+      }
+      // If no unread found but seenAt exists, mark goes at end
+      if (readMarkIdx === -1 && filtered.length > 0) readMarkIdx = filtered.length;
+    }
+
+    let html = "";
+    for (let i = 0; i < filtered.length; i++) {
+      if (i === readMarkIdx) html += readMarkHtml();
+      html += bubbleHtml(filtered[i]);
+    }
+    if (readMarkIdx === filtered.length) html += readMarkHtml();
+    thread.innerHTML = html;
+
+    // First-load: scroll to read-mark; subsequent loads: scroll to bottom if sticky
+    if (!_firstRenderComplete) {
+      _firstRenderComplete = true;
+      if (seenAt) scrollToReadMark();
+      else maybeScrollToBottom(true);
+    } else {
+      maybeScrollToBottom(false);
+    }
+  }
+
+  let _firstLoadHashHandled = false;
+  async function loadMessages() {
+    try {
+      // viewer query string fetches reactions inline + applies privacy filter (bookmark = private to actor)
+      // translate=true pre-renders body_english for view-mode switching (per @george tr_819d4c9d7e).
+      const wantTranslation = viewMode === "english" || viewMode === "both";
+      // Cap to last 100 messages by default (per @george tr_be98e8960a 2026-05-02 sluggish/jitter fix).
+      const r = await fetch("/api/team_room?viewer=" + encodeURIComponent(managerId)
+                              + "&limit=100"
+                              + (wantTranslation ? "&translate=true" : ""));
+      const data = await r.json();
+      const newMsgs = data.messages || [];
+      if (!stickToBottom && cachedMessages.length && newMsgs.length > cachedMessages.length) {
+        unreadCount += (newMsgs.length - cachedMessages.length);
+      }
+      cachedMessages = newMsgs;
+      rerender();
+      // Honor URL hash anchor on first load (e.g., /team_room#tr_xxx from Desk auto-link).
+      // Messages render async — the browser's native anchor scroll fires too early; do it post-render here.
+      if (!_firstLoadHashHandled && window.location.hash) {
+        _firstLoadHashHandled = true;
+        const targetId = window.location.hash.slice(1);
+        if (targetId && /^(tr|pp|mm?)_[a-z0-9]{8,16}$/.test(targetId)) {
+          requestAnimationFrame(() => {
+            const target = document.getElementById(targetId);
+            if (target) {
+              stickToBottom = false;  // override default scroll-to-bottom for hash-anchor navigations
+              target.scrollIntoView({ block: "center", behavior: "auto" });
+              target.classList.add("tr-flash");
+              setTimeout(() => target.classList.remove("tr-flash"), 2400);
+            }
+          });
+        }
+      }
+    } catch (e) {
+      thread.innerHTML = '<p class="empty-state">error: ' + esc(e.message) + '</p>';
+    }
+  }
+
+  // ─── Reactions (v0 — 9 buttons, hover-toolbar, optimistic toggle) ─────────
+  // Per @george tr_5553c13f27 sig 2026-05-08 — TASK row + CULTURE row · clarify dropped · 🚀/🗓 stay as ACTION_KINDS.
+  const REACTION_KINDS = [
+    // task
+    { kind: "ack",        icon: "👍", label: "Ack — I saw it · no action needed from me" },
+    { kind: "approved",   icon: "✅", label: "Approved — I sig this · I will do / I agree" },
+    { kind: "thinking",   icon: "👀", label: "Thinking — engaging · response coming" },
+    { kind: "celebrate",  icon: "🎉", label: "Celebrate — shape is good / nice ship" },
+    { kind: "disagree",   icon: "❌", label: "Disagree — text reply coming within 5min" },
+    // culture
+    { kind: "thank_you",  icon: "🙏", label: "Thank you — gratitude · for the helper" },
+    { kind: "model",      icon: "🌟", label: "Model this — cohort should imitate this behavior" },
+    { kind: "more_info",  icon: "🤔", label: "More info — invite elaboration" },
+    { kind: "capability", icon: "🛠", label: "Capability-honest — I lack the substrate for this" },
+    { kind: "anchor",     icon: "📍", label: "Anchor this — worth codifying as doctrine" },
+    // workflow / artifact-creating (right cluster)
+    { kind: "project",    icon: "🚀", label: "Start Project" },
+    { kind: "meeting",    icon: "🗓", label: "Schedule meeting" },
+    { kind: "bookmark",   icon: "🔖", label: "Bookmark (private)" },
+  ];
+
+  const TOGGLE_KINDS = new Set([
+    "ack","approved","thinking","celebrate","disagree",
+    "thank_you","model","more_info","capability","anchor",
+    "bookmark",
+  ]);
+  const ACTION_KINDS = new Set(["project", "meeting"]);
+
+  // Per @george tr_4e00e21abe item 2 (2026-05-08) — tooltip shows actor list, not just count.
+  function _reactBtn(message_id, kind, icon, label, isOn, n, actors) {
+    const cls = "tr-react-btn" + (isOn ? " tr-react-on" : "");
+    const countHtml = n > 0 ? '<span class="tr-react-count">' + n + '</span>' : '';
+    const actorList = (actors && actors.length) ? "\n— " + actors.map(a => "@" + a).join(", ") : "";
+    const tooltip = label + (isOn ? " — click to remove" : "") + actorList;
+    return '<button class="' + cls + '" data-action="react" data-mid="' + esc(message_id) + '" data-kind="' + kind + '" title="' + esc(tooltip) + '">' + icon + countHtml + '</button>';
+  }
+
+  function _actorsByKind(reactions) {
+    const m = {};
+    for (const r of reactions || []) {
+      if (r.kind === "bookmark") continue;  // private — don't expose actor
+      (m[r.kind] = m[r.kind] || []).push(r.actor);
+    }
+    return m;
+  }
+
+  function reactionsToolbarHtml(message_id, reactions) {
+    const myReacts = new Set((reactions || []).filter(r => r.actor === managerId).map(r => r.kind));
+    const counts = {};
+    for (const r of reactions || []) counts[r.kind] = (counts[r.kind] || 0) + 1;
+    const actors = _actorsByKind(reactions);
+    const toggleButtons = REACTION_KINDS
+      .filter(rk => TOGGLE_KINDS.has(rk.kind))
+      .map(({kind, icon, label}) => _reactBtn(message_id, kind, icon, label, myReacts.has(kind), counts[kind] || 0, actors[kind]))
+      .join("");
+    return '<div class="tr-reactions tr-reactions-toggle">' + toggleButtons + '</div>';
+  }
+
+  function actionReactionsHtml(message_id, reactions) {
+    const myReacts = new Set((reactions || []).filter(r => r.actor === managerId).map(r => r.kind));
+    const counts = {};
+    for (const r of reactions || []) counts[r.kind] = (counts[r.kind] || 0) + 1;
+    const actors = _actorsByKind(reactions);
+    const actionButtons = REACTION_KINDS
+      .filter(rk => ACTION_KINDS.has(rk.kind))
+      .map(({kind, icon, label}) => _reactBtn(message_id, kind, icon, label, myReacts.has(kind), counts[kind] || 0, actors[kind]))
+      .join("");
+    return actionButtons;
+  }
+
+  async function toggleReaction(message_id, kind, currentlyOn) {
+    const method = currentlyOn ? "DELETE" : "POST";
+    try {
+      const r = await fetch("/api/team_room/reactions", {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message_id, kind, actor: managerId }),
+      });
+      const data = await r.json().catch(() => ({}));
+      const m = cachedMessages.find(x => x.message_id === message_id);
+      if (m) {
+        m.reactions = m.reactions || [];
+        if (currentlyOn) {
+          m.reactions = m.reactions.filter(r => !(r.actor === managerId && r.kind === kind));
+        } else {
+          m.reactions.push({ actor: managerId, kind, ts: new Date().toISOString() });
+        }
+      }
+      rerender();
+      // Phase B v0.3 (Option II): 🚀 add → either navigate to existing project (if one already exists
+      // for this source post) OR open boost modal pre-populated. Repeat 🚀s no longer create duplicates.
+      if (!currentlyOn && kind === "project" && data) {
+        if (data.existing_project && data.existing_project.project_id) {
+          window.location.href = "/projects?project=" + encodeURIComponent(data.existing_project.project_id);
+        } else if (data.project_suggest) {
+          openBoostModal(data.project_suggest);
+        }
+      }
+      // 🗓 add → open meeting modal pre-populated. No dedup — multiple meetings from one source
+      // post are valid (follow-up sync, retro). User cancels via X/Esc/click-outside to unwind reaction.
+      if (!currentlyOn && kind === "meeting" && data && data.meeting_suggest) {
+        openMeetingModal(data.meeting_suggest);
+      }
+    } catch (e) {
+      // Silent failure; next poll reconciles
+    }
+  }
+
+  // ─── 🚀 Boost-to-project modal (Phase B v0.2) ──────────────────────────────
+  // The user's OWN cohort (memberNames from /api/members) + the manager — resolved at CALL-time
+  // so it reflects the loaded roster; single-source, no hardcoded/dev list (George #2 · Mira C1).
+  function knownWorkers() {
+    return [{ id: "{{ manager_id }}", label: "{{ manager_id }}" }].concat(
+      Object.keys(memberNames)
+        .filter(id => id !== "{{ manager_id }}")
+        .map(id => ({ id: id, label: memberNames[id] || id })));
+  }
+  const boostModal = document.getElementById("tr-boost-modal");
+  const boostFb = document.getElementById("tr-boost-fb");
+  let _boostSeed = "";
+  let _boostSourceMid = "";
+
+  function openBoostModal(suggest) {
+    document.getElementById("tr-boost-title").value = suggest.title || "";
+    _boostSeed = suggest.seed_post || "";
+    _boostSourceMid = suggest.source_message_id || "";
+    document.getElementById("tr-boost-seed-preview").textContent = _boostSeed;
+    const preChecked = new Set(suggest.members || []);
+    // Always lock the actor (manager) — they're the reactor; can't remove themselves
+    const list = document.getElementById("tr-boost-member-list");
+    list.innerHTML = knownWorkers().map(w => {
+      const checked = preChecked.has(w.id) ? " checked" : "";
+      const locked = w.id === managerId ? " disabled" : "";
+      const lockedNote = w.id === managerId ? ' <span class="proj-member-id">(you)</span>' : "";
+      return (
+        '<label class="proj-member-pick">' +
+          '<input type="checkbox" name="tr-boost-member" value="' + esc(w.id) + '"' + checked + locked + '> ' +
+          '<span class="proj-member-label">' + esc(w.label) + '</span>' +
+          '<span class="proj-member-id">' + esc(w.id) + '</span>' + lockedNote +
+        '</label>'
+      );
+    }).join("");
+    boostFb.textContent = "";
+    boostModal.style.display = "flex";
+  }
+
+  // Single dismiss path: cancel button, click-outside-modal, and Esc all unwind the reaction
+  // (per @george m_43c226b1d2 + m_5168f60359 — three dismiss surfaces, one unwind).
+  async function cancelBoostModal() {
+    if (boostModal.style.display === "none") return;  // already closed; idempotent
+    boostModal.style.display = "none";
+    if (_boostSourceMid) {
+      try {
+        await fetch("/api/team_room/reactions", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message_id: _boostSourceMid, kind: "project", actor: managerId }),
+        });
+        const m = cachedMessages.find(x => x.message_id === _boostSourceMid);
+        if (m) {
+          m.reactions = (m.reactions || []).filter(r => !(r.actor === managerId && r.kind === "project"));
+        }
+        rerender();
+      } catch {}
+    }
+  }
+
+  document.getElementById("tr-boost-cancel").addEventListener("click", cancelBoostModal);
+  // Click on the modal backdrop (outside the inner panel) dismisses + unwinds
+  boostModal.addEventListener("click", (e) => {
+    if (e.target === boostModal) cancelBoostModal();
+  });
+  // Esc key dismisses + unwinds. Capture phase + check getComputedStyle in case some
+  // ancestor handler stopPropagation()s on Esc, or inline style check is unreliable.
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" && e.key !== "Esc") return;
+    const cs = window.getComputedStyle(boostModal);
+    if (cs.display === "none") return;
+    e.preventDefault();
+    e.stopPropagation();
+    cancelBoostModal();
+  }, true);  // useCapture=true
+
+  document.getElementById("tr-boost-create").addEventListener("click", async () => {
+    const title = document.getElementById("tr-boost-title").value.trim();
+    const checks = document.querySelectorAll('input[name="tr-boost-member"]:checked');
+    const members = Array.from(checks).map(el => el.value);
+    if (!members.includes(managerId)) members.push(managerId);
+    if (!title || members.length < 2) {
+      boostFb.textContent = "Title + at least one other member required.";
+      return;
+    }
+    const btn = document.getElementById("tr-boost-create");
+    btn.disabled = true;
+    boostFb.textContent = "creating…";
+    try {
+      const r = await fetch("/api/projects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title, members, source_message_id: _boostSourceMid || undefined })
+      });
+      const d = await r.json();
+      if (!d.ok || !d.project_id) {
+        boostFb.textContent = "create failed: " + (d.error || "unknown");
+        btn.disabled = false;
+        return;
+      }
+      if (_boostSeed) {
+        await fetch("/api/projects/" + encodeURIComponent(d.project_id) + "/posts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sender: managerId, body: _boostSeed })
+        });
+      }
+      boostModal.style.display = "none";
+      window.location.href = "/projects?project=" + encodeURIComponent(d.project_id);
+    } catch (e) {
+      boostFb.textContent = "error: " + e.message;
+      btn.disabled = false;
+    }
+  });
+
+  // ─── 🗓 Schedule-meeting modal (v0.1 — parallel to 🚀 boost) ──────────────
+  const meetingModal = document.getElementById("tr-meeting-modal");
+  const meetingFb = document.getElementById("tr-meeting-fb");
+  let _meetingDesc = "";
+  let _meetingSourceMid = "";
+
+  function openMeetingModal(suggest) {
+    document.getElementById("tr-meeting-title").value = suggest.title || "";
+    _meetingDesc = suggest.description || "";
+    _meetingSourceMid = suggest.source_message_id || "";
+    document.getElementById("tr-meeting-desc-preview").textContent = _meetingDesc;
+    document.getElementById("tr-meeting-schedule").value = "";
+    const preChecked = new Set(suggest.participants || []);
+    const list = document.getElementById("tr-meeting-participant-list");
+    list.innerHTML = knownWorkers().map(w => {
+      const checked = preChecked.has(w.id) ? " checked" : "";
+      const locked = w.id === managerId ? " disabled" : "";
+      const lockedNote = w.id === managerId ? ' <span class="proj-member-id">(you)</span>' : "";
+      return (
+        '<label class="proj-member-pick">' +
+          '<input type="checkbox" name="tr-meeting-participant" value="' + esc(w.id) + '"' + checked + locked + '> ' +
+          '<span class="proj-member-label">' + esc(w.label) + '</span>' +
+          '<span class="proj-member-id">' + esc(w.id) + '</span>' + lockedNote +
+        '</label>'
+      );
+    }).join("");
+    meetingFb.textContent = "";
+    meetingModal.style.display = "flex";
+  }
+
+  // Three dismiss surfaces, one unwind (per 🚀 boost-modal precedent + @george m_43c226b1d2)
+  async function cancelMeetingModal() {
+    if (meetingModal.style.display === "none") return;
+    meetingModal.style.display = "none";
+    if (_meetingSourceMid) {
+      try {
+        await fetch("/api/team_room/reactions", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message_id: _meetingSourceMid, kind: "meeting", actor: managerId }),
+        });
+        const m = cachedMessages.find(x => x.message_id === _meetingSourceMid);
+        if (m) {
+          m.reactions = (m.reactions || []).filter(r => !(r.actor === managerId && r.kind === "meeting"));
+        }
+        rerender();
+      } catch {}
+    }
+  }
+
+  document.getElementById("tr-meeting-cancel").addEventListener("click", cancelMeetingModal);
+  meetingModal.addEventListener("click", (e) => {
+    if (e.target === meetingModal) cancelMeetingModal();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" && e.key !== "Esc") return;
+    const cs = window.getComputedStyle(meetingModal);
+    if (cs.display === "none") return;
+    e.preventDefault();
+    e.stopPropagation();
+    cancelMeetingModal();
+  }, true);
+
+  document.getElementById("tr-meeting-create").addEventListener("click", async () => {
+    const title = document.getElementById("tr-meeting-title").value.trim();
+    const checks = document.querySelectorAll('input[name="tr-meeting-participant"]:checked');
+    const participants = Array.from(checks).map(el => el.value);
+    if (!participants.includes(managerId)) participants.push(managerId);
+    if (!title || participants.length < 2) {
+      meetingFb.textContent = "Title + at least one other participant required.";
+      return;
+    }
+    const scheduleVal = document.getElementById("tr-meeting-schedule").value;
+    let scheduledStartAt = null;
+    if (scheduleVal) {
+      const t = Date.parse(scheduleVal);
+      if (!isNaN(t)) scheduledStartAt = t / 1000;  // unix seconds (UTC)
+    }
+    const btn = document.getElementById("tr-meeting-create");
+    btn.disabled = true;
+    meetingFb.textContent = "creating…";
+    try {
+      const r = await fetch("/api/meetings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title,
+          participants,
+          description: _meetingDesc || undefined,
+          scheduled_start_at: scheduledStartAt,
+        })
+      });
+      const d = await r.json();
+      if (!d || !d.id) {
+        meetingFb.textContent = "create failed: " + ((d && d.detail) || "unknown");
+        btn.disabled = false;
+        return;
+      }
+      meetingModal.style.display = "none";
+      window.location.href = "/meeting/" + encodeURIComponent(d.id);
+    } catch (e) {
+      meetingFb.textContent = "error: " + e.message;
+      btn.disabled = false;
+    }
+  });
+
+  // ─── Edit / Delete own message (Block 4 parity sweep) ─────────────────────
+  function startTrEdit(message_id) {
+    const m = cachedMessages.find(x => x.message_id === message_id);
+    if (!m || m.from !== managerId) return;
+    const bubble = document.getElementById(message_id);
+    if (!bubble) return;
+    const bodyEl = bubble.querySelector(".chat-body-text");
+    if (!bodyEl) return;
+    const oldBody = m.body;
+    const ta = document.createElement("textarea");
+    ta.className = "tr-edit-textarea";
+    ta.rows = Math.max(3, Math.min(12, oldBody.split("\n").length + 1));
+    ta.value = oldBody;
+    const actions = document.createElement("div");
+    actions.className = "tr-edit-actions";
+    actions.innerHTML = (
+      '<button class="tr-reply-btn tr-edit-save" data-action="tr-edit-save" data-mid="' + esc(message_id) + '">✓ Save</button>' +
+      '<button class="tr-reply-btn tr-edit-cancel" data-action="tr-edit-cancel" data-mid="' + esc(message_id) + '">✕ Cancel</button>'
+    );
+    bodyEl.replaceWith(ta);
+    ta.parentNode.insertBefore(actions, ta.nextSibling);
+    ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+    _isEditing = true;
+    // Esc cancels, Cmd+Enter saves
+    ta.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") { e.preventDefault(); _isEditing = false; rerender(); }
+      else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); saveTrEdit(message_id); }
+    });
+  }
+
+  async function saveTrEdit(message_id) {
+    const bubble = document.getElementById(message_id);
+    if (!bubble) return;
+    const ta = bubble.querySelector(".tr-edit-textarea");
+    if (!ta) return;
+    const newBody = ta.value.trim();
+    if (!newBody) return;
+    try {
+      const r = await fetch("/api/team_room/messages/" + encodeURIComponent(message_id), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ body: newBody, actor: managerId }),
+      });
+      if (r.ok) {
+        _isEditing = false;
+        await loadMessages();
+      } else {
+        const d = await r.json().catch(() => ({}));
+        alert("Edit failed: " + (d.detail || "unknown"));
+      }
+    } catch (e) { alert("Edit error: " + e.message); }
+  }
+
+  async function confirmTrDelete(message_id) {
+    if (!window.confirm("Delete this message?\n\nSoft-delete: body replaced with deletion marker; original sender + timestamp preserved as audit trail.")) return;
+    try {
+      const r = await fetch("/api/team_room/messages/" + encodeURIComponent(message_id) + "?actor=" + encodeURIComponent(managerId), { method: "DELETE" });
+      if (r.ok) {
+        await loadMessages();
+      } else {
+        const d = await r.json().catch(() => ({}));
+        alert("Delete failed: " + (d.detail || "unknown"));
+      }
+    } catch (e) { alert("Delete error: " + e.message); }
+  }
+
+  // Wire edit-save / edit-cancel via the existing replyBtn delegation (they share .tr-reply-btn class)
+  document.getElementById("team-room-thread").addEventListener("click", (e) => {
+    const btn = e.target.closest(".tr-edit-save, .tr-edit-cancel");
+    if (!btn) return;
+    e.preventDefault();
+    const action = btn.getAttribute("data-action");
+    const mid = btn.getAttribute("data-mid");
+    if (!mid) return;
+    if (action === "tr-edit-save") saveTrEdit(mid);
+    else if (action === "tr-edit-cancel") { _isEditing = false; rerender(); }
+  });
+
+  async function send() {
+    const body = document.getElementById("tr-body").value.trim();
+    if (!body) return;
+    const btn = document.getElementById("tr-send");
+    btn.disabled = true;
+    sendFb.textContent = "sending…";
+    try {
+      // Per scar #19 substrate fix (TB tr_9a5b6362df 2026-05-03): server-side endpoint
+      // no longer silent-defaults sender to manager-id. Frontend must pass explicit sender.
+      const r = await fetch("/api/team_room/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sender: managerId, body }),
+      });
+      const d = await r.json();
+      sendFb.textContent = d.ok ? "sent" : "failed";
+      document.getElementById("tr-body").value = "";
+      stickToBottom = true;
+      seenAt = new Date().toISOString();
+      lsSet(SEEN_KEY, seenAt);
+      await loadMessages();
+      maybeScrollToBottom(true);
+    } catch (e) { sendFb.textContent = "error: " + e.message; }
+    finally { btn.disabled = false; }
+  }
+
+  document.getElementById("tr-send").addEventListener("click", send);
+  document.getElementById("tr-body").addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); send(); }
+  });
+
+  // Auto-grow textarea on input (caps at ~16 lines; user can drag-resize for more)
+  const composeTextarea = document.getElementById("tr-body");
+  function autoGrow() {
+    composeTextarea.style.height = "auto";
+    const max = parseInt(getComputedStyle(composeTextarea).maxHeight, 10) || 320;
+    composeTextarea.style.height = Math.min(composeTextarea.scrollHeight, max) + "px";
+  }
+  composeTextarea.addEventListener("input", autoGrow);
+  // Reset height after send (since textarea.value cleared in send())
+  document.getElementById("tr-send").addEventListener("click", () => setTimeout(autoGrow, 50));
+
+  // ─── @-mention autocomplete (v0.1) ─────────────────────────────────────────
+  // Trigger: typing `@` opens dropdown of MENTION_MAP shortcuts; filter as user types.
+  // Confirm: Tab or Enter inserts; Escape closes; click selects.
+  const mentionPopup = document.getElementById("tr-mention-popup");
+  let mentionState = null;  // { startIdx, query, items, activeIdx }
+
+  function buildMentionList(query) {
+    const q = (query || "").toLowerCase();
+    // Prefer display_name (Theo, Abe, Coby, Sage) as the inserted/labeled token.
+    // Fall back to the 2-letter slug if no display_name registered (george, oc, _all, envoy).
+    // Filter matches against display_name AND slug, so typing "th" or "tb" both surface Theo.
+    const seen = new Set();
+    const items = [];
+    // @all always available (typing a / all / everyone surfaces it).
+    if (!q || "all".startsWith(q) || "everyone".startsWith(q)) {
+      items.push({ insert: "all", label: "all", sublabel: "all workers" });
+    }
+    // The manager (George's catch 2026-07-23): this list only ever iterated cohort members —
+    // the manager was never a selectable @-mention option at all, so a worker had no suggested
+    // tag to pick and typed the full name they'd seen elsewhere instead ("George J Antony").
+    // Suggest the short tag ("{{ manager_tag }}") as the insert/label, falling back to the full
+    // name only if no tag is configured.
+    const _mgrTag = "{{ manager_tag }}";
+    const _mgrLabel = (_mgrTag && _mgrTag !== "{{ manager_id }}") ? _mgrTag : "{{ manager_id }}";
+    if (!q || _mgrLabel.toLowerCase().startsWith(q) || "{{ manager_id }}".toLowerCase().startsWith(q)) {
+      seen.add("{{ manager_id }}");
+      items.push({ insert: _mgrLabel, label: _mgrLabel, sublabel: "{{ manager_id }}" });
+    }
+    // One item per cohort member — DYNAMIC (the user's composed roster from /api/members),
+    // never a hardcoded/dev list (George preview #1 · Mira C1 · Atlas born-scoping).
+    for (const slug of Object.keys(memberNames)) {
+      if (seen.has(slug)) continue;
+      const display = memberNames[slug] || slug;   // display_name or name
+      if (q && !display.toLowerCase().startsWith(q) && !slug.toLowerCase().startsWith(q)) continue;
+      seen.add(slug);
+      items.push({ insert: display, label: display, sublabel: slug });
+    }
+    return items;
+  }
+
+  function showMentionPopup() {
+    if (!mentionState || !mentionState.items.length) { hideMentionPopup(); return; }
+    mentionPopup.innerHTML = mentionState.items.map((it, i) =>
+      '<div class="tr-mention-item' + (i === mentionState.activeIdx ? ' tr-mention-active' : '') + '" data-idx="' + i + '">' +
+        '<span class="tr-mention-key">@' + esc(it.label) + '</span>' +
+        '<span class="tr-mention-sub">' + esc(it.sublabel) + '</span>' +
+      '</div>'
+    ).join("");
+    mentionPopup.style.display = "block";
+  }
+
+  function hideMentionPopup() {
+    mentionPopup.style.display = "none";
+    mentionState = null;
+  }
+
+  function detectMentionContext() {
+    const ta = composeTextarea;
+    const cursor = ta.selectionStart;
+    const text = ta.value.slice(0, cursor);
+    // Find last @ that's at start or preceded by whitespace + no space between @ and cursor
+    const lastAt = text.lastIndexOf("@");
+    if (lastAt < 0) return null;
+    const before = lastAt === 0 ? " " : text[lastAt - 1];
+    if (!/[\s(]/.test(before)) return null;
+    const afterAt = text.slice(lastAt + 1);
+    if (/\s/.test(afterAt)) return null;  // already typed past; close
+    return { startIdx: lastAt, query: afterAt };
+  }
+
+  composeTextarea.addEventListener("input", () => {
+    const ctx = detectMentionContext();
+    if (!ctx) { hideMentionPopup(); return; }
+    const items = buildMentionList(ctx.query);
+    if (!items.length) { hideMentionPopup(); return; }
+    mentionState = { startIdx: ctx.startIdx, query: ctx.query, items, activeIdx: 0 };
+    showMentionPopup();
+  });
+
+  composeTextarea.addEventListener("keydown", (e) => {
+    if (!mentionState || mentionPopup.style.display === "none") return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      mentionState.activeIdx = (mentionState.activeIdx + 1) % mentionState.items.length;
+      showMentionPopup();
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      mentionState.activeIdx = (mentionState.activeIdx - 1 + mentionState.items.length) % mentionState.items.length;
+      showMentionPopup();
+    } else if (e.key === "Tab" || e.key === "Enter") {
+      e.preventDefault();
+      const it = mentionState.items[mentionState.activeIdx];
+      if (it) {
+        const ta = composeTextarea;
+        const cursor = ta.selectionStart;
+        const before = ta.value.slice(0, mentionState.startIdx);
+        const after = ta.value.slice(cursor);
+        const insert = "@" + it.insert + " ";
+        ta.value = before + insert + after;
+        const newPos = before.length + insert.length;
+        ta.setSelectionRange(newPos, newPos);
+        ta.dispatchEvent(new Event("input"));  // re-trigger autoGrow
+      }
+      hideMentionPopup();
+    } else if (e.key === "Escape") {
+      hideMentionPopup();
+    }
+  });
+
+  composeTextarea.addEventListener("blur", () => setTimeout(hideMentionPopup, 150));
+
+  mentionPopup.addEventListener("mousedown", (e) => {
+    // mousedown (not click) so it fires before blur hides popup
+    const item = e.target.closest(".tr-mention-item");
+    if (!item || !mentionState) return;
+    e.preventDefault();
+    const idx = parseInt(item.getAttribute("data-idx"), 10);
+    mentionState.activeIdx = idx;
+    const it = mentionState.items[idx];
+    if (it) {
+      const ta = composeTextarea;
+      const cursor = ta.selectionStart;
+      const before = ta.value.slice(0, mentionState.startIdx);
+      const after = ta.value.slice(cursor);
+      const insert = "@" + it.insert + " ";
+      ta.value = before + insert + after;
+      const newPos = before.length + insert.length;
+      ta.setSelectionRange(newPos, newPos);
+      ta.dispatchEvent(new Event("input"));
+      ta.focus();
+    }
+    hideMentionPopup();
+  });
+
+  composeTextarea.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") setTimeout(autoGrow, 50);
+  });
+
+  // SSE for live updates
+  let es = null;
+  function startSSE() {
+    if (es) es.close();
+    es = new EventSource("/api/events/stream");
+    es.addEventListener("bus", (e) => {
+      try {
+        const ev = JSON.parse(e.data);
+        if (ev.kind === "team_room.message") {
+          loadMessages();
+        }
+      } catch {}
+    });
+    es.onerror = () => setTimeout(startSSE, 3000);
+  }
+  startSSE();
+
+  loadMessages();
+  setInterval(loadMessages, 8000);
+})();
+</script>
+{% endblock %}

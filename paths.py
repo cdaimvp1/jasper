@@ -1,0 +1,65 @@
+"""
+paths.py — canonical filesystem paths for the substrate.
+
+Centralized so individual modules don't hardcode locations and so v2 can
+relocate any of these (e.g. for a non-ARIA deployment) by editing one file.
+"""
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+# --- repo + data roots -----------------------------------------------------
+HERE = Path(__file__).parent
+DATA_DIR = Path(os.environ.get("TEAM_DATA_DIR", str(HERE / "data")))
+CONFIG_DIR = Path(os.environ.get("TEAM_CONFIG_DIR", str(HERE / "config")))
+
+# Substrate databases — single SQLite file per concern, all WAL.
+BUS_DB = DATA_DIR / "bus.db"
+TASKS_DB = DATA_DIR / "tasks.db"
+WORKGRAPH_DB = DATA_DIR / "workgraph.db"
+
+# Document library: reference materials workers can read from, output
+# documents workers produce, and files uploaded from the cockpit chat panel.
+# attachments rows in workgraph.db point at paths relative to this root.
+DOCUMENTS_DIR = DATA_DIR / "documents"
+DOCUMENTS_REFERENCE_DIR = DOCUMENTS_DIR / "reference"
+DOCUMENTS_ISSUES_DIR = DOCUMENTS_DIR / "issues"
+DOCUMENTS_PROJECTS_DIR = DOCUMENTS_DIR / "projects"
+DOCUMENTS_CHAT_DIR = DOCUMENTS_DIR / "chat"
+# Email attachments land here, keyed by raw_item id — classification hasn't
+# assigned an issue yet at ingest time, so they can't go straight under
+# DOCUMENTS_ISSUES_DIR. workgraph_store.list_attachments() is joined through
+# raw_items -> issue at read time rather than physically re-parenting files.
+DOCUMENTS_RAW_ITEMS_DIR = DOCUMENTS_DIR / "raw_items"
+
+# Outlook COM (PowerShell) saves attachments here first, keyed by EntryID (the
+# one stable identifier it has before Python assigns a raw_item row id); the
+# Python ingest step moves them into DOCUMENTS_RAW_ITEMS_DIR once it knows the
+# real id, then removes the staging folder either way (dup or not).
+ATTACHMENT_STAGING_DIR = DATA_DIR / "raw_ingest_inbox" / "_mail_attachments_staging"
+
+# --- workspace this team operates over -------------------------------------
+# For ARIA: OneDrive root where aria_sync/ and canon_doctrine/ live.
+# Generalizable: any directory the substrate observes / acts within.
+WORKSPACE_ROOT = Path(os.environ.get(
+    "TEAM_WORKSPACE_ROOT",
+    "/Users/DA37243/Library/CloudStorage/OneDrive-SharedLibraries-EliLillyandCompany/Claude AI Assets - Documents",
+))
+
+ARIA_SYNC = WORKSPACE_ROOT / "aria_sync"
+CANON_DOCTRINE = WORKSPACE_ROOT / "canon_doctrine"
+
+# --- claude code introspection ---------------------------------------------
+# Live JSONL transcripts the substrate tails for activity observation.
+CC_PROJECTS_ROOT = Path.home() / ".claude" / "projects"
+CC_SESSIONS_ROOT = Path.home() / ".claude" / "sessions"
+CC_IMAGE_CACHE = Path.home() / ".claude" / "image-cache"
+
+# --- ensure dirs exist -----------------------------------------------------
+def ensure_dirs() -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    for d in (DOCUMENTS_REFERENCE_DIR, DOCUMENTS_ISSUES_DIR, DOCUMENTS_PROJECTS_DIR,
+              DOCUMENTS_CHAT_DIR, DOCUMENTS_RAW_ITEMS_DIR, ATTACHMENT_STAGING_DIR):
+        d.mkdir(parents=True, exist_ok=True)

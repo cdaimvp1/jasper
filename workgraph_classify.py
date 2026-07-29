@@ -68,8 +68,15 @@ TOPIC_RULES = [
     ("onboarding", re.compile(r"\b(onboard|w-?9|w-?8|certificate of insurance|coi|banking|vendor setup|activation|welcome)\b", re.I)),
     ("financial", re.compile(r"\b(invoice|purchase order|\bpo\b|payment|rate change|price (?:adjust|increase)|escalator|true[\s-]?up|credit memo)\b", re.I)),
     ("performance", re.compile(r"\b(qbr|quarterly (?:business )?review|sla|kpi|corrective action|performance|scorecard)\b", re.I)),
-    ("compliance", re.compile(r"\b(audit|compliance|certification|regulatory|data breach|adverse event|finding)\b", re.I)),
+    ("compliance", re.compile(r"\b(audit|compliance|certification|regulatory|data breach|adverse event|finding|"
+                               r"\bbaa\b|business associate agreement)\b", re.I)),
     ("relationship", re.compile(r"\b(introduc|handoff|thank you|business continuity|general correspondence|check[\s-]?in)\b", re.I)),
+    # Added 2026-07-29 - real recurring patterns found in the "other" bucket during
+    # backlog profiling, not guessed: "IT Savings 2026", "Savings Projects- 2026".
+    # A plain \bsavings\b (not e.g. "savings project", which fails to match
+    # "Savings Projects" - "project"+"s" has no word boundary between them)
+    # is what actually matches both real subjects.
+    ("savings", re.compile(r"\b(savings|cost saving|cost reduction)\b", re.I)),
 ]
 
 # --- item_class cues (new — not in the reference file, which classifies
@@ -117,6 +124,7 @@ _SIGNAL_TYPE_TOPIC = {
     "signature_fully_executed": "contract", "signature_cc_notice": "contract",
     "signature_completed_docusign": "contract", "signature_requested_docusign": "contract",
     "contractpodai_obligations_update": "contract", "contractpodai_contract_request_submitted": "contract",
+    "concur_expense_reminder": "expense",
 }
 
 _RE_PREFIX = re.compile(r"^\s*(re|fwd?|fw)\s*:\s*", re.I)
@@ -419,58 +427,61 @@ def cluster_and_link(limit: int = 500) -> dict:
             "parties": party_result, "projects": project_result}
 
 
-def backfill_reclassify_signals() -> dict:
-    """One-time (or on-demand) repair pass: re-check every ALREADY-classified
-    raw_item against workgraph_signals.classify_signal, and update
-    item_class/topic/signal_type/pr_number ONLY for the ones that now match a
-    known signal template that didn't exist (or wasn't wired in) when they
-    were first classified - e.g. the Ariba/Adobe Sign/DocuSign/ContractPodAI
-    rules added 2026-07-29. Deliberately narrow: an item that matches no
-    signal is left completely untouched, so this can never reshuffle
-    classification for anything outside the specific gap it's meant to close.
-    Confirmed live 2026-07-29: 151 of 1051 already-classified raw_items had a
-    topic that would change, 54 of them on issues sitting in category='other'
-    - this is what actually closes that gap for the existing backlog, not
-    just future mail, without Marc reclassifying anything by hand."""
+def backfill_reclassify() -> dict:
+    """One-time (or on-demand) repair pass: re-run the FULL classify_item()
+    (signal templates AND the generic TOPIC_RULES scan - not just signals)
+    against every ALREADY-classified raw_item, and update item_class/topic/
+    signal_type/pr_number wherever the result now differs from what's stored.
+
+    This is safe because classify_item is pure and deterministic: given the
+    same subject/body/sender, it returns the SAME result every time unless
+    the ruleset itself (TOPIC_RULES or workgraph_signals._RULES) changed
+    since the item was last classified. So any difference found here is a
+    genuine ruleset improvement being applied retroactively, never a random
+    re-guess - e.g. the 2026-07-29 additions (Ariba/Adobe Sign/DocuSign/
+    ContractPodAI signals, the BAA keyword, the new 'savings'/'expense'
+    categories) all only take effect for NEW mail otherwise; this is what
+    closes that gap for the existing backlog too, without Marc reclassifying
+    anything by hand. First run (signals only) moved 54 issues out of
+    'other'; the categories_updated/updated counts below are THIS run's own.
+
+    The issue's own `category` (set once at creation - see cluster_and_link -
+    never auto-recomputed since) is only ever corrected when it's still
+    sitting at 'other', the classifier's own lowest-confidence default -
+    never a category a human or something else already assigned on purpose."""
     rows = ws.get_all_classified_raw_items()
     updated = 0
     touched_issues = set()
-    # issue_id -> the first signal-derived topic seen among its items, so the
-    # issue's OWN category (set once at creation time - see cluster_and_link -
-    # and never auto-recomputed from raw_items.topic since) can be corrected
-    # too. Only ever overwrites an issue currently sitting at 'other' - the
-    # lowest-confidence default - never a category someone/something else
-    # already assigned deliberately.
-    issue_signal_topic: dict[str, str] = {}
+    issue_new_topic: dict[str, str] = {}
 
     for item in rows:
-        signal = workgraph_signals.classify_signal(
-            subject=item.get("subject") or "", from_actor=item.get("from_actor") or "",
+        result = classify_item(
+            subject=item.get("subject") or "", body_preview=item.get("body_preview") or "",
+            from_actor=item.get("from_actor") or "",
         )
-        if signal is None:
-            continue
-        new_topic = _SIGNAL_TYPE_TOPIC.get(signal["signal_type"], item.get("topic"))
-        new_class = _SIGNAL_TREATMENT_TO_ITEM_CLASS[signal["treatment"]]
-        if item.get("issue_id") and new_topic and item["issue_id"] not in issue_signal_topic:
-            issue_signal_topic[item["issue_id"]] = new_topic
-        if new_topic == item.get("topic") and new_class == item.get("item_class") and item.get("signal_type") == signal["signal_type"]:
+        if (result["topic"] == item.get("topic") and result["item_class"] == item.get("item_class")
+                and result["signal_type"] == item.get("signal_type")):
             continue  # already correct - nothing to update
+
+        if item.get("issue_id") and result["topic"] and item["issue_id"] not in issue_new_topic:
+            issue_new_topic[item["issue_id"]] = result["topic"]
+
         ws.classify_raw_item(
-            item["id"], item_class=new_class,
+            item["id"], item_class=result["item_class"],
             direction=item["direction"], direction_inferred=bool(item["direction_inferred"]),
-            topic=new_topic, topic_inferred=False,
+            topic=result["topic"], topic_inferred=result["topic_inferred"],
             sentiment=item["sentiment"], sentiment_inferred=bool(item["sentiment_inferred"]),
             anomaly_flag=bool(item["anomaly_flag"]),
-            signal_type=signal["signal_type"], pr_number=signal["pr_number"],
+            signal_type=result["signal_type"], pr_number=result["pr_number"],
         )
         updated += 1
         if item.get("issue_id"):
             touched_issues.add(item["issue_id"])
 
     categories_updated = 0
-    for issue_id, new_category in issue_signal_topic.items():
+    for issue_id, new_category in issue_new_topic.items():
         issue = ws.get_issue(issue_id)
-        if issue and issue.get("category") == "other":
+        if issue and issue.get("category") == "other" and new_category != "other":
             ws.update_issue(issue_id, category=new_category)
             touched_issues.add(issue_id)
             categories_updated += 1

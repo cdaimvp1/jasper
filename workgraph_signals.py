@@ -84,6 +84,9 @@ _RULES: list[tuple[str, Optional[str], "re.Pattern[str]", str]] = [
 
     ("intake_new_project_assigned", None,
      re.compile(r"Intake PowerApp - New Project Submitted", re.I), "fyi"),
+
+    ("concur_expense_reminder", "concursolutions.com",
+     re.compile(r"^Action Required:\s*Unapplied credit card transactions", re.I), "actionable"),
 ]
 
 

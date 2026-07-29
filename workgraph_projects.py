@@ -109,6 +109,16 @@ def _has_external_party(issue_id: str) -> bool:
     return any(p.get("affiliation") == "external" for p in ws.list_parties_for_issue(issue_id))
 
 
+def _external_companies_for_issue(issue_id: str) -> set:
+    """Every identifiable external company on this issue's parties, lowercased.
+    Used by _shared_topic_key to veto a boilerplate-phrase match - see there."""
+    return {
+        p["company"].lower() for p in ws.list_parties_for_issue(issue_id)
+        if p.get("affiliation") == "external" and p.get("company")
+        and not _SYSTEM_SENDER.match(p.get("primary_email") or "")
+    }
+
+
 def _shared_topic_key(issue: dict):
     """Two issues whose normalized subjects share a long contiguous run are
     almost always the same underlying thread split across channels or
@@ -133,6 +143,16 @@ def _shared_topic_key(issue: dict):
     key = ws.normalize_topic_key(issue.get("title") or "")
     if len(key) < MIN_TOPIC_KEY_LEN:
         return None
+    # Fixed 2026-07-29: confirmed false-positive - two issues about
+    # VERIFIABLY DIFFERENT companies (e.g. procurement-template boilerplate:
+    # "please review and approve the attached statement of work for [X]")
+    # were still merging on shared boilerplate phrasing alone, exactly the
+    # domain most prone to it. If this issue has an identifiable company,
+    # a candidate whose OWN identifiable company set is non-empty and
+    # disjoint from it is positively contradicting evidence, not just an
+    # absence of confirming evidence - veto the match rather than let a
+    # long shared phrase override it.
+    my_companies = _external_companies_for_issue(issue["id"])
     for other in ws.list_issues():
         if other["id"] == issue["id"]:
             continue
@@ -144,8 +164,12 @@ def _shared_topic_key(issue: dict):
         if len(other_key) < MIN_TOPIC_KEY_LEN:
             continue
         match = SequenceMatcher(None, key, other_key).find_longest_match(0, len(key), 0, len(other_key))
-        if match.size >= MIN_TOPIC_KEY_LEN:
-            return other["id"]
+        if match.size < MIN_TOPIC_KEY_LEN:
+            continue
+        other_companies = _external_companies_for_issue(other["id"])
+        if my_companies and other_companies and my_companies.isdisjoint(other_companies):
+            continue  # known different suppliers - a shared template phrase doesn't override that
+        return other["id"]
     return None
 
 

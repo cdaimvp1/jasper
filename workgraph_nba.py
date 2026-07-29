@@ -52,7 +52,25 @@ DAY = 86400.0
 
 DEFAULT_WEIGHTS = {"is_your_step": 0.45, "staleness": 0.25, "due": 0.12, "value": 0.18}
 
-_DOLLAR_RE = re.compile(r"\$\s?([\d,]+(?:\.\d+)?)\s*(million|mm|m|thousand|k)?\b", re.IGNORECASE)
+# Fixed 2026-07-29: two confirmed gaps beyond the module's own disclosed
+# "an unrelated figure gets picked up too" limitation. (1) "billion"/"bn"/"b"
+# weren't recognized suffixes at all - "$1.2 billion" extracted as a raw 1.2,
+# scoring as if it were a $1.20 deal instead of saturating the value term the
+# way a genuinely billion-scale figure should. (2) a range like "$2.5-3
+# million" truncated to the FIRST number only, with the suffix never applied
+# to it either ("$2.5" raw, below _VALUE_FLOOR, so a multi-million-dollar
+# range's real scale was silently discarded). The regex now captures an
+# optional second number after a hyphen, and the suffix multiplier is
+# applied to BOTH sides of a range - "best" (the higher of the two, per this
+# function's own MAX-figure theory) is what gets kept.
+_DOLLAR_RE = re.compile(
+    r"\$\s?([\d,]+(?:\.\d+)?)(?:\s*-\s*([\d,]+(?:\.\d+)?))?\s*(million|mm|billion|bn|thousand|k|m|b)?\b",
+    re.IGNORECASE)
+_DOLLAR_SUFFIX_MULTIPLIER = {
+    "million": 1_000_000, "mm": 1_000_000, "m": 1_000_000,
+    "billion": 1_000_000_000, "bn": 1_000_000_000, "b": 1_000_000_000,
+    "thousand": 1_000, "k": 1_000,
+}
 _VALUE_FLOOR = 1_000.0       # below this, don't treat it as a deal-value signal at all
 _VALUE_LOG_LOW = 3.0         # log10(1,000)
 _VALUE_LOG_SPAN = 5.0        # log10(100,000,000) - log10(1,000)
@@ -69,13 +87,12 @@ def _extract_value_amount(issue_id: str) -> float:
     for item in ws.get_raw_items_for_issue(issue_id):
         text = " ".join(filter(None, [item.get("subject"), item.get("body_preview")]))
         for match in _DOLLAR_RE.finditer(text):
-            amount = float(match.group(1).replace(",", ""))
-            suffix = (match.group(2) or "").lower()
-            if suffix in ("million", "mm", "m"):
-                amount *= 1_000_000
-            elif suffix in ("thousand", "k"):
-                amount *= 1_000
-            best = max(best, amount)
+            suffix = (match.group(3) or "").lower()
+            multiplier = _DOLLAR_SUFFIX_MULTIPLIER.get(suffix, 1)
+            for group in (match.group(1), match.group(2)):
+                if group is None:
+                    continue
+                best = max(best, float(group.replace(",", "")) * multiplier)
     return best
 
 
@@ -99,7 +116,16 @@ def _due_urgency(due_iso: str | None, now: float) -> float:
         return 0.0
     try:
         import datetime
-        due_ts = datetime.datetime.fromisoformat(due_iso.replace("Z", "+00:00")).timestamp()
+        due_dt = datetime.datetime.fromisoformat(due_iso.replace("Z", "+00:00"))
+        # Fixed 2026-07-29: a due date with no explicit timezone (a bare
+        # "2026-08-01" from a date picker - the realistic common case)
+        # parses as a NAIVE datetime, and .timestamp() on a naive datetime
+        # assumes LOCAL time - while `now` is a UTC epoch from time.time().
+        # Measured 4h drift on this machine (US Eastern). Explicit UTC
+        # attachment removes the ambient-timezone dependency entirely.
+        if due_dt.tzinfo is None:
+            due_dt = due_dt.replace(tzinfo=datetime.timezone.utc)
+        due_ts = due_dt.timestamp()
     except Exception:
         return 0.0
     days_until = (due_ts - now) / DAY

@@ -171,7 +171,18 @@ def list_stale_entities(limit: int = DEFAULT_SYNTHESIS_LIMIT, *, stats: Optional
     # Rank: never-synthesized (previous_marker is None) first, then
     # oldest-marker first, so a big backlog doesn't starve entities that
     # have been waiting longest.
-    stale.sort(key=lambda s: (s["previous_marker"] is not None, s["previous_marker"] or ""))
+    #
+    # Fixed 2026-07-29: this used to sort on the raw marker STRING
+    # ("count:N|max_ts:T"), not by time - since `count` sits before `max_ts`
+    # in the string and digit-length varies, lexicographic comparison was
+    # dominated by the count field. Confirmed: "count:12|..." (fresher, more
+    # evidence) sorted BEFORE "count:3|..." (genuinely staler) because "1"
+    # lexicographically precedes "3". Given DEFAULT_SYNTHESIS_LIMIT truncates
+    # this list, that could bump genuinely long-neglected entities out of
+    # curator's work queue in favor of fresher ones - the opposite of the
+    # anti-starvation guarantee this sort exists for. _parse_max_ts already
+    # existed for exactly this - just wasn't being used here.
+    stale.sort(key=lambda s: (s["previous_marker"] is not None, _parse_max_ts(s["previous_marker"])))
 
     if stats is not None:
         stats["skipped_immaterial"] = skipped_immaterial

@@ -9,9 +9,41 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+
+def _require_env_path(var_name: str) -> Path:
+    """No silent (or even warned-but-still-working) fallback - REQUIRED.
+    Confirmed 2026-07-29: a soft fallback to a local default (even with a
+    warning printed) still means the process runs "successfully" against a
+    plausible-looking but WRONG path unless a human notices the warning in
+    the middle of other output. Checked every real invocation path in this
+    repo before removing the fallback entirely: the Scheduled Task, the
+    server's own launch chain, and every scheduled_refresh.py subprocess
+    spawn all already set this explicitly; every test script in this repo
+    bypasses paths.py entirely (reassigns workgraph_store.WORKGRAPH_DB
+    directly). Nothing legitimate relies on this working unset - the only
+    thing that ever hit the old fallback was a one-off script run without
+    the right environment, which is exactly the mistake this exists to make
+    impossible now instead of merely visible."""
+    val = os.environ.get(var_name)
+    if not val:
+        raise RuntimeError(
+            f"{var_name} is not set. Refusing to guess a data/config location - "
+            f"source symphony_env.ps1/.sh first (or set {var_name} explicitly) "
+            f"before running anything that touches this repo's real data."
+        )
+    return Path(val)
+
+
 # --- repo + data roots -----------------------------------------------------
 HERE = Path(__file__).parent
-DATA_DIR = Path(os.environ.get("TEAM_DATA_DIR", str(HERE / "data")))
+DATA_DIR = _require_env_path("TEAM_DATA_DIR")
+# CONFIG_DIR does NOT get the hard-require treatment: unlike TEAM_DATA_DIR,
+# TEAM_CONFIG_DIR is never actually set anywhere in the real launch chain
+# (checked symphony_env.ps1/.sh, scheduled_refresh.py - zero references), and
+# there's no evidence of a second, divergent config/ copy the way body/data
+# had - the real server has always run correctly on this same fallback.
+# Requiring it broke the live server on restart (confirmed 2026-07-29) for
+# no real safety gain - reverted to the soft default.
 CONFIG_DIR = Path(os.environ.get("TEAM_CONFIG_DIR", str(HERE / "config")))
 
 # Substrate databases — single SQLite file per concern, all WAL.

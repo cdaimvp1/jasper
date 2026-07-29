@@ -1,6 +1,7 @@
 # Symphony machine env (source before launch: . symphony_env.sh)
 export TEAM_WORKSPACE_ROOT="C:\Users\lane_marc@lilly.com\Symphony\workspace"
 export TEAM_HOME="C:\Users\lane_marc@lilly.com\Symphony\body"
+export TEAM_CONFIG_DIR="C:\Users\lane_marc@lilly.com\Symphony\body\config"
 export SYMPHONY_INSTALL_ROOT="C:\Users\lane_marc@lilly.com\Symphony"
 export TEAM_SCRIPTS_ROOT="C:\Users\lane_marc@lilly.com\Symphony\body/setup"
 export SYMPHONY_BODY_SOURCE="None"

@@ -1,6 +1,7 @@
 # Symphony machine env (dot-source before launch: . .\symphony_env.ps1)
 $env:TEAM_WORKSPACE_ROOT="C:\Users\lane_marc@lilly.com\Symphony\workspace"
 $env:TEAM_HOME="C:\Users\lane_marc@lilly.com\Symphony\body"
+$env:TEAM_CONFIG_DIR="C:\Users\lane_marc@lilly.com\Symphony\body\config"
 $env:SYMPHONY_INSTALL_ROOT="C:\Users\lane_marc@lilly.com\Symphony"
 $env:TEAM_SCRIPTS_ROOT="C:\Users\lane_marc@lilly.com\Symphony\body/setup"
 $env:SYMPHONY_BODY_SOURCE="None"

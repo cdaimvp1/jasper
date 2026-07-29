@@ -1319,9 +1319,18 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sender: managerId, body }),
       });
+      // Fixed 2026-07-29: clearing used to happen AFTER r.json() - a
+      // malformed-but-200 response threw before that line ran, leaving the
+      // just-sent text sitting in the box and inviting an accidental
+      // duplicate resend on retry. Clearing right after the fetch resolves
+      // (the POST reached the server) rather than after successfully
+      // parsing its response fixes that; a genuine network failure (fetch()
+      // itself rejecting) still skips this line entirely via the outer
+      // catch, correctly keeping the text since the message likely never
+      // reached the server at all.
+      document.getElementById("tr-body").value = "";
       const d = await r.json();
       sendFb.textContent = d.ok ? "sent" : "failed";
-      document.getElementById("tr-body").value = "";
       stickToBottom = true;
       seenAt = new Date().toISOString();
       lsSet(SEEN_KEY, seenAt);

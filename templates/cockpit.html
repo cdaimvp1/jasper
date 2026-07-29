@@ -7586,8 +7586,22 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
     // open states - otherwise it's just another filter wearing an "All" label,
     // which is exactly what Marc called out (106 of 112 real issues are "done",
     // so restricting to open states hid almost everything from "All").
-    const r = await fetch("/api/workgraph/issues?state=active,waiting,blocked,done,noise-archived&limit=500", { cache: "no-store" });
-    const d = await r.json();
+    //
+    // Fixed 2026-07-29: this had no error handling at all - a failed/malformed
+    // response threw straight out of this function, which (at the init call
+    // site) happens BEFORE setInterval(pccLoadIssues, 20000) ever runs, so one
+    // bad response permanently killed polling with the board silently stuck,
+    // not just that one refresh. Never throws now; on failure it logs and
+    // leaves whatever was already rendered alone rather than wiping it.
+    let d;
+    try {
+      const r = await fetch("/api/workgraph/issues?state=active,waiting,blocked,done,noise-archived&limit=500", { cache: "no-store" });
+      if (!r.ok) throw new Error(`issues fetch failed: ${r.status}`);
+      d = await r.json();
+    } catch (e) {
+      console.error("pccLoadIssues failed, keeping previous state:", e);
+      return;
+    }
     pccIssues = d.issues || [];
     // Meetings/Comms are derived from real evidence types (calendar vs email/teams),
     // not a first-class issue category the API exposes — so we prefetch detail for
@@ -8308,9 +8322,23 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
   }
 
   async function loadWorkers() {
-    const r = await fetch("/api/workers/status", { cache: "no-store" });
-    const d = await r.json();
-    workers = d.workers || [];
+    // Fixed 2026-07-29: had no error handling at all - one failed/malformed
+    // response threw straight out, and since this is called with `await`
+    // (not in a try/catch) at chat-panel init, that meant loadAll() never
+    // ran and setInterval(loadAll, 8000) never got set up - the whole "Back
+    // Office" chat panel never loaded a single message and never started
+    // polling for the rest of the page session, recoverable only by a hard
+    // reload. Never throws now; on failure it logs and leaves whatever
+    // worker list already existed alone.
+    try {
+      const r = await fetch("/api/workers/status", { cache: "no-store" });
+      if (!r.ok) throw new Error(`workers/status fetch failed: ${r.status}`);
+      const d = await r.json();
+      workers = d.workers || [];
+    } catch (e) {
+      console.error("loadWorkers failed, keeping previous state:", e);
+      return;
+    }
     namesBySlug = {}; slugByLowerName = {};
     namesBySlug.socrates = "Socrates";
     workers.forEach(w => {

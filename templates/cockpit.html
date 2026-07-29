@@ -2484,7 +2484,10 @@
 (function(){
   if(window.renderProvenance) return;   // idempotent
 
-  function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,function(c){return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c];}); }
+  // Fixed 2026-07-29: was missing ' -> &#39;, unlike every other esc() in this file -
+  // any single-quoted attribute this renderer's output landed in (e.g. onclick='...')
+  // could be broken out of by a company/supplier name containing an apostrophe.
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c];}); }
 
   /* safeHref, only http(s); everything else is refused (returns ''). */
   function safeHref(u){
@@ -4598,18 +4601,22 @@ function ensureTip(){
  return t;
 }
 const STATUS_WORD={done:'Done',inprog:'In progress',blocked:'Blocked / at risk',proj:'Projected'};
+// Hardcoded demo data today (TLPROJ above), but gate/project/wait-on names are exactly
+// the kind of field a live backend fills from real project/supplier data later - escape
+// now so this doesn't go live already-vulnerable (fixed 2026-07-29).
+function tlEsc(s){return (window.LillyAPI&&LillyAPI.esc)?LillyAPI.esc(s):String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);}
 function showTip(node,tip){
  const data=JSON.parse(decodeURIComponent(node.dataset.tip));
  const dt=d(data.date);
  const dateTxt=dlabel(dt)+', '+dt.getFullYear();
  const future=data.status==='proj';
- let body=`<div class="tt">${data.g}</div><div class="tp">${data.pname||data.pn} · ${data.pid}</div>`;
+ let body=`<div class="tt">${tlEsc(data.g)}</div><div class="tp">${tlEsc(data.pname||data.pn)} · ${tlEsc(data.pid)}</div>`;
  body+=`<div class="tstat ${data.status}"><span class="d"></span>${STATUS_WORD[data.status]}</div>`;
  if(data.wait){
-  body+=`<div class="twait"><span class="lab">${data.status==='blocked'?'Holding everything up':'Waiting on'}</span><b>${data.wait.who}</b>, ${data.wait.what}</div>`;
+  body+=`<div class="twait"><span class="lab">${data.status==='blocked'?'Holding everything up':'Waiting on'}</span><b>${tlEsc(data.wait.who)}</b>, ${tlEsc(data.wait.what)}</div>`;
  }
  if(future && data.basis){
-  body+=`<div class="twait"><span class="lab">Projection basis</span>${data.basis}</div>`;
+  body+=`<div class="twait"><span class="lab">Projection basis</span>${tlEsc(data.basis)}</div>`;
  }
  body+=`<div class="tdate">${future?'Projected ':'Closed '}${dateTxt}</div>`;
  tip.innerHTML=body;
@@ -5877,8 +5884,11 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
   function mqDetail(t){if(!t.wg&&!t.chain)return '';var WS={done:'done',wait:'waiting',open:'your step',blocked:'blocked'};
    var tk='',ev='';
    if(t.wg){
-    tk='<div class="wghd">Tasks</div>'+t.wg.tasks.map(function(x){return '<div class="wgt '+x[1]+'"><span class="wgdot"></span><span class="wgl">'+x[0]+'</span><span class="wgo">'+x[2]+'</span><span class="wgst">'+(WS[x[1]]||x[1])+'</span></div>';}).join('');
-    ev='<div class="wghd">Why this state, evidence</div>'+t.wg.ev.map(function(x){return '<div class="wgev"><span class="wgsrc">'+x[0]+'</span><span class="wgsum">'+x[1]+'</span><span class="inf '+x[2]+'">'+(x[2]==='auto'?'auto':'confirm?')+'</span></div>';}).join('');
+    // x[1] (state key: done/wait/open/blocked) is an internal enum, safe as a class name;
+    // x[0]/x[2] (task label, owner) and ev's x[0]/x[1] (source, summary) trace back to real
+    // email/contract content and must be escaped before landing in innerHTML (fixed 2026-07-29).
+    tk='<div class="wghd">Tasks</div>'+t.wg.tasks.map(function(x){return '<div class="wgt '+x[1]+'"><span class="wgdot"></span><span class="wgl">'+mqEscL(x[0])+'</span><span class="wgo">'+mqEscL(x[2])+'</span><span class="wgst">'+(WS[x[1]]||x[1])+'</span></div>';}).join('');
+    ev='<div class="wghd">Why this state, evidence</div>'+t.wg.ev.map(function(x){return '<div class="wgev"><span class="wgsrc">'+mqEscL(x[0])+'</span><span class="wgsum">'+mqEscL(x[1])+'</span><span class="inf '+x[2]+'">'+(x[2]==='auto'?'auto':'confirm?')+'</span></div>';}).join('');
    }
    return '<div class="mqdetail" id="wg-'+t.id+'">'+tk+ev+mqApprovalChain(t)+'</div>';}
   var MQ_UP=[
@@ -5976,10 +5986,10 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
   function mqWageCls(w){return (w.overdue||w.staleDays>=7)?'old':(w.staleDays>=3?'mid':'fresh');}
   function mqWaitRow(w){
    var od=!!w.overdue,cls=mqWageCls(w),proj=w.projId||w.projLabel||'';
-   var meta='waiting on <b>'+w.owner+'</b>'+(w.projLabel?' · '+w.projLabel:'')+(w.projId?' <span class="pid">'+w.projId+'</span>':'');
+   var meta='waiting on <b>'+mqEscL(w.owner)+'</b>'+(w.projLabel?' · '+mqEscL(w.projLabel):'')+(w.projId?' <span class="pid">'+mqEscL(w.projId)+'</span>':'');
    return '<div class="mqwrow">'+
     '<div class="mqwic '+(od?'block':'wait')+'">'+(od?MQ_SVG_ALERT:MQ_SVG_CLOCK)+'</div>'+
-    '<div class="mqwmid"><div class="mqwt" title="'+mqAttr(w.label)+'">'+w.label+'</div><div class="mqwmeta">'+meta+'</div></div>'+
+    '<div class="mqwmid"><div class="mqwt" title="'+mqAttr(w.label)+'">'+mqEscL(w.label)+'</div><div class="mqwmeta">'+meta+'</div></div>'+
     '<div class="mqwend"><span class="mqwage '+cls+'">'+w.staleDays+'d<small>'+(od?'overdue':'idle')+'</small></span>'+
     '<button class="mqwnudge" onclick="mqNudge(event,\''+mqJs(w.owner)+'\',\''+mqJs(proj)+'\')">Nudge</button></div>'+
    '</div>';
@@ -6179,11 +6189,11 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
   // --- ROW (replaces mqCard) ---
   function mqRow(t,up){
    var k=MQ_KIND[t.k]||['•','mut'];
-   var rec=t.rec?('<div class="mqrec"><span class="sp">✦</span><span>'+t.rec+'</span></div>'):'';
+   var rec=t.rec?('<div class="mqrec"><span class="sp">✦</span><span>'+mqEscL(t.rec)+'</span></div>'):'';
    if(up){
     return '<div class="mqrow up"><div class="mqic '+k[1]+'">'+k[0]+'</div>'+
-     '<div class="mqcontent"><div class="mqndline"><span class="mqnd" title="'+mqAttr(t.nd)+'">'+t.nd+'</span></div>'+
-     '<div class="mqpj">'+t.pj+'</div>'+rec+'</div></div>';   // coming-up: no action cluster
+     '<div class="mqcontent"><div class="mqndline"><span class="mqnd" title="'+mqAttr(t.nd)+'">'+mqEscL(t.nd)+'</span></div>'+
+     '<div class="mqpj">'+mqEscL(t.pj)+'</div>'+rec+'</div></div>';   // coming-up: no action cluster
    }
    var tag=t.tag?('<span class="mqtag '+mqTagCls(t.tag[0])+'">'+t.tag[1]+'</span>'):'';
    var icons=mq365(t);
@@ -6215,8 +6225,8 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
    // and moves it to Done & dismissed. Class kept so the hover-reveal styling still applies.
    var dismiss='<button class="mqdismiss" onclick="mqDismiss(event,'+"'"+t.id+"'"+')" title="Dismiss" aria-label="Dismiss this task">'+MQ_SVG_X+'</button>';
    return '<div class="mqrow"><div class="mqic '+k[1]+'">'+k[0]+'</div>'+
-    '<div class="mqcontent"><div class="mqndline"><span class="mqnd" title="'+mqAttr(t.nd)+'">'+t.nd+'</span>'+tag+'</div>'+
-    '<div class="mqpj">'+t.pj+'</div>'+rec+mqWhy(t)+mqLearn(t)+exp+mqDetail(t)+'</div>'+
+    '<div class="mqcontent"><div class="mqndline"><span class="mqnd" title="'+mqAttr(t.nd)+'">'+mqEscL(t.nd)+'</span>'+tag+'</div>'+
+    '<div class="mqpj">'+mqEscL(t.pj)+'</div>'+rec+mqWhy(t)+mqLearn(t)+exp+mqDetail(t)+'</div>'+
     '<div class="mqacts"><div class="mqm365">'+iconHtml+'</div>'+primary+dismiss+kebab+'</div></div>';
   }
   // --- CLOSED ROW (Done & dismissed view): labels done vs dismissed + Recall ---
@@ -6225,9 +6235,9 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
    var st=mqStateOf(t);
    var lbl=st==='done'?'Done':'Dismissed';
    return '<div class="mqrow closed"><div class="mqic '+k[1]+'">'+k[0]+'</div>'+
-    '<div class="mqcontent"><div class="mqndline"><span class="mqnd" title="'+mqAttr(t.nd)+'">'+t.nd+'</span>'+
+    '<div class="mqcontent"><div class="mqndline"><span class="mqnd" title="'+mqAttr(t.nd)+'">'+mqEscL(t.nd)+'</span>'+
     '<span class="mqstate '+st+'">'+lbl+'</span></div>'+
-    '<div class="mqpj">'+t.pj+'</div></div>'+
+    '<div class="mqpj">'+mqEscL(t.pj)+'</div></div>'+
     '<div class="mqacts"><button class="mqb ghost mqrecall" onclick="mqRecall(event,'+"'"+t.id+"'"+')" aria-label="Recall this task to Open">Recall</button></div></div>';
   }
   // --- search / filter / sort: applied to the OPEN view's task list ------------
@@ -6252,7 +6262,7 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
    pool.forEach(function(t){if(t.k)kinds[t.k]=true;if(t.pj)projs[t.pj]=true;});
    var KLABEL={chase:'Chase',answer:'Answer',decide:'Decide',approve:'Approve',sign:'Sign',risk:'Risk',deleg:'Delegation',ooo:'Calendar',prep:'Meeting prep',role:'Role change',leaver:'Departure',rfp:'RFP',info:'Info'};
    var kOpts='<option value="">Any kind</option>'+Object.keys(kinds).sort().map(function(x){return '<option value="'+mqAttr(x)+'"'+(MQ_FKIND===x?' selected':'')+'>'+(KLABEL[x]||x)+'</option>';}).join('');
-   var pOpts='<option value="">Any project</option>'+Object.keys(projs).sort().map(function(x){return '<option value="'+mqAttr(x)+'"'+(MQ_FPROJ===x?' selected':'')+'>'+x+'</option>';}).join('');
+   var pOpts='<option value="">Any project</option>'+Object.keys(projs).sort().map(function(x){return '<option value="'+mqAttr(x)+'"'+(MQ_FPROJ===x?' selected':'')+'>'+mqEscL(x)+'</option>';}).join('');
    var sOpts=[['priority','Priority'],['due','Due date'],['value','Value']].map(function(o){return '<option value="'+o[0]+'"'+(MQ_SORT===o[0]?' selected':'')+'>'+o[1]+'</option>';}).join('');
    return '<div class="mqtools" role="search">'+
      '<div class="mqsearch"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>'+

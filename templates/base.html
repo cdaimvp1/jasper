@@ -100,6 +100,14 @@
     // cohort (nothing to hide); populated only if a cohort explicitly marks a worker inactive.
     const DM_INACTIVE = new Set();  // no hardcoded dev workers — a cohort hides nothing by default (Mira C1)
 
+    // worker_name/worker_id/last-DM-body all come from other workers' DMs, not
+    // just Marc — treat as untrusted before it lands in innerHTML (fixed 2026-07-29).
+    function escHtml(s) {
+      return String(s).replace(/[&<>"']/g, ch => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+      }[ch]));
+    }
+
     function render() {
       if (!lastChannels.length) {
         menu.innerHTML = '<div style="padding:14px;color:#777;font-size:13px">No DM activity.</div>';
@@ -110,13 +118,14 @@
         .sort((a, b) => (b.unread || 0) - (a.unread || 0))
         .map(c => {
           const wid = c.worker_id;
-          const name = c.worker_name || wid;
+          const name = escHtml(c.worker_name || wid);
+          const hrefWid = encodeURIComponent(wid);
           const unread = c.unread || 0;
           const last = c.last_dm || {};
-          const snippet = (last.body || "(no recent DMs)").replace(/[<>]/g, "").slice(0, 90);
+          const snippet = escHtml((last.body || "(no recent DMs)").slice(0, 90));
           const ts = last.ts ? new Date(last.ts).toLocaleString([], {month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}) : "";
           const badge = unread > 0 ? `<span style="background:#e53935;color:#fff;border-radius:9px;padding:1px 7px;font-size:11px;font-weight:700">${unread}</span>` : '';
-          return `<a href="/chat/${wid}" target="_blank" rel="noopener" style="display:flex;gap:10px;padding:10px;border-radius:6px;text-decoration:none;color:inherit;border-bottom:1px solid var(--border,#eee)" onmouseover="this.style.background='var(--row-hover,#f5f5f5)'" onmouseout="this.style.background='transparent'">
+          return `<a href="/chat/${hrefWid}" target="_blank" rel="noopener" style="display:flex;gap:10px;padding:10px;border-radius:6px;text-decoration:none;color:inherit;border-bottom:1px solid var(--border,#eee)" onmouseover="this.style.background='var(--row-hover,#f5f5f5)'" onmouseout="this.style.background='transparent'">
             <div style="flex:1;min-width:0">
               <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline"><strong style="font-size:13px">${name}</strong><span style="font-size:11px;color:#888">${ts}</span></div>
               <div style="font-size:12px;color:#666;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px">${snippet}</div>

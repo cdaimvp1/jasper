@@ -20,6 +20,7 @@ Future kinds: SlackUserMember, GithubBotMember, etc. — same interface.
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
 from pathlib import Path
@@ -46,8 +47,11 @@ def _load() -> list[dict[str, Any]]:
         data = json.loads(MEMBERS_PATH.read_text(encoding="utf-8"))
         _cache = data.get("members", [])
         _cache_mtime = m
-    except Exception:
-        pass
+    except Exception as e:
+        # Same gap as config.py's _load (fixed alongside it, 2026-07-29): a bad
+        # members.json used to silently keep serving the stale roster forever,
+        # with nothing anywhere indicating the file on disk had gone bad.
+        print(f"[members] failed to parse {MEMBERS_PATH}: {e!r} - using last-known-good cache", file=sys.stderr)
     return _cache or []
 
 
@@ -116,9 +120,17 @@ def member_state(member_id: str) -> dict[str, Any]:
         "kind": m.get("kind"),
     }
 
-    # active_file mtime
-    active_path = WORKSPACE_ROOT / m.get("active_file", "")
-    if active_path.is_file():
+    # active_file mtime. active_file is roster config data (config/members.json),
+    # not raw HTTP input, but a bad/malicious entry ("../../../../some/file") would
+    # otherwise let member_state() read and excerpt anything reachable from
+    # WORKSPACE_ROOT via traversal or an absolute-path override - same class of bug
+    # fixed in inbox.py's _safe_member_path this session. Resolve and confirm the
+    # path is still inside WORKSPACE_ROOT before touching it; skip (don't crash the
+    # whole roster/status view over one bad entry) if not.
+    active_path = (WORKSPACE_ROOT / m.get("active_file", "")).resolve()
+    if not active_path.is_relative_to(WORKSPACE_ROOT.resolve()):
+        active_path = None
+    if active_path is not None and active_path.is_file():
         try:
             mt = active_path.stat().st_mtime
             state["active_md_mtime"] = mt

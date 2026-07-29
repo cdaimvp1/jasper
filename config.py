@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 import time
 from pathlib import Path
@@ -47,8 +48,13 @@ def _load() -> dict[str, Any]:
     try:
         _cache = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
         _cache_mtime = m
-    except Exception:
-        pass
+    except Exception as e:
+        # Was a bare `pass` - a malformed settings.json (bad hand-edit, or a write
+        # caught mid-flight before write_json_atomic existed) silently kept serving
+        # the last-known-good _cache forever with zero signal that the file on disk
+        # had gone bad. Surfaced to stderr now; still falls back to _cache, since a
+        # config read must never crash a live server over a bad file (fixed 2026-07-29).
+        print(f"[config] failed to parse {SETTINGS_PATH}: {e!r} - using last-known-good cache", file=sys.stderr)
     return _cache or {}
 
 

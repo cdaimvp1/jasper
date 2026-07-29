@@ -86,20 +86,25 @@ def _find_target_member(text: str, exclude: Optional[str] = None) -> Optional[st
     lower = text.lower()
     short_map = members_mod.short_to_slug()  # {'ab': 'aria_builder', ...}
 
-    # @-mentions are most explicit
+    # @-mentions are most explicit. re.escape(short): short is roster config
+    # (config/members.json), not literal-regex-safe by construction - a short code
+    # containing a regex metachar (".", "+", parens, ...) would otherwise either
+    # silently over/under-match or throw re.error, same class of gap already
+    # avoided for mgr_id below (fixed 2026-07-29).
     for short, slug in short_map.items():
         if slug == exclude: continue
-        if re.search(rf"@{short}\b", lower): return slug
+        if re.search(rf"@{re.escape(short)}\b", lower): return slug
 
     # Address patterns
     for short, slug in short_map.items():
         if slug == exclude: continue
+        esc_short = re.escape(short)
         patterns = [
-            rf"\b(ask|tell|ping|notify|hand off to|loop in|cc) {short}\b",
-            rf"\b{short}: ",
-            rf"\b{short},\s+",
-            rf"\b{short} (will|can|should|needs to|please|owns)",
-            rf"\bfor {short}\b",
+            rf"\b(ask|tell|ping|notify|hand off to|loop in|cc) {esc_short}\b",
+            rf"\b{esc_short}: ",
+            rf"\b{esc_short},\s+",
+            rf"\b{esc_short} (will|can|should|needs to|please|owns)",
+            rf"\bfor {esc_short}\b",
         ]
         for pat in patterns:
             if re.search(pat, lower): return slug

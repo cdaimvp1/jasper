@@ -24,6 +24,13 @@ def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(BUS_DB, isolation_level=None, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
+    # bus.db is written by every cohort worker's OWN process (see CLAUDE.md: "NEVER
+    # hand-write SQL against bus.db"), not just threads within one process - sqlite3's
+    # default busy_timeout is 0, so two workers posting at the same instant would raise
+    # "database is locked" immediately instead of one briefly waiting for the other's
+    # writer lock. 5s lets SQLite retry internally for any real cross-process contention
+    # (fixed 2026-07-29).
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.row_factory = sqlite3.Row
     return conn
 

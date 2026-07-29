@@ -124,18 +124,26 @@ def _recall_evidence(issue: Optional[dict], category: Optional[str], company: Op
 
 
 def _materialized_evidence(issue: Optional[dict], company: Optional[str]):
+    # (entity_type, entity_id) pairs to check - NOT just issue-level. Fixed
+    # 2026-07-29: once an issue is grouped into a Project, synthesis is
+    # written under ("project", project_id) instead (see cluster_and_link /
+    # SYNTHESIS_ROUTINE.md) - checking only the issue-level row meant this
+    # tier was blind to the majority case grouping exists for. Live repro
+    # before the fix: a project with fresh, current synthesis containing the
+    # exact answer still produced "no current synthesis found."
+    entities: list[tuple[str, str]] = []
     if issue is not None:
-        candidates = [issue["id"]]
+        entities.append(("issue", issue["id"]))
+        if issue.get("project_id"):
+            entities.append(("project", issue["project_id"]))
     elif company:
-        candidates = ws.list_issues_for_company(company)
-    else:
-        candidates = []
-    if not candidates:
+        entities.extend(("issue", iid) for iid in ws.list_issues_for_company(company))
+    if not entities:
         return _no_evidence("no issue in scope to check for an existing synthesis"), []
 
     best = None
-    for iid in candidates:
-        synth = ws.get_synthesis("issue", iid)
+    for entity_type, eid in entities:
+        synth = ws.get_synthesis(entity_type, eid)
         if synth and synth.get("summary"):
             if best is None or (synth.get("synthesized_at") or 0) > (best.get("synthesized_at") or 0):
                 best = synth
@@ -143,15 +151,15 @@ def _materialized_evidence(issue: Optional[dict], company: Optional[str]):
         return _no_evidence("no current synthesis found"), []
 
     try:
-        current_marker = workgraph_synthesis.compute_evidence_marker("issue", best["entity_id"])
+        current_marker = workgraph_synthesis.compute_evidence_marker(best["entity_type"], best["entity_id"])
         stale = current_marker != best.get("synthesized_from_marker")
     except Exception:
         stale = False
     band = "low" if stale else "medium"
     return (
         {"band": band, "needs_review": stale,
-         "detail": f"synthesis for {best['entity_id']}{' (stale)' if stale else ''}"},
-        [f"materialized:{best['entity_id']}"],
+         "detail": f"synthesis for {best['entity_type']} {best['entity_id']}{' (stale)' if stale else ''}"},
+        [f"materialized:{best['entity_type']}:{best['entity_id']}"],
     )
 
 

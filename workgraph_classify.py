@@ -53,24 +53,35 @@ OUTBOUND_CUE = re.compile(
 INTERNAL_CUE = re.compile(
     r"\b(meeting notes|internal|debrief|prep|huddle|stand[\s-]?up|sync)\b", re.I)
 
+# Fixed 2026-07-29: several stems below were wrapped as bare fragments inside
+# \b(...)\b - the trailing \b requires a word->non-word transition RIGHT
+# AFTER the stem, which never happens once a suffix like -ed/-ing/-ion
+# continues the word. Confirmed dead: "escalat"/"terminat"/"dissatisf"/
+# "disput" never matched "escalated"/"terminated"/"dissatisfied"/"disputed";
+# "negotiat"/"onboard"/"introduc" never matched their own most common real
+# forms ("negotiation", "onboarding", "introduction"); "congrat"/"appreciate"
+# never matched "congratulations"/"appreciated". Adding \w* after each stem
+# (keeping the leading \b, letting the match run to the word's real end
+# before the trailing \b applies) fixes all of these without narrowing what
+# already matched.
 NEGATIVE_CUE = re.compile(
-    r"\b(delay|delayed|late|miss(?:ed)?|issue|problem|dispute|disput|complaint|complain|"
-    r"escalat|breach|fail(?:ed|ure)?|concern|unhappy|dissatisf|terminat|penalt|defect|"
-    r"outage|incident|overdue|non[\s-]?compliance|reject)\b", re.I)
+    r"\b(delay\w*|late|miss(?:ed)?|issue|problem|disput\w*|complaint|complain\w*|"
+    r"escalat\w*|breach|fail(?:ed|ure)?|concern|unhappy|dissatisf\w*|terminat\w*|penalt\w*|defect|"
+    r"outage|incident|overdue|non[\s-]?compliance|reject\w*)\b", re.I)
 POSITIVE_CUE = re.compile(
-    r"\b(thank|thanks|pleased|congrat|excellent|great|appreciate|agreed|resolved|success|"
+    r"\b(thank\w*|pleased|congrat\w*|excellent|great|appreciat\w*|agreed|resolved|success\w*|"
     r"on track|ahead of schedule|delivered early|approved|accepted|positive|strong)\b", re.I)
 
 TOPIC_RULES = [
     ("rfp-sourcing", re.compile(r"\b(rfp|rfq|rfi|request for proposal|q&a|addendum|award|bidder|sourcing event)\b", re.I)),
-    ("negotiation", re.compile(r"\b(redline|tracked changes|markup|counter[\s-]?proposal|term sheet|bafo|position letter|negotiat)\b", re.I)),
-    ("contract", re.compile(r"\b(renewal|renew|terminat|amendment|execution|assignment|force majeure|expirat|msa|sow|contract)\b", re.I)),
-    ("onboarding", re.compile(r"\b(onboard|w-?9|w-?8|certificate of insurance|coi|banking|vendor setup|activation|welcome)\b", re.I)),
-    ("financial", re.compile(r"\b(invoice|purchase order|\bpo\b|payment|rate change|price (?:adjust|increase)|escalator|true[\s-]?up|credit memo)\b", re.I)),
+    ("negotiation", re.compile(r"\b(redline|tracked changes|markup|counter[\s-]?proposal|term sheet|bafo|position letter|negotiat\w*)\b", re.I)),
+    ("contract", re.compile(r"\b(renewal|renew\w*|terminat\w*|amendment|execution|assignment|force majeure|expirat\w*|msa|sow|contract)\b", re.I)),
+    ("onboarding", re.compile(r"\b(onboard\w*|w-?9|w-?8|certificate of insurance|coi|banking|vendor setup|activation|welcome)\b", re.I)),
+    ("financial", re.compile(r"\b(invoice|purchase order|\bpo\b|payment|rate change|price (?:adjust\w*|increas\w*)|escalator|true[\s-]?up|credit memo)\b", re.I)),
     ("performance", re.compile(r"\b(qbr|quarterly (?:business )?review|sla|kpi|corrective action|performance|scorecard)\b", re.I)),
     ("compliance", re.compile(r"\b(audit|compliance|certification|regulatory|data breach|adverse event|finding|"
                                r"\bbaa\b|business associate agreement)\b", re.I)),
-    ("relationship", re.compile(r"\b(introduc|handoff|thank you|business continuity|general correspondence|check[\s-]?in)\b", re.I)),
+    ("relationship", re.compile(r"\b(introduc\w*|handoff|thank you|business continuity|general correspondence|check[\s-]?in)\b", re.I)),
     # Added 2026-07-29 - real recurring patterns found in the "other" bucket during
     # backlog profiling, not guessed: "IT Savings 2026", "Savings Projects- 2026".
     # A plain \bsavings\b (not e.g. "savings project", which fails to match
@@ -174,7 +185,15 @@ def classify_item(*, subject: str, body_preview: str, from_actor: str) -> dict:
 
     signal = workgraph_signals.classify_signal(subject=subject or "", from_actor=from_actor or "")
 
-    direction_inferred = True
+    # Fixed 2026-07-29: direction_inferred/sentiment_inferred (and topic's
+    # generic-path branch) used to be hardcoded True unconditionally, never
+    # flipped to False even when a real cue regex actually matched - meaning
+    # inferred_count below could never drop low enough for confidence to
+    # reach "H" for ANY input, including a fully signal-confirmed Ariba
+    # approval. Each now genuinely reflects "was this explicitly matched by
+    # a real cue, or just defaulted/guessed" - the ratio deriveConfidence
+    # below is supposed to measure.
+    direction_inferred = False
     if INBOUND_CUE.search(text):
         direction = "inbound"
     elif OUTBOUND_CUE.search(text):
@@ -183,27 +202,31 @@ def classify_item(*, subject: str, body_preview: str, from_actor: str) -> dict:
         direction = "internal"
     else:
         direction = "inbound"  # default: most personal-inbox mail is inbound by construction
+        direction_inferred = True
 
     if signal and signal["signal_type"] in _SIGNAL_TYPE_TOPIC:
         topic = _SIGNAL_TYPE_TOPIC[signal["signal_type"]]
         topic_inferred = False  # a confirmed signal template, not a keyword guess
     else:
-        topic_inferred = True
         topic = "other"
+        topic_inferred = True
         for name, rule in TOPIC_RULES:
             if rule.search(text):
                 topic = name
+                topic_inferred = False
                 break
 
-    sentiment_inferred = True
     neg = bool(NEGATIVE_CUE.search(text))
     pos = bool(POSITIVE_CUE.search(text))
     if neg and not pos:
         sentiment = "negative"
+        sentiment_inferred = False
     elif pos and not neg:
         sentiment = "positive"
+        sentiment_inferred = False
     else:
-        sentiment = "neutral"
+        sentiment = "neutral"  # no cue, or both fired - genuinely ambiguous, stays inferred
+        sentiment_inferred = True
 
     anomaly_flag = bool(OFF_CHANNEL.search(text))
 

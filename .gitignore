@@ -29,6 +29,8 @@ relay_hello.txt
 # Python
 __pycache__/
 *.pyc
+.pytest_cache/
+tests/_pytest_scratch/
 
 # OS/editor cruft
 .DS_Store

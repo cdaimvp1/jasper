@@ -207,6 +207,15 @@
 .pcc-bulk-count{font-size:12px;font-weight:700;color:var(--red-d);font-family:var(--mono);white-space:nowrap}
 .pcc-bulk-actions{display:flex;gap:8px;flex:1}
 .pcc-bulk-clear{font-size:11.5px;color:var(--mut2);background:none;border:none;cursor:pointer;text-decoration:underline;padding:0}
+/* task #65: Value-at-risk rollup banner */
+.pcc-var-card{margin-bottom:14px;padding:0}
+.pcc-var-card details{padding:12px 18px}
+.pcc-var-summary{cursor:pointer;display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;list-style:none}
+.pcc-var-summary::-webkit-details-marker{display:none}
+.pcc-var-total{font:700 18px/1 var(--mono);color:var(--red-d)}
+.pcc-var-label{font:600 12px/1 var(--sans);color:var(--mut)}
+.pcc-var-caveat{font:500 11px/1.3 var(--sans);color:var(--mut2);margin-left:auto}
+.pcc-var-body{margin-top:10px}
 /* task #64: Deadline Radar */
 .pcc-radar-card{margin-bottom:14px;padding:0}
 .pcc-radar-card details{padding:14px 18px}
@@ -4126,6 +4135,25 @@ body.ownerlock #ownernote{display:block}
         </div>
       </aside>
       <div class="cp-home-main">
+      <!-- task #65: Value-at-risk rollup banner. Reuses workgraph_nba's own
+           deterministic dollar-value extraction (the same figure each
+           issue's own priority reason already cites) - summed across every
+           open issue. Deliberately phrased as "found in open threads," not
+           "at risk" as a certain claim, and collapsed by default (a single
+           glance-value line, not another list demanding attention) - the
+           known failure mode (an unrelated large number quoted in passing)
+           carries over unchanged from workgraph_nba.py's own per-issue use
+           of this same extraction. -->
+      <div class="card pcc-var-card" id="pccVarCard" style="display:none">
+        <details>
+          <summary class="pcc-var-summary">
+            <span class="pcc-var-total" id="pccVarTotal"></span>
+            <span class="pcc-var-label">found across <span id="pccVarCount"></span> open threads</span>
+            <span class="pcc-var-caveat">best-effort figure, not certified — click to see which threads</span>
+          </summary>
+          <div class="pcc-var-body" id="pccVarTop"></div>
+        </details>
+      </div>
       <!-- task #64: Deadline Radar. Two tiers, never merged - see workgraph_
            deadlines.py's docstring for why (the Ariba expiration-date signal
            was found wrong ~98% of the time when auto-parsed as a real
@@ -7819,6 +7847,43 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
     if (pccSelectedId && pccDetailCache[pccSelectedId]) pccRenderDetail(pccDetailCache[pccSelectedId]);
   }
 
+  // --- task #65: Value-at-risk rollup banner -------------------------------
+  function pccFmtMoney(amount) {
+    if (amount >= 1e9) return `$${(amount / 1e9).toFixed(1)}B`;
+    if (amount >= 1e6) return `$${(amount / 1e6).toFixed(1)}M`;
+    if (amount >= 1e3) return `$${(amount / 1e3).toFixed(0)}K`;
+    return `$${Math.round(amount)}`;
+  }
+
+  async function pccLoadValueAtRisk() {
+    let d;
+    try {
+      const r = await fetch("/api/workgraph/value-at-risk", { cache: "no-store" });
+      if (!r.ok) throw new Error(`value-at-risk fetch failed: ${r.status}`);
+      d = await r.json();
+    } catch (e) {
+      console.error("pccLoadValueAtRisk failed:", e);
+      return;
+    }
+    const card = document.getElementById("pccVarCard");
+    if (!card) return;
+    if (!d.issue_count) { card.style.display = "none"; return; }
+    card.style.display = "";
+    document.getElementById("pccVarTotal").textContent = pccFmtMoney(d.total);
+    document.getElementById("pccVarCount").textContent = d.issue_count;
+    const topEl = document.getElementById("pccVarTop");
+    if (topEl) {
+      topEl.innerHTML = (d.top || []).map(t => `
+        <div class="pcc-radar-row" data-id="${pccEsc(t.issue_id)}">
+          <span class="pcc-radar-days">${pccFmtMoney(t.amount)}</span>
+          <span class="pcc-radar-title">${pccEsc(t.title)}</span>
+        </div>`).join("");
+      topEl.querySelectorAll(".pcc-radar-row").forEach(row => {
+        row.addEventListener("click", () => pccSelectIssue(row.getAttribute("data-id")));
+      });
+    }
+  }
+
   // --- task #64: Deadline Radar --------------------------------------------
   async function pccLoadDeadlineRadar() {
     let d;
@@ -8592,6 +8657,7 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
       pccLoadIssues();
       setInterval(pccLoadIssues, 20000);
       pccLoadDeadlineRadar();
+      pccLoadValueAtRisk();
     }
   }
   window.pccShowView = pccShowView;  // exposed for the left-rail nav script (separate scope)

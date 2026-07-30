@@ -1259,6 +1259,18 @@ async def api_workgraph_issues_bulk_status(body: BulkIssueStatusBody):
     return JSONResponse({"ok": True, "updated": updated, "missing": missing})
 
 
+@app.get("/api/workgraph/value-at-risk")
+async def api_value_at_risk():
+    """Task #65 (Value-at-risk rollup banner). Reuses workgraph_nba's own
+    deterministic, already-scored dollar-value extraction (the same figure
+    each issue's own nba_reason cites, e.g. "$111.7M") - summed across
+    every open issue. Same known failure mode as that per-issue signal: an
+    unrelated large figure quoted in passing inflates the total. That's why
+    the frontend must present this as "value found in open threads," not
+    as a certain "at risk" claim."""
+    return JSONResponse(sanitize_surrogates(workgraph_nba.value_at_risk_rollup()))
+
+
 @app.get("/api/workgraph/deadline-radar")
 async def api_deadline_radar():
     """Task #64 (Deadline Radar). Two tiers, deliberately never merged into

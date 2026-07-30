@@ -151,3 +151,75 @@ def test_score_issue_no_warning_when_no_rule_triggers(ws_db):
     score, reason, lesson_id = nba.score_issue(issue, time.time())
 
     assert "No confirmation seen yet" not in reason
+
+
+# --- task #65: value_at_risk_rollup ------------------------------------------
+
+def _open_issue_with_value(ws_db, title, amount_text, key):
+    issue_id = ws_db.create_issue_with_new_id(title=title, state="active", category="other")
+    row_id = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key=key, thread_key=key, dedupe_key=key,
+        occurred_ts=time.time(), subject=amount_text, from_actor="a@example.com",
+        participants_json="[]", body_preview="",
+    )
+    ws_db.link_raw_item_to_issue(row_id, issue_id)
+    return issue_id
+
+
+def test_value_at_risk_rollup_empty_when_no_open_issues(ws_db):
+    rollup = nba.value_at_risk_rollup()
+    assert rollup == {"total": 0.0, "issue_count": 0, "top": []}
+
+
+def test_value_at_risk_rollup_single_issue(ws_db):
+    _open_issue_with_value(ws_db, "Deal A", "Worth $2.5 million", "vr1")
+
+    rollup = nba.value_at_risk_rollup()
+
+    assert rollup["total"] == 2_500_000.0
+    assert rollup["issue_count"] == 1
+    assert rollup["top"][0]["amount"] == 2_500_000.0
+
+
+def test_value_at_risk_rollup_sums_and_sorts_multiple_issues(ws_db):
+    _open_issue_with_value(ws_db, "Small deal", "Worth $10,000", "vr2")
+    _open_issue_with_value(ws_db, "Big deal", "Worth $5 million", "vr3")
+
+    rollup = nba.value_at_risk_rollup()
+
+    assert rollup["total"] == 5_010_000.0
+    assert rollup["issue_count"] == 2
+    assert [t["amount"] for t in rollup["top"]] == [5_000_000.0, 10_000.0]
+
+
+def test_value_at_risk_rollup_excludes_amounts_below_floor(ws_db):
+    _open_issue_with_value(ws_db, "Tiny mention", "Lunch was $12", "vr4")
+
+    rollup = nba.value_at_risk_rollup()
+
+    assert rollup == {"total": 0.0, "issue_count": 0, "top": []}
+
+
+def test_value_at_risk_rollup_excludes_closed_issues(ws_db):
+    issue_id = ws_db.create_issue_with_new_id(title="Closed big deal", state="done", category="other")
+    row_id = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key="vr5", thread_key="vr5", dedupe_key="vr5",
+        occurred_ts=time.time(), subject="Worth $9 million", from_actor="a@example.com",
+        participants_json="[]", body_preview="",
+    )
+    ws_db.link_raw_item_to_issue(row_id, issue_id)
+
+    rollup = nba.value_at_risk_rollup()
+
+    assert rollup == {"total": 0.0, "issue_count": 0, "top": []}
+
+
+def test_value_at_risk_rollup_top_capped_at_five_but_total_counts_all(ws_db):
+    for i in range(7):
+        _open_issue_with_value(ws_db, f"Deal {i}", f"Worth ${(i + 1) * 100_000}", f"vr6-{i}")
+
+    rollup = nba.value_at_risk_rollup()
+
+    assert rollup["issue_count"] == 7
+    assert len(rollup["top"]) == 5
+    assert rollup["total"] == sum((i + 1) * 100_000 for i in range(7))

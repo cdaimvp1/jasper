@@ -131,6 +131,31 @@ def _extract_value_amount(raw_items: list[dict]) -> float:
     return best
 
 
+def value_at_risk_rollup() -> dict:
+    """Task #65 (Value-at-risk rollup banner): sums _extract_value_amount
+    across every open issue. Reuses the SAME deterministic, zero-LLM
+    extraction score_issue's own value_urgency term already uses (rather
+    than re-implementing it), so the banner total and each issue's own
+    "$X" reason always agree with each other. The known failure mode
+    carries over unchanged: an unrelated large figure quoted in passing in
+    ANY open thread inflates this total - exactly why the banner must
+    present itself as "value found in open threads," never as a certain
+    "at risk" claim (see the frontend copy that renders this)."""
+    issues = ws.list_issues(states=["active", "waiting", "blocked"], limit=1000)
+    contributing = []
+    for issue in issues:
+        raw_items = ws.get_raw_items_for_issue(issue["id"])
+        amount = _extract_value_amount(raw_items)
+        if amount >= _VALUE_FLOOR:
+            contributing.append({
+                "issue_id": issue["id"], "title": issue.get("display_title") or issue["title"],
+                "state": issue["state"], "amount": amount,
+            })
+    contributing.sort(key=lambda c: c["amount"], reverse=True)
+    total = sum(c["amount"] for c in contributing)
+    return {"total": total, "issue_count": len(contributing), "top": contributing[:5]}
+
+
 def _value_urgency(amount: float) -> float:
     if amount < _VALUE_FLOOR:
         return 0.0

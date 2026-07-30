@@ -141,8 +141,8 @@
         <span style="font-size:13px">In-app chat with workers — learn from messages you send to Tia, relay, curator, and bridge in Back Office.</span>
       </label>
       <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-        <input type="checkbox" id="prl-sent-mail" style="width:15px;height:15px" disabled>
-        <span style="font-size:13px;color:var(--muted,#667)">Sent email — learn from mail you send, scanned the same read-only way your inbox already is. <i>(not built yet)</i></span>
+        <input type="checkbox" id="prl-sent-mail" style="width:15px;height:15px">
+        <span style="font-size:13px">Sent email — learn from mail you send, scanned the same read-only way your inbox already is.</span>
       </label>
       <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
         <input type="checkbox" id="prl-sent-teams" style="width:15px;height:15px" disabled>
@@ -337,6 +337,7 @@
   const prlEls = {
     enabled: document.getElementById('prl-enabled'),
     appChat: document.getElementById('prl-app-chat'),
+    sentMail: document.getElementById('prl-sent-mail'),
   };
   const prlStats = document.getElementById('prl-stats');
   const prlFb = document.getElementById('prl-fb');
@@ -345,6 +346,7 @@
     return fetch('/api/settings/personal-learning').then(r=>r.json()).then(d=>{
       prlEls.enabled.checked = !!d.enabled;
       prlEls.appChat.checked = !!d.surfaces.app_chat;
+      prlEls.sentMail.checked = !!d.surfaces.sent_mail;
       prlStats.textContent = d.patterns_learned + ' pattern' + (d.patterns_learned===1?'':'s') + ' learned so far'
         + (d.last_run ? (' · last ran ' + d.last_run) : ' · never run yet');
     }).catch(()=>{ prlStats.textContent = 'Could not load.'; });
@@ -354,7 +356,8 @@
     prlFb.textContent = 'saving…';
     try{
       const r = await fetch('/api/settings/personal-learning',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({enabled: prlEls.enabled.checked, surfaces: {app_chat: prlEls.appChat.checked}})});
+        body:JSON.stringify({enabled: prlEls.enabled.checked,
+          surfaces: {app_chat: prlEls.appChat.checked, sent_mail: prlEls.sentMail.checked}})});
       if(r.ok){ prlFb.textContent='✓ saved'; setTimeout(()=>prlFb.textContent='',2000); prlLoad(); }
       else { const d = await r.json(); prlFb.textContent = d.detail || 'error'; }
     }catch(e){ prlFb.textContent='error'; }

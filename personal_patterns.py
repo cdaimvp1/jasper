@@ -1,33 +1,45 @@
 """
-personal_patterns.py — Phase 1 of Personal Response Learning (task #45):
-mines Marc's own in-app questions (socrates_retrieval_log) for deterministic,
-zero-LLM co-occurrence patterns - which systems/data sources he references,
-which task-verbs he consistently reaches for. No attempt at "how he phrases
+personal_patterns.py — Personal Response Learning (task #45 Phase 1, task
+#49 Phase 2): mines Marc's own words for deterministic, zero-LLM co-
+occurrence patterns - which systems/data sources he references, which
+task-verbs he consistently reaches for. No attempt at "how he phrases
 things" here - that's a genuinely fuzzier signal than keyword matching can
 honestly claim to capture, and is deliberately deferred to a future bounded/
 periodic LLM pass (the sentinel-worker concept discussed but not yet built)
 rather than faked with a regex.
 
-Off by default, two independent gates:
-  config.get("personal_learning", "enabled")             - master switch
-  config.get("personal_learning", "surfaces", "app_chat") - this surface
+Two surfaces so far, each independently toggleable:
+  app_chat  (#45) - Marc's own questions in socrates_retrieval_log. Zero new
+             ingestion; this data already exists.
+  sent_mail (#49) - Marc's own Sent Items, via a dedicated, minimal COM scan
+             (ingest/outlook_scan_sent.ps1) - deliberately NOT routed through
+             outlook_com_ingest.py's full pipeline, since sent mail isn't
+             triage input and nothing here becomes a permanent document.
 
-Both must be true for run_daily_if_due() to do anything. Everything below
-run_daily_if_due() is pure/ungated on purpose (same shape as retention.py:
-the gate lives at the one real entry point, not scattered through the
-module), so it stays directly testable without fighting config state.
+Gates: config.get("personal_learning", "enabled") is the master switch;
+config.get("personal_learning", "surfaces", <name>) enables one specific
+surface. run_daily_if_due() runs every enabled surface once/day and returns
+a per-surface report - None only when the master switch is off, no surface
+at all is enabled, or it already ran today (three distinct, real "did not
+run" reasons, never a silent no-op). Everything below run_daily_if_due() is
+pure/ungated on purpose (same shape as retention.py), so it stays directly
+testable without fighting config state.
 
-Sent mail (task #49) and sent Teams (task #50) are separate, later modules -
-this file is app_chat only.
+Sent Teams (task #50) is a separate, later module.
 """
 from __future__ import annotations
 
+import json
 import re
+import subprocess
 import time
+from pathlib import Path
 from typing import Optional
 
 import config
 import workgraph_store as ws
+
+_SENT_SCAN_SCRIPT = Path(__file__).resolve().parent / "ingest" / "outlook_scan_sent.ps1"
 
 # Cheap, explainable keyword matching over fancier NLP - same house style as
 # workgraph_recommend.py's _APPROVAL_RE and workgraph_nba.py's value-extraction
@@ -55,9 +67,9 @@ _ALL_PATTERNS = _SYSTEM_PATTERNS + _TASK_VERB_PATTERNS
 
 
 def extract_patterns(text: str) -> list[str]:
-    """Every pattern_key whose regex matches `text` - one question can carry
-    more than one (e.g. "check the Ariba PO status" matches both "ariba" and
-    "check status")."""
+    """Every pattern_key whose regex matches `text` - one question/email can
+    carry more than one (e.g. "check the Ariba PO status" matches both
+    "ariba" and "check status")."""
     if not text:
         return []
     return [key for key, rx in _ALL_PATTERNS if rx.search(text)]
@@ -85,24 +97,79 @@ def mine_app_chat(since_ts: float) -> dict:
     return {"scanned": len(rows), "matched": matched, "cursor": max_ts}
 
 
+def mine_sent_mail(since_ts: float) -> dict:
+    """Scans Sent Items since since_ts via the dedicated outlook_scan_sent.ps1
+    (not outlook_com_ingest.py's pipeline - see module docstring). Extracts
+    patterns from subject + a body excerpt, upserts under
+    source_surface='sent_mail'. Returns {"scanned","matched","cursor"} - same
+    shape as mine_app_chat. A PowerShell failure (Outlook not running, etc.)
+    is reported as scanned=0 with an "error" key rather than raised, so one
+    bad scan never blocks the day's app_chat mining."""
+    proc = subprocess.run(
+        ["powershell", "-NoProfile", "-File", str(_SENT_SCAN_SCRIPT),
+         "-SinceEpoch", str(since_ts), "-MaxItems", "500"],
+        capture_output=True, encoding="utf-8", timeout=120,
+    )
+    scanned = 0
+    matched = 0
+    max_ts = since_ts
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue  # malformed line - skip, don't fail the whole batch
+        scanned += 1
+        ts = float(item.get("sent_epoch") or 0)
+        if ts > max_ts:
+            max_ts = ts
+        text = f"{item.get('subject') or ''} {item.get('body_excerpt') or ''}"
+        keys = extract_patterns(text)
+        for key in keys:
+            ws.upsert_response_pattern("sent_mail", key, item.get("subject") or "", ts)
+        if keys:
+            matched += 1
+    result = {"scanned": scanned, "matched": matched, "cursor": max_ts}
+    if proc.returncode != 0:
+        result["error"] = proc.stderr.strip() or f"exit code {proc.returncode}"
+    return result
+
+
 def run_daily_if_due(now: Optional[float] = None) -> Optional[dict]:
     """Gate for scheduled_refresh.py - mirrors retention.run_daily_if_due's
     exact shape (same ingest_cursors mechanism, source='personal_learning').
-    Returns None - a real, checkable 'did not run' result, not a silent
-    no-op - when the master toggle or the app_chat sub-toggle is off, or
-    this has already run today."""
+    Runs every surface whose own toggle is on, once/day, and returns a
+    per-surface report keyed by surface name (e.g. {"app_chat": {...},
+    "sent_mail": {...}}) - only the enabled surfaces appear. Returns None -
+    a real, checkable 'did not run' result, never a silent no-op - when the
+    master toggle is off, no surface at all is enabled, or this already ran
+    today."""
     if now is None:
         now = time.time()
     if not config.get("personal_learning", "enabled"):
         return None
     surfaces = config.get("personal_learning", "surfaces") or {}
-    if not (isinstance(surfaces, dict) and surfaces.get("app_chat")):
-        return None
+    if not isinstance(surfaces, dict):
+        surfaces = {}
     today = time.strftime("%Y-%m-%d", time.localtime(now))
     if ws.get_cursor("personal_learning", "last_run_date") == today:
         return None
-    since_ts = float(ws.get_cursor("personal_learning", "app_chat_cursor") or "0")
-    result = mine_app_chat(since_ts)
-    ws.set_cursor("personal_learning", "app_chat_cursor", str(result["cursor"]))
+
+    result: dict = {}
+    if surfaces.get("app_chat"):
+        since_ts = float(ws.get_cursor("personal_learning", "app_chat_cursor") or "0")
+        r = mine_app_chat(since_ts)
+        ws.set_cursor("personal_learning", "app_chat_cursor", str(r["cursor"]))
+        result["app_chat"] = r
+    if surfaces.get("sent_mail"):
+        since_ts = float(ws.get_cursor("personal_learning", "sent_mail_cursor") or "0")
+        r = mine_sent_mail(since_ts)
+        ws.set_cursor("personal_learning", "sent_mail_cursor", str(r["cursor"]))
+        result["sent_mail"] = r
+
+    if not result:
+        return None  # master on, but no individual surface enabled yet
     ws.set_cursor("personal_learning", "last_run_date", today)
     return result

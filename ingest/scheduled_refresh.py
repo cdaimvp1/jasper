@@ -37,6 +37,7 @@ import workgraph_synthesis
 import workgraph_projects
 import outlook_com_ingest
 import retention
+import health_check
 
 from paths import DATA_DIR
 
@@ -345,6 +346,14 @@ def run() -> dict:
     except Exception as e:
         retention_result = {"error": str(e)}
 
+    # 8. Deterministic daily health check (task #41) - same once/day gate,
+    # same never-block-the-rest-of-the-cycle guard. Report-only: this never
+    # takes any corrective action itself, just surfaces findings.
+    try:
+        health_check_result = health_check.run_daily_if_due()
+    except Exception as e:
+        health_check_result = {"error": str(e)}
+
     summary = {
         "mail": mail_result,
         "classify_after_mail": classify_result_1,
@@ -356,6 +365,7 @@ def run() -> dict:
         "project_grouping": grouping_result,
         "synthesis": synthesis_result,
         "retention": retention_result,
+        "health_check": health_check_result,
     }
     _log(f"REFRESH ok mail_inserted={mail_result.get('inserted', '?')} "
         f"relay_ok={relay_result.get('ok')} relay_calendar_advanced={relay_result.get('cursor_advanced')} "
@@ -364,7 +374,8 @@ def run() -> dict:
         f"grouping_ok={grouping_result.get('ok')} grouping_skipped={grouping_result.get('skipped', False)} "
         f"synthesis_ok={synthesis_result.get('ok')} synthesis_skipped={synthesis_result.get('skipped', False)} "
         f"synthesis_deferred={synthesis_result.get('deferred', 0)} synthesis_skipped_immaterial={synthesis_result.get('skipped_immaterial', 0)} "
-        f"retention_ran={retention_result is not None and 'error' not in retention_result}")
+        f"retention_ran={retention_result is not None and 'error' not in retention_result} "
+        f"health_check_ok={health_check_result.get('ok') if health_check_result else 'not-due'}")
     return summary
 
 

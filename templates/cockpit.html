@@ -2655,7 +2655,10 @@ html[data-theme="dark"]{--header:#0A0A0A;--tint-8fb3f0:#19253a;--tint-9fb4d2:#17
 .cp-chat-input-wrap{position:relative;background:var(--bg);border:1px solid var(--mut2)}
 .cp-chat-compose textarea{
   width:100%;resize:none;background:transparent;border:none;outline:none;box-sizing:border-box;
-  padding:8px 40px 8px 36px;font:inherit;font-size:12.7px;color:var(--ink);
+  /* right padding widened 8->72px (task #37): room for the mic button too, not
+     just Send - only actually eats space when the mic button reveals itself
+     (browser supports SpeechRecognition), harmless empty margin otherwise. */
+  padding:8px 72px 8px 36px;font:inherit;font-size:12.7px;color:var(--ink);
   max-height:160px;overflow-y:auto;display:block;
 }
 /* Dark-gray thumb / transparent track, scoped to the composer's own scrollbar only. */
@@ -2671,6 +2674,17 @@ html[data-theme="dark"]{--header:#0A0A0A;--tint-8fb3f0:#19253a;--tint-9fb4d2:#17
   background:transparent;color:var(--mut);border:none;cursor:pointer}
 .cp-chat-attach svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:2}
 .cp-chat-attach:hover{color:var(--ink)}
+/* Voice dictation (task #37, added 2026-07-29) - Web Speech API, browser-side
+   only, no backend involved. Hidden by default (display:none inline on the
+   element) and only revealed by JS feature-detecting SpeechRecognition -
+   browsers without it (or a non-HTTPS/non-localhost context) simply never
+   see the button, no broken control. Sits just left of Send. */
+.cp-chat-mic{position:absolute;right:38px;bottom:5px;width:28px;height:28px;display:flex;align-items:center;justify-content:center;
+  background:transparent;color:var(--mut);border:none;cursor:pointer}
+.cp-chat-mic svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:2}
+.cp-chat-mic:hover{color:var(--ink)}
+.cp-chat-mic.listening{color:var(--red);animation:cpmicpulse 1.1s ease-in-out infinite}
+@keyframes cpmicpulse{0%,100%{opacity:1}50%{opacity:.45}}
 .cp-chat-input-wrap.drag-over{border-color:var(--ink);border-style:dashed}
 /* Per-worker locked colors - reusing the app's own palette tokens, not invented ones. */
 .cp-chat-w-tia{--wc:var(--blue-d);--wc-t:var(--blue-t)}
@@ -3734,10 +3748,15 @@ body.ownerlock #ownernote{display:block}
    6px and text rendered underneath the paperclip icon. Restored clearance on
    both sides, sized to the actual button widths below (28px attach + margin,
    30px send + margin). */
-#cpChatInput{font-size:13.5px;line-height:1.5;padding:9px 40px 9px 36px;max-height:132px;overflow-y:auto;background:none}
+/* right padding widened 40->72px (task #37, same reason as the base rule
+   above): room for the mic button too, not just Send. */
+#cpChatInput{font-size:13.5px;line-height:1.5;padding:9px 72px 9px 36px;max-height:132px;overflow-y:auto;background:none}
 .cp-chat-send-icon{background:var(--lk-pri);border-radius:var(--lk-r-s);width:30px;height:30px}
 .cp-chat-attach{color:var(--lk-mut2);border-radius:var(--lk-r-c)}
 .cp-chat-attach:hover{background:var(--lk-nested);color:var(--lk-ink)}
+.cp-chat-mic{color:var(--lk-mut2);border-radius:var(--lk-r-c);right:40px}
+.cp-chat-mic:hover{background:var(--lk-nested);color:var(--lk-ink)}
+.cp-chat-mic.listening{color:var(--lk-danger,var(--red))}
 
 /* ═══ INBOX list ═══════════════════════════════════════════════════════ */
 .pcc-list{padding:0;flex:1;min-height:0}
@@ -4046,6 +4065,7 @@ body.ownerlock #ownernote{display:block}
             <button type="button" class="cp-chat-attach" id="cpChatAttach" aria-label="Attach a file" title="Attach a file"><svg viewBox="0 0 24 24"><path d="M21.44 11.05l-9.19 9.19a5.5 5.5 0 01-7.78-7.78l9.19-9.19a3.5 3.5 0 014.95 4.95l-9.2 9.19a1.5 1.5 0 01-2.12-2.12l8.49-8.48"/></svg></button>
             <input type="file" id="cpChatFileInput" style="display:none" multiple>
             <textarea id="cpChatInput" placeholder="@Name your message, or just ask a question…" rows="1"></textarea>
+            <button type="button" class="cp-chat-mic" id="cpChatMic" aria-label="Dictate message" title="Dictate (click to start/stop)" style="display:none"><svg viewBox="0 0 24 24"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v4M8 23h8"/></svg></button>
             <button type="button" class="cp-chat-send-icon" id="cpChatSend" aria-label="Send message" title="Send"><svg viewBox="0 0 24 24"><path d="M4 11l16-7-7 16-2-7-7-2z"/></svg></button>
           </div>
         </div>
@@ -8615,6 +8635,53 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
   if (attachBtn && fileInput) {
     attachBtn.addEventListener("click", () => fileInput.click());
     fileInput.addEventListener("change", () => { uploadFiles(fileInput.files); fileInput.value = ""; });
+  }
+
+  // ── Voice dictation (task #37, added 2026-07-29) ──────────────────────
+  // Browser-side only (Web Speech API) - no backend endpoint, no new
+  // dependency. Feature-detected: on a browser/context without
+  // SpeechRecognition (or non-HTTPS/non-localhost, which the API requires),
+  // the button just stays hidden - never a broken control. Dictated text is
+  // APPENDED to whatever's already in the box (same "prefix + text" pattern
+  // the attach-file path above already uses), never auto-sent - Marc always
+  // reviews/edits before clicking Send, same reflect-don't-enforce
+  // discipline as everything else here.
+  const micBtn = document.getElementById("cpChatMic");
+  const SpeechRecognitionImpl = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (micBtn && SpeechRecognitionImpl) {
+    micBtn.style.display = "";
+    const recognizer = new SpeechRecognitionImpl();
+    recognizer.continuous = true;
+    recognizer.interimResults = false;  // only append FINAL transcripts - avoids jittery partial overwrites
+    recognizer.lang = "en-US";
+    let listening = false;
+
+    recognizer.onresult = (event) => {
+      let finalText = "";
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        if (event.results[i].isFinal) finalText += event.results[i][0].transcript;
+      }
+      if (!finalText.trim()) return;
+      const prefix = input.value && !input.value.endsWith(" ") ? input.value + " " : input.value;
+      input.value = prefix + finalText.trim();
+      autosizeInput();
+    };
+    recognizer.onerror = () => { listening = false; micBtn.classList.remove("listening"); };
+    recognizer.onend = () => { listening = false; micBtn.classList.remove("listening"); };
+
+    micBtn.addEventListener("click", () => {
+      if (listening) {
+        recognizer.stop();
+        listening = false;
+        micBtn.classList.remove("listening");
+      } else {
+        try {
+          recognizer.start();
+          listening = true;
+          micBtn.classList.add("listening");
+        } catch (e) { /* already running, or mic permission denied - fail quiet, no broken UI */ }
+      }
+    });
   }
   if (compose) {
     ["dragenter", "dragover"].forEach(evt => compose.addEventListener(evt, e => {

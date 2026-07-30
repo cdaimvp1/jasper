@@ -31,6 +31,7 @@ import time
 import hashlib
 import sqlite3
 import threading
+import asyncio
 from pathlib import Path
 from typing import Optional
 
@@ -1650,6 +1651,21 @@ async def api_cockpit_action(body: CockpitActionBody):
 _cockpit_refresh_in_flight = False
 
 
+def _run_cockpit_refresh_sync() -> dict:
+    """The actual blocking work, unchanged from before - split out so it can
+    run on a worker thread (see api_cockpit_refresh below) instead of
+    directly on the event loop."""
+    try:
+        ingest_result = outlook_com_ingest.run()
+    except Exception as e:
+        ingest_result = {"ok": False, "error": str(e)}
+    classify_result = workgraph_classify.run()
+    nba_result = workgraph_nba.recompute_all()
+    alerts_result = workgraph_alerts.run()
+    return {"ingest": ingest_result, "classify": classify_result, "nba": nba_result,
+            "alerts": alerts_result}
+
+
 @app.post("/api/cockpit/refresh")
 async def api_cockpit_refresh():
     """Synchronous mail re-ingest + classify + re-score, for the cockpit's
@@ -1664,23 +1680,29 @@ async def api_cockpit_refresh():
     it's wired for real (see mqRefresh in cockpit.html), a real ingest pass
     can take several seconds; refusing a second concurrent call (409, not a
     silent queue or a second overlapping ingest) is cheap insurance against
-    mashing the button twice."""
+    mashing the button twice.
+
+    asyncio.to_thread (task #42, fixed 2026-07-29): this used to run
+    _run_cockpit_refresh_sync's blocking work directly on the event loop -
+    confirmed by direct measurement that this froze the ENTIRE server (not
+    just this endpoint) for the whole duration: an unrelated /api/manager
+    call fired 0.3s into a 15.7s refresh took 15.2s to respond, i.e. it was
+    genuinely blocked, not just slow. Running the same code via
+    asyncio.to_thread keeps it exactly as correct (workgraph_store/bus's own
+    threading.Lock + WAL/busy_timeout already make this safe from a worker
+    thread - independently confirmed under real cross-PROCESS concurrency,
+    a strictly stronger guarantee than one extra thread needs), while
+    freeing the event loop to keep serving every other request normally
+    while a refresh runs."""
     global _cockpit_refresh_in_flight
     if _cockpit_refresh_in_flight:
         raise HTTPException(409, "a refresh is already in progress")
     _cockpit_refresh_in_flight = True
     try:
-        try:
-            ingest_result = outlook_com_ingest.run()
-        except Exception as e:
-            ingest_result = {"ok": False, "error": str(e)}
-        classify_result = workgraph_classify.run()
-        nba_result = workgraph_nba.recompute_all()
-        alerts_result = workgraph_alerts.run()
+        result = await asyncio.to_thread(_run_cockpit_refresh_sync)
     finally:
         _cockpit_refresh_in_flight = False
-    return JSONResponse({"ingest": ingest_result, "classify": classify_result, "nba": nba_result,
-                        "alerts": alerts_result})
+    return JSONResponse(result)
 
 
 @app.get("/api/workers/status")

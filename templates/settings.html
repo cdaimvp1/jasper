@@ -295,6 +295,17 @@
     <div id="digest-body">Loading…</div>
   </div>
 
+  <!-- ── Party resolution review queue (added 2026-07-30, task #79) ────── -->
+  <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:26px 0 10px">Party Resolution Review Queue</div>
+  <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px">
+    <div style="color:var(--muted,#667);font-size:13px;margin-bottom:12px">
+      External contacts with no identified company — not automated senders (Ariba, DocuSign, and the others
+      already correctly have no company), real contacts. Without a company, this contact can't be grouped into
+      the Supplier Dashboard or matched by a supplier-scoped rule.
+    </div>
+    <div id="partyreview-list">Loading…</div>
+  </div>
+
   <!-- ── Signal volume trends (added 2026-07-30, task #66) ─────────────── -->
   <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:26px 0 10px">Signal volume trends</div>
   <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px">
@@ -740,6 +751,40 @@
       .catch(() => { digestBody.textContent = 'Could not load.'; });
   }
   digestLoad();
+
+  // ── Party resolution review queue (task #79) ────────────────────────────
+  const partyreviewList = document.getElementById('partyreview-list');
+  function partyreviewRender(parties){
+    if(!parties.length){ partyreviewList.innerHTML = '<div style="color:var(--muted,#667);font-size:13px">Nothing needs review right now.</div>'; return; }
+    partyreviewList.innerHTML = parties.map(p => `
+      <div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border,#eee);font-size:13px">
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:600">${esc(p.display_name || p.primary_email)}</div>
+          <div style="color:var(--muted,#888);font-size:12px">${esc(p.primary_email)}</div>
+        </div>
+        <input type="text" placeholder="Company name" data-partyreview-company="${p.id}" style="border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:7px;padding:6px 8px;font:500 13px sans-serif;color:inherit;width:180px">
+        <button data-partyreview-save="${p.id}" style="border:1px solid var(--border,#ddd);background:var(--accent,#0f766e);color:#fff;font:600 12px sans-serif;padding:6px 12px;border-radius:7px;cursor:pointer">Save</button>
+      </div>
+      <span id="partyreview-fb-${p.id}" style="font-size:11.5px;color:var(--muted,#888);display:block;margin:-4px 0 4px"></span>`).join('');
+    partyreviewList.querySelectorAll('[data-partyreview-save]').forEach(btn => btn.addEventListener('click', () => partyreviewSave(btn.getAttribute('data-partyreview-save'))));
+  }
+  async function partyreviewSave(partyId){
+    const input = partyreviewList.querySelector(`[data-partyreview-company="${partyId}"]`);
+    const fb = document.getElementById('partyreview-fb-' + partyId);
+    const company = input.value.trim();
+    if(!company){ if(fb) fb.textContent = 'enter a company name first'; return; }
+    try{
+      const r = await fetch(`/api/workgraph/parties/${encodeURIComponent(partyId)}/correct`, {method:'POST',
+        headers:{'Content-Type':'application/json'}, body:JSON.stringify({affiliation:'external', company, reason:'party review queue'})});
+      if(r.ok){ partyreviewLoad(); }
+      else { const d = await r.json().catch(()=>({})); if(fb) fb.textContent = d.detail || 'error'; }
+    }catch(e){ if(fb) fb.textContent = 'error'; }
+  }
+  function partyreviewLoad(){
+    return fetch('/api/workgraph/party-review-queue').then(r=>r.json()).then(d=>partyreviewRender(d.parties))
+      .catch(()=>{ partyreviewList.textContent = 'Could not load.'; });
+  }
+  partyreviewLoad();
 
   // ── Signal volume trends (task #66) ─────────────────────────────────────
   const sigtrendList = document.getElementById('sigtrend-list');

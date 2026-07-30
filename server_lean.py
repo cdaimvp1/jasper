@@ -77,6 +77,7 @@ import workgraph_commitments
 import health_check
 import workgraph_suppliers
 import workgraph_digest
+import workgraph_party_review
 
 
 PORT = int(os.environ.get("TEAM_PORT", "8700"))  # born-local default (Tia's live-review catch, 2026-07-23):
@@ -1301,6 +1302,16 @@ async def api_gate_board():
     prerequisite rule - see workgraph_aristotle.gate_board's docstring for
     why "currently_gating" is computed live rather than a stored counter."""
     return JSONResponse(sanitize_surrogates(workgraph_aristotle.gate_board()))
+
+
+@app.get("/api/workgraph/party-review-queue")
+async def api_party_review_queue():
+    """Task #79 (Party resolution confidence review queue). See
+    workgraph_party_review.py's docstring for why this is scoped to
+    "external, no identified company, not a system sender" rather than a
+    literal confidence-tier filter - real data showed every external
+    party is already at the highest confidence tier."""
+    return JSONResponse({"parties": sanitize_surrogates(workgraph_party_review.list_parties_needing_review())})
 
 
 @app.get("/api/workgraph/weekly-digest")

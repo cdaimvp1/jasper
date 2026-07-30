@@ -33,6 +33,10 @@ more than one action, so this returns a LIST (evidence["deep_links"], plural)
 rather than the single "deep_link" v1/v2 shipped with. Both require the
 raw_item's entry_id (task #43) - rows ingested before that change, or with a
 source none of this covers, get an empty list rather than a broken button.
+
+v4 (task #48): a vendor action link (DocuSign/Adobe Sign/Ariba - see
+link_extraction.py) is appended as a fourth possible entry for outlook_mail
+rows whose signal_type is a recognized LIVE signature/approval request.
 """
 from __future__ import annotations
 
@@ -40,6 +44,7 @@ from urllib.parse import quote
 from typing import Optional
 
 import workgraph_store as ws
+import link_extraction
 
 
 def teams_chat_link(chat_id: Optional[str]) -> Optional[dict]:
@@ -67,13 +72,21 @@ def draft_reply_action(raw_item: dict) -> Optional[dict]:
             "raw_item_id": raw_item["id"], "label": "Draft reply"}
 
 
+def vendor_action_link(raw_item: dict) -> Optional[dict]:
+    extracted = link_extraction.extract_link_for_raw_item(raw_item)
+    if not extracted:
+        return None
+    return {"kind": "url", "url": extracted["url"], "label": extracted["label"]}
+
+
 def _links_for_raw_item(raw_item: dict) -> list[dict]:
     source = raw_item.get("source")
     if source == "teams_chat":
         link = teams_chat_link(raw_item.get("thread_key"))
         return [link] if link else []
     if source == "outlook_mail":
-        return [a for a in (open_email_action(raw_item), draft_reply_action(raw_item)) if a]
+        return [a for a in (open_email_action(raw_item), draft_reply_action(raw_item),
+                             vendor_action_link(raw_item)) if a]
     return []
 
 

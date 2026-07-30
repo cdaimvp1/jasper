@@ -4,7 +4,9 @@ against production data: ingest/normalize.py's _process_teams_chat already
 sets thread_key = chat_id verbatim, no parsing needed here), open-email
 (task #46) and draft-reply (task #47) actions for outlook_mail rows.
 evidence["deep_links"] is a LIST (task #47's refactor) since a single email
-can carry more than one action (open + draft reply) at once."""
+can carry more than one action (open + draft reply + a vendor link) at once."""
+import json
+
 import deep_links
 
 
@@ -89,6 +91,28 @@ def test_attach_deep_links_mail_with_entry_id_gets_both_actions(ws_db):
     links = out[0]["deep_links"]
     assert {l["label"] for l in links} == {"Open email", "Draft reply"}
     assert all(l["kind"] == "action" and l["raw_item_id"] == row_id for l in links)
+
+
+def test_attach_deep_links_mail_with_vendor_signal_gets_all_three_links(ws_db, isolated_paths):
+    dest_dir = isolated_paths.DOCUMENTS_DIR / "raw_items" / "77"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    (dest_dir / "body.html").write_text(
+        '<a href="https://na1.adobesign.com/public/esignWidget?wid=z">REVIEW AND SIGN</a>', encoding="utf-8",
+    )
+    conn = ws_db._connect()
+    row_id = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key="conv-3", thread_key="conv-3",
+        dedupe_key="dk-mail-3", occurred_ts=1_800_000_000.0, subject="Signature requested on X",
+        from_actor="echosign@adobesign.com", participants_json="[]", body_preview="please sign",
+        entry_id="entryid-VENDOR", raw_ref=json.dumps({"body_html": "raw_items/77/body.html"}),
+    )
+    conn.execute("UPDATE raw_items SET signal_type = ? WHERE id = ?", ("signature_requested", row_id))
+    evidence = [{"raw_item_id": row_id, "type": "email", "summary": "x", "ts": 1_800_000_000.0}]
+
+    out = deep_links.attach_deep_links(evidence)
+
+    labels = {l["label"] for l in out[0]["deep_links"]}
+    assert labels == {"Open email", "Draft reply", "Open in Adobe Sign"}
 
 
 def test_attach_deep_links_calendar_source_gets_no_links(ws_db):

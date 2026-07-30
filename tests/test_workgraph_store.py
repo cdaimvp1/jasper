@@ -80,6 +80,20 @@ def test_clear_response_patterns_removes_everything(ws_db):
     assert ws_db.list_response_patterns() == []
 
 
+def test_list_response_patterns_tiebreak_is_stable_and_deterministic(ws_db):
+    """Fixed 2026-07-30 (adversarial review round #2): ORDER BY hit_count
+    DESC alone has no tie-break for two patterns with equal hit_count -
+    the same non-determinism class already fixed 3x elsewhere this session.
+    first_seen_ts ascending must win ties, deterministically, every call."""
+    ws_db.upsert_response_pattern("app_chat", "sap", "x", 200.0)
+    ws_db.upsert_response_pattern("app_chat", "docusign", "y", 100.0)
+    ws_db.upsert_response_pattern("app_chat", "ariba", "z", 150.0)
+
+    runs = [[r["pattern_key"] for r in ws_db.list_response_patterns("app_chat")] for _ in range(3)]
+    assert runs[0] == runs[1] == runs[2]
+    assert runs[0] == ["docusign", "ariba", "sap"], "all tied at hit_count=1, earliest first_seen_ts must sort first"
+
+
 def test_get_socrates_log_since_dedupes_multi_tier_rows(ws_db):
     """append_socrates_log logs one row PER TIER for a single real question -
     get_socrates_log_since must collapse that back to one row per question."""

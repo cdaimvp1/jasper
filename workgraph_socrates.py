@@ -326,7 +326,14 @@ def answer(*, question: str, issue_id: Optional[str] = None, asker: Optional[str
             scope = [issue["id"]] if issue else (ws.list_issues_for_company(company) if company else [])
             ev, prov = _research_evidence(q_tokens, scope, "targeted-research")
         else:  # broad-research - deep depth only
-            scope = [i["id"] for i in ws.list_issues(states=["active", "waiting", "blocked"], limit=200)]
+            # Fixed 2026-07-30 (adversarial review round #2): ws.list_issues
+            # defaults to limit=200, silently truncating - the real DB
+            # already has 221 open issues, so the lowest-priority ~21 were
+            # invisible to broad-research, the tier specifically meant to
+            # widen the search when narrower tiers found nothing. Same
+            # missing-limit=10000 pattern already fixed 3x elsewhere this
+            # session (workgraph_projects, workgraph_suppliers).
+            scope = [i["id"] for i in ws.list_issues(states=["active", "waiting", "blocked"], limit=10000)]
             ev, prov = _research_evidence(q_tokens, scope, "broad-research")
 
         steps.append({"tier": tier, "band": ev["band"], "needs_review": ev["needs_review"], "detail": ev["detail"]})

@@ -2439,17 +2439,28 @@ def upsert_response_pattern(source_surface: str, pattern_key: str, example_text:
 
 
 def list_response_patterns(source_surface: Optional[str] = None) -> list[dict]:
+    """Fixed 2026-07-30 (adversarial review round #2): `ORDER BY hit_count
+    DESC` alone has no tie-break, so two patterns tied on hit_count (very
+    plausible at real scale) could come back in either order across runs -
+    the same non-determinism already fixed 3x elsewhere this session
+    (workgraph_projects._project_name_for, workgraph_suppliers.
+    attach_supplier_precedent, workgraph_lessons._first_external_company).
+    personal_patterns.citation_for_text picks the FIRST match in this list,
+    so an unstable tie could flip which pattern gets cited as precedent.
+    first_seen_ts ascending is the same stable tie-break used everywhere
+    else in this codebase."""
     with _lock:
         conn = _connect()
         try:
             if source_surface:
                 rows = conn.execute(
-                    "SELECT * FROM response_patterns WHERE source_surface = ? ORDER BY hit_count DESC",
+                    "SELECT * FROM response_patterns WHERE source_surface = ? "
+                    "ORDER BY hit_count DESC, first_seen_ts ASC",
                     (source_surface,),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT * FROM response_patterns ORDER BY hit_count DESC"
+                    "SELECT * FROM response_patterns ORDER BY hit_count DESC, first_seen_ts ASC"
                 ).fetchall()
         finally:
             conn.close()

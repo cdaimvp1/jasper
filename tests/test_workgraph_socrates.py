@@ -48,3 +48,23 @@ def test_longer_company_name_still_case_insensitive(ws_db):
     _seed_company(ws_db, "Databricks")
     _, company = wsoc._extract_candidates("following up on the databricks renewal")
     assert company == "Databricks"
+
+
+def test_broad_research_tier_searches_beyond_default_200_limit(ws_db, monkeypatch):
+    """Fixed 2026-07-30 (adversarial review round #2): ws.list_issues'
+    200-row default silently capped broad-research - the tier specifically
+    meant to widen the search when narrower tiers find nothing - on the
+    real, larger (221-open-issue) dataset. Same missing-limit=10000 pattern
+    already fixed 3x elsewhere this session."""
+    seen_limits = []
+    real_list_issues = ws_db.list_issues
+
+    def spy(*args, **kwargs):
+        seen_limits.append(kwargs.get("limit"))
+        return real_list_issues(*args, **kwargs)
+
+    monkeypatch.setattr(ws_db, "list_issues", spy)
+
+    wsoc.answer(question="something nobody has ever asked before", explicit_depth="deep")
+
+    assert seen_limits and all((limit or 0) > 200 for limit in seen_limits)

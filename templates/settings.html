@@ -197,6 +197,17 @@
     <span id="ar-fb" style="font-size:12px;color:var(--muted,#888);display:block;margin-top:8px"></span>
   </div>
 
+  <!-- ── Suggested rules (added 2026-07-30, tasks #52/#54) ─────────────── -->
+  <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:26px 0 10px">Suggested rules</div>
+  <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px">
+    <div style="color:var(--muted,#667);font-size:13px;margin-bottom:12px">
+      Jasper never activates a rule on its own — these are candidates it noticed on its own (from real, repeated
+      history) or that you explained in Back Office chat with <code>#addrule</code>. Nothing here does anything
+      until you confirm it.
+    </div>
+    <div id="arsug-list">Loading…</div>
+  </div>
+
   <!-- ── Server · Settings #6 ──────────────────────────────────────────── -->
   <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:26px 0 10px">Server</div>
   <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px">
@@ -465,6 +476,44 @@
       else { arFb.textContent = d.detail || 'error'; }
     }catch(e){ arFb.textContent = 'error'; }
   });
+
+  // ── Suggested rules (tasks #52/#54) ────────────────────────────────────
+  const arsugList = document.getElementById('arsug-list');
+  function arsugRender(suggestions){
+    if(!suggestions.length){ arsugList.innerHTML = '<div style="color:var(--muted,#667);font-size:13px">Nothing pending.</div>'; return; }
+    arsugList.innerHTML = suggestions.map(s => {
+      const originLabel = s.origin === 'detected' ? 'Noticed automatically' : 'From a chat conversation';
+      const structured = s.trigger_signal_type && s.requires_signal_type && s.match_on;
+      const summary = structured
+        ? `<code>${esc(s.trigger_signal_type)}</code> requires <code>${esc(s.requires_signal_type)}</code> (same ${esc(s.match_on)})`
+        : '<i>Not structured yet — use the form above to add it as a real rule, or edit the fields below.</i>';
+      return `<div style="padding:10px 0;border-bottom:1px solid var(--border,#eee);font-size:13px">
+        <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--muted,#888);margin-bottom:3px">${originLabel}</div>
+        <div>${summary}</div>
+        ${s.reason ? `<div style="color:var(--muted,#667);font-size:12px;margin-top:2px">${esc(s.reason)}</div>` : ''}
+        ${s.evidence ? `<div style="color:var(--muted,#667);font-size:12px;margin-top:2px">${esc(s.evidence)}</div>` : ''}
+        ${s.raw_explanation ? `<div style="color:var(--muted,#667);font-size:12px;margin-top:2px;font-style:italic">"${esc(s.raw_explanation)}"</div>` : ''}
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <button data-arsug-confirm="${s.id}" ${structured ? '' : 'disabled'} style="border:1px solid var(--border,#ddd);background:var(--accent,#0f766e);color:#fff;font:600 12px sans-serif;padding:5px 12px;border-radius:7px;cursor:pointer">Confirm</button>
+          <button data-arsug-reject="${s.id}" style="border:1px solid var(--border,#ddd);background:none;color:inherit;font:600 12px sans-serif;padding:5px 12px;border-radius:7px;cursor:pointer">Reject</button>
+        </div>
+      </div>`;
+    }).join('');
+    arsugList.querySelectorAll('[data-arsug-confirm]').forEach(btn => btn.addEventListener('click', () => arsugResolve(btn.getAttribute('data-arsug-confirm'), 'confirm')));
+    arsugList.querySelectorAll('[data-arsug-reject]').forEach(btn => btn.addEventListener('click', () => arsugResolve(btn.getAttribute('data-arsug-reject'), 'reject')));
+  }
+  function arsugLoad(){
+    return fetch('/api/settings/prerequisite-rule-suggestions').then(r=>r.json()).then(d=>arsugRender(d.suggestions))
+      .catch(()=>{ arsugList.textContent = 'Could not load.'; });
+  }
+  async function arsugResolve(id, action){
+    try{
+      const r = await fetch(`/api/settings/prerequisite-rule-suggestions/${id}/resolve`,{method:'POST',
+        headers:{'Content-Type':'application/json'}, body:JSON.stringify({action})});
+      if(r.ok){ arsugLoad(); arLoad(); } else { const d = await r.json().catch(()=>({})); alert(d.detail || 'error'); }
+    }catch(e){ alert('error'); }
+  }
+  arsugLoad();
 
   // ── Server restart ────────────────────────────────────────────────────
   const restartBtn = document.getElementById('restart-btn');

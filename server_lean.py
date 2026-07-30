@@ -1463,6 +1463,46 @@ async def api_prerequisite_rule_delete(rule_id: int):
     return JSONResponse({"ok": True})
 
 
+@app.get("/api/settings/prerequisite-rule-suggestions")
+async def api_prerequisite_rule_suggestions_list():
+    """Shared review queue for BOTH origins (task #52 auto-detected, task
+    #54 chat-taught) - one place to confirm or reject, regardless of where a
+    candidate came from."""
+    return JSONResponse({
+        "suggestions": sanitize_surrogates(wg.list_prerequisite_suggestions("pending")),
+    })
+
+
+class PrerequisiteSuggestionResolveBody(BaseModel):
+    action: str  # "confirm" | "reject"
+
+
+@app.post("/api/settings/prerequisite-rule-suggestions/{suggestion_id}/resolve")
+async def api_prerequisite_rule_suggestion_resolve(suggestion_id: int, body: PrerequisiteSuggestionResolveBody):
+    if body.action not in ("confirm", "reject"):
+        raise HTTPException(400, "action must be 'confirm' or 'reject'")
+    suggestion = wg.get_prerequisite_suggestion(suggestion_id)
+    if suggestion is None:
+        raise HTTPException(404, f"no such suggestion: {suggestion_id}")
+    if suggestion["status"] != "pending":
+        raise HTTPException(400, f"suggestion already {suggestion['status']}")
+    if body.action == "confirm":
+        if not (suggestion.get("trigger_signal_type") and suggestion.get("requires_signal_type")
+                and suggestion.get("match_on")):
+            raise HTTPException(400, "this suggestion isn't structured enough to confirm yet - "
+                                      "add it as a real rule above using the dropdowns instead")
+        wg.create_prerequisite_rule(
+            trigger_signal_type=suggestion["trigger_signal_type"],
+            requires_signal_type=suggestion["requires_signal_type"],
+            match_on=suggestion["match_on"], reason=suggestion.get("reason") or "",
+            created_by=config.get("manager", "id") or "marc",
+        )
+        wg.resolve_prerequisite_suggestion(suggestion_id, "confirmed")
+    else:
+        wg.resolve_prerequisite_suggestion(suggestion_id, "rejected")
+    return JSONResponse({"ok": True})
+
+
 # --- Per-communication extraction / per-entity synthesis ------------------
 # Extraction is real LLM judgment (asks/decisions/dates/commitments/facts),
 # written once per raw_item by curator's synthesis routine and never

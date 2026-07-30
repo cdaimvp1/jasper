@@ -5,6 +5,8 @@
 import sqlite3
 import time
 
+import pytest
+
 
 def test_list_issues_tiebreak_is_stable_and_deterministic(ws_db):
     ids = [ws_db.create_issue_with_new_id(title=f"Issue {i}", state="active", category="other")
@@ -113,6 +115,101 @@ def test_delete_prerequisite_rule(ws_db):
 
 def test_get_active_prerequisite_rules_for_trigger_empty_for_unknown_type(ws_db):
     assert ws_db.get_active_prerequisite_rules_for_trigger("nonexistent_signal") == []
+
+
+def test_list_distinct_signal_types_in_use(ws_db):
+    ws_db.insert_raw_item(source="outlook_mail", stable_key="a", thread_key="a", dedupe_key="a",
+                          occurred_ts=1.0, subject="s", from_actor="x@example.com", participants_json="[]")
+    ws_db.insert_raw_item(source="outlook_mail", stable_key="b", thread_key="b", dedupe_key="b",
+                          occurred_ts=2.0, subject="s", from_actor="x@example.com", participants_json="[]")
+    conn = ws_db._connect()
+    conn.execute("UPDATE raw_items SET signal_type = 'ariba_pr_fully_approved' WHERE stable_key = 'a'")
+    conn.execute("UPDATE raw_items SET signal_type = 'signature_requested_docusign' WHERE stable_key = 'b'")
+    types = ws_db.list_distinct_signal_types_in_use()
+    assert set(types) == {"ariba_pr_fully_approved", "signature_requested_docusign"}
+
+
+def test_get_raw_items_by_signal_type(ws_db):
+    row_id = ws_db.insert_raw_item(source="outlook_mail", stable_key="a", thread_key="a", dedupe_key="a",
+                                    occurred_ts=5.0, subject="s", from_actor="x@example.com", participants_json="[]")
+    conn = ws_db._connect()
+    conn.execute("UPDATE raw_items SET signal_type = 'ariba_pr_fully_approved' WHERE id = ?", (row_id,))
+    rows = ws_db.get_raw_items_by_signal_type("ariba_pr_fully_approved")
+    assert len(rows) == 1
+    assert rows[0]["id"] == row_id
+    assert rows[0]["occurred_ts"] == 5.0
+    assert ws_db.get_raw_items_by_signal_type("nonexistent_type") == []
+
+
+def test_create_and_list_prerequisite_suggestion(ws_db):
+    sid = ws_db.create_prerequisite_suggestion(
+        origin="detected", trigger_signal_type="a", requires_signal_type="b", match_on="project",
+        reason="r", evidence="e", raw_explanation=None, proposed_by="system",
+    )
+    pending = ws_db.list_prerequisite_suggestions("pending")
+    assert len(pending) == 1
+    assert pending[0]["id"] == sid
+    assert pending[0]["origin"] == "detected"
+    assert ws_db.get_prerequisite_suggestion(sid)["reason"] == "r"
+
+
+def test_list_prerequisite_suggestions_status_none_returns_all(ws_db):
+    sid1 = ws_db.create_prerequisite_suggestion(origin="detected", trigger_signal_type="a",
+        requires_signal_type="b", match_on="project", reason="r", evidence="e",
+        raw_explanation=None, proposed_by="system")
+    ws_db.resolve_prerequisite_suggestion(sid1, "rejected")
+    sid2 = ws_db.create_prerequisite_suggestion(origin="detected", trigger_signal_type="c",
+        requires_signal_type="d", match_on="project", reason="r", evidence="e",
+        raw_explanation=None, proposed_by="system")
+
+    assert len(ws_db.list_prerequisite_suggestions("pending")) == 1
+    assert len(ws_db.list_prerequisite_suggestions(None)) == 2
+    assert ws_db.get_prerequisite_suggestion(sid1)["status"] == "rejected"
+    assert ws_db.get_prerequisite_suggestion(sid2)["status"] == "pending"
+
+
+def test_resolve_prerequisite_suggestion_invalid_status_raises(ws_db):
+    sid = ws_db.create_prerequisite_suggestion(origin="detected", trigger_signal_type="a",
+        requires_signal_type="b", match_on="project", reason="r", evidence="e",
+        raw_explanation=None, proposed_by="system")
+    with pytest.raises(ValueError):
+        ws_db.resolve_prerequisite_suggestion(sid, "pending")
+
+
+def test_get_most_recent_pending_suggestion_by_asker(ws_db):
+    ws_db.create_prerequisite_suggestion(origin="taught_via_chat", trigger_signal_type=None,
+        requires_signal_type=None, match_on=None, reason=None, evidence=None,
+        raw_explanation="old one", proposed_by="marc")
+    recent_id = ws_db.create_prerequisite_suggestion(origin="taught_via_chat", trigger_signal_type=None,
+        requires_signal_type=None, match_on=None, reason=None, evidence=None,
+        raw_explanation="new one", proposed_by="marc")
+
+    result = ws_db.get_most_recent_pending_suggestion_by_asker("marc", since_ts=0)
+    assert result["id"] == recent_id
+    assert result["raw_explanation"] == "new one"
+
+
+def test_get_most_recent_pending_suggestion_excludes_other_askers(ws_db):
+    ws_db.create_prerequisite_suggestion(origin="taught_via_chat", trigger_signal_type=None,
+        requires_signal_type=None, match_on=None, reason=None, evidence=None,
+        raw_explanation="x", proposed_by="someone_else")
+    assert ws_db.get_most_recent_pending_suggestion_by_asker("marc", since_ts=0) is None
+
+
+def test_get_most_recent_pending_suggestion_excludes_resolved(ws_db):
+    sid = ws_db.create_prerequisite_suggestion(origin="taught_via_chat", trigger_signal_type=None,
+        requires_signal_type=None, match_on=None, reason=None, evidence=None,
+        raw_explanation="x", proposed_by="marc")
+    ws_db.resolve_prerequisite_suggestion(sid, "confirmed")
+    assert ws_db.get_most_recent_pending_suggestion_by_asker("marc", since_ts=0) is None
+
+
+def test_get_most_recent_pending_suggestion_respects_since_ts(ws_db):
+    ws_db.create_prerequisite_suggestion(origin="taught_via_chat", trigger_signal_type=None,
+        requires_signal_type=None, match_on=None, reason=None, evidence=None,
+        raw_explanation="x", proposed_by="marc")
+    result = ws_db.get_most_recent_pending_suggestion_by_asker("marc", since_ts=time.time() + 100)
+    assert result is None
 
 
 def test_get_teams_messages_from_actor_since_matches_case_insensitively(ws_db):

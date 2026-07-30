@@ -532,6 +532,33 @@ def init_workgraph() -> None:
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_prereq_trigger ON prerequisite_rules(trigger_signal_type, active)")
 
+            # Aristotle candidate-rule suggestions (task #52/#54) - a shared
+            # propose-then-confirm queue for BOTH origins: deterministic
+            # correlation detection (origin='detected', task #52) and chat-
+            # taught explanations (origin='taught_via_chat', task #54).
+            # trigger_signal_type/requires_signal_type/match_on are nullable:
+            # a chat-taught explanation that couldn't be confidently
+            # structured still gets logged (raw_explanation always present
+            # for that origin) even with no structured fields yet - visible
+            # and reviewable, never silently dropped.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS pending_prerequisite_suggestions (
+                    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+                    origin                TEXT NOT NULL CHECK (origin IN ('detected','taught_via_chat')),
+                    trigger_signal_type   TEXT,
+                    requires_signal_type  TEXT,
+                    match_on              TEXT CHECK (match_on IS NULL OR match_on IN ('project','supplier')),
+                    reason                TEXT,
+                    evidence              TEXT,
+                    raw_explanation       TEXT,
+                    proposed_by           TEXT,
+                    status                TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','confirmed','rejected')),
+                    created_ts            REAL NOT NULL,
+                    resolved_ts           REAL
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_prereq_suggestions_status ON pending_prerequisite_suggestions(status, created_ts DESC)")
+
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS response_patterns (
                     id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1595,6 +1622,125 @@ def delete_prerequisite_rule(rule_id: int) -> None:
             conn.execute("DELETE FROM prerequisite_rules WHERE id = ?", (rule_id,))
         finally:
             conn.close()
+
+
+def list_distinct_signal_types_in_use() -> list[str]:
+    """Every signal_type actually present on a real raw_item (not just the
+    full catalog in workgraph_signals.known_signal_types()) - detection only
+    needs to consider types that have actually occurred, task #52."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT DISTINCT signal_type FROM raw_items WHERE signal_type IS NOT NULL"
+            ).fetchall()
+        finally:
+            conn.close()
+    return [r["signal_type"] for r in rows]
+
+
+def get_raw_items_by_signal_type(signal_type: str) -> list[dict]:
+    """id/issue_id/occurred_ts for every raw_item classified with this
+    signal_type - detection support, task #52."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT id, issue_id, occurred_ts FROM raw_items WHERE signal_type = ?",
+                (signal_type,),
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+# --- pending_prerequisite_suggestions (Aristotle, tasks #52/#54) ------------
+
+def create_prerequisite_suggestion(*, origin: str, trigger_signal_type: Optional[str],
+                                    requires_signal_type: Optional[str], match_on: Optional[str],
+                                    reason: Optional[str], evidence: Optional[str],
+                                    raw_explanation: Optional[str], proposed_by: Optional[str]) -> int:
+    with _lock:
+        conn = _connect()
+        try:
+            cur = conn.execute(
+                """INSERT INTO pending_prerequisite_suggestions
+                   (origin, trigger_signal_type, requires_signal_type, match_on, reason,
+                    evidence, raw_explanation, proposed_by, status, created_ts)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)""",
+                (origin, trigger_signal_type, requires_signal_type, match_on, reason,
+                 evidence, raw_explanation, proposed_by, time.time()),
+            )
+            return cur.lastrowid
+        finally:
+            conn.close()
+
+
+def list_prerequisite_suggestions(status: Optional[str] = "pending") -> list[dict]:
+    """status=None returns every suggestion regardless of status - used by
+    detection to avoid re-proposing something already confirmed OR already
+    rejected, not just pending ones."""
+    with _lock:
+        conn = _connect()
+        try:
+            if status is None:
+                rows = conn.execute(
+                    "SELECT * FROM pending_prerequisite_suggestions ORDER BY created_ts DESC"
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM pending_prerequisite_suggestions WHERE status = ? ORDER BY created_ts DESC",
+                    (status,),
+                ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_prerequisite_suggestion(suggestion_id: int) -> Optional[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM pending_prerequisite_suggestions WHERE id = ?", (suggestion_id,)
+            ).fetchone()
+        finally:
+            conn.close()
+    return dict(row) if row else None
+
+
+def resolve_prerequisite_suggestion(suggestion_id: int, status: str) -> None:
+    if status not in ("confirmed", "rejected"):
+        raise ValueError(f"invalid resolution status: {status!r}")
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                "UPDATE pending_prerequisite_suggestions SET status = ?, resolved_ts = ? WHERE id = ?",
+                (status, time.time(), suggestion_id),
+            )
+        finally:
+            conn.close()
+
+
+def get_most_recent_pending_suggestion_by_asker(asker: str, since_ts: float) -> Optional[dict]:
+    """The single most recent still-pending taught_via_chat suggestion from
+    this asker, created after since_ts (a recency window) - task #54's
+    confirm-in-chat mechanism resolves against this, not an open-ended
+    search back through all history."""
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                """SELECT * FROM pending_prerequisite_suggestions
+                   WHERE status = 'pending' AND origin = 'taught_via_chat'
+                   AND proposed_by = ? AND created_ts >= ?
+                   ORDER BY created_ts DESC LIMIT 1""",
+                (asker, since_ts),
+            ).fetchone()
+        finally:
+            conn.close()
+    return dict(row) if row else None
 
 
 _TOPIC_KEY_STRIP = re.compile(r"^\s*(?:\[[^\]]{1,20}\]|re|fwd?|fw)\s*:?\s*", re.I)

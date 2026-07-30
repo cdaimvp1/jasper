@@ -122,6 +122,46 @@ def test_mine_sent_mail_reports_error_on_nonzero_exit_without_raising(pp_env, mo
     assert result["scanned"] == 0
 
 
+def test_mine_sent_teams_populates_response_patterns(pp_env):
+    import workgraph_store as ws, config
+    config.set_value({"id": "Marc Lane"}, "manager")
+    ws.insert_raw_item(source="teams_chat", stable_key="c1:m1", thread_key="c1",
+                        dedupe_key="d1", occurred_ts=100.0, subject=None,
+                        from_actor="Marc Lane", participants_json="[]",
+                        body_preview="can you check the Ariba status")
+    ws.insert_raw_item(source="teams_chat", stable_key="c1:m2", thread_key="c1",
+                        dedupe_key="d2", occurred_ts=200.0, subject=None,
+                        from_actor="Someone Else", participants_json="[]",
+                        body_preview="ariba is fine on my end")
+
+    result = pp_env.mine_sent_teams(since_ts=0)
+
+    assert result["scanned"] == 1  # only Marc's own message
+    assert result["matched"] == 1
+    patterns = {p["pattern_key"]: p["hit_count"] for p in ws.list_response_patterns("sent_teams")}
+    assert patterns["ariba"] == 1
+
+
+def test_mine_sent_teams_no_manager_id_is_a_safe_noop(pp_env):
+    result = pp_env.mine_sent_teams(since_ts=42.0)
+    assert result == {"scanned": 0, "matched": 0, "cursor": 42.0}
+
+
+def test_run_daily_if_due_runs_only_sent_teams_when_that_is_the_only_toggle_on(pp_env):
+    import config, workgraph_store as ws
+    config.set_value({"id": "Marc Lane"}, "manager")
+    config.set_value(True, "personal_learning", "enabled")
+    config.set_value({"sent_teams": True}, "personal_learning", "surfaces")
+    ws.insert_raw_item(source="teams_chat", stable_key="c1:m1", thread_key="c1",
+                        dedupe_key="d1", occurred_ts=time.time() - 60, subject=None,
+                        from_actor="Marc Lane", participants_json="[]", body_preview="check sap")
+
+    result = pp_env.run_daily_if_due()
+    assert result is not None
+    assert result["sent_teams"]["scanned"] == 1
+    assert "app_chat" not in result and "sent_mail" not in result
+
+
 def test_run_daily_if_due_returns_none_when_disabled(pp_env):
     assert pp_env.run_daily_if_due() is None
 

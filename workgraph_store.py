@@ -1904,6 +1904,34 @@ def delete_old_socrates_log(cutoff_ts: float) -> int:
             conn.close()
 
 
+def get_teams_messages_from_actor_since(actor: str, since_ts: float) -> list[dict]:
+    """Personal Response Learning Phase 3 (task #50) support: raw_items rows
+    already ingested as Teams messages (source='teams_chat') whose from_actor
+    matches `actor` case-insensitively, newer than since_ts. No new
+    ingestion - Teams messages are already captured both directions by the
+    existing pipeline (ingest/normalize.py's _process_teams_chat); this just
+    identifies which of them are Marc's own.
+
+    Known limitation: from_actor can be either a display name or an email
+    depending on what Graph returned for that specific message - an exact,
+    case-insensitive match against config.manager.id (his display name)
+    catches the common case but would miss a message where Graph reported
+    his email address instead."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                """SELECT id, occurred_ts, subject, body_preview FROM raw_items
+                   WHERE source = 'teams_chat' AND occurred_ts > ?
+                   AND LOWER(from_actor) = LOWER(?)
+                   ORDER BY occurred_ts ASC""",
+                (since_ts, actor),
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
 def get_socrates_log_since(since_ts: float) -> list[dict]:
     """Distinct (asked_ts, asker, question) rows strictly after since_ts - one
     row PER TIER is logged per real question (see append_socrates_log's own

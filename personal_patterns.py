@@ -8,13 +8,21 @@ honestly claim to capture, and is deliberately deferred to a future bounded/
 periodic LLM pass (the sentinel-worker concept discussed but not yet built)
 rather than faked with a regex.
 
-Two surfaces so far, each independently toggleable:
-  app_chat  (#45) - Marc's own questions in socrates_retrieval_log. Zero new
-             ingestion; this data already exists.
-  sent_mail (#49) - Marc's own Sent Items, via a dedicated, minimal COM scan
-             (ingest/outlook_scan_sent.ps1) - deliberately NOT routed through
-             outlook_com_ingest.py's full pipeline, since sent mail isn't
-             triage input and nothing here becomes a permanent document.
+Three surfaces so far, each independently toggleable:
+  app_chat   (#45) - Marc's own questions in socrates_retrieval_log. Zero new
+              ingestion; this data already exists.
+  sent_mail  (#49) - Marc's own Sent Items, via a dedicated, minimal COM scan
+              (ingest/outlook_scan_sent.ps1) - deliberately NOT routed
+              through outlook_com_ingest.py's full pipeline, since sent mail
+              isn't triage input and nothing here becomes a permanent
+              document.
+  sent_teams (#50) - Marc's own messages within Teams chats already
+              ingested by the existing pipeline (ingest/normalize.py's
+              _process_teams_chat captures both directions of every chat
+              already) - zero new ingestion here either, just identifying
+              which already-stored rows are his (see
+              workgraph_store.get_teams_messages_from_actor_since's own
+              caveat on how that match works and its limits).
 
 Gates: config.get("personal_learning", "enabled") is the master switch;
 config.get("personal_learning", "surfaces", <name>) enables one specific
@@ -24,8 +32,6 @@ at all is enabled, or it already ran today (three distinct, real "did not
 run" reasons, never a silent no-op). Everything below run_daily_if_due() is
 pure/ungated on purpose (same shape as retention.py), so it stays directly
 testable without fighting config state.
-
-Sent Teams (task #50) is a separate, later module.
 """
 from __future__ import annotations
 
@@ -137,6 +143,33 @@ def mine_sent_mail(since_ts: float) -> dict:
     return result
 
 
+def mine_sent_teams(since_ts: float) -> dict:
+    """Phase 3 (task #50): identifies which already-ingested teams_chat
+    raw_items are Marc's own sent messages (matched against
+    config.manager.id) and mines them the same way as the other two
+    surfaces. No new ingestion - see module docstring. Returns
+    {"scanned","matched","cursor"} - if manager.id isn't set (shouldn't
+    happen in practice, but this must never crash a daily scheduled job over
+    it), scanned/matched are 0 and cursor is unchanged."""
+    manager_id = config.get("manager", "id") or ""
+    if not manager_id:
+        return {"scanned": 0, "matched": 0, "cursor": since_ts}
+    rows = ws.get_teams_messages_from_actor_since(manager_id, since_ts)
+    matched = 0
+    max_ts = since_ts
+    for row in rows:
+        ts = row["occurred_ts"]
+        if ts > max_ts:
+            max_ts = ts
+        text = f"{row.get('subject') or ''} {row.get('body_preview') or ''}"
+        keys = extract_patterns(text)
+        for key in keys:
+            ws.upsert_response_pattern("sent_teams", key, row.get("body_preview") or "", ts)
+        if keys:
+            matched += 1
+    return {"scanned": len(rows), "matched": matched, "cursor": max_ts}
+
+
 def run_daily_if_due(now: Optional[float] = None) -> Optional[dict]:
     """Gate for scheduled_refresh.py - mirrors retention.run_daily_if_due's
     exact shape (same ingest_cursors mechanism, source='personal_learning').
@@ -168,6 +201,11 @@ def run_daily_if_due(now: Optional[float] = None) -> Optional[dict]:
         r = mine_sent_mail(since_ts)
         ws.set_cursor("personal_learning", "sent_mail_cursor", str(r["cursor"]))
         result["sent_mail"] = r
+    if surfaces.get("sent_teams"):
+        since_ts = float(ws.get_cursor("personal_learning", "sent_teams_cursor") or "0")
+        r = mine_sent_teams(since_ts)
+        ws.set_cursor("personal_learning", "sent_teams_cursor", str(r["cursor"]))
+        result["sent_teams"] = r
 
     if not result:
         return None  # master on, but no individual surface enabled yet

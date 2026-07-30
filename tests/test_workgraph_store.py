@@ -90,6 +90,43 @@ def test_get_socrates_log_since_dedupes_multi_tier_rows(ws_db):
     assert rows[0]["question"] == "q1"
 
 
+def test_get_teams_messages_from_actor_since_matches_case_insensitively(ws_db):
+    ws_db.insert_raw_item(source="teams_chat", stable_key="c1:m1", thread_key="c1",
+                           dedupe_key="d1", occurred_ts=100.0, subject=None,
+                           from_actor="Marc Lane", participants_json="[]", body_preview="hi team")
+    ws_db.insert_raw_item(source="teams_chat", stable_key="c1:m2", thread_key="c1",
+                           dedupe_key="d2", occurred_ts=200.0, subject=None,
+                           from_actor="marc lane", participants_json="[]", body_preview="ping")
+    ws_db.insert_raw_item(source="teams_chat", stable_key="c1:m3", thread_key="c1",
+                           dedupe_key="d3", occurred_ts=300.0, subject=None,
+                           from_actor="Someone Else", participants_json="[]", body_preview="pong")
+
+    rows = ws_db.get_teams_messages_from_actor_since("Marc Lane", 0)
+
+    assert [r["body_preview"] for r in rows] == ["hi team", "ping"]
+
+
+def test_get_teams_messages_from_actor_since_excludes_at_or_before_cutoff(ws_db):
+    ws_db.insert_raw_item(source="teams_chat", stable_key="c1:m1", thread_key="c1",
+                           dedupe_key="d1", occurred_ts=100.0, subject=None,
+                           from_actor="Marc Lane", participants_json="[]", body_preview="old")
+    ws_db.insert_raw_item(source="teams_chat", stable_key="c1:m2", thread_key="c1",
+                           dedupe_key="d2", occurred_ts=200.0, subject=None,
+                           from_actor="Marc Lane", participants_json="[]", body_preview="new")
+
+    rows = ws_db.get_teams_messages_from_actor_since("Marc Lane", 100.0)
+
+    assert [r["body_preview"] for r in rows] == ["new"]
+
+
+def test_get_teams_messages_from_actor_since_excludes_other_sources(ws_db):
+    ws_db.insert_raw_item(source="outlook_mail", stable_key="m1", thread_key="m1",
+                           dedupe_key="d1", occurred_ts=100.0, subject=None,
+                           from_actor="Marc Lane", participants_json="[]", body_preview="an email")
+    rows = ws_db.get_teams_messages_from_actor_since("Marc Lane", 0)
+    assert rows == []
+
+
 def test_get_socrates_log_since_excludes_at_or_before_cutoff(ws_db):
     ws_db.append_socrates_log(asked_ts=100.0, asker="marc", question="old", signature="s",
                                tier="recall", band="high", contributed=True, outcome="answered")

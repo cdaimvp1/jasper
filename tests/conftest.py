@@ -71,6 +71,7 @@ def isolated_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "BUS_DB", data_dir / "bus.db")
     monkeypatch.setattr(paths, "DOCUMENTS_DIR", data_dir / "documents")
     monkeypatch.setattr(paths, "DOCUMENTS_RAW_ITEMS_DIR", data_dir / "documents" / "raw_items")
+    monkeypatch.setattr(paths, "ATTACHMENT_STAGING_DIR", data_dir / "raw_ingest_inbox" / "_mail_attachments_staging")
     monkeypatch.setattr(paths, "BACKUPS_DIR", data_dir / "backups")
     monkeypatch.setattr(paths, "DB_SNAPSHOTS_DIR", data_dir / "backups" / "db_snapshots")
     monkeypatch.setattr(paths, "CONFIG_SNAPSHOTS_DIR", data_dir / "backups" / "config_snapshots")

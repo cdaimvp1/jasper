@@ -15,8 +15,9 @@
 # SaveAsFile fails silently with "Path does not exist," while short filenames
 # like image001.png happened to still fit - this looked like a detection bug
 # at first but was a path-length bug. Each JSON line reports the exact
-# attachments_staged_dir used, so outlook_com_ingest.py's cleanup step doesn't
-# need to re-derive the hash itself.
+# item_staged_dir used (task #43: shared by attachments AND the staged full
+# body files below), so outlook_com_ingest.py's cleanup step doesn't need to
+# re-derive the hash itself.
 #
 # Usage:
 #   powershell -File outlook_scan.ps1 -FolderName "Careful" -SinceEpoch 1785200000 -MaxItems 500 -StagingDir C:\...\_mail_attachments_staging
@@ -60,10 +61,9 @@ function Get-ShortHash([string]$s) {
 }
 
 function Save-RealAttachments {
-    param($item, [string]$stagingDir)
-    $result = [ordered]@{ saved = @(); dir = "" }
-    if (-not $stagingDir -or $item.Attachments.Count -eq 0) { return $result }
-    $itemDir = Join-Path $stagingDir (Get-ShortHash $item.EntryID)
+    param($item, [string]$itemDir)
+    $result = [ordered]@{ saved = @() }
+    if (-not $itemDir -or $item.Attachments.Count -eq 0) { return $result }
     $saved = @()
     foreach ($att in $item.Attachments) {
         try {
@@ -85,7 +85,32 @@ function Save-RealAttachments {
         } catch { }  # one bad attachment (e.g. an OLE object SaveAsFile can't handle) never fails the whole item
     }
     $result.saved = $saved
-    if ($saved.Count -gt 0) { $result.dir = $itemDir }
+    return $result
+}
+
+function Save-FullBody {
+    # Stages the FULL plain-text and HTML bodies to files, same staging dir
+    # attachments use (task #43) - the JSON-lines stream stays small (still
+    # emits only a 500-char body_preview per item) while the complete content
+    # a later feature needs (full-text display, or link_extraction.py parsing
+    # a DocuSign/Ariba/Word href out of the real HTML) lives on disk instead.
+    # UTF8 without BOM - Out-File defaults to BOM'd UTF8 on Windows PowerShell
+    # 5.1, which a naive later `open(path).read()` in Python would leave a
+    # stray ﻿ on the front of; System.IO.File]::WriteAllText avoids that.
+    param($item, [string]$itemDir)
+    $result = [ordered]@{ text_file = ""; html_file = "" }
+    if (-not $itemDir) { return $result }
+    if (-not (Test-Path $itemDir)) { New-Item -ItemType Directory -Path $itemDir -Force | Out-Null }
+    try {
+        $textPath = Join-Path $itemDir "body.txt"
+        [System.IO.File]::WriteAllText($textPath, [string]$item.Body, [System.Text.Encoding]::UTF8)
+        $result.text_file = "body.txt"
+    } catch { }  # one bad item's .Body throwing (e.g. an encrypted/S-MIME message) shouldn't fail the whole scan
+    try {
+        $htmlPath = Join-Path $itemDir "body.html"
+        [System.IO.File]::WriteAllText($htmlPath, [string]$item.HTMLBody, [System.Text.Encoding]::UTF8)
+        $result.html_file = "body.html"
+    } catch { }
     return $result
 }
 
@@ -173,7 +198,12 @@ try {
             if ($item.CC) { $participants += ($item.CC -split ';' | ForEach-Object { $_.Trim() }) }
             $participants = $participants | Where-Object { $_ -and $_.Trim().Length -gt 0 } | Select-Object -Unique
 
-            $attResult = Save-RealAttachments -item $item -stagingDir $StagingDir
+            # Shared per-item staging dir - attachments and the full body both
+            # land here, so one cleanup pass on the Python side (item_staged_dir)
+            # covers both instead of tracking two separate temp dirs.
+            $itemDir = if ($StagingDir) { Join-Path $StagingDir (Get-ShortHash $item.EntryID) } else { $null }
+            $attResult = Save-RealAttachments -item $item -itemDir $itemDir
+            $bodyResult = Save-FullBody -item $item -itemDir $itemDir
 
             $obj = [ordered]@{
                 conversation_id        = $item.ConversationID
@@ -185,7 +215,9 @@ try {
                 received_epoch         = $receivedEpoch
                 body_preview           = $item.Body.Substring(0, [Math]::Min(500, $item.Body.Length))
                 attachments            = $attResult.saved
-                attachments_staged_dir = $attResult.dir
+                body_text_file         = $bodyResult.text_file
+                body_html_file         = $bodyResult.html_file
+                item_staged_dir        = $itemDir
             }
             $obj | ConvertTo-Json -Compress -Depth 4
             $count++

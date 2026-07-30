@@ -51,6 +51,32 @@ def _dedupe_key(occurred_ts: float, participants: list[str], source_ref: str) ->
     return digest[:16]
 
 
+def _absorb_body(row_id: int, item_staged_dir: str | None, text_file: str | None,
+                  html_file: str | None) -> str | None:
+    """Move the staged full plain-text and/or HTML body files (task #43) into
+    the same per-row document dir attachments use, and return a JSON string
+    (for raw_items.raw_ref) pointing at whichever of the two actually landed.
+    A single row can have neither (a scan predating this change, or both
+    writes failed on a malformed item), one, or both - callers must not
+    assume either key is present."""
+    if not item_staged_dir:
+        return None
+    src_dir = Path(item_staged_dir)
+    dest_dir = paths.DOCUMENTS_RAW_ITEMS_DIR / str(row_id)
+    ref: dict[str, str] = {}
+    for key, filename in (("body_text", text_file), ("body_html", html_file)):
+        if not filename:
+            continue
+        src = src_dir / filename
+        if not src.is_file():
+            continue  # PS reported it but it's not actually there - skip, don't fail the item
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / filename
+        shutil.move(str(src), str(dest))
+        ref[key] = str(dest.relative_to(paths.DOCUMENTS_DIR))
+    return json.dumps(ref, ensure_ascii=False) if ref else None
+
+
 def _absorb_attachments(row_id: int, staged: list[dict]) -> int:
     """Move each staged file (saved by outlook_scan.ps1 via Outlook COM) into
     the real document library under this raw_item's id, and register one
@@ -134,18 +160,23 @@ def run(folder: str = "Careful", max_items: int = 500) -> dict:
             from_actor=item.get("sender"),
             participants_json=json.dumps(participants, ensure_ascii=False),
             body_preview=item.get("body_preview"),
+            entry_id=item.get("entry_id"),
         )
         if row_id is None:
             duplicates += 1
         else:
             inserted += 1
             attachments_absorbed += _absorb_attachments(row_id, item.get("attachments") or [])
+            raw_ref = _absorb_body(row_id, item.get("item_staged_dir"),
+                                    item.get("body_text_file"), item.get("body_html_file"))
+            if raw_ref:
+                ws.set_raw_item_raw_ref(row_id, raw_ref)
 
         # Whether this was a fresh insert or a duplicate, the staging folder
-        # PowerShell used (if any - most messages have no real attachments) is
-        # done being useful - clean it up either way so re-scans of
-        # already-seen mail never accumulate orphaned staged files.
-        staged_dir_str = item.get("attachments_staged_dir")
+        # PowerShell used (attachments and/or the full body, task #43) is done
+        # being useful - clean it up either way so re-scans of already-seen
+        # mail never accumulate orphaned staged files.
+        staged_dir_str = item.get("item_staged_dir")
         if staged_dir_str:
             shutil.rmtree(Path(staged_dir_str), ignore_errors=True)
 
@@ -219,14 +250,19 @@ def sweep_unread(folder: str = "Careful", max_items: int = 200) -> dict:
             from_actor=item.get("sender"),
             participants_json=json.dumps(participants, ensure_ascii=False),
             body_preview=item.get("body_preview"),
+            entry_id=item.get("entry_id"),
         )
         if row_id is None:
             duplicates += 1
         else:
             inserted += 1
             attachments_absorbed += _absorb_attachments(row_id, item.get("attachments") or [])
+            raw_ref = _absorb_body(row_id, item.get("item_staged_dir"),
+                                    item.get("body_text_file"), item.get("body_html_file"))
+            if raw_ref:
+                ws.set_raw_item_raw_ref(row_id, raw_ref)
 
-        staged_dir_str = item.get("attachments_staged_dir")
+        staged_dir_str = item.get("item_staged_dir")
         if staged_dir_str:
             shutil.rmtree(Path(staged_dir_str), ignore_errors=True)
 

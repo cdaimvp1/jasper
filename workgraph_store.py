@@ -490,6 +490,17 @@ def init_workgraph() -> None:
                 conn.execute("ALTER TABLE raw_items ADD COLUMN pr_number TEXT")
             except sqlite3.OperationalError:
                 pass
+            try:
+                # Outlook's own message identifier - the PS scan has always
+                # emitted this, but until now it was only used transiently to
+                # build stable_key/dedupe_key and never persisted. Needed to
+                # open the exact source item later (task #43/#46) via
+                # Outlook COM's GetItemFromID, which EntryID alone can do -
+                # ConversationID (already in stable_key) only gets you the
+                # thread, not this specific message.
+                conn.execute("ALTER TABLE raw_items ADD COLUMN entry_id TEXT")
+            except sqlite3.OperationalError:
+                pass
         finally:
             conn.close()
 
@@ -508,6 +519,7 @@ def insert_raw_item(
     participants_json: str = "[]",
     body_preview: Optional[str] = None,
     raw_ref: Optional[str] = None,
+    entry_id: Optional[str] = None,
 ) -> Optional[int]:
     """Insert one raw item. Returns the new row id, or None if it was a duplicate
     (dedupe_key already present — first write wins, matching the reference
@@ -519,14 +531,27 @@ def insert_raw_item(
                 cur = conn.execute(
                     """INSERT INTO raw_items
                        (source, stable_key, thread_key, dedupe_key, occurred_ts,
-                        subject, from_actor, participants, body_preview, raw_ref, ingested_ts)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        subject, from_actor, participants, body_preview, raw_ref, ingested_ts, entry_id)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (source, stable_key, thread_key, dedupe_key, occurred_ts,
-                     subject, from_actor, participants_json, body_preview, raw_ref, time.time()),
+                     subject, from_actor, participants_json, body_preview, raw_ref, time.time(), entry_id),
                 )
                 return cur.lastrowid
             except sqlite3.IntegrityError:
                 return None  # duplicate dedupe_key, first write wins
+        finally:
+            conn.close()
+
+
+def set_raw_item_raw_ref(row_id: int, raw_ref: str) -> None:
+    """raw_ref can only be computed once the row's id is known (the staged
+    body files land under a per-id document dir - task #43), so it's set as
+    a follow-up update rather than passed to insert_raw_item, same two-step
+    shape _absorb_attachments already uses for the documents it registers."""
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute("UPDATE raw_items SET raw_ref = ? WHERE id = ?", (raw_ref, row_id))
         finally:
             conn.close()
 

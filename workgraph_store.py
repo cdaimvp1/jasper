@@ -2654,6 +2654,37 @@ def list_extractions_for_issue(issue_id: str) -> list[dict]:
     return out
 
 
+def list_extractions_for_issues(issue_ids: list[str]) -> dict[str, list[dict]]:
+    """Batched form of list_extractions_for_issue - task #64 (Deadline Radar)
+    needs this across every open issue at once, not one issue at a time -
+    same N+1 fix already applied to list_evidence_for_issues/
+    get_raw_items_by_ids."""
+    if not issue_ids:
+        return {}
+    with _lock:
+        conn = _connect()
+        try:
+            placeholders = ",".join("?" * len(issue_ids))
+            rows = conn.execute(
+                f"""SELECT rie.*, ri.issue_id AS issue_id FROM raw_item_extractions rie
+                    JOIN raw_items ri ON ri.id = rie.raw_item_id
+                    WHERE ri.issue_id IN ({placeholders})
+                    ORDER BY rie.extracted_ts ASC""",
+                issue_ids,
+            ).fetchall()
+        finally:
+            conn.close()
+    out: dict[str, list[dict]] = {}
+    for r in rows:
+        d = dict(r)
+        try:
+            d["extracted_json"] = json.loads(d["extracted_json"])
+        except Exception:
+            d["extracted_json"] = {}
+        out.setdefault(d["issue_id"], []).append(d)
+    return out
+
+
 # --- synthesis ---------------------------------------------------------
 # Per-entity (Project, or a standalone Issue) narrative synthesis - see
 # workgraph_synthesis.py for the deterministic staleness check that decides

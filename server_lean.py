@@ -69,6 +69,7 @@ import workgraph_synthesis
 import workgraph_projects
 import workgraph_lessons
 import workgraph_socrates
+import workgraph_deadlines
 
 
 PORT = int(os.environ.get("TEAM_PORT", "8700"))  # born-local default (Tia's live-review catch, 2026-07-23):
@@ -1256,6 +1257,17 @@ async def api_workgraph_issues_bulk_status(body: BulkIssueStatusBody):
         wg.update_issue(issue_id, state=body.state)
         updated.append(issue_id)
     return JSONResponse({"ok": True, "updated": updated, "missing": missing})
+
+
+@app.get("/api/workgraph/deadline-radar")
+async def api_deadline_radar():
+    """Task #64 (Deadline Radar). Two tiers, deliberately never merged into
+    one falsely-precise sorted list - see workgraph_deadlines.py's
+    docstring for why: Ariba's own expiration-date signal was found to be
+    wrong ~98% of the time when auto-parsed and trusted as a real
+    deadline, and `mentioned` (free-text dates_mentioned) gets the same
+    caution applied up front rather than repeating that mistake."""
+    return JSONResponse(sanitize_surrogates(workgraph_deadlines.build_radar(time.time())))
 
 
 _ALERT_SEVERITY_ORDER = {"critical": 0, "warn": 1, "info": 2}

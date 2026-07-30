@@ -207,6 +207,25 @@
 .pcc-bulk-count{font-size:12px;font-weight:700;color:var(--red-d);font-family:var(--mono);white-space:nowrap}
 .pcc-bulk-actions{display:flex;gap:8px;flex:1}
 .pcc-bulk-clear{font-size:11.5px;color:var(--mut2);background:none;border:none;cursor:pointer;text-decoration:underline;padding:0}
+/* task #64: Deadline Radar */
+.pcc-radar-card{margin-bottom:14px;padding:0}
+.pcc-radar-card details{padding:14px 18px}
+.pcc-radar-summary{cursor:pointer;display:flex;align-items:baseline;gap:10px;font:700 13px/1.2 var(--sans);color:var(--ink);list-style:none}
+.pcc-radar-summary::-webkit-details-marker{display:none}
+.pcc-radar-count{font:600 11px/1 var(--mono);color:var(--mut2);text-transform:uppercase;letter-spacing:.03em}
+.pcc-radar-body{display:flex;gap:22px;margin-top:12px;flex-wrap:wrap}
+.pcc-radar-section{flex:1;min-width:260px;max-height:220px;overflow-y:auto}
+.pcc-radar-section-hd{font:700 10.5px/1 var(--mono);text-transform:uppercase;letter-spacing:.04em;color:var(--mut2);margin-bottom:6px}
+.pcc-radar-caveat{text-transform:none;letter-spacing:0;font-weight:500;color:var(--mut2);font-family:var(--sans)}
+.pcc-radar-row{display:flex;align-items:baseline;gap:8px;padding:6px 0;border-bottom:1px solid var(--line);cursor:pointer;font-size:12.5px}
+.pcc-radar-row:hover{background:var(--bg)}
+.pcc-radar-row:last-child{border-bottom:none}
+.pcc-radar-days{font:700 11px/1 var(--mono);color:var(--ink);white-space:nowrap;flex:none;min-width:34px}
+.pcc-radar-overdue{color:var(--red-d)}
+.pcc-radar-title{color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
+.pcc-radar-src{font:600 9.5px/1 var(--mono);color:var(--mut2);text-transform:uppercase;letter-spacing:.03em;flex:none}
+.pcc-radar-row-mentioned .pcc-radar-title{flex:none;max-width:40%;font-weight:600}
+.pcc-radar-mention-text{color:var(--mut);font-style:italic;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
 .mqwic{width:28px;height:28px;border-radius:8px;flex:none;display:flex;align-items:center;justify-content:center;margin-top:1px}
 .mqwic svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:2;display:block}
 .mqwic.wait{background:#F2EEEE;color:var(--mut2)}
@@ -4107,6 +4126,28 @@ body.ownerlock #ownernote{display:block}
         </div>
       </aside>
       <div class="cp-home-main">
+      <!-- task #64: Deadline Radar. Two tiers, never merged - see workgraph_
+           deadlines.py's docstring for why (the Ariba expiration-date signal
+           was found wrong ~98% of the time when auto-parsed as a real
+           deadline; free-text "mentioned" dates get the same caution up
+           front instead of repeating that mistake). Hidden entirely when
+           both tiers are empty, rather than showing an always-there card
+           with nothing in it. -->
+      <div class="card pcc-radar-card" id="pccRadarCard" style="display:none">
+        <details open>
+          <summary class="pcc-radar-summary"><span>Deadline Radar</span><span class="pcc-radar-count" id="pccRadarCount"></span></summary>
+          <div class="pcc-radar-body">
+            <div class="pcc-radar-section">
+              <div class="pcc-radar-section-hd">Confirmed dates</div>
+              <div id="pccRadarStructured"></div>
+            </div>
+            <div class="pcc-radar-section">
+              <div class="pcc-radar-section-hd">Mentioned in threads <span class="pcc-radar-caveat">— unverified, for your own judgment</span></div>
+              <div id="pccRadarMentioned"></div>
+            </div>
+          </div>
+        </details>
+      </div>
       <div id="pccBoardWrap">
         <div class="pcc-board" id="pccBoard">
           <div class="card pcc-list-card">
@@ -7778,6 +7819,63 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
     if (pccSelectedId && pccDetailCache[pccSelectedId]) pccRenderDetail(pccDetailCache[pccSelectedId]);
   }
 
+  // --- task #64: Deadline Radar --------------------------------------------
+  async function pccLoadDeadlineRadar() {
+    let d;
+    try {
+      const r = await fetch("/api/workgraph/deadline-radar", { cache: "no-store" });
+      if (!r.ok) throw new Error(`radar fetch failed: ${r.status}`);
+      d = await r.json();
+    } catch (e) {
+      console.error("pccLoadDeadlineRadar failed:", e);
+      return;
+    }
+    pccRenderDeadlineRadar(d.structured || [], d.mentioned || []);
+  }
+
+  function pccFmtDaysOut(days, overdue) {
+    const n = Math.round(Math.abs(days));
+    if (overdue) return n === 0 ? "due today" : `${n}d overdue`;
+    return days < 0.5 ? "today" : `${n}d`;
+  }
+
+  function pccRenderDeadlineRadar(structured, mentioned) {
+    const card = document.getElementById("pccRadarCard");
+    if (!card) return;
+    if (!structured.length && !mentioned.length) { card.style.display = "none"; return; }
+    card.style.display = "";
+    const count = document.getElementById("pccRadarCount");
+    if (count) count.textContent = `${structured.length} confirmed · ${mentioned.length} mentioned`;
+
+    const structEl = document.getElementById("pccRadarStructured");
+    if (structEl) {
+      structEl.innerHTML = structured.length ? structured.map(e => `
+        <div class="pcc-radar-row" data-id="${pccEsc(e.issue_id)}">
+          <span class="pcc-radar-days${e.overdue ? " pcc-radar-overdue" : ""}">${pccFmtDaysOut(e.days_out, e.overdue)}</span>
+          <span class="pcc-radar-title">${pccEsc(e.title)}</span>
+          <span class="pcc-radar-src">${e.source === "calendar" ? "meeting" : "due date"}</span>
+        </div>`).join("") : '<div class="pcc-empty">Nothing has a confirmed due date or upcoming meeting yet.</div>';
+      structEl.querySelectorAll(".pcc-radar-row").forEach(row => {
+        row.addEventListener("click", () => pccSelectIssue(row.getAttribute("data-id")));
+      });
+    }
+
+    const mentEl = document.getElementById("pccRadarMentioned");
+    if (mentEl) {
+      // Not sliced/capped - real volume here is modest (dozens, not thousands)
+      // and the section itself scrolls (see CSS) rather than silently hiding
+      // anything past an arbitrary count.
+      mentEl.innerHTML = mentioned.length ? mentioned.map(e => `
+        <div class="pcc-radar-row pcc-radar-row-mentioned" data-id="${pccEsc(e.issue_id)}">
+          <span class="pcc-radar-title">${pccEsc(e.title)}</span>
+          <span class="pcc-radar-mention-text">${pccEsc(e.text)}</span>
+        </div>`).join("") : '<div class="pcc-empty">Nothing mentioned yet.</div>';
+      mentEl.querySelectorAll(".pcc-radar-row").forEach(row => {
+        row.addEventListener("click", () => pccSelectIssue(row.getAttribute("data-id")));
+      });
+    }
+  }
+
   function pccEvidenceTypes(id) {
     const d = pccDetailCache[id];
     return d ? (d.evidence || []).map(e => e.type) : [];
@@ -8493,6 +8591,7 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
       pccSetLane("all");
       pccLoadIssues();
       setInterval(pccLoadIssues, 20000);
+      pccLoadDeadlineRadar();
     }
   }
   window.pccShowView = pccShowView;  // exposed for the left-rail nav script (separate scope)

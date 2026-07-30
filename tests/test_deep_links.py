@@ -7,6 +7,7 @@ import deep_links
 
 def test_teams_chat_link_builds_documented_url_shape():
     link = deep_links.teams_chat_link("19:4d1853ce-c33b@unq.gbl.spaces")
+    assert link["kind"] == "url"
     assert link["url"] == "https://teams.microsoft.com/l/chat/19%3A4d1853ce-c33b%40unq.gbl.spaces/0"
     assert link["label"] == "Open Teams chat"
 
@@ -40,13 +41,46 @@ def test_attach_deep_links_teams_evidence_gets_link(ws_db):
     assert out[0]["deep_link"]["label"] == "Open Teams chat"
 
 
-def test_attach_deep_links_non_teams_evidence_gets_no_link(ws_db):
+def test_attach_deep_links_mail_without_entry_id_gets_no_link(ws_db):
+    """Rows ingested before task #43 (or where the PS scan couldn't read
+    EntryID for some reason) have no entry_id - nothing to open by, so no
+    button rather than a broken one."""
     row_id = ws_db.insert_raw_item(
         source="outlook_mail", stable_key="conv-1", thread_key="conv-1",
         dedupe_key="dk-mail-1", occurred_ts=1_800_000_000.0, subject="Hi",
         from_actor="vendor@example.com", participants_json="[]", body_preview="hello",
     )
     evidence = [{"raw_item_id": row_id, "type": "email", "summary": "x", "ts": 1_800_000_000.0}]
+
+    out = deep_links.attach_deep_links(evidence)
+
+    assert out[0]["deep_link"] is None
+
+
+def test_attach_deep_links_mail_with_entry_id_gets_open_action(ws_db):
+    row_id = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key="conv-2", thread_key="conv-2",
+        dedupe_key="dk-mail-2", occurred_ts=1_800_000_000.0, subject="Hi again",
+        from_actor="vendor@example.com", participants_json="[]", body_preview="hello",
+        entry_id="entryid-XYZ",
+    )
+    evidence = [{"raw_item_id": row_id, "type": "email", "summary": "x", "ts": 1_800_000_000.0}]
+
+    out = deep_links.attach_deep_links(evidence)
+
+    assert out[0]["deep_link"] == {
+        "kind": "action", "endpoint": "/api/action/open-email",
+        "raw_item_id": row_id, "label": "Open email",
+    }
+
+
+def test_attach_deep_links_calendar_source_gets_no_link(ws_db):
+    row_id = ws_db.insert_raw_item(
+        source="calendar", stable_key="ev-1", thread_key="ev-1",
+        dedupe_key="dk-cal-1", occurred_ts=1_800_000_000.0, subject="Sync",
+        from_actor="organizer@example.com", participants_json="[]",
+    )
+    evidence = [{"raw_item_id": row_id, "type": "calendar", "summary": "x", "ts": 1_800_000_000.0}]
 
     out = deep_links.attach_deep_links(evidence)
 

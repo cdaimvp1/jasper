@@ -60,6 +60,7 @@ import workgraph_classify
 import workgraph_nba
 import workgraph_recommend
 import deep_links
+import outlook_actions
 import workgraph_alerts
 import workgraph_synthesis
 import workgraph_projects
@@ -1128,6 +1129,32 @@ async def api_workgraph_issue_detail(issue_id: str):
                         "synthesis": sanitize_surrogates(synthesis),
                         "project_synthesis": sanitize_surrogates(project_synthesis),
                         "attachments": sanitize_surrogates(attachments)})
+
+
+class OpenEmailBody(BaseModel):
+    raw_item_id: int
+
+
+@app.post("/api/action/open-email")
+async def api_action_open_email(body: OpenEmailBody):
+    """Task #46 - opens the exact source email in a real Outlook window via
+    COM's Display() (outlook_actions.py). Wrapped in asyncio.to_thread: this
+    shells out to PowerShell and blocks for the whole COM round-trip, and
+    this server runs a single uvicorn worker with no --workers flag - a
+    blocking call directly in an async def handler freezes EVERY request,
+    not just this one (the exact bug found and fixed for /api/cockpit/refresh
+    in task #42 - not repeating it here)."""
+    raw_item = wg.get_raw_item(body.raw_item_id)
+    if raw_item is None:
+        raise HTTPException(404, f"no such raw_item: {body.raw_item_id}")
+    entry_id = raw_item.get("entry_id")
+    if not entry_id:
+        raise HTTPException(400, "this item has no stored EntryID (ingested before task #43, or not a mail item)")
+    try:
+        result = await asyncio.to_thread(outlook_actions.open_email, entry_id)
+    except RuntimeError as e:
+        raise HTTPException(500, str(e))
+    return JSONResponse(result)
 
 
 class TaskCreateBody(BaseModel):

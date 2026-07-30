@@ -3836,6 +3836,8 @@ body.ownerlock #ownernote{display:block}
 .pcc-tl-deeplink{display:inline-block;margin-top:7px;margin-left:8px;font-size:11.5px;font-weight:600;
   color:var(--lk-pri);text-decoration:none}
 .pcc-tl-deeplink:hover{text-decoration:underline}
+.pcc-tl-deeplink-btn{background:none;border:none;padding:0;font-family:inherit;cursor:pointer}
+.pcc-tl-deeplink-btn:disabled{opacity:.6;cursor:default}
 .pcc-tl-rec{border-left:3px solid var(--lk-pri);padding-left:11px}
 .pcc-tl-rec-none{border-left-color:var(--lk-line)}
 .pcc-tl-rec-label{font-size:12.5px;font-weight:700;color:var(--lk-ink);line-height:1.35}
@@ -8036,6 +8038,18 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
   }
   pccRenderLaneMenu();
 
+  // task #44/#46: "url" kind (Teams) renders a plain link; "action" kind
+  // (open the exact email - no reliable client-side URL for a specific
+  // Outlook desktop item) renders a button that calls the server, which
+  // shells out to Outlook COM (outlook_actions.py).
+  function pccDeepLinkHtml(deepLink) {
+    if (!deepLink) return "";
+    if (deepLink.kind === "action") {
+      return `<button type="button" class="pcc-tl-deeplink pcc-tl-deeplink-btn" data-open-action="${pccEsc(deepLink.endpoint)}" data-raw-item-id="${pccEsc(deepLink.raw_item_id)}">${pccEsc(deepLink.label)} &#8594;</button>`;
+    }
+    return `<a class="pcc-tl-deeplink" href="${pccEsc(deepLink.url)}" target="_blank" rel="noopener">${pccEsc(deepLink.label)} &#8594;</a>`;
+  }
+
   function pccBuildTimeline(evidence, stateHistory) {
     const evItems = (evidence || []).map(e => ({
       kind: "evidence", channel: e.type || "email", summary: e.summary, ts: e.ts,
@@ -8125,7 +8139,7 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
           </div>
           <span class="pcc-tl-sum">${pccEsc(item.summary)}</span>
           ${item.attachment ? `<span class="pcc-tl-att">${pccEsc(item.attachment)}</span>` : ""}
-          ${item.deepLink ? `<a class="pcc-tl-deeplink" href="${pccEsc(item.deepLink.url)}" target="_blank" rel="noopener">${pccEsc(item.deepLink.label)} &#8594;</a>` : ""}
+          ${pccDeepLinkHtml(item.deepLink)}
         </div>
         ${recHtml}
       </div>`;
@@ -8263,6 +8277,23 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
     // throw on every issue selection.
     body.querySelectorAll("[data-act]").forEach(btn => btn.addEventListener("click", () => pccRunDeterministic(issue.id, btn.getAttribute("data-act"))));
     body.querySelectorAll("[data-gen]").forEach(btn => btn.addEventListener("click", () => pccRunGenerative(issue.id, btn.getAttribute("data-gen"))));
+    body.querySelectorAll("[data-open-action]").forEach(btn => btn.addEventListener("click", async () => {
+      const endpoint = btn.getAttribute("data-open-action");
+      const rawItemId = parseInt(btn.getAttribute("data-raw-item-id"), 10);
+      const original = btn.textContent;
+      btn.disabled = true; btn.textContent = "Opening…";
+      try {
+        const r = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ raw_item_id: rawItemId }) });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.detail || "failed to open");
+        btn.textContent = "Opened ✓";
+        setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 2000);
+      } catch (e) {
+        btn.textContent = "Couldn't open";
+        setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 2500);
+      }
+    }));
     const kebabBtn = document.getElementById("pccDetailKebab");
     const kebabMenu = document.getElementById("pccDetailKebabMenu");
     if (kebabBtn && kebabMenu) {

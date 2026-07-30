@@ -219,15 +219,39 @@ def run(now: float | None = None) -> dict:
     return {"ok": all_ok, "as_of": _now_str(now), "checks": checks}
 
 
+_LAST_RESULT_SOURCE = "health_check"
+_LAST_RESULT_KEY = "last_result"
+
+
 def run_daily_if_due(now: float | None = None) -> dict | None:
     """Same once-a-day gate as retention.run_daily_if_due - piggybacks the
-    5x/day scheduled_refresh cycle without redoing real work 5x."""
+    5x/day scheduled_refresh cycle without redoing real work 5x. Persists
+    the full result (task #74, Settings panel) so it can be READ without
+    re-running run() on demand - re-running would corrupt the day-over-day
+    comparisons check_disk_growth_sane/check_claude_process_count depend
+    on (each call overwrites "yesterday's" baseline with "just now")."""
     if now is None:
         now = time.time()
     today = time.strftime("%Y-%m-%d", time.localtime(now))
     if not ws.claim_daily_run("health_check", today):
         return None
-    return run(now=now)
+    result = run(now=now)
+    ws.set_cursor(_LAST_RESULT_SOURCE, _LAST_RESULT_KEY, json.dumps(result))
+    return result
+
+
+def get_last_result() -> dict | None:
+    """The most recent daily run_daily_if_due() result, or None if it has
+    never run yet in this install. Read-only - never triggers a new run,
+    exactly so a Settings panel can be opened any number of times a day
+    without disturbing the day-over-day comparisons above."""
+    raw = ws.get_cursor(_LAST_RESULT_SOURCE, _LAST_RESULT_KEY)
+    if raw is None:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
 
 
 if __name__ == "__main__":

@@ -133,3 +133,38 @@ def test_daily_gate_runs_once_per_day(ws_db):
     assert r2 is None
     r3 = hc.run_daily_if_due(now=now + 86400)
     assert r3 is not None
+
+
+# --- task #74: get_last_result / persistence -----------------------------
+
+def test_get_last_result_none_when_never_run(ws_db):
+    assert hc.get_last_result() is None
+
+
+def test_get_last_result_reflects_the_run_that_actually_happened(ws_db):
+    now = time.time()
+    ran = hc.run_daily_if_due(now=now)
+
+    stored = hc.get_last_result()
+
+    assert stored is not None
+    assert stored["ok"] == ran["ok"]
+    assert stored["as_of"] == ran["as_of"]
+    assert set(stored["checks"].keys()) == set(ran["checks"].keys())
+
+
+def test_get_last_result_does_not_change_when_gated(ws_db):
+    struct = time.localtime()
+    now = time.mktime((struct.tm_year, struct.tm_mon, struct.tm_mday, 12, 0, 0, 0, 0, -1))
+    hc.run_daily_if_due(now=now)
+    first = hc.get_last_result()
+
+    skipped = hc.run_daily_if_due(now=now + 3600)  # same day - gated, must not overwrite
+
+    assert skipped is None
+    assert hc.get_last_result() == first
+
+
+def test_get_last_result_survives_malformed_stored_value(ws_db):
+    ws_db.set_cursor("health_check", "last_result", "not valid json")
+    assert hc.get_last_result() is None

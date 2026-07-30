@@ -74,6 +74,7 @@ import workgraph_signal_trends
 import workgraph_aristotle
 import workgraph_export
 import workgraph_commitments
+import health_check
 
 
 PORT = int(os.environ.get("TEAM_PORT", "8700"))  # born-local default (Tia's live-review catch, 2026-07-23):
@@ -2232,6 +2233,19 @@ async def api_settings_retention_set(body: RetentionSettingsBody):
                 merged[key] = val
         config.set_value(merged, "retention", "db_snapshots")
     return JSONResponse({"ok": True})
+
+
+@app.get("/api/settings/health-check")
+async def api_settings_health_check_get():
+    """Task #74 (Health Check panel). Returns the LAST daily result
+    (health_check.get_last_result(), a plain read) rather than running the
+    checks fresh - health_check.run() persists today's disk/process counts
+    as the baseline for TOMORROW's day-over-day comparison, so re-running
+    it every time this panel loads would corrupt that comparison (each
+    open would overwrite "yesterday" with "just now"). null means it
+    hasn't run yet in this install (a fresh install, or before the first
+    scheduled_refresh.py cycle completes)."""
+    return JSONResponse({"result": sanitize_surrogates(health_check.get_last_result())})
 
 
 class PersonalLearningSurfacesBody(BaseModel):

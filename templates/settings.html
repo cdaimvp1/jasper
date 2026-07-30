@@ -295,6 +295,19 @@
     <div id="sigtrend-list">Loading…</div>
   </div>
 
+  <!-- ── Health Check (added 2026-07-30, task #74) ──────────────────────── -->
+  <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:26px 0 10px">Health Check</div>
+  <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px">
+    <div style="color:var(--muted,#667);font-size:13px;margin-bottom:12px">
+      6 deterministic checks (ingest cursors advancing, disk usage sane, the scheduled refresh actually running, a
+      recent backup, no failed-ingest pileup, no runaway process count), run once a day. This shows the result of
+      the LAST daily run, not a fresh check — re-checking on every page load would corrupt the day-over-day
+      comparisons a couple of these checks depend on.
+    </div>
+    <div id="hc-asof" style="font-size:12px;color:var(--muted,#888);margin-bottom:10px"></div>
+    <div id="hc-list">Loading…</div>
+  </div>
+
   <!-- ── Server · Settings #6 ──────────────────────────────────────────── -->
   <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:26px 0 10px">Server</div>
   <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px">
@@ -715,6 +728,46 @@
       .catch(() => { sigtrendList.textContent = 'Could not load.'; });
   }
   sigtrendLoad();
+
+  // ── Health Check (task #74) ─────────────────────────────────────────────
+  const hcList = document.getElementById('hc-list');
+  const hcAsOf = document.getElementById('hc-asof');
+  const HC_LABELS = {
+    cursors_advancing: 'Ingest cursors advancing',
+    disk_growth_sane: 'Disk usage sane',
+    scheduled_refresh_ran: 'Scheduled refresh ran recently',
+    backup_recent: 'Recent backup exists',
+    raw_ingest_failed: 'No failed-ingest pileup',
+    claude_process_count: 'No runaway process count',
+  };
+  function hcDetailLine(key, check){
+    if (key === 'cursors_advancing' && check.stale_cursors && check.stale_cursors.length)
+      return check.stale_cursors.map(s => `${s.source}: ${s.age_hours}h stale`).join(', ');
+    if (key === 'disk_growth_sane' && check.findings && check.findings.length)
+      return check.findings.map(f => `${f.metric} ${f.issue} (${f.old} → ${f.new})`).join(', ');
+    if (key === 'scheduled_refresh_ran') return check.age_hours != null ? `last ran ${check.age_hours}h ago` : (check.detail || '');
+    if (key === 'backup_recent') return check.age_hours != null ? `newest snapshot ${check.age_hours}h old` : (check.detail || '');
+    if (key === 'raw_ingest_failed') return `${check.count} failed item${check.count === 1 ? '' : 's'}`;
+    if (key === 'claude_process_count') return check.count != null ? `${check.count} running${check.yesterday_count != null ? ' (was ' + check.yesterday_count + ')' : ''}` : (check.detail || '');
+    return check.detail || '';
+  }
+  function hcRender(result){
+    if (!result) { hcAsOf.textContent = ''; hcList.innerHTML = '<div style="color:var(--muted,#667);font-size:13px">Hasn’t run yet — runs automatically once a day.</div>'; return; }
+    hcAsOf.textContent = `As of ${result.as_of} — overall ${result.ok ? 'OK' : 'issues found'}`;
+    hcList.innerHTML = Object.entries(result.checks).map(([key, check]) => {
+      const detail = hcDetailLine(key, check);
+      return `
+      <div style="display:flex;align-items:baseline;gap:10px;padding:7px 0;border-bottom:1px solid var(--border,#eee);font-size:13px">
+        <span style="font:700 10px monospace;text-transform:uppercase;padding:2px 8px;border-radius:20px;white-space:nowrap;background:${check.ok ? 'var(--bg,#f0f0f0)' : '#fbe7e3'};color:${check.ok ? 'var(--muted,#888)' : '#b41e16'}">${check.ok ? 'OK' : 'CHECK'}</span>
+        <span style="flex:1"><b>${esc(HC_LABELS[key] || key)}</b>${detail ? ' — ' + esc(detail) : ''}</span>
+      </div>`;
+    }).join('');
+  }
+  function hcLoad(){
+    return fetch('/api/settings/health-check').then(r => r.json()).then(d => hcRender(d.result))
+      .catch(() => { hcList.textContent = 'Could not load.'; });
+  }
+  hcLoad();
 
   // ── Signal-treatment overrides (task #58) ──────────────────────────────
   const sigrulesList = document.getElementById('sigrules-list');

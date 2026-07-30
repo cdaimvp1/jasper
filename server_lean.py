@@ -59,6 +59,7 @@ import workgraph_store as wg
 import workgraph_classify
 import workgraph_nba
 import workgraph_recommend
+import deep_links
 import workgraph_alerts
 import workgraph_synthesis
 import workgraph_projects
@@ -1118,6 +1119,7 @@ async def api_workgraph_issue_detail(issue_id: str):
     # workgraph_recommend.py) — the Detail pane's Progress column already
     # rendered these when present, but nothing ever produced them.
     workgraph_recommend.attach_recommendations(evidence, attachments, time.time())
+    deep_links.attach_deep_links(evidence)
     workgraph_lessons.attach_learned([issue])
     return JSONResponse({"issue": sanitize_surrogates(issue), "evidence": sanitize_surrogates(evidence),
                         "pending_actions": sanitize_surrogates(pending), "tasks": sanitize_surrogates(tasks),

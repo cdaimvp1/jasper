@@ -671,6 +671,25 @@ def get_raw_item(id: int) -> Optional[dict]:
     return dict(row) if row else None
 
 
+def get_raw_items_by_ids(ids: list[int]) -> dict[int, dict]:
+    """Batched form of get_raw_item - one query for a whole evidence list
+    (deep_links.attach_deep_links) rather than one query per row, same N+1
+    fix already applied to list_evidence_for_issues/
+    list_issue_state_history_for_issues this session."""
+    if not ids:
+        return {}
+    with _lock:
+        conn = _connect()
+        try:
+            placeholders = ",".join("?" * len(ids))
+            rows = conn.execute(
+                f"SELECT * FROM raw_items WHERE id IN ({placeholders})", ids,
+            ).fetchall()
+        finally:
+            conn.close()
+    return {r["id"]: dict(r) for r in rows}
+
+
 def link_raw_item_to_issue(raw_item_id: int, issue_id: str) -> None:
     with _lock:
         conn = _connect()

@@ -3833,6 +3833,9 @@ body.ownerlock #ownernote{display:block}
 .pcc-tl-sum{font-size:13px;line-height:1.5;color:var(--lk-ink)}
 .pcc-tl-att{display:inline-block;margin-top:7px;font-size:11.5px;color:var(--lk-ink2);
   background:var(--lk-nested);border-radius:var(--lk-r-c);padding:3px 9px}
+.pcc-tl-deeplink{display:inline-block;margin-top:7px;margin-left:8px;font-size:11.5px;font-weight:600;
+  color:var(--lk-pri);text-decoration:none}
+.pcc-tl-deeplink:hover{text-decoration:underline}
 .pcc-tl-rec{border-left:3px solid var(--lk-pri);padding-left:11px}
 .pcc-tl-rec-none{border-left-color:var(--lk-line)}
 .pcc-tl-rec-label{font-size:12.5px;font-weight:700;color:var(--lk-ink);line-height:1.35}
@@ -8039,6 +8042,9 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
       // carried through so Progress can pair an event with its recommendation
       // and name the attachment that produced it
       recommendation: e.recommendation, attachment: e.attachment,
+      // task #44: {url,label} when the source can be opened directly (a Teams
+      // chat today, more sources coming) - null when there's nothing to link to.
+      deepLink: e.deep_link || null,
     }));
     const stItems = (stateHistory || []).map(h => ({
       kind: "state",
@@ -8119,6 +8125,7 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
           </div>
           <span class="pcc-tl-sum">${pccEsc(item.summary)}</span>
           ${item.attachment ? `<span class="pcc-tl-att">${pccEsc(item.attachment)}</span>` : ""}
+          ${item.deepLink ? `<a class="pcc-tl-deeplink" href="${pccEsc(item.deepLink.url)}" target="_blank" rel="noopener">${pccEsc(item.deepLink.label)} &#8594;</a>` : ""}
         </div>
         ${recHtml}
       </div>`;

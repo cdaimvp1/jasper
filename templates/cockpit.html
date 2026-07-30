@@ -8594,10 +8594,19 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
     renderThread();
   }
 
+  // task #54: "#addrule ..." always gets captured deterministically via
+  // askSocrates()/api/socrates/ask (see rule_teaching.py), even when a
+  // worker is ALSO @mentioned in the same message - the capture never
+  // depends on that worker's cooperation.
+  function isAddRuleMessage(text) {
+    return /^#addrule\b/i.test(text.replace(/^@\S+\s*/, "").trim());
+  }
+
   async function send() {
     const text = input.value.trim();
     if (!text) return;
     const slug = resolveMention(text);
+    const addRule = isAddRuleMessage(text);
     if (compose) compose.classList.remove("error");
     input.value = "";
     input.style.height = "auto";
@@ -8621,6 +8630,7 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
       input.value = text;
       return;
     }
+    if (addRule) await askSocrates(text);
     await loadAll();
   }
   sendBtn.addEventListener("click", send);

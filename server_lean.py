@@ -62,6 +62,7 @@ import workgraph_recommend
 import deep_links
 import outlook_actions
 import workgraph_signals
+import rule_teaching
 import workgraph_alerts
 import workgraph_synthesis
 import workgraph_projects
@@ -1660,11 +1661,33 @@ class SocratesAskBody(BaseModel):
 async def api_socrates_ask(body: SocratesAskBody):
     """Ask Jasper a free-text question; answered from precedent (Total
     Recall), the relevant synthesis, and linked evidence - no LLM call, no
-    fabrication. See workgraph_socrates.py."""
+    fabrication. See workgraph_socrates.py.
+
+    Task #54 - checked BEFORE that zero-LLM path, not inside it:
+    1. A "#addrule ..." message (optionally still carrying a leading
+       @mention, if the frontend also posted it to a worker) always gets
+       captured as a pending prerequisite-rule suggestion here, then
+       best-effort structured by rule_extraction.py's local LLM. Never
+       reaches workgraph_socrates.answer() - it isn't a question.
+    2. A short "confirm"/"yes"/"reject"/"no" reply resolves the asker's most
+       recent still-pending taught-via-chat suggestion, if one exists within
+       the recency window. If it doesn't look like an answer to something
+       pending, this is a no-op and falls through to the normal path below -
+       workgraph_socrates.answer() itself is completely untouched."""
     if not (body.question or "").strip():
         raise HTTPException(400, "question required")
     if body.issue_id and wg.get_issue(body.issue_id) is None:
         raise HTTPException(404, f"no such issue: {body.issue_id}")
+
+    if rule_teaching.is_addrule_message(body.question):
+        result = await asyncio.to_thread(rule_teaching.teach_from_chat, body.question, body.asker or "")
+        return JSONResponse({"answer": result["reply"], "outcome": "rule_captured",
+                             "suggestion_id": result["suggestion_id"]})
+
+    resolution = rule_teaching.try_resolve_pending_confirmation(body.question, body.asker or "")
+    if resolution is not None:
+        return JSONResponse({"answer": resolution["reply"], "outcome": "rule_resolved"})
+
     result = workgraph_socrates.answer(
         question=body.question, issue_id=body.issue_id, asker=body.asker, explicit_depth=body.depth,
     )

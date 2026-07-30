@@ -203,8 +203,10 @@ def run_daily_if_due(now: Optional[float] = None) -> Optional[dict]:
     surfaces = config.get("personal_learning", "surfaces") or {}
     if not isinstance(surfaces, dict):
         surfaces = {}
+    if not any(surfaces.values()):
+        return None  # master on, but no individual surface enabled yet - don't consume the day's claim
     today = time.strftime("%Y-%m-%d", time.localtime(now))
-    if ws.get_cursor("personal_learning", "last_run_date") == today:
+    if not ws.claim_daily_run("personal_learning", today):
         return None
 
     result: dict = {}
@@ -225,8 +227,7 @@ def run_daily_if_due(now: Optional[float] = None) -> Optional[dict]:
         result["sent_teams"] = r
 
     if not result:
-        return None  # master on, but no individual surface enabled yet
-    ws.set_cursor("personal_learning", "last_run_date", today)
+        return None
     return result
 
 

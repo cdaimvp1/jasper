@@ -379,3 +379,55 @@ def test_get_socrates_log_since_excludes_at_or_before_cutoff(ws_db):
                                tier="recall", band="high", contributed=True, outcome="answered")
     rows = ws_db.get_socrates_log_since(100.0)
     assert [r["question"] for r in rows] == ["new"]
+
+
+def test_claim_daily_run_first_caller_wins(ws_db):
+    assert ws_db.claim_daily_run("retention", "2026-07-30") is True
+
+
+def test_claim_daily_run_second_caller_same_day_loses(ws_db):
+    """The exact race this fixes: two overlapping scheduled_refresh.py
+    processes both reach the gate for the same day. Only one may proceed -
+    a second claim call for the same (source, day) must observe False, not
+    silently re-run the (sometimes destructive, e.g. backup-writing) work."""
+    assert ws_db.claim_daily_run("retention", "2026-07-30") is True
+    assert ws_db.claim_daily_run("retention", "2026-07-30") is False
+    assert ws_db.claim_daily_run("retention", "2026-07-30") is False
+
+
+def test_claim_daily_run_new_day_wins_again(ws_db):
+    assert ws_db.claim_daily_run("retention", "2026-07-30") is True
+    assert ws_db.claim_daily_run("retention", "2026-07-31") is True
+
+
+def test_claim_daily_run_is_scoped_per_source(ws_db):
+    """Two different daily-gated jobs (e.g. retention and health_check) must
+    not block each other - each source claims its own row."""
+    assert ws_db.claim_daily_run("retention", "2026-07-30") is True
+    assert ws_db.claim_daily_run("health_check", "2026-07-30") is True
+
+
+def test_claim_daily_run_concurrent_threads_only_one_winner(ws_db):
+    """Simulates the real failure mode with actual OS threads racing the
+    same claim, each against its own sqlite3 connection (claim_daily_run
+    calls _connect() internally) - proves the win is decided by the
+    database's own statement atomicity, not by this process's in-memory
+    lock alone."""
+    import threading
+
+    results = []
+    results_lock = threading.Lock()
+
+    def attempt():
+        won = ws_db.claim_daily_run("retention", "2026-07-30")
+        with results_lock:
+            results.append(won)
+
+    threads = [threading.Thread(target=attempt) for _ in range(12)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert results.count(True) == 1
+    assert results.count(False) == 11

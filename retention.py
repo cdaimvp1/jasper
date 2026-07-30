@@ -216,8 +216,7 @@ def run_daily_if_due(now: float | None = None) -> dict | None:
     if now is None:
         now = time.time()
     today = time.strftime("%Y-%m-%d", time.localtime(now))
-    last_run = ws.get_cursor("retention", "last_run_date")
-    if last_run == today:
+    if not ws.claim_daily_run("retention", today):
         return None
     snapshot_cfg = config.get("retention", "db_snapshots") or {}
     snapshot_result = backup.run_nightly_snapshot(
@@ -227,7 +226,6 @@ def run_daily_if_due(now: float | None = None) -> dict | None:
         now=now,
     )
     retention_result = run(now=now)
-    ws.set_cursor("retention", "last_run_date", today)
     return {"snapshot": snapshot_result, "retention": retention_result}
 
 

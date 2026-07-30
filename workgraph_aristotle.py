@@ -191,7 +191,7 @@ def detect_and_log_candidates_daily_if_due(now: Optional[float] = None) -> Optio
     if now is None:
         now = time.time()
     today = time.strftime("%Y-%m-%d", time.localtime(now))
-    if ws.get_cursor("aristotle_detection", "last_run_date") == today:
+    if not ws.claim_daily_run("aristotle_detection", today):
         return None
     candidates = detect_candidate_rules()
     logged = 0
@@ -203,7 +203,6 @@ def detect_and_log_candidates_daily_if_due(now: Optional[float] = None) -> Optio
             reason=reason, evidence=evidence, raw_explanation=None, proposed_by="system",
         )
         logged += 1
-    ws.set_cursor("aristotle_detection", "last_run_date", today)
     return {"candidates_found": len(candidates), "logged": logged}
 
 

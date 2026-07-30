@@ -1331,6 +1331,37 @@ def set_cursor(source: str, cursor_key: str, value: str) -> None:
             conn.close()
 
 
+def claim_daily_run(source: str, today: str) -> bool:
+    """Atomically claims 'source' for today's once-a-day run. Fixes a real
+    cross-process race: retention/health_check/aristotle_detection/
+    personal_learning's daily gates used to read the cursor, do the
+    (sometimes slow, file-writing) work, THEN write the cursor - so two
+    overlapping scheduled_refresh.py processes (a real failure mode given
+    documented Outlook-COM hangs) could both pass the read and both do the
+    work concurrently, including both calling backup.run_nightly_snapshot()
+    at the same time onto the same snapshot filename. This claims the day
+    as a single atomic UPSERT statement - the WHERE clause makes the
+    conflict branch a no-op (0 rows changed) when the value already equals
+    today, so SQLite's own statement atomicity guarantees at most one
+    caller ever observes rowcount > 0 for a given (source, today) pair, no
+    matter how many processes race on it. Callers must claim BEFORE doing
+    the gated work, not after, or the race just moves."""
+    with _lock:
+        conn = _connect()
+        try:
+            cur = conn.execute(
+                """INSERT INTO ingest_cursors (source, cursor_key, value, updated_ts)
+                   VALUES (?, 'last_run_date', ?, ?)
+                   ON CONFLICT(source, cursor_key) DO UPDATE SET
+                       value = excluded.value, updated_ts = excluded.updated_ts
+                   WHERE ingest_cursors.value IS NOT ?""",
+                (source, today, time.time(), today),
+            )
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+
 # --- worker_status ---------------------------------------------------------
 
 def set_worker_status(worker: str, *, state: str, current_task: Optional[str] = None, detail: Optional[str] = None) -> None:

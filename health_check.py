@@ -225,12 +225,9 @@ def run_daily_if_due(now: float | None = None) -> dict | None:
     if now is None:
         now = time.time()
     today = time.strftime("%Y-%m-%d", time.localtime(now))
-    last_run = ws.get_cursor("health_check", "last_run_date")
-    if last_run == today:
+    if not ws.claim_daily_run("health_check", today):
         return None
-    result = run(now=now)
-    ws.set_cursor("health_check", "last_run_date", today)
-    return result
+    return run(now=now)
 
 
 if __name__ == "__main__":

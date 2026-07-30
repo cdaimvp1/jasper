@@ -76,6 +76,7 @@ import workgraph_export
 import workgraph_commitments
 import health_check
 import workgraph_suppliers
+import workgraph_digest
 
 
 PORT = int(os.environ.get("TEAM_PORT", "8700"))  # born-local default (Tia's live-review catch, 2026-07-23):
@@ -1299,6 +1300,14 @@ async def api_gate_board():
     prerequisite rule - see workgraph_aristotle.gate_board's docstring for
     why "currently_gating" is computed live rather than a stored counter."""
     return JSONResponse(sanitize_surrogates(workgraph_aristotle.gate_board()))
+
+
+@app.get("/api/workgraph/weekly-digest")
+async def api_weekly_digest():
+    """Task #76 (Weekly Digest). Zero LLM, zero new extraction - a
+    7-day-scoped rollup of numbers this app already computes elsewhere
+    (workgraph_nba's scoring/value, workgraph_deadlines' classification)."""
+    return JSONResponse(sanitize_surrogates(workgraph_digest.build_digest(time.time())))
 
 
 @app.get("/api/workgraph/signal-trends")

@@ -2038,6 +2038,23 @@ def get_project(id: str) -> Optional[dict]:
     return dict(row) if row else None
 
 
+def set_project_status(project_id: str, status: str) -> None:
+    """Task #81 remediation: used to archive a project that a re-grouping
+    fix leaves with zero member issues, rather than hard-deleting the row
+    (no delete_project function exists, deliberately not added for a
+    one-off cleanup - archiving is reversible, a hard delete of a project
+    row with real history/synthesis attached is not)."""
+    if status not in ("active", "waiting", "done", "archived"):
+        raise ValueError(f"invalid project status: {status!r}")
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?",
+                         (status, time.time(), project_id))
+        finally:
+            conn.close()
+
+
 def list_projects(status: Optional[list[str]] = None) -> list[dict]:
     sql = "SELECT * FROM projects"
     args: list[Any] = []

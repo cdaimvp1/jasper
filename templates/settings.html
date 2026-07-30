@@ -284,6 +284,17 @@
     <span id="capsug-fb" style="font-size:12px;color:var(--muted,#888);display:block;margin-top:6px"></span>
   </div>
 
+  <!-- ── Weekly Digest (added 2026-07-30, task #76) ─────────────────────── -->
+  <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:26px 0 10px">Weekly Digest</div>
+  <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px">
+    <div style="color:var(--muted,#667);font-size:13px;margin-bottom:12px">
+      What changed and what's outstanding over the last 7 days — built entirely from numbers Jasper already
+      computes elsewhere (priority scoring, value found, hard deadlines), just rolled up over a week instead of
+      shown one issue at a time.
+    </div>
+    <div id="digest-body">Loading…</div>
+  </div>
+
   <!-- ── Signal volume trends (added 2026-07-30, task #66) ─────────────── -->
   <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:26px 0 10px">Signal volume trends</div>
   <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px">
@@ -696,6 +707,39 @@
     }catch(e){ capsugFb.textContent = 'error'; setTimeout(()=>capsugFb.textContent='',3000); }
   }
   capsugLoad();
+
+  // ── Weekly Digest (task #76) ─────────────────────────────────────────────
+  const digestBody = document.getElementById('digest-body');
+  function digestFmtMoney(amount){
+    if (amount >= 1e9) return '$' + (amount / 1e9).toFixed(1) + 'B';
+    if (amount >= 1e6) return '$' + (amount / 1e6).toFixed(1) + 'M';
+    if (amount >= 1e3) return '$' + (amount / 1e3).toFixed(0) + 'K';
+    return '$' + Math.round(amount);
+  }
+  function digestRow(label, value){
+    return `<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--border,#eee);font-size:13px"><span style="color:var(--muted,#667)">${esc(label)}</span><b>${value}</b></div>`;
+  }
+  function digestIssueList(title, issues){
+    if (!issues.length) return '';
+    const rows = issues.map(i => `<li style="font-size:12.5px;margin-bottom:2px">${esc(i.title)}</li>`).join('');
+    return `<div style="margin-top:10px"><div style="font:700 11px/1 monospace;text-transform:uppercase;letter-spacing:.03em;color:var(--muted,#888);margin-bottom:4px">${esc(title)}</div><ul style="margin:0;padding-left:18px">${rows}</ul></div>`;
+  }
+  function digestRender(d){
+    digestBody.innerHTML =
+      digestRow('Opened this week', d.opened_count) +
+      digestRow('Closed this week', d.closed_count) +
+      digestRow('Currently open', d.open_count) +
+      digestRow('With a hard deadline', d.hard_deadline_count) +
+      digestRow('Value found across open threads', digestFmtMoney(d.value_found_total)) +
+      digestIssueList('Top priority right now', d.top_priority) +
+      digestIssueList('Closed this week', d.closed_this_week) +
+      digestIssueList('Hard deadlines to watch', d.hard_deadline_issues);
+  }
+  function digestLoad(){
+    return fetch('/api/workgraph/weekly-digest').then(r => r.json()).then(digestRender)
+      .catch(() => { digestBody.textContent = 'Could not load.'; });
+  }
+  digestLoad();
 
   // ── Signal volume trends (task #66) ─────────────────────────────────────
   const sigtrendList = document.getElementById('sigtrend-list');

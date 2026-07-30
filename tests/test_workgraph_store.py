@@ -431,3 +431,16 @@ def test_claim_daily_run_concurrent_threads_only_one_winner(ws_db):
 
     assert results.count(True) == 1
     assert results.count(False) == 11
+
+
+def test_set_project_status_updates_status(ws_db):
+    pid = ws_db.create_project_with_new_id(name="P", category="other")
+    ws_db.set_project_status(pid, "archived")
+    assert ws_db.get_project(pid)["status"] == "archived"
+
+
+def test_set_project_status_rejects_invalid_status(ws_db):
+    pid = ws_db.create_project_with_new_id(name="P", category="other")
+    with pytest.raises(ValueError):
+        ws_db.set_project_status(pid, "bogus")
+    assert ws_db.get_project(pid)["status"] != "bogus"

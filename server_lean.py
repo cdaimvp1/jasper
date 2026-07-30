@@ -63,6 +63,7 @@ import deep_links
 import outlook_actions
 import workgraph_signals
 import rule_teaching
+import personal_patterns
 import workgraph_alerts
 import workgraph_synthesis
 import workgraph_projects
@@ -1123,6 +1124,7 @@ async def api_workgraph_issue_detail(issue_id: str):
     # rendered these when present, but nothing ever produced them.
     workgraph_recommend.attach_recommendations(evidence, attachments, time.time())
     deep_links.attach_deep_links(evidence)
+    personal_patterns.attach_citations(evidence)
     workgraph_lessons.attach_learned([issue])
     return JSONResponse({"issue": sanitize_surrogates(issue), "evidence": sanitize_surrogates(evidence),
                         "pending_actions": sanitize_surrogates(pending), "tasks": sanitize_surrogates(tasks),
@@ -2147,6 +2149,16 @@ async def api_settings_personal_learning_get():
         },
         "patterns_learned": len(wg.list_response_patterns()),
         "last_run": wg.get_cursor("personal_learning", "last_run_date"),
+        # task #59: was just a bare count before - shows WHAT's been learned,
+        # per surface, top 5 by hit_count (list_response_patterns already
+        # returns ORDER BY hit_count DESC).
+        "top_patterns": {
+            surface: [
+                {"pattern_key": p["pattern_key"], "hit_count": p["hit_count"], "example_text": p["example_text"]}
+                for p in wg.list_response_patterns(surface)[:5]
+            ]
+            for surface in ("app_chat", "sent_mail", "sent_teams")
+        },
     })
 
 

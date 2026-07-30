@@ -32,6 +32,13 @@ at all is enabled, or it already ran today (three distinct, real "did not
 run" reasons, never a silent no-op). Everything below run_daily_if_due() is
 pure/ungated on purpose (same shape as retention.py), so it stays directly
 testable without fighting config state.
+
+Task #59: attach_citations() is the one honest visible consumer of what's
+been learned. It ONLY ever cites - "you've referenced X in similar
+situations N times before" - the same "cited as precedent" framing Total
+Recall already uses for issue reasoning. It never rewrites a draft or any
+other content; that would be a real overreach past what a keyword-matched
+pattern can honestly support.
 """
 from __future__ import annotations
 
@@ -211,3 +218,43 @@ def run_daily_if_due(now: Optional[float] = None) -> Optional[dict]:
         return None  # master on, but no individual surface enabled yet
     ws.set_cursor("personal_learning", "last_run_date", today)
     return result
+
+
+# --- task #59: the one visible consumer -------------------------------------
+
+# Below this, a pattern is too thin to honestly say "you usually..." - one or
+# two hits could just be coincidence, not a real habit worth citing back.
+MIN_CITATION_HIT_COUNT = 3
+
+
+def citation_for_text(text: str) -> Optional[dict]:
+    """Given a piece of evidence text, returns the highest-hit_count learned
+    pattern it matches (from ANY surface), as long as that pattern has been
+    seen at least MIN_CITATION_HIT_COUNT times - or None. This only ever
+    cites; it never rewrites a draft or any other content."""
+    keys = set(extract_patterns(text))
+    if not keys:
+        return None
+    for pattern in ws.list_response_patterns():  # already ORDER BY hit_count DESC
+        if pattern["pattern_key"] in keys and pattern["hit_count"] >= MIN_CITATION_HIT_COUNT:
+            return {
+                "pattern_key": pattern["pattern_key"], "hit_count": pattern["hit_count"],
+                "note": f'You\'ve referenced "{pattern["pattern_key"]}" in similar '
+                        f'situations {pattern["hit_count"]} times before.',
+            }
+    return None
+
+
+def attach_citations(evidence: list[dict]) -> list[dict]:
+    """Mutates and returns `evidence`: adds a "learned_citation" key ({
+    "pattern_key","hit_count","note"} or None) to each row. A no-op (every
+    row gets None) when Personal Response Learning is off - there's no
+    learned data to cite in that case anyway, but the explicit check keeps
+    the gate visible in code rather than relying on an empty table."""
+    if not config.get("personal_learning", "enabled"):
+        for ev in evidence:
+            ev["learned_citation"] = None
+        return evidence
+    for ev in evidence:
+        ev["learned_citation"] = citation_for_text(ev.get("summary") or "")
+    return evidence

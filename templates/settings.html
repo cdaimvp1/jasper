@@ -150,7 +150,8 @@
       </label>
     </div>
 
-    <div id="prl-stats" style="font-size:12px;color:var(--muted,#667);margin-bottom:12px">Loading…</div>
+    <div id="prl-stats" style="font-size:12px;color:var(--muted,#667);margin-bottom:8px">Loading…</div>
+    <div id="prl-top-patterns" style="margin-bottom:12px"></div>
 
     <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
       <button id="prl-save" style="border:1px solid var(--border,#ddd);background:var(--accent,#0f766e);color:#fff;font:600 13px sans-serif;padding:9px 16px;border-radius:9px;cursor:pointer">Save</button>
@@ -444,6 +445,19 @@
   const prlStats = document.getElementById('prl-stats');
   const prlFb = document.getElementById('prl-fb');
   const prlForgetFb = document.getElementById('prl-forget-fb');
+  const prlTopPatterns = document.getElementById('prl-top-patterns');
+  const PRL_SURFACE_LABEL = { app_chat: 'In-app chat', sent_mail: 'Sent email', sent_teams: 'Sent Teams' };
+  function prlRenderTopPatterns(topPatterns){
+    const blocks = Object.entries(topPatterns || {})
+      .filter(([, list]) => list && list.length)
+      .map(([surface, list]) => `
+        <div style="margin-top:6px">
+          <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--muted,#888)">${esc(PRL_SURFACE_LABEL[surface] || surface)}</div>
+          ${list.map(p => `<div style="font-size:12.5px;padding:2px 0"><code>${esc(p.pattern_key)}</code> <span style="color:var(--muted,#667)">× ${esc(String(p.hit_count))}</span></div>`).join('')}
+        </div>`);
+    prlTopPatterns.innerHTML = blocks.length ? blocks.join('') :
+      '<div style="font-size:12px;color:var(--muted,#667)">Nothing learned yet.</div>';
+  }
   function prlLoad(){
     return fetch('/api/settings/personal-learning').then(r=>r.json()).then(d=>{
       prlEls.enabled.checked = !!d.enabled;
@@ -452,6 +466,7 @@
       prlEls.sentTeams.checked = !!d.surfaces.sent_teams;
       prlStats.textContent = d.patterns_learned + ' pattern' + (d.patterns_learned===1?'':'s') + ' learned so far'
         + (d.last_run ? (' · last ran ' + d.last_run) : ' · never run yet');
+      prlRenderTopPatterns(d.top_patterns);
     }).catch(()=>{ prlStats.textContent = 'Could not load.'; });
   }
   prlLoad();

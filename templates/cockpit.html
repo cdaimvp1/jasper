@@ -3843,6 +3843,7 @@ body.ownerlock #ownernote{display:block}
 .pcc-tl-deeplink:hover{text-decoration:underline}
 .pcc-tl-deeplink-btn{background:none;border:none;padding:0;font-family:inherit;cursor:pointer}
 .pcc-tl-deeplink-btn:disabled{opacity:.6;cursor:default}
+.pcc-tl-learned{display:block;margin-top:6px;font-size:11px;font-style:italic;color:var(--lk-mut2)}
 .pcc-tl-rec{border-left:3px solid var(--lk-pri);padding-left:11px}
 .pcc-tl-rec-none{border-left-color:var(--lk-line)}
 .pcc-tl-rec-label{font-size:12.5px;font-weight:700;color:var(--lk-ink);line-height:1.35}
@@ -8075,6 +8076,11 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
       // link, or open-email/draft-reply actions for a mail item. Empty when
       // there's nothing to link to.
       deepLinks: e.deep_links || [],
+      // task #59: {pattern_key,hit_count,note} when a Personal Response
+      // Learning pattern (opt-in, off by default) matches this evidence's
+      // text - cited, same as a Total Recall precedent, never rewriting
+      // anything. null when the feature's off or nothing matched.
+      learnedCitation: e.learned_citation || null,
     }));
     const stItems = (stateHistory || []).map(h => ({
       kind: "state",
@@ -8156,6 +8162,7 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
           <span class="pcc-tl-sum">${pccEsc(item.summary)}</span>
           ${item.attachment ? `<span class="pcc-tl-att">${pccEsc(item.attachment)}</span>` : ""}
           ${pccDeepLinkHtml(item.deepLinks)}
+          ${item.learnedCitation ? `<div class="pcc-tl-learned">${pccEsc(item.learnedCitation.note)}</div>` : ""}
         </div>
         ${recHtml}
       </div>`;

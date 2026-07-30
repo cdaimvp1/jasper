@@ -213,6 +213,66 @@ def test_run_daily_if_due_runs_both_surfaces_together(pp_env, monkeypatch):
     assert set(result.keys()) == {"app_chat", "sent_mail"}
 
 
+def test_citation_for_text_none_when_no_pattern_match(pp_env):
+    assert pp_env.citation_for_text("just a normal message") is None
+
+
+def test_citation_for_text_none_below_min_hit_count(pp_env, monkeypatch):
+    import workgraph_store as ws
+    ws.upsert_response_pattern("app_chat", "ariba", "x", 1.0)
+    ws.upsert_response_pattern("app_chat", "ariba", "x", 2.0)  # hit_count=2, below MIN_CITATION_HIT_COUNT(3)
+    assert pp_env.citation_for_text("check the ariba status") is None
+
+
+def test_citation_for_text_cites_pattern_at_or_above_threshold(pp_env):
+    import workgraph_store as ws
+    for i in range(3):
+        ws.upsert_response_pattern("app_chat", "ariba", "x", float(i))
+
+    result = pp_env.citation_for_text("check the ariba status")
+
+    assert result["pattern_key"] == "ariba"
+    assert result["hit_count"] == 3
+    assert "3 times" in result["note"]
+
+
+def test_citation_for_text_picks_highest_hit_count_when_multiple_match(pp_env):
+    import workgraph_store as ws
+    for i in range(3):
+        ws.upsert_response_pattern("app_chat", "ariba", "x", float(i))
+    for i in range(5):
+        ws.upsert_response_pattern("sent_mail", "check status", "x", float(i))
+
+    result = pp_env.citation_for_text("check the ariba status")
+
+    assert result["pattern_key"] == "check status"
+    assert result["hit_count"] == 5
+
+
+def test_attach_citations_off_when_personal_learning_disabled(pp_env):
+    import workgraph_store as ws
+    for i in range(5):
+        ws.upsert_response_pattern("app_chat", "ariba", "x", float(i))
+    evidence = [{"summary": "check the ariba status"}]
+
+    pp_env.attach_citations(evidence)
+
+    assert evidence[0]["learned_citation"] is None
+
+
+def test_attach_citations_cites_when_enabled(pp_env):
+    import config, workgraph_store as ws
+    config.set_value(True, "personal_learning", "enabled")
+    for i in range(5):
+        ws.upsert_response_pattern("app_chat", "ariba", "x", float(i))
+    evidence = [{"summary": "check the ariba status"}, {"summary": "nothing relevant here"}]
+
+    pp_env.attach_citations(evidence)
+
+    assert evidence[0]["learned_citation"]["pattern_key"] == "ariba"
+    assert evidence[1]["learned_citation"] is None
+
+
 def test_run_daily_if_due_persists_cursor_across_calls(pp_env):
     import config, workgraph_store as ws
     config.set_value(True, "personal_learning", "enabled")

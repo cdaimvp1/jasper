@@ -32,6 +32,7 @@ confirm or reject via workgraph_store.resolve_project_suggestion.
 """
 from __future__ import annotations
 
+import re
 import sys
 import time
 from difflib import SequenceMatcher
@@ -43,6 +44,48 @@ import workgraph_lessons
 import workgraph_signals
 
 WEAK_SIGNAL_WINDOW_DAYS = 45
+
+# Fixed 2026-07-30 (Marc's direct catch): a real production project (proj-015)
+# had merged 71 issues spanning 56+ genuinely distinct purchase requisitions,
+# purely because their subjects all shared the boilerplate phrase "Action
+# required: Approve the Requisition that [name] submitted" (45 shared
+# characters, well past MIN_TOPIC_KEY_LEN) - the existing company-disjoint
+# veto never fired because the ONLY external party on any of them is Ariba's
+# own no-reply sender, which is correctly excluded from company
+# identification, leaving both sides' company sets empty. Marc's explicit
+# principle: project identity should track the actual sourcing transaction
+# (a PR/PO number, a contract name/type) - the same supplier, or even the
+# same automated boilerplate template, can legitimately cover many
+# unrelated purchase requisitions. PR/PO numbers are a REAL, deterministic
+# identifier (confirmed against real subjects: "PR1111865", "PR416079-V33",
+# "PO4200703817") - unlike a shared company or a shared boilerplate phrase,
+# so a disjoint reference-number pair is treated the same way the existing
+# disjoint-company check already is: positively contradicting evidence,
+# not just an absence of confirming evidence.
+_REFERENCE_ID_RE = re.compile(r"\b(?:PR|PO)\d{4,}(?:-V\d+)?\b", re.I)
+
+
+def _reference_ids_for_issue(issue_id: str) -> set:
+    """Every PR#/PO# found across this issue's own raw_items' subject +
+    body_preview text, uppercased for comparison."""
+    ids = set()
+    for item in ws.get_raw_items_for_issue(issue_id):
+        text = f"{item.get('subject') or ''} {item.get('body_preview') or ''}"
+        ids.update(m.upper() for m in _REFERENCE_ID_RE.findall(text))
+    return ids
+
+
+def _vetoed_by_reference_mismatch(issue_id: str, sibling_id: str) -> bool:
+    """True when BOTH issues have at least one identified PR/PO reference
+    and the sets are disjoint - a real, structured signal that overrides
+    ANY of the strong-signal checks below (shared party/company/subject),
+    since two different purchase requisitions are two different
+    transactions no matter how similar their surrounding text looks."""
+    my_refs = _reference_ids_for_issue(issue_id)
+    if not my_refs:
+        return False
+    sibling_refs = _reference_ids_for_issue(sibling_id)
+    return bool(sibling_refs) and my_refs.isdisjoint(sibling_refs)
 
 
 def _project_name_for(issue: dict, category: str, parties: list) -> str:
@@ -172,17 +215,24 @@ def _strong_signal_match(issue_id: str, issue: dict):
     """First strong deterministic signal found, checked in order of
     confidence: exact external party > shared external company > matching
     normalized subject/topic core. Any one is trusted enough to auto-merge
-    without asking. Returns (kind, detail, sibling_issue_id) or None."""
+    without asking - UNLESS vetoed by a disjoint PR/PO reference number
+    (see _vetoed_by_reference_mismatch above), which overrides all three.
+    A candidate rejected on reference grounds is not retried against a
+    weaker signal for the same pair; the safer failure mode is no_match,
+    not risking a second wrong merge via a looser check. Returns
+    (kind, detail, sibling_issue_id) or None."""
     m = _shared_external_party(issue_id)
     if m:
         party_id, sibling_id = m
-        return "party", party_id, sibling_id
+        if not _vetoed_by_reference_mismatch(issue_id, sibling_id):
+            return "party", party_id, sibling_id
     m = _shared_external_company(issue_id)
     if m:
         company, sibling_id = m
-        return "company", company, sibling_id
+        if not _vetoed_by_reference_mismatch(issue_id, sibling_id):
+            return "company", company, sibling_id
     sibling_id = _shared_topic_key(issue)
-    if sibling_id:
+    if sibling_id and not _vetoed_by_reference_mismatch(issue_id, sibling_id):
         return "topic", ws.normalize_topic_key(issue.get("title") or ""), sibling_id
     return None
 
@@ -191,7 +241,9 @@ def _weak_signal_candidates(issue: dict) -> list:
     """Same category, opened within the proximity window, no shared external
     party (that case was already handled as a strong-signal merge before
     this is called) - a real but softer hint worth asking about, not acting
-    on unprompted."""
+    on unprompted. Same disjoint-PR/PO veto as the strong-signal path -
+    even a SUGGESTED merge shouldn't propose combining two issues that
+    already look like different purchase requisitions."""
     category = issue.get("category")
     if not category or category == "other":
         return []
@@ -200,6 +252,8 @@ def _weak_signal_candidates(issue: dict) -> list:
         if other["id"] == issue["id"] or other.get("category") != category:
             continue
         if other.get("project_id") and issue.get("project_id") == other.get("project_id"):
+            continue
+        if _vetoed_by_reference_mismatch(issue["id"], other["id"]):
             continue
         gap_days = abs((issue.get("opened_at") or 0) - (other.get("opened_at") or 0)) / 86400
         if gap_days <= WEAK_SIGNAL_WINDOW_DAYS:

@@ -1,9 +1,10 @@
-"""Regression tests for workgraph_deadlines.py (task #64, Deadline Radar).
-Two tiers, deliberately never merged: `structured` (real due dates / real
-upcoming calendar evidence, safe to sort by actual proximity) and
-`mentioned` (free-text dates_mentioned extractions, never auto-parsed into
-a day-count - the exact caution the Ariba expiration-date signal's ~98%
-error rate showed was needed)."""
+"""Regression tests for workgraph_deadlines.py (task #64/#80, deadline
+info attached to issue detail - not a standalone panel, per Marc's direct
+feedback). due_date_info (real due dates / real upcoming calendar
+evidence) is always safe to compute; deadline_mentions' hard/soft
+`kind` comes from curator's real judgment at extraction time and is
+never guessed retroactively from a keyword filter - the exact caution
+the Ariba expiration-date signal's ~98% error rate showed was needed."""
 from __future__ import annotations
 
 import json
@@ -20,188 +21,236 @@ def _set_evidence_ts(ws_db, evidence_id, ts):
     conn.close()
 
 
-def test_build_radar_empty_when_no_signals(ws_db):
-    ws_db.create_issue_with_new_id(title="No dates anywhere", state="active", category="other")
-    radar = wd.build_radar(time.time())
-    assert radar["structured"] == []
-    assert radar["mentioned"] == []
+def _issue(ws_db, title="Issue", state="active"):
+    return ws_db.create_issue_with_new_id(title=title, state=state, category="other")
 
 
-def test_structured_includes_future_due_date(ws_db):
+def _extraction_with_dates(ws_db, issue_id, dates_mentioned, key):
+    rid = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key=key, thread_key=key, dedupe_key=key,
+        occurred_ts=time.time(), subject="s", from_actor="a@example.com", participants_json="[]",
+    )
+    ws_db.link_raw_item_to_issue(rid, issue_id)
+    ws_db.create_extraction(rid, json.dumps({"dates_mentioned": dates_mentioned}))
+    return rid
+
+
+# --- _normalize_date_mention -------------------------------------------
+
+def test_normalize_legacy_plain_string():
+    assert wd._normalize_date_mention("Aug 11 - tentative") == {"text": "Aug 11 - tentative", "kind": None}
+
+
+def test_normalize_new_shape_hard():
+    assert wd._normalize_date_mention({"text": "must sign by Aug 11", "kind": "hard"}) == \
+        {"text": "must sign by Aug 11", "kind": "hard"}
+
+
+def test_normalize_new_shape_soft():
+    assert wd._normalize_date_mention({"text": "shooting for next week", "kind": "soft"}) == \
+        {"text": "shooting for next week", "kind": "soft"}
+
+
+def test_normalize_malformed_kind_becomes_none():
+    assert wd._normalize_date_mention({"text": "x", "kind": "urgent"}) == {"text": "x", "kind": None}
+
+
+def test_normalize_blank_string_is_none():
+    assert wd._normalize_date_mention("   ") is None
+
+
+def test_normalize_object_with_blank_text_is_none():
+    assert wd._normalize_date_mention({"text": "  ", "kind": "hard"}) is None
+
+
+def test_normalize_garbage_types_are_none():
+    assert wd._normalize_date_mention(42) is None
+    assert wd._normalize_date_mention(None) is None
+    assert wd._normalize_date_mention(["x"]) is None
+
+
+# --- attach_deadline_info: due_date_info --------------------------------
+
+def test_attach_deadline_info_empty_list_is_safe(ws_db):
+    assert wd.attach_deadline_info([]) == []
+
+
+def test_no_signals_yields_empty_and_not_hard(ws_db):
+    iid = _issue(ws_db)
+    issues = [ws_db.get_issue(iid)]
+
+    wd.attach_deadline_info(issues, now=time.time())
+
+    assert issues[0]["due_date_info"] is None
+    assert issues[0]["deadline_mentions"] == []
+    assert issues[0]["has_hard_deadline"] is False
+
+
+def test_future_due_date_is_hard(ws_db):
     now = time.time()
-    iid = ws_db.create_issue_with_new_id(title="Renewal", state="active", category="other")
-    due_iso = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now + 5 * DAY))
-    ws_db.update_issue(iid, due=due_iso)
+    iid = _issue(ws_db)
+    ws_db.update_issue(iid, due=time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now + 5 * DAY)))
+    issues = [ws_db.get_issue(iid)]
 
-    radar = wd.build_radar(now)
+    wd.attach_deadline_info(issues, now=now)
 
-    assert len(radar["structured"]) == 1
-    entry = radar["structured"][0]
-    assert entry["issue_id"] == iid
-    assert entry["source"] == "due_date"
-    assert entry["overdue"] is False
-    assert 4.5 < entry["days_out"] < 5.5
+    info = issues[0]["due_date_info"]
+    assert info["source"] == "due_date"
+    assert info["overdue"] is False
+    assert 4.5 < info["days_out"] < 5.5
+    assert issues[0]["has_hard_deadline"] is True
 
 
-def test_structured_flags_overdue_due_date(ws_db):
+def test_overdue_due_date_flagged(ws_db):
     now = time.time()
-    iid = ws_db.create_issue_with_new_id(title="Overdue thing", state="active", category="other")
-    due_iso = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now - 2 * DAY))
-    ws_db.update_issue(iid, due=due_iso)
+    iid = _issue(ws_db)
+    ws_db.update_issue(iid, due=time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now - 2 * DAY)))
+    issues = [ws_db.get_issue(iid)]
 
-    radar = wd.build_radar(now)
+    wd.attach_deadline_info(issues, now=now)
 
-    assert radar["structured"][0]["overdue"] is True
-    assert radar["structured"][0]["days_out"] < 0
+    assert issues[0]["due_date_info"]["overdue"] is True
 
 
-def test_malformed_due_date_is_ignored_not_crashed(ws_db):
+def test_malformed_due_date_ignored_not_crashed(ws_db):
     now = time.time()
-    iid = ws_db.create_issue_with_new_id(title="Bad date", state="active", category="other")
+    iid = _issue(ws_db)
     ws_db.update_issue(iid, due="not-a-real-date")
+    issues = [ws_db.get_issue(iid)]
 
-    radar = wd.build_radar(now)  # must not raise
+    wd.attach_deadline_info(issues, now=now)  # must not raise
 
-    assert radar["structured"] == []
+    assert issues[0]["due_date_info"] is None
+    assert issues[0]["has_hard_deadline"] is False
 
 
-def test_structured_includes_upcoming_calendar_event_within_lookahead(ws_db):
+def test_upcoming_calendar_event_within_lookahead_is_hard(ws_db):
     now = time.time()
-    iid = ws_db.create_issue_with_new_id(title="Board review", state="active", category="other")
-    eid = ws_db.add_evidence(issue_id=iid, type="calendar", summary="Board review meeting")
+    iid = _issue(ws_db)
+    eid = ws_db.add_evidence(issue_id=iid, type="calendar", summary="Board review")
     _set_evidence_ts(ws_db, eid, now + 10 * DAY)
+    issues = [ws_db.get_issue(iid)]
 
-    radar = wd.build_radar(now)
+    wd.attach_deadline_info(issues, now=now)
 
-    assert len(radar["structured"]) == 1
-    assert radar["structured"][0]["source"] == "calendar"
-    assert 9.5 < radar["structured"][0]["days_out"] < 10.5
+    info = issues[0]["due_date_info"]
+    assert info["source"] == "calendar"
+    assert 9.5 < info["days_out"] < 10.5
+    assert issues[0]["has_hard_deadline"] is True
 
 
 def test_calendar_event_beyond_lookahead_excluded(ws_db):
     now = time.time()
-    iid = ws_db.create_issue_with_new_id(title="Far-off meeting", state="active", category="other")
-    eid = ws_db.add_evidence(issue_id=iid, type="calendar", summary="Way out there")
+    iid = _issue(ws_db)
+    eid = ws_db.add_evidence(issue_id=iid, type="calendar", summary="Far off")
     _set_evidence_ts(ws_db, eid, now + 30 * DAY)
+    issues = [ws_db.get_issue(iid)]
 
-    radar = wd.build_radar(now)
+    wd.attach_deadline_info(issues, now=now)
 
-    assert radar["structured"] == []
+    assert issues[0]["due_date_info"] is None
 
 
 def test_past_calendar_event_excluded(ws_db):
     now = time.time()
-    iid = ws_db.create_issue_with_new_id(title="Already happened", state="active", category="other")
-    eid = ws_db.add_evidence(issue_id=iid, type="calendar", summary="Past meeting")
+    iid = _issue(ws_db)
+    eid = ws_db.add_evidence(issue_id=iid, type="calendar", summary="Already happened")
     _set_evidence_ts(ws_db, eid, now - 2 * DAY)
+    issues = [ws_db.get_issue(iid)]
 
-    radar = wd.build_radar(now)
+    wd.attach_deadline_info(issues, now=now)
 
-    assert radar["structured"] == []
+    assert issues[0]["due_date_info"] is None
 
 
 def test_due_date_takes_priority_over_calendar_evidence(ws_db):
     now = time.time()
-    iid = ws_db.create_issue_with_new_id(title="Has both", state="active", category="other")
-    due_iso = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now + 3 * DAY))
-    ws_db.update_issue(iid, due=due_iso)
+    iid = _issue(ws_db)
+    ws_db.update_issue(iid, due=time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now + 3 * DAY)))
     eid = ws_db.add_evidence(issue_id=iid, type="calendar", summary="Also has a meeting")
     _set_evidence_ts(ws_db, eid, now + 10 * DAY)
+    issues = [ws_db.get_issue(iid)]
 
-    radar = wd.build_radar(now)
+    wd.attach_deadline_info(issues, now=now)
 
-    assert len(radar["structured"]) == 1
-    assert radar["structured"][0]["source"] == "due_date"
-    assert 2.5 < radar["structured"][0]["days_out"] < 3.5
+    assert issues[0]["due_date_info"]["source"] == "due_date"
 
 
-def test_structured_sorted_soonest_first_across_issues(ws_db):
+# --- attach_deadline_info: deadline_mentions -----------------------------
+
+def test_hard_mention_sets_has_hard_deadline(ws_db):
     now = time.time()
-    far = ws_db.create_issue_with_new_id(title="Far", state="active", category="other")
-    ws_db.update_issue(far, due=time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now + 9 * DAY)))
-    near = ws_db.create_issue_with_new_id(title="Near", state="active", category="other")
-    ws_db.update_issue(near, due=time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now + 1 * DAY)))
+    iid = _issue(ws_db)
+    _extraction_with_dates(ws_db, iid, [{"text": "must sign by Aug 11", "kind": "hard"}], "m1")
+    issues = [ws_db.get_issue(iid)]
 
-    radar = wd.build_radar(now)
+    wd.attach_deadline_info(issues, now=now)
 
-    assert [e["issue_id"] for e in radar["structured"]] == [near, far]
+    assert issues[0]["deadline_mentions"] == [{"text": "must sign by Aug 11", "kind": "hard"}]
+    assert issues[0]["has_hard_deadline"] is True
 
 
-def test_closed_issues_excluded_from_structured(ws_db):
+def test_soft_mention_alone_is_not_hard(ws_db):
     now = time.time()
-    iid = ws_db.create_issue_with_new_id(title="Done thing", state="done", category="other")
-    ws_db.update_issue(iid, due=time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now + 1 * DAY)))
+    iid = _issue(ws_db)
+    _extraction_with_dates(ws_db, iid, [{"text": "shooting for next week", "kind": "soft"}], "m2")
+    issues = [ws_db.get_issue(iid)]
 
-    radar = wd.build_radar(now)
+    wd.attach_deadline_info(issues, now=now)
 
-    assert radar["structured"] == []
+    assert issues[0]["deadline_mentions"] == [{"text": "shooting for next week", "kind": "soft"}]
+    assert issues[0]["has_hard_deadline"] is False
 
 
-def test_mentioned_surfaces_raw_extraction_text_verbatim(ws_db):
+def test_legacy_unclassified_mention_is_not_hard(ws_db):
     now = time.time()
-    iid = ws_db.create_issue_with_new_id(title="Press release deal", state="active", category="other")
-    rid = ws_db.insert_raw_item(source="outlook_mail", stable_key="k1", thread_key="k1", dedupe_key="d1",
-                                 occurred_ts=now, subject="s", from_actor="a@example.com", participants_json="[]")
-    ws_db.link_raw_item_to_issue(rid, iid)
-    ws_db.create_extraction(rid, json.dumps({
-        "asks": [], "decisions": [], "dates_mentioned": ["Tuesday, August 11 - tentative"],
-        "commitments": [], "key_facts": [],
-    }))
+    iid = _issue(ws_db)
+    _extraction_with_dates(ws_db, iid, ["Aug 11 - tentative press release"], "m3")
+    issues = [ws_db.get_issue(iid)]
 
-    radar = wd.build_radar(now)
+    wd.attach_deadline_info(issues, now=now)
 
-    assert len(radar["mentioned"]) == 1
-    entry = radar["mentioned"][0]
-    assert entry["issue_id"] == iid
-    assert entry["text"] == "Tuesday, August 11 - tentative"
-    # never computed into a day-count or urgency flag - that's the whole point
-    assert "days_out" not in entry
-    assert "overdue" not in entry
+    assert issues[0]["deadline_mentions"] == [{"text": "Aug 11 - tentative press release", "kind": None}]
+    assert issues[0]["has_hard_deadline"] is False
 
 
-def test_mentioned_skips_blank_and_non_string_entries(ws_db):
+def test_mixed_hard_and_soft_mentions_both_kept(ws_db):
     now = time.time()
-    iid = ws_db.create_issue_with_new_id(title="Mixed junk", state="active", category="other")
-    rid = ws_db.insert_raw_item(source="outlook_mail", stable_key="k2", thread_key="k2", dedupe_key="d2",
-                                 occurred_ts=now, subject="s", from_actor="a@example.com", participants_json="[]")
-    ws_db.link_raw_item_to_issue(rid, iid)
-    ws_db.create_extraction(rid, json.dumps({
-        "dates_mentioned": ["", "   ", None, 42, "a real one"],
-    }))
+    iid = _issue(ws_db)
+    _extraction_with_dates(ws_db, iid, [
+        {"text": "termination notice due Sept 1", "kind": "hard"},
+        {"text": "hoping to wrap up by Friday", "kind": "soft"},
+    ], "m4")
+    issues = [ws_db.get_issue(iid)]
 
-    radar = wd.build_radar(now)
+    wd.attach_deadline_info(issues, now=now)
 
-    assert [e["text"] for e in radar["mentioned"]] == ["a real one"]
+    kinds = {m["kind"] for m in issues[0]["deadline_mentions"]}
+    assert kinds == {"hard", "soft"}
+    assert issues[0]["has_hard_deadline"] is True
 
 
-def test_mentioned_sorted_most_recently_extracted_first(ws_db):
+def test_blank_and_garbage_mentions_skipped(ws_db):
     now = time.time()
-    iid = ws_db.create_issue_with_new_id(title="Multiple mentions", state="active", category="other")
-    rid1 = ws_db.insert_raw_item(source="outlook_mail", stable_key="k3", thread_key="k3", dedupe_key="d3",
-                                  occurred_ts=now, subject="s", from_actor="a@example.com", participants_json="[]")
-    ws_db.link_raw_item_to_issue(rid1, iid)
-    rid2 = ws_db.insert_raw_item(source="outlook_mail", stable_key="k4", thread_key="k4", dedupe_key="d4",
-                                  occurred_ts=now, subject="s", from_actor="a@example.com", participants_json="[]")
-    ws_db.link_raw_item_to_issue(rid2, iid)
-    ws_db.create_extraction(rid1, json.dumps({"dates_mentioned": ["older mention"]}))
-    conn = ws_db._connect()
-    conn.execute("UPDATE raw_item_extractions SET extracted_ts = ? WHERE raw_item_id = ?", (now - 100, rid1))
-    conn.close()
-    ws_db.create_extraction(rid2, json.dumps({"dates_mentioned": ["newer mention"]}))
+    iid = _issue(ws_db)
+    _extraction_with_dates(ws_db, iid, ["", "   ", None, 42, {"text": "", "kind": "hard"}, "a real one"], "m5")
+    issues = [ws_db.get_issue(iid)]
 
-    radar = wd.build_radar(now)
+    wd.attach_deadline_info(issues, now=now)
 
-    assert [e["text"] for e in radar["mentioned"]] == ["newer mention", "older mention"]
+    assert [m["text"] for m in issues[0]["deadline_mentions"]] == ["a real one"]
 
 
-def test_mentioned_excludes_closed_issues(ws_db):
+def test_multiple_issues_do_not_cross_contaminate(ws_db):
     now = time.time()
-    iid = ws_db.create_issue_with_new_id(title="Closed with a date", state="noise-archived", category="other")
-    rid = ws_db.insert_raw_item(source="outlook_mail", stable_key="k5", thread_key="k5", dedupe_key="d5",
-                                 occurred_ts=now, subject="s", from_actor="a@example.com", participants_json="[]")
-    ws_db.link_raw_item_to_issue(rid, iid)
-    ws_db.create_extraction(rid, json.dumps({"dates_mentioned": ["should not appear"]}))
+    hard_issue = _issue(ws_db, title="Hard one")
+    _extraction_with_dates(ws_db, hard_issue, [{"text": "must sign", "kind": "hard"}], "m6")
+    soft_issue = _issue(ws_db, title="Soft one")
+    _extraction_with_dates(ws_db, soft_issue, [{"text": "shooting for", "kind": "soft"}], "m7")
+    issues = [ws_db.get_issue(hard_issue), ws_db.get_issue(soft_issue)]
 
-    radar = wd.build_radar(now)
+    wd.attach_deadline_info(issues, now=now)
 
-    assert radar["mentioned"] == []
+    by_id = {i["id"]: i for i in issues}
+    assert by_id[hard_issue]["has_hard_deadline"] is True
+    assert by_id[soft_issue]["has_hard_deadline"] is False

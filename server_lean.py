@@ -1107,6 +1107,7 @@ async def api_workgraph_issues(state: Optional[str] = None, limit: int = 200):
     states = [s.strip() for s in state.split(",")] if state else ["active", "waiting", "blocked"]
     issues = wg.list_issues(states=states, limit=min(max(limit, 1), 1000))
     workgraph_lessons.attach_learned(issues)
+    workgraph_deadlines.attach_deadline_info(issues)
     return JSONResponse({"issues": sanitize_surrogates(issues)})
 
 
@@ -1157,6 +1158,7 @@ async def api_workgraph_issue_detail(issue_id: str):
     deep_links.attach_deep_links(evidence)
     personal_patterns.attach_citations(evidence)
     workgraph_lessons.attach_learned([issue])
+    workgraph_deadlines.attach_deadline_info([issue])
     return JSONResponse({"issue": sanitize_surrogates(issue), "evidence": sanitize_surrogates(evidence),
                         "pending_actions": sanitize_surrogates(pending), "tasks": sanitize_surrogates(tasks),
                         "state_history": sanitize_surrogates(state_history),
@@ -1329,17 +1331,6 @@ async def api_commitments():
     return JSONResponse(sanitize_surrogates({"commitments": workgraph_commitments.list_open_commitments()}))
 
 
-@app.get("/api/workgraph/deadline-radar")
-async def api_deadline_radar():
-    """Task #64 (Deadline Radar). Two tiers, deliberately never merged into
-    one falsely-precise sorted list - see workgraph_deadlines.py's
-    docstring for why: Ariba's own expiration-date signal was found to be
-    wrong ~98% of the time when auto-parsed and trusted as a real
-    deadline, and `mentioned` (free-text dates_mentioned) gets the same
-    caution applied up front rather than repeating that mistake."""
-    return JSONResponse(sanitize_surrogates(workgraph_deadlines.build_radar(time.time())))
-
-
 _ALERT_SEVERITY_ORDER = {"critical": 0, "warn": 1, "info": 2}
 
 
@@ -1407,6 +1398,7 @@ async def api_project_detail(project_id: str):
     if project is None:
         raise HTTPException(404, f"no such project: {project_id}")
     issues = wg.list_issues_for_project(project_id)
+    workgraph_deadlines.attach_deadline_info(issues)
     synthesis = wg.get_synthesis("project", project_id)
     attachments = wg.list_attachments_for_project(project_id)
     return JSONResponse({"project": sanitize_surrogates(project), "issues": sanitize_surrogates(issues),

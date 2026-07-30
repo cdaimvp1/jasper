@@ -44,11 +44,27 @@ different jobs.
    Write each one via:
    ```
    POST /api/workgraph/raw_items/{raw_item_id}/extraction
-   {"extracted_json": {"asks": [...], "decisions": [...], "dates_mentioned": [...],
+   {"extracted_json": {"asks": [...], "decisions": [...],
+                        "dates_mentioned": [{"text": "...", "kind": "hard"|"soft"}, ...],
                         "commitments": [...], "key_facts": [...]}}
    ```
    Computed ONCE per raw_item, permanently — never re-extract an item that already has a row here
    (check first; the routes list above tell you which raw_items already have one).
+
+   **`dates_mentioned` entries need real judgment on `kind` (added 2026-07-30, Marc's direct
+   request) — this is exactly the kind of call deterministic code can't make, which is why it
+   lives here and not in a keyword filter:**
+   - `"hard"` — a real, binding date with an actual consequence for missing it: a contract's
+     must-sign-by date, a notice-of-non-renewal or termination deadline, an SLA cutoff, a filing
+     deadline. If missing it has a real, nameable consequence, it's hard.
+   - `"soft"` — an aspirational or target date with no binding consequence: "shooting to have
+     this done by next week," "hoping to close this out by end of month," a rough estimate.
+   - When you genuinely can't tell from the text, still pick the closer of the two rather than
+     omitting `kind` — Jasper treats a missing/malformed `kind` as "unclassified" and shows it
+     more cautiously than either, so a real guess is more useful than silence.
+   - Plain strings (the old shape, from before this date) still work and just show as
+     unclassified — don't go back and re-extract old raw_items to backfill `kind` (violates the
+     "computed once, permanently" rule above); this only applies going forward.
 
 4. **Write the updated synthesis** — a 2-4 sentence narrative (who asked what, what's happened,
    where it stands now, informed by the prior synthesis plus what's new), `next_steps` grounded in

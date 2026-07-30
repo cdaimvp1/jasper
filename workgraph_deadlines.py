@@ -1,35 +1,38 @@
 """
-workgraph_deadlines.py — task #64: "Deadline Radar". Explicitly excludes
-Ariba's expiration-date signal (ariba_wo_expiration) - task #61/#72's
-research found it wrong ~98% of the time when auto-parsed and trusted as a
-real deadline. Rather than trying to fix that one signal's accuracy, this
-module applies the lesson structurally: deadlines are split into two tiers
-that are NEVER merged into one falsely-precise sorted list.
+workgraph_deadlines.py — task #64/#80: deadline info attached to each
+issue's own detail, not a standalone panel (Marc's direct feedback on the
+first version: a separate "Deadline Radar" card was the wrong shape -
+this belongs on the issue/project it's about, and needs to be filterable
+in the inbox).
 
-  structured: issues with a real due date (issues.due) or a linked
-    upcoming calendar event (<=CALENDAR_LOOKAHEAD_DAYS out, the same
-    window workgraph_nba.py/workgraph_recommend.py already trust) - both
-    machine-set real timestamps, safe to sort by actual day-count
-    proximity. Empty today in practice (neither issues.due nor calendar
-    ingestion has real data yet in this deployment) but built correctly so
-    it fills in automatically as either source gets populated, rather than
-    inventing a parser to manufacture data that doesn't exist.
-  mentioned: raw_item_extractions' dates_mentioned field - genuine
-    LLM-extracted judgment (curator's synthesis routine), but free-form
-    natural language ("Tuesday, August 11 - tentative press-release
-    date"), not a parsed date. Surfaced verbatim for Marc's own reading,
-    sorted only by extraction recency (the one honest ordering available)
-    - NEVER auto-parsed into a day-count or used to rank anything, which
-    is exactly the mistake that made the Ariba signal unreliable.
+Two sources, kept structurally distinct:
+  due_date_info: issues.due (when set) or a linked upcoming calendar
+    event (<=CALENDAR_LOOKAHEAD_DAYS out, the same window workgraph_nba.py/
+    workgraph_recommend.py already trust) - both real timestamps, treated
+    as inherently "hard" (a due date or a scheduled meeting is a fact, not
+    a guess).
+  deadline_mentions: raw_item_extractions' dates_mentioned field - real
+    LLM judgment from curator's synthesis routine (SYNTHESIS_ROUTINE.md),
+    now classified per-mention as "hard" (a real, binding date with a
+    named consequence - contract must-sign-by, notice-of-non-renewal/
+    termination, an SLA cutoff) or "soft" (aspirational - "shooting for
+    next week"). Entries written before this classification existed are
+    plain strings and normalize to kind=None ("unclassified") rather than
+    being guessed at retroactively by a keyword filter - checked before
+    building the original version of this feature: keyword-guessing
+    hard/soft from already-summarized free text would repeat exactly the
+    failure mode that made the Ariba expiration-date signal wrong ~98% of
+    the time (task #61/#72). The classification only happens where a real
+    reader (curator) already has the actual email in front of them.
 
-Zero LLM calls here - same discipline as workgraph_nba.py/workgraph_
-recommend.py/workgraph_aristotle.py. The LLM judgment already happened
-once, upstream, when curator wrote dates_mentioned; this module only ever
-reads it back out.
+has_hard_deadline is True when either a real due_date_info exists OR any
+mention is explicitly kind="hard" - the flag the Morning Queue filters/
+sorts by.
 """
 from __future__ import annotations
 
 import datetime
+import time
 from typing import Optional
 
 import workgraph_store as ws
@@ -41,10 +44,11 @@ _OPEN_STATES = ("active", "waiting", "blocked")
 
 def _parse_due(due_iso: Optional[str]) -> Optional[float]:
     """Returns a UTC epoch timestamp, or None if unset/unparseable - a
-    malformed due string must never crash the radar, just be treated as
-    "no due date" (same discipline, same fix, as workgraph_nba._due_urgency:
-    a naive datetime's .timestamp() assumes LOCAL time while `now` is a UTC
-    epoch - explicit UTC attachment removes that ambient-timezone drift)."""
+    malformed due string must never crash this, just be treated as "no
+    due date" (same discipline, same fix, as workgraph_nba._due_urgency:
+    a naive datetime's .timestamp() assumes LOCAL time while `now` is a
+    UTC epoch - explicit UTC attachment removes that ambient-timezone
+    drift)."""
     if not due_iso:
         return None
     try:
@@ -61,47 +65,63 @@ def _nearest_upcoming_calendar_ts(evidence: list[dict], now: float) -> Optional[
     return min(upcoming) if upcoming else None
 
 
-def build_radar(now: float) -> dict:
-    """Returns {"structured": [...], "mentioned": [...]}. Both lists are
-    reflect-only - this module never writes anything back, and never
-    treats a `mentioned` entry as a real deadline to compute urgency from."""
-    issues = ws.list_issues(states=list(_OPEN_STATES), limit=1000)
+def _normalize_date_mention(entry) -> Optional[dict]:
+    """Accepts either the current {"text": str, "kind": "hard"|"soft"}
+    shape or a legacy plain string (written before this classification
+    existed) - returns {"text": str, "kind": "hard"|"soft"|None}, or None
+    if the entry is blank/unusable. A malformed kind value normalizes to
+    None (unclassified) rather than being silently miscategorized."""
+    if isinstance(entry, str):
+        text = entry.strip()
+        return {"text": text, "kind": None} if text else None
+    if isinstance(entry, dict):
+        text = entry.get("text")
+        if not isinstance(text, str) or not text.strip():
+            return None
+        kind = entry.get("kind")
+        if kind not in ("hard", "soft"):
+            kind = None
+        return {"text": text.strip(), "kind": kind}
+    return None
+
+
+def attach_deadline_info(issues: list[dict], now: Optional[float] = None) -> list[dict]:
+    """Mutates and returns `issues`: adds `due_date_info` (dict or None),
+    `deadline_mentions` (list of {"text","kind"}), and `has_hard_deadline`
+    (bool) to each. Computed at READ time - same pattern as workgraph_
+    lessons.attach_learned / workgraph_recommend.attach_recommendations -
+    so this stays current without a separate write path to keep in sync."""
+    if not issues:
+        return issues
+    if now is None:
+        now = time.time()
     issue_ids = [i["id"] for i in issues]
     evidence_by_issue = ws.list_evidence_for_issues(issue_ids)
     extractions_by_issue = ws.list_extractions_for_issues(issue_ids)
 
-    structured = []
     for issue in issues:
         due_ts = _parse_due(issue.get("due"))
         source = "due_date" if due_ts is not None else None
         if due_ts is None:
             cal_ts = _nearest_upcoming_calendar_ts(evidence_by_issue.get(issue["id"], []), now)
-            if cal_ts is not None:
+            if cal_ts is not None and (cal_ts - now) / DAY <= CALENDAR_LOOKAHEAD_DAYS:
                 due_ts, source = cal_ts, "calendar"
-        if due_ts is None:
-            continue
-        days_out = (due_ts - now) / DAY
-        if source == "calendar" and days_out > CALENDAR_LOOKAHEAD_DAYS:
-            continue  # a calendar event further out than the lookahead isn't "radar" material yet
-        structured.append({
-            "issue_id": issue["id"], "title": issue.get("display_title") or issue["title"],
-            "state": issue["state"], "due_ts": due_ts, "days_out": round(days_out, 1),
-            "overdue": days_out < 0, "source": source,
-        })
-    structured.sort(key=lambda r: r["due_ts"])
 
-    mentioned = []
-    for issue in issues:
+        if due_ts is not None:
+            days_out = (due_ts - now) / DAY
+            issue["due_date_info"] = {"days_out": round(days_out, 1), "overdue": days_out < 0, "source": source}
+        else:
+            issue["due_date_info"] = None
+
+        mentions = []
         for extraction in extractions_by_issue.get(issue["id"], []):
-            dates = (extraction.get("extracted_json") or {}).get("dates_mentioned") or []
-            for text in dates:
-                if not isinstance(text, str) or not text.strip():
-                    continue
-                mentioned.append({
-                    "issue_id": issue["id"], "title": issue.get("display_title") or issue["title"],
-                    "state": issue["state"], "text": text.strip(),
-                    "extracted_ts": extraction["extracted_ts"],
-                })
-    mentioned.sort(key=lambda r: r["extracted_ts"], reverse=True)
+            for raw in (extraction.get("extracted_json") or {}).get("dates_mentioned") or []:
+                normalized = _normalize_date_mention(raw)
+                if normalized:
+                    mentions.append(normalized)
+        issue["deadline_mentions"] = mentions
+        issue["has_hard_deadline"] = (
+            issue["due_date_info"] is not None or any(m["kind"] == "hard" for m in mentions)
+        )
 
-    return {"structured": structured, "mentioned": mentioned}
+    return issues

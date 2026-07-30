@@ -216,17 +216,19 @@
 .pcc-var-label{font:600 12px/1 var(--sans);color:var(--mut)}
 .pcc-var-caveat{font:500 11px/1.3 var(--sans);color:var(--mut2);margin-left:auto}
 .pcc-var-body{margin-top:10px}
-/* task #64: Deadline Radar */
-.pcc-radar-card{margin-bottom:14px;padding:0}
-.pcc-radar-card details{padding:14px 18px}
-.pcc-radar-summary{cursor:pointer;display:flex;align-items:baseline;gap:10px;font:700 13px/1.2 var(--sans);color:var(--ink);list-style:none}
-.pcc-radar-summary::-webkit-details-marker{display:none}
-.pcc-radar-count{font:600 11px/1 var(--mono);color:var(--mut2);text-transform:uppercase;letter-spacing:.03em}
-.pcc-radar-body{display:flex;gap:22px;margin-top:12px;flex-wrap:wrap}
-.pcc-radar-section{flex:1;min-width:260px;max-height:220px;overflow-y:auto}
-.pcc-radar-section-hd{font:700 10.5px/1 var(--mono);text-transform:uppercase;letter-spacing:.04em;color:var(--mut2);margin-bottom:6px}
-.pcc-radar-caveat{text-transform:none;letter-spacing:0;font-weight:500;color:var(--mut2);font-family:var(--sans)}
+/* task #64/#80: shared by the issue-detail Deadlines line, Value-at-risk,
+   and Commitments Tracker - no standalone panel anymore (Marc's direct
+   feedback: a separate Deadline Radar card was the wrong shape). */
 .pcc-radar-row{display:flex;align-items:baseline;gap:8px;padding:6px 0;border-bottom:1px solid var(--line);cursor:pointer;font-size:12.5px}
+/* task #80: Deadlines zone in PCC Detail */
+.pcc-deadline-row{display:flex;align-items:baseline;gap:9px;padding:6px 0;border-bottom:1px solid var(--line);font-size:13px}
+.pcc-deadline-row:last-child{border-bottom:none}
+.pcc-deadline-badge{font:700 9.5px/1 var(--mono);text-transform:uppercase;letter-spacing:.03em;padding:2px 7px;border-radius:20px;flex:none;white-space:nowrap}
+.pcc-deadline-hard .pcc-deadline-badge{background:var(--pink-t);color:var(--red-d)}
+.pcc-deadline-soft .pcc-deadline-badge{background:var(--blue-t);color:var(--blue-d)}
+.pcc-deadline-unclassified .pcc-deadline-badge{background:var(--bg);color:var(--mut2)}
+.pcc-deadline-soft{color:var(--mut)}
+.pcc-deadline-unclassified{color:var(--mut2);font-style:italic}
 .pcc-radar-row:hover{background:var(--bg)}
 .pcc-radar-row:last-child{border-bottom:none}
 .pcc-radar-days{font:700 11px/1 var(--mono);color:var(--ink);white-space:nowrap;flex:none;min-width:34px}
@@ -4175,28 +4177,6 @@ body.ownerlock #ownernote{display:block}
           <div class="pcc-var-body" id="pccCommitList"></div>
         </details>
       </div>
-      <!-- task #64: Deadline Radar. Two tiers, never merged - see workgraph_
-           deadlines.py's docstring for why (the Ariba expiration-date signal
-           was found wrong ~98% of the time when auto-parsed as a real
-           deadline; free-text "mentioned" dates get the same caution up
-           front instead of repeating that mistake). Hidden entirely when
-           both tiers are empty, rather than showing an always-there card
-           with nothing in it. -->
-      <div class="card pcc-radar-card" id="pccRadarCard" style="display:none">
-        <details open>
-          <summary class="pcc-radar-summary"><span>Deadline Radar</span><span class="pcc-radar-count" id="pccRadarCount"></span></summary>
-          <div class="pcc-radar-body">
-            <div class="pcc-radar-section">
-              <div class="pcc-radar-section-hd">Confirmed dates</div>
-              <div id="pccRadarStructured"></div>
-            </div>
-            <div class="pcc-radar-section">
-              <div class="pcc-radar-section-hd">Mentioned in threads <span class="pcc-radar-caveat">— unverified, for your own judgment</span></div>
-              <div id="pccRadarMentioned"></div>
-            </div>
-          </div>
-        </details>
-      </div>
       <div id="pccBoardWrap">
         <div class="pcc-board" id="pccBoard">
           <div class="card pcc-list-card">
@@ -7544,7 +7524,7 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
       // sub-brand of the Theo platform. Wordmark + tagline both shown in the
       // persistent header (unlike Theo's tagline-on-launcher-only convention),
       // since JASPER has no separate launcher/home page of its own.
-      span.innerHTML = '<span class="twm">JASPER</span><span class="ttag">Just another simple procurement execution router...</span>';
+      span.innerHTML = '<span class="twm">JASPER</span><span class="ttag">Just Another System for Planning, Execution, &amp; Routing</span>';
       brand.appendChild(span);
     }
     // Swap the model-picker stand-in icons for the official full-color marks.
@@ -7796,7 +7776,7 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
     projects: { label: "Projects" },
   };
   const PCC_LANE_ORDER = ["all", "issues", "waiting", "meetings", "comms", "handover", "projects"];
-  const PCC_SORT_META = { priority: "Priority", newest: "Newest", stale: "Oldest" };
+  const PCC_SORT_META = { priority: "Priority", newest: "Newest", stale: "Oldest", deadline: "Deadline" };
   const MQ_ICON_DOT = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/></svg>';
   const MQ_ICON_CLOCK = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>';
   const MQ_ICON_ALERT = '<svg viewBox="0 0 24 24"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 3.9L2.5 17a2 2 0 001.7 3h15.6a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/></svg>';
@@ -7818,6 +7798,8 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
       svg: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 015 .3c0 1.7-2.3 1.9-2.3 3.4"/><path d="M12 17h.01"/></svg>' },
     { key: "pending", title: "A worker is actively on this",
       svg: MQ_ICON_CLOCK },
+    { key: "harddeadline", title: "Has a hard deadline (real due date, upcoming meeting, or a mention classified hard)",
+      svg: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/><path d="M4.9 4.9l1.4 1.4M19.1 4.9l-1.4 1.4"/></svg>' },
   ];
 
   function pccRenderIconFilters() {
@@ -7947,61 +7929,14 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
     }
   }
 
-  // --- task #64: Deadline Radar --------------------------------------------
-  async function pccLoadDeadlineRadar() {
-    let d;
-    try {
-      const r = await fetch("/api/workgraph/deadline-radar", { cache: "no-store" });
-      if (!r.ok) throw new Error(`radar fetch failed: ${r.status}`);
-      d = await r.json();
-    } catch (e) {
-      console.error("pccLoadDeadlineRadar failed:", e);
-      return;
-    }
-    pccRenderDeadlineRadar(d.structured || [], d.mentioned || []);
-  }
-
+  // task #80: pccFmtDaysOut is still used (issue detail's Deadlines section
+  // below), the standalone Deadline Radar panel/loader/renderer are not -
+  // removed per Marc's direct feedback that a separate panel was the wrong
+  // shape; the same information now lives on each issue's own detail.
   function pccFmtDaysOut(days, overdue) {
     const n = Math.round(Math.abs(days));
     if (overdue) return n === 0 ? "due today" : `${n}d overdue`;
     return days < 0.5 ? "today" : `${n}d`;
-  }
-
-  function pccRenderDeadlineRadar(structured, mentioned) {
-    const card = document.getElementById("pccRadarCard");
-    if (!card) return;
-    if (!structured.length && !mentioned.length) { card.style.display = "none"; return; }
-    card.style.display = "";
-    const count = document.getElementById("pccRadarCount");
-    if (count) count.textContent = `${structured.length} confirmed · ${mentioned.length} mentioned`;
-
-    const structEl = document.getElementById("pccRadarStructured");
-    if (structEl) {
-      structEl.innerHTML = structured.length ? structured.map(e => `
-        <div class="pcc-radar-row" data-id="${pccEsc(e.issue_id)}">
-          <span class="pcc-radar-days${e.overdue ? " pcc-radar-overdue" : ""}">${pccFmtDaysOut(e.days_out, e.overdue)}</span>
-          <span class="pcc-radar-title">${pccEsc(e.title)}</span>
-          <span class="pcc-radar-src">${e.source === "calendar" ? "meeting" : "due date"}</span>
-        </div>`).join("") : '<div class="pcc-empty">Nothing has a confirmed due date or upcoming meeting yet.</div>';
-      structEl.querySelectorAll(".pcc-radar-row").forEach(row => {
-        row.addEventListener("click", () => pccSelectIssue(row.getAttribute("data-id")));
-      });
-    }
-
-    const mentEl = document.getElementById("pccRadarMentioned");
-    if (mentEl) {
-      // Not sliced/capped - real volume here is modest (dozens, not thousands)
-      // and the section itself scrolls (see CSS) rather than silently hiding
-      // anything past an arbitrary count.
-      mentEl.innerHTML = mentioned.length ? mentioned.map(e => `
-        <div class="pcc-radar-row pcc-radar-row-mentioned" data-id="${pccEsc(e.issue_id)}">
-          <span class="pcc-radar-title">${pccEsc(e.title)}</span>
-          <span class="pcc-radar-mention-text">${pccEsc(e.text)}</span>
-        </div>`).join("") : '<div class="pcc-empty">Nothing mentioned yet.</div>';
-      mentEl.querySelectorAll(".pcc-radar-row").forEach(row => {
-        row.addEventListener("click", () => pccSelectIssue(row.getAttribute("data-id")));
-      });
-    }
   }
 
   function pccEvidenceTypes(id) {
@@ -8032,6 +7967,18 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
     }
     if (pccSortMode === "newest") {
       return list.slice().sort((a, b) => (pccLastTs(b.id) || 0) - (pccLastTs(a.id) || 0));  // most recent activity first
+    }
+    if (pccSortMode === "deadline") {
+      // task #80: hard-deadline issues first, soonest real due date/meeting
+      // within those - issues with no due_date_info sort after ones that
+      // have it, regardless of hard-deadline status, since "no known date"
+      // isn't more urgent than "known date, further out."
+      return list.slice().sort((a, b) => {
+        if (!!a.has_hard_deadline !== !!b.has_hard_deadline) return a.has_hard_deadline ? -1 : 1;
+        const aDays = a.due_date_info ? a.due_date_info.days_out : Infinity;
+        const bDays = b.due_date_info ? b.due_date_info.days_out : Infinity;
+        return aDays - bDays;
+      });
     }
     return list;  // "priority": server order (priority_score DESC) - leave as-is
   }
@@ -8193,6 +8140,7 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
       const hasPending = d && (d.pending_actions || []).some(p => p.status !== "done");
       if (!hasPending) return false;
     }
+    if (pccIconFilterState.has("harddeadline") && !iss.has_hard_deadline) return false;
     return true;
   }
 
@@ -8491,6 +8439,31 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
       ? `<div class="pcc-why-line${issue.has_unmet_prerequisite ? " mqw-reason-warn" : ""}">${pccEsc(issue.nba_reason)}</div>` : "";
     const learnedHtml = window.mqLearn ? window.mqLearn(issue) : "";
 
+    // task #80: Deadlines - replaces the standalone Deadline Radar panel
+    // per Marc's direct feedback that a separate card was the wrong
+    // shape. due_date_info is a real due date or upcoming calendar event
+    // (always "hard" - a fact, not a guess). deadline_mentions carry
+    // curator's real per-mention hard/soft judgment (SYNTHESIS_ROUTINE.md,
+    // added 2026-07-30); a mention with no kind is from before that
+    // classification existed and shows as unclassified rather than being
+    // guessed at here by a keyword filter.
+    const dueInfo = issue.due_date_info;
+    const dueRowHtml = dueInfo
+      ? `<div class="pcc-deadline-row pcc-deadline-hard">
+           <span class="pcc-deadline-badge">${dueInfo.overdue ? "Overdue" : "Hard"}</span>
+           <span>${dueInfo.source === "calendar" ? "Meeting" : "Due"} ${pccFmtDaysOut(dueInfo.days_out, dueInfo.overdue)}</span>
+         </div>` : "";
+    const mentionRowsHtml = (issue.deadline_mentions || []).map(m => `
+      <div class="pcc-deadline-row pcc-deadline-${m.kind || "unclassified"}">
+        <span class="pcc-deadline-badge">${m.kind ? pccEsc(m.kind) : "Unclassified"}</span>
+        <span>${pccEsc(m.text)}</span>
+      </div>`).join("");
+    const deadlinesZoneHtml = (dueRowHtml || mentionRowsHtml) ? `
+      <div class="pcc-zone">
+        <div class="pcc-zone-hd"><span>Deadlines</span></div>
+        ${dueRowHtml}${mentionRowsHtml}
+      </div>` : "";
+
     // Progress pairs each event with what the system can do about it. The
     // recommendation column is optional and stays empty when the event carries
     // none - "if any", per the locked design. `recommendation` is not in the
@@ -8643,6 +8616,7 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
       <div class="pcc-detail-stack">
         ${summaryZoneHtml}
         ${suggestZoneHtml}
+        ${deadlinesZoneHtml}
         <div class="pcc-zone">
           <div class="pcc-zone-hd"><span>Progress</span><span class="pcc-zone-note">What happened, and what can be done about it</span><span class="pcc-stale-pill pcc-stale-${stale.cls}">${pccEsc(stale.label)}</span></div>
           <div class="pcc-tl">${timelineRows}</div>
@@ -8741,7 +8715,6 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
       pccSetLane("all");
       pccLoadIssues();
       setInterval(pccLoadIssues, 20000);
-      pccLoadDeadlineRadar();
       pccLoadValueAtRisk();
       pccLoadCommitments();
     }
@@ -9412,10 +9385,12 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
         ? `<div class="pcc-actions-row" style="margin-top:6px">${parties.map(p => window.renderPartyChip(p)).join("")}</div>` : "";
       const reasonHtml = iss.nba_reason
         ? `<div class="mqw-reason${iss.has_unmet_prerequisite ? " mqw-reason-warn" : ""}">${pjEsc(iss.nba_reason)}</div>` : "";
+      const hardBadge = iss.has_hard_deadline
+        ? '<span class="pcc-deadline-badge" style="margin-left:6px;background:var(--pink-t);color:var(--red-d)">Hard deadline</span>' : "";
       return `<div class="pcc-task-row pj-issue-row" data-id="${pjEsc(iss.id)}" style="align-items:flex-start;cursor:pointer">
         <div class="mqw-chip" style="flex:none;margin-top:1px">#${idx + 1}</div>
         <div style="flex:1;min-width:0">
-          <div class="mqwt">${pjEsc(iss.title)}</div>
+          <div class="mqwt">${pjEsc(iss.title)}${hardBadge}</div>
           <div class="mqwmeta">${pjEsc(iss.state)}${iss.due ? " · due " + pjEsc(iss.due) : ""}</div>
           ${reasonHtml}
           ${chips}

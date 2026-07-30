@@ -1162,6 +1162,7 @@ async def api_workgraph_issue_detail(issue_id: str):
     personal_patterns.attach_citations(evidence)
     workgraph_lessons.attach_learned([issue])
     workgraph_deadlines.attach_deadline_info([issue])
+    workgraph_suppliers.attach_supplier_precedent(issue)
     return JSONResponse({"issue": sanitize_surrogates(issue), "evidence": sanitize_surrogates(evidence),
                         "pending_actions": sanitize_surrogates(pending), "tasks": sanitize_surrogates(tasks),
                         "state_history": sanitize_surrogates(state_history),

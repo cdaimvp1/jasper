@@ -8460,6 +8460,16 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
       ? `<div class="pcc-why-line${issue.has_unmet_prerequisite ? " mqw-reason-warn" : ""}">${pccEsc(issue.nba_reason)}</div>` : "";
     const learnedHtml = window.mqLearn ? window.mqLearn(issue) : "";
 
+    // task #77: supplier precedent ("last time with this supplier") - the
+    // most recently CLOSED issue with the same real external company,
+    // never a system-sender-only party (confirmed real failure mode from
+    // task #81's investigation: Ariba's own no-reply sender must never be
+    // treated as "the supplier").
+    const precedent = issue.supplier_precedent;
+    const precedentHtml = precedent
+      ? `<div class="mqlearn"><span class="lk">✦ Last time with this supplier</span><span class="lt">${pccEsc(precedent.title)} — closed in ${precedent.days_to_close}d</span></div>`
+      : "";
+
     // task #80: Deadlines - replaces the standalone Deadline Radar panel
     // per Marc's direct feedback that a separate card was the wrong
     // shape. due_date_info is a real due date or upcoming calendar event
@@ -8617,6 +8627,7 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
           <div class="pcc-detail-title">${pccEsc(displayTitle)}</div>
           ${whyLineHtml}
           ${learnedHtml}
+          ${precedentHtml}
         </div>
         <div class="pcc-actions-row pcc-detail-hd-actions">
           ${issue.state === "waiting" ? '<button class="mqb primary" type="button" data-gen="nudge">✉ Nudge</button>' : ""}

@@ -123,3 +123,81 @@ def test_supplier_detail_returns_full_issue_list(ws_db):
     assert detail["issues"][0]["id"] == iid
     assert "value_found" in detail["issues"][0]
     assert "has_hard_deadline" in detail["issues"][0]
+
+
+# --- task #77: supplier precedent comparison -----------------------------
+
+def _closed_issue(ws_db, party_id, company, opened_at, closed_at):
+    iid = ws_db.create_issue_with_new_id(title=f"Closed deal via {party_id}", state="done", category="other")
+    conn = ws_db._connect()
+    conn.execute("UPDATE issues SET opened_at = ?, updated_at = ? WHERE id = ?", (opened_at, closed_at, iid))
+    conn.close()
+    _party(ws_db, party_id, company)
+    ws_db.link_party_to_issue(iid, party_id)
+    return iid
+
+
+def test_last_closed_issue_none_when_nothing_closed(ws_db):
+    _party(ws_db, "p1", "Acme")
+    iid = ws_db.create_issue_with_new_id(title="Still open", state="active", category="other")
+    ws_db.link_party_to_issue(iid, "p1")
+
+    assert wsup.last_closed_issue_for_company("Acme") is None
+
+
+def test_last_closed_issue_returns_most_recent(ws_db):
+    now = time.time()
+    older = _closed_issue(ws_db, "p1", "Acme", now - 40 * 86400, now - 30 * 86400)
+    newer = _closed_issue(ws_db, "p2", "Acme", now - 10 * 86400, now - 2 * 86400)
+
+    precedent = wsup.last_closed_issue_for_company("Acme")
+
+    assert precedent["issue_id"] == newer
+    assert 7.5 < precedent["days_to_close"] < 8.5
+
+
+def test_last_closed_issue_excludes_given_issue(ws_db):
+    now = time.time()
+    only_closed = _closed_issue(ws_db, "p1", "Acme", now - 10 * 86400, now - 2 * 86400)
+
+    assert wsup.last_closed_issue_for_company("Acme", exclude_issue_id=only_closed) is None
+
+
+def test_attach_supplier_precedent_finds_real_company_precedent(ws_db):
+    now = time.time()
+    _closed_issue(ws_db, "p1", "Acme", now - 20 * 86400, now - 10 * 86400)
+
+    open_issue_id = ws_db.create_issue_with_new_id(title="New deal", state="active", category="other")
+    _party(ws_db, "p2", "Acme")
+    ws_db.link_party_to_issue(open_issue_id, "p2")
+    issue = ws_db.get_issue(open_issue_id)
+
+    wsup.attach_supplier_precedent(issue)
+
+    assert issue["supplier_precedent"] is not None
+    assert issue["supplier_precedent"]["days_to_close"] == 10.0
+
+
+def test_attach_supplier_precedent_none_when_no_external_company(ws_db):
+    iid = ws_db.create_issue_with_new_id(title="No supplier", state="active", category="other")
+    issue = ws_db.get_issue(iid)
+
+    wsup.attach_supplier_precedent(issue)
+
+    assert issue["supplier_precedent"] is None
+
+
+def test_attach_supplier_precedent_ignores_system_sender_only_party(ws_db):
+    """A party with no identified company (e.g. Ariba's own no-reply
+    sender) must never be treated as "the supplier" - confirmed real
+    failure mode from task #81's investigation."""
+    iid = ws_db.create_issue_with_new_id(title="Ariba notice", state="active", category="other")
+    ws_db.upsert_party(id="ariba", primary_email="no-reply@ansmtp.ariba.com", display_name="Ariba",
+                        affiliation="external", affiliation_confidence="H",
+                        affiliation_source="domain", company=None)
+    ws_db.link_party_to_issue(iid, "ariba")
+    issue = ws_db.get_issue(iid)
+
+    wsup.attach_supplier_precedent(issue)
+
+    assert issue["supplier_precedent"] is None

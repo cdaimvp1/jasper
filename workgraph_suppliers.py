@@ -59,6 +59,48 @@ def list_suppliers() -> list[dict]:
     return out
 
 
+def last_closed_issue_for_company(company: str, exclude_issue_id: Optional[str] = None) -> Optional[dict]:
+    """Task #77 (supplier precedent comparison): the most recently closed
+    (state='done') issue for this company - "last time with this
+    supplier," a real reference point rather than a guess. None if
+    nothing's ever closed for this company yet."""
+    if not company:
+        return None
+    closed = []
+    for iid in ws.list_issues_for_company(company):
+        if iid == exclude_issue_id:
+            continue
+        issue = ws.get_issue(iid)
+        if issue and issue["state"] == "done":
+            closed.append(issue)
+    if not closed:
+        return None
+    closed.sort(key=lambda i: i["updated_at"], reverse=True)
+    latest = closed[0]
+    days_open = max(0.0, (latest["updated_at"] - latest["opened_at"]) / 86400.0)
+    return {
+        "issue_id": latest["id"], "title": latest.get("display_title") or latest["title"],
+        "closed_ts": latest["updated_at"], "days_to_close": round(days_open, 1),
+    }
+
+
+def attach_supplier_precedent(issue: dict) -> dict:
+    """Mutates and returns `issue`: adds `supplier_precedent` (dict or
+    None) - the most recently closed issue with the SAME real external
+    supplier company, excluding this issue itself. A system-sender-only
+    party (e.g. Ariba's no-reply) never has a `company` set, so it's
+    naturally excluded rather than needing a separate check here."""
+    company = None
+    for party in ws.list_parties_for_issue(issue["id"]):
+        if party.get("affiliation") == "external" and party.get("company"):
+            company = party["company"]
+            break
+    issue["supplier_precedent"] = (
+        last_closed_issue_for_company(company, exclude_issue_id=issue["id"]) if company else None
+    )
+    return issue
+
+
 def supplier_detail(company: str) -> Optional[dict]:
     """Full issue list for one company (Settings/dashboard drill-down),
     or None if the company has no real issues at all."""

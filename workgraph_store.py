@@ -623,6 +623,22 @@ def init_workgraph() -> None:
                 )
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_prereq_suggestions_status ON pending_prerequisite_suggestions(status, created_ts DESC)")
+            try:
+                # task #62: which clarifying question (if any) this suggestion
+                # is mid-conversation on - NULL means "not in a clarification
+                # conversation" (the normal case: either fully structured
+                # already, or nobody's chosen to walk through it). Lives on
+                # the suggestion row itself rather than a separate table,
+                # since the fields being clarified (trigger_signal_type/
+                # requires_signal_type/match_on) already ARE this row's own
+                # columns - clarification just fills them in one at a time.
+                conn.execute(
+                    "ALTER TABLE pending_prerequisite_suggestions ADD COLUMN clarify_stage TEXT "
+                    "CHECK (clarify_stage IS NULL OR clarify_stage IN "
+                    "('offered','ask_trigger','ask_requires','ask_match_on'))"
+                )
+            except sqlite3.OperationalError:
+                pass  # already added by a prior init_workgraph() call
 
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS response_patterns (
@@ -1854,6 +1870,68 @@ def get_most_recent_pending_suggestion_by_asker(asker: str, since_ts: float) -> 
         finally:
             conn.close()
     return dict(row) if row else None
+
+
+def get_most_recent_clarifying_suggestion_by_asker(asker: str, since_ts: float) -> Optional[dict]:
+    """Task #62: the suggestion this asker is CURRENTLY mid-clarification-
+    conversation on, if any - distinct from get_most_recent_pending_
+    suggestion_by_asker (which finds any pending suggestion, clarifying or
+    not). A plain 'yes'/'no' reply while a clarification is active must
+    route through the conversation, not accidentally be read as a confirm/
+    reject answer for a DIFFERENT, already-fully-structured pending
+    suggestion from the same asker."""
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                """SELECT * FROM pending_prerequisite_suggestions
+                   WHERE status = 'pending' AND origin = 'taught_via_chat'
+                   AND proposed_by = ? AND created_ts >= ? AND clarify_stage IS NOT NULL
+                   ORDER BY created_ts DESC LIMIT 1""",
+                (asker, since_ts),
+            ).fetchone()
+        finally:
+            conn.close()
+    return dict(row) if row else None
+
+
+def set_suggestion_clarify_stage(suggestion_id: int, stage: Optional[str]) -> None:
+    """stage=None ends the conversation (either fully structured now, or the
+    asker declined/cancelled it) - the row then behaves exactly like any
+    other pending suggestion again."""
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                "UPDATE pending_prerequisite_suggestions SET clarify_stage = ? WHERE id = ?",
+                (stage, suggestion_id),
+            )
+        finally:
+            conn.close()
+
+
+def update_prerequisite_suggestion_structure(suggestion_id: int, *, trigger_signal_type: Optional[str] = None,
+                                              requires_signal_type: Optional[str] = None,
+                                              match_on: Optional[str] = None, reason: Optional[str] = None) -> None:
+    """Fills in one structured field at a time as task #62's clarification
+    conversation collects each answer - only the fields actually passed
+    (non-None) are updated, so answering "what triggers this" doesn't wipe
+    out an already-answered "what does it require"."""
+    fields = {"trigger_signal_type": trigger_signal_type, "requires_signal_type": requires_signal_type,
+              "match_on": match_on, "reason": reason}
+    fields = {k: v for k, v in fields.items() if v is not None}
+    if not fields:
+        return
+    assignments = ", ".join(f"{k} = ?" for k in fields)
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                f"UPDATE pending_prerequisite_suggestions SET {assignments} WHERE id = ?",
+                (*fields.values(), suggestion_id),
+            )
+        finally:
+            conn.close()
 
 
 _TOPIC_KEY_STRIP = re.compile(r"^\s*(?:\[[^\]]{1,20}\]|re|fwd?|fw)\s*:?\s*", re.I)

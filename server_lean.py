@@ -1690,6 +1690,14 @@ async def api_socrates_ask(body: SocratesAskBody):
         return JSONResponse({"answer": result["reply"], "outcome": "rule_captured",
                              "suggestion_id": result["suggestion_id"]})
 
+    # Task #62 - checked BEFORE the plain confirm/reject resolver below: a
+    # bare "yes" while a clarification conversation is active means "yes,
+    # let's walk through it" (or an answer to one of its questions), not a
+    # confirm/reject answer for some unrelated already-structured suggestion.
+    clarification = rule_teaching.try_continue_clarification(body.question, body.asker or "")
+    if clarification is not None:
+        return JSONResponse({"answer": clarification["reply"], "outcome": "rule_clarifying"})
+
     resolution = rule_teaching.try_resolve_pending_confirmation(body.question, body.asker or "")
     if resolution is not None:
         return JSONResponse({"answer": resolution["reply"], "outcome": "rule_resolved"})

@@ -118,6 +118,53 @@ def extract_rule_candidate(explanation: str) -> Optional[dict]:
     }
 
 
+def extract_rule_draft(explanation: str) -> Optional[dict]:
+    """Task #62: like extract_rule_candidate, but does NOT require
+    confidence=='high' - returns whatever structured guess the model made
+    (even a low-confidence or only-partially-filled one), so rule_teaching.
+    py's conversational clarification flow has a starting point to refine
+    rather than a Q&A starting completely from scratch. Every non-null
+    signal-type field is still independently validated against
+    known_signal_types() - a hallucinated type is discarded (treated as
+    unresolved), never passed through just because SOME field looked valid.
+    A resolved trigger/requires pair that turned out identical is also
+    discarded back to unresolved (can't require itself). Returns None only
+    when the model itself was unreachable, timed out, or returned
+    unparseable JSON - unlike extract_rule_candidate, a well-formed but
+    low-confidence response DOES come back here."""
+    if not explanation or not explanation.strip():
+        return None
+    known_types = workgraph_signals.known_signal_types()
+    raw = _call_ollama(_build_prompt(explanation, known_types))
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+
+    trigger = parsed.get("trigger_signal_type")
+    if trigger not in known_types:
+        trigger = None
+    requires = parsed.get("requires_signal_type")
+    if requires not in known_types:
+        requires = None
+    if trigger is not None and trigger == requires:
+        requires = None
+    match_on = parsed.get("match_on")
+    if match_on not in ("project", "supplier"):
+        match_on = None
+
+    reflection = parsed.get("reflection")
+    reflection = reflection.strip() if isinstance(reflection, str) and reflection.strip() else None
+    return {
+        "trigger_signal_type": trigger, "requires_signal_type": requires,
+        "match_on": match_on, "reflection": reflection,
+    }
+
+
 def is_ollama_reachable() -> bool:
     """Cheap reachability check (not a full extraction attempt) - for a
     Settings/status indicator, distinct from actually trying to extract."""

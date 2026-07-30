@@ -129,3 +129,25 @@ def test_list_asks_for_issue_empty_when_none(ws_db):
     iid = _issue_with_extraction(ws_db, "No asks", "pi6", {"decisions": ["something"]})
 
     assert wad.list_asks_for_issue(iid) == []
+
+
+# --- hardening pass #3: malformed extracted_json shape must not crash ----
+
+def test_list_open_asks_non_list_field_value_ignored(ws_db):
+    """A malformed extraction row (e.g. asks written as a bare int/string
+    instead of a list) must not crash the whole rollup or iterate
+    characters of a stray string."""
+    _issue_with_extraction(ws_db, "Malformed int", "m1", {"asks": 5})
+    _issue_with_extraction(ws_db, "Malformed str", "m2", {"asks": "not a list"})
+    iid = _issue_with_extraction(ws_db, "Real one", "m3", {"asks": ["a real ask"]})
+
+    entries = wad.list_open_asks()
+
+    assert [e["text"] for e in entries] == ["a real ask"]
+    assert entries[0]["issue_id"] == iid
+
+
+def test_list_asks_for_issue_non_list_field_value_ignored(ws_db):
+    iid = _issue_with_extraction(ws_db, "Malformed", "m4", {"asks": 5})
+
+    assert wad.list_asks_for_issue(iid) == []

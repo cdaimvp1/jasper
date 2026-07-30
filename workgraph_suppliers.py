@@ -55,25 +55,49 @@ def _total_recall_precedent_for_company(company: str, categories: set) -> Option
     return {"statement": best["statement"], "confidence": workgraph_lessons.confidence_band(best["trust_score"])}
 
 
+def _issue_dicts_for_company(company: str) -> list[dict]:
+    """Shared batched fetch: every real issue row for this company, via one
+    id-list query plus one batched get_issues_by_ids call - fixed 2026-07-30
+    (hardening pass #3, minor nit #6) from an O(n) get_issue-per-id loop."""
+    if not company:
+        return []
+    issue_ids = ws.list_issues_for_company(company)
+    if not issue_ids:
+        return []
+    issues_by_id = ws.get_issues_by_ids(issue_ids)
+    return [issues_by_id[iid] for iid in issue_ids if iid in issues_by_id]
+
+
 def list_suppliers() -> list[dict]:
     """One entry per distinct external company with at least one issue,
     sorted by open-issue count descending (ties broken by most-recent
     activity). A company with 0 currently-open issues still appears (real
-    history, not hidden), just at the bottom."""
+    history, not hidden), just at the bottom.
+
+    Fixed 2026-07-30 (hardening pass #3, HIGH): this used to call
+    ws.get_issue() once per issue and workgraph_nba.value_amount_for_issue()
+    (-> ws.get_raw_items_for_issue()) once per open issue, across every
+    company - measured live at 375 individual sqlite connections and
+    3-4.5s wall-clock, freezing the single uvicorn worker for that whole
+    span on every call. Both are now single batched queries across every
+    company's issues at once."""
     parties = ws.list_parties(affiliation="external")
     companies = sorted({p["company"] for p in parties if p.get("company")})
 
+    company_issue_ids = {company: ws.list_issues_for_company(company) for company in companies}
+    all_issue_ids = [iid for ids in company_issue_ids.values() for iid in ids]
+    issues_by_id = ws.get_issues_by_ids(all_issue_ids)
+    all_open_issue_ids = [iid for iid in all_issue_ids if issues_by_id.get(iid, {}).get("state") in _OPEN_STATES]
+    value_by_issue = workgraph_nba.value_amounts_for_issues(all_open_issue_ids)
+
     out = []
     for company in companies:
-        issue_ids = ws.list_issues_for_company(company)
-        if not issue_ids:
-            continue
-        issues = [i for i in (ws.get_issue(iid) for iid in issue_ids) if i is not None]
+        issues = [issues_by_id[iid] for iid in company_issue_ids[company] if iid in issues_by_id]
         if not issues:
             continue
         open_issues = [i for i in issues if i["state"] in _OPEN_STATES]
 
-        value_found = sum(workgraph_nba.value_amount_for_issue(i["id"]) for i in open_issues)
+        value_found = sum(value_by_issue.get(i["id"], 0.0) for i in open_issues)
         workgraph_deadlines.attach_deadline_info(open_issues)
         has_hard_deadline = any(i.get("has_hard_deadline") for i in open_issues)
         last_activity_ts = max((i["updated_at"] for i in issues), default=None)
@@ -99,15 +123,10 @@ def last_closed_issue_for_company(company: str, exclude_issue_id: Optional[str] 
     (state='done') issue for this company - "last time with this
     supplier," a real reference point rather than a guess. None if
     nothing's ever closed for this company yet."""
-    if not company:
-        return None
-    closed = []
-    for iid in ws.list_issues_for_company(company):
-        if iid == exclude_issue_id:
-            continue
-        issue = ws.get_issue(iid)
-        if issue and issue["state"] == "done":
-            closed.append(issue)
+    closed = [
+        i for i in _issue_dicts_for_company(company)
+        if i["id"] != exclude_issue_id and i["state"] == "done"
+    ]
     if not closed:
         return None
     closed.sort(key=lambda i: i["updated_at"], reverse=True)
@@ -144,16 +163,10 @@ def other_gated_open_issue_count_for_company(company: str, exclude_issue_id: str
     supplier's OTHER open issues are currently gated - real signal Marc
     previously only saw by visiting the Handover panel's supplier list.
     0 if there's no real company or nothing else is gated."""
-    if not company:
-        return 0
-    count = 0
-    for iid in ws.list_issues_for_company(company):
-        if iid == exclude_issue_id:
-            continue
-        other = ws.get_issue(iid)
-        if other and other["state"] in _OPEN_STATES and other.get("has_unmet_prerequisite"):
-            count += 1
-    return count
+    return sum(
+        1 for i in _issue_dicts_for_company(company)
+        if i["id"] != exclude_issue_id and i["state"] in _OPEN_STATES and i.get("has_unmet_prerequisite")
+    )
 
 
 def attach_supplier_precedent(issue: dict) -> dict:
@@ -175,16 +188,14 @@ def attach_supplier_precedent(issue: dict) -> dict:
 def supplier_detail(company: str) -> Optional[dict]:
     """Full issue list for one company (Settings/dashboard drill-down),
     or None if the company has no real issues at all."""
-    issue_ids = ws.list_issues_for_company(company)
-    if not issue_ids:
-        return None
-    issues = [i for i in (ws.get_issue(iid) for iid in issue_ids) if i is not None]
+    issues = _issue_dicts_for_company(company)
     if not issues:
         return None
     issues.sort(key=lambda i: i["updated_at"], reverse=True)
     workgraph_deadlines.attach_deadline_info(issues)
+    value_by_issue = workgraph_nba.value_amounts_for_issues([i["id"] for i in issues])
     for issue in issues:
-        issue["value_found"] = workgraph_nba.value_amount_for_issue(issue["id"])
+        issue["value_found"] = value_by_issue.get(issue["id"], 0.0)
     open_issues = [i for i in issues if i["state"] in _OPEN_STATES]
     categories = {i["category"] for i in open_issues if i.get("category")}
     return {

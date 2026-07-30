@@ -354,6 +354,49 @@ def test_attach_supplier_precedent_other_gated_count_zero_when_no_company(ws_db)
     assert issue["supplier_other_gated_count"] == 0
 
 
+def test_list_suppliers_does_not_call_get_issue_per_issue(ws_db, monkeypatch):
+    """Hardening pass #3 (HIGH): list_suppliers() used to call ws.get_issue()
+    once per issue across every company - measured live at 375 individual
+    sqlite connections, 3-4.5s wall-clock, freezing the single-worker
+    server for that whole span. Now batched via get_issues_by_ids - confirm
+    the per-issue call is gone entirely, not just reduced."""
+    calls = []
+    real_get_issue = ws_db.get_issue
+    monkeypatch.setattr(ws_db, "get_issue", lambda *a, **k: (calls.append(1), real_get_issue(*a, **k))[1])
+
+    for n in range(3):
+        company = f"Co{n}"
+        _party(ws_db, f"p{n}", company)
+        for m in range(3):
+            iid = ws_db.create_issue_with_new_id(title=f"Deal {n}-{m}", state="active", category="other")
+            ws_db.link_party_to_issue(iid, f"p{n}")
+
+    suppliers = wsup.list_suppliers()
+
+    assert len(suppliers) == 3
+    assert calls == [], "get_issue() must not be called per-issue - use the batched get_issues_by_ids instead"
+
+
+def test_list_suppliers_value_and_counts_correct_after_batching(ws_db):
+    """Correctness check alongside the query-count fix above - batching must
+    not change the actual numbers."""
+    _party(ws_db, "p1", "Acme")
+    open_id = ws_db.create_issue_with_new_id(title="Open deal", state="active", category="other")
+    ws_db.link_party_to_issue(open_id, "p1")
+    rid = ws_db.insert_raw_item(source="outlook_mail", stable_key="lb1", thread_key="lb1", dedupe_key="lb1",
+                                 occurred_ts=time.time(), subject="Worth $2 million", from_actor="a@example.com",
+                                 participants_json="[]")
+    ws_db.link_raw_item_to_issue(rid, open_id)
+    done_id = ws_db.create_issue_with_new_id(title="Closed deal", state="done", category="other")
+    ws_db.link_party_to_issue(done_id, "p1")
+
+    suppliers = wsup.list_suppliers()
+
+    assert suppliers[0]["open_issue_count"] == 1
+    assert suppliers[0]["total_issue_count"] == 2
+    assert suppliers[0]["value_found"] == 2_000_000.0
+
+
 def test_supplier_detail_includes_gated_count_and_precedent(ws_db):
     _party(ws_db, "p1", "Acme")
     gated = ws_db.create_issue_with_new_id(title="Sign this", state="active", category="contract")

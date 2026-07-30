@@ -54,6 +54,54 @@ def test_get_raw_items_by_ids_missing_id_omitted(ws_db):
     assert result == {}
 
 
+def test_get_issues_by_ids_batches_correctly(ws_db):
+    """Hardening pass #3: workgraph_suppliers.list_suppliers() was calling
+    get_issue() once per issue - same N+1 fix already applied to raw_items/
+    extractions/state_history this session."""
+    ids = [ws_db.create_issue_with_new_id(title=f"Issue {i}", state="active", category="other")
+           for i in range(3)]
+    result = ws_db.get_issues_by_ids(ids)
+    assert set(result.keys()) == set(ids)
+    assert all(result[i]["id"] == i for i in ids)
+
+
+def test_get_issues_by_ids_empty_list_is_safe(ws_db):
+    assert ws_db.get_issues_by_ids([]) == {}
+
+
+def test_get_issues_by_ids_missing_id_omitted(ws_db):
+    assert ws_db.get_issues_by_ids(["does-not-exist"]) == {}
+
+
+def test_get_raw_items_for_issues_batches_correctly(ws_db):
+    """Hardening pass #3: workgraph_nba.value_amount_for_issue() (via
+    get_raw_items_for_issue) was called once per open issue inside
+    workgraph_suppliers.list_suppliers()'s per-company loop."""
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
+    r1 = ws_db.insert_raw_item(source="outlook_mail", stable_key="ri1", thread_key="ri1", dedupe_key="ri1",
+                                occurred_ts=100.0, subject="s1", from_actor="a@example.com", participants_json="[]")
+    ws_db.link_raw_item_to_issue(r1, a)
+    r2 = ws_db.insert_raw_item(source="outlook_mail", stable_key="ri2", thread_key="ri2", dedupe_key="ri2",
+                                occurred_ts=100.0, subject="s2", from_actor="a@example.com", participants_json="[]")
+    ws_db.link_raw_item_to_issue(r2, b)
+
+    result = ws_db.get_raw_items_for_issues([a, b])
+
+    assert set(result.keys()) == {a, b}
+    assert [r["id"] for r in result[a]] == [r1]
+    assert [r["id"] for r in result[b]] == [r2]
+
+
+def test_get_raw_items_for_issues_empty_list_is_safe(ws_db):
+    assert ws_db.get_raw_items_for_issues([]) == {}
+
+
+def test_get_raw_items_for_issues_issue_with_none_omitted(ws_db):
+    iid = ws_db.create_issue_with_new_id(title="No items", state="active", category="other")
+    assert ws_db.get_raw_items_for_issues([iid]) == {}
+
+
 def test_upsert_response_pattern_increments_hit_count_on_repeat(ws_db):
     ws_db.upsert_response_pattern("app_chat", "ariba", "first mention", 100.0)
     ws_db.upsert_response_pattern("app_chat", "ariba", "second mention", 200.0)

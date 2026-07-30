@@ -101,3 +101,21 @@ def test_list_key_facts_for_issue_empty_when_none(ws_db):
     iid = ws_db.create_issue_with_new_id(title="No facts", state="active", category="other")
 
     assert wkf.list_key_facts_for_issue(iid) == []
+
+
+# --- hardening pass #3: malformed extracted_json shape must not crash ----
+
+def test_list_open_key_facts_non_list_field_value_ignored(ws_db):
+    _issue_with_facts(ws_db, "Malformed int", "m1", 5)
+    iid = _issue_with_facts(ws_db, "Real one", "m2", ["a real fact"])
+
+    entries = wkf.list_open_key_facts()
+
+    assert [e["text"] for e in entries] == ["a real fact"]
+    assert entries[0]["issue_id"] == iid
+
+
+def test_list_key_facts_for_issue_non_list_field_value_ignored(ws_db):
+    iid = _issue_with_facts(ws_db, "Malformed", "m3", "not a list")
+
+    assert wkf.list_key_facts_for_issue(iid) == []

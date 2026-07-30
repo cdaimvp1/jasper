@@ -31,6 +31,12 @@ def _rollup(field_name: str) -> list[dict]:
     for issue in issues:
         for extraction in extractions_by_issue.get(issue["id"], []):
             values = (extraction.get("extracted_json") or {}).get(field_name) or []
+            # Fixed 2026-07-30 (hardening pass #3): a malformed extraction
+            # row (e.g. a non-list value for this field) must not crash this
+            # whole rollup or iterate characters of a stray string - treat
+            # anything that isn't really a list as "no entries", not a guess.
+            if not isinstance(values, list):
+                continue
             for text in values:
                 if not isinstance(text, str) or not text.strip():
                     continue
@@ -62,7 +68,10 @@ def _texts_for_issue(issue_id: str, field_name: str) -> list[str]:
     extractions_by_issue = ws.list_extractions_for_issues([issue_id])
     out = []
     for extraction in extractions_by_issue.get(issue_id, []):
-        for text in (extraction.get("extracted_json") or {}).get(field_name) or []:
+        values = (extraction.get("extracted_json") or {}).get(field_name) or []
+        if not isinstance(values, list):
+            continue
+        for text in values:
             if isinstance(text, str) and text.strip():
                 out.append(text.strip())
     return out

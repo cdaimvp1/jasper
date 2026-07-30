@@ -139,6 +139,17 @@ def value_amount_for_issue(issue_id: str) -> float:
     return _extract_value_amount(ws.get_raw_items_for_issue(issue_id))
 
 
+def value_amounts_for_issues(issue_ids: list[str]) -> dict[str, float]:
+    """Batched form of value_amount_for_issue - one query for N issues
+    instead of N. Fixed 2026-07-30 (hardening pass #3): workgraph_suppliers.
+    list_suppliers() called value_amount_for_issue() once per open issue
+    across every company, the dominant contributor to that endpoint's
+    measured 3-4.5s single-worker freeze. Missing/unlinked ids return 0.0,
+    same as value_amount_for_issue on an issue with no raw_items."""
+    raw_items_by_issue = ws.get_raw_items_for_issues(issue_ids)
+    return {iid: _extract_value_amount(raw_items_by_issue.get(iid, [])) for iid in issue_ids}
+
+
 def value_at_risk_rollup() -> dict:
     """Task #65 (Value-at-risk rollup banner): sums _extract_value_amount
     across every open issue. Reuses the SAME deterministic, zero-LLM

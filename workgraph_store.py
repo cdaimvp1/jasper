@@ -979,6 +979,27 @@ def get_issue(id: str) -> Optional[dict]:
     return dict(row) if row else None
 
 
+def get_issues_by_ids(ids: list[str]) -> dict[str, dict]:
+    """Batched form of get_issue - one query for a whole list of ids instead
+    of one query per id. Fixed 2026-07-30 (hardening pass #3): workgraph_
+    suppliers.list_suppliers() was calling get_issue() once per issue across
+    every company (375 individual connections measured live, ~3-4.5s per
+    call, freezing the single-worker server for that whole span). Same
+    batched-query fix already applied to raw_items/extractions/state_history
+    this session. Missing ids are simply absent from the result, same as
+    get_issue returning None for them."""
+    if not ids:
+        return {}
+    with _lock:
+        conn = _connect()
+        try:
+            placeholders = ",".join("?" * len(ids))
+            rows = conn.execute(f"SELECT * FROM issues WHERE id IN ({placeholders})", ids).fetchall()
+        finally:
+            conn.close()
+    return {r["id"]: dict(r) for r in rows}
+
+
 def list_issue_ids() -> list[str]:
     with _lock:
         conn = _connect()
@@ -1283,6 +1304,31 @@ def get_raw_items_for_issue(issue_id: str) -> list[dict]:
         finally:
             conn.close()
     return [dict(r) for r in rows]
+
+
+def get_raw_items_for_issues(issue_ids: list[str]) -> dict[str, list[dict]]:
+    """Batched form of get_raw_items_for_issue - one query for N issues
+    instead of N queries. Fixed 2026-07-30 (hardening pass #3): workgraph_
+    nba.value_amount_for_issue() was called once per open issue inside
+    workgraph_suppliers.list_suppliers()'s per-company loop, the dominant
+    contributor to that endpoint's measured 3-4.5s single-worker freeze.
+    Missing ids are simply absent (empty list), same as the single form."""
+    if not issue_ids:
+        return {}
+    with _lock:
+        conn = _connect()
+        try:
+            placeholders = ",".join("?" * len(issue_ids))
+            rows = conn.execute(
+                f"SELECT * FROM raw_items WHERE issue_id IN ({placeholders}) ORDER BY occurred_ts ASC",
+                issue_ids,
+            ).fetchall()
+        finally:
+            conn.close()
+    out: dict[str, list[dict]] = {}
+    for r in rows:
+        out.setdefault(r["issue_id"], []).append(dict(r))
+    return out
 
 
 def list_evidence(issue_id: str) -> list[dict]:

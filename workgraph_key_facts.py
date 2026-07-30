@@ -32,6 +32,12 @@ def list_open_key_facts() -> list[dict]:
     for issue in issues:
         for extraction in extractions_by_issue.get(issue["id"], []):
             facts = (extraction.get("extracted_json") or {}).get("key_facts") or []
+            # Fixed 2026-07-30 (hardening pass #3): a malformed extraction
+            # row must not crash this rollup or iterate characters of a
+            # stray string - anything that isn't really a list is "no
+            # entries," not a guess.
+            if not isinstance(facts, list):
+                continue
             for text in facts:
                 if not isinstance(text, str) or not text.strip():
                     continue
@@ -51,7 +57,10 @@ def list_key_facts_for_issue(issue_id: str) -> list[str]:
     extractions_by_issue = ws.list_extractions_for_issues([issue_id])
     out = []
     for extraction in extractions_by_issue.get(issue_id, []):
-        for text in (extraction.get("extracted_json") or {}).get("key_facts") or []:
+        facts = (extraction.get("extracted_json") or {}).get("key_facts") or []
+        if not isinstance(facts, list):
+            continue
+        for text in facts:
             if isinstance(text, str) and text.strip():
                 out.append(text.strip())
     return out

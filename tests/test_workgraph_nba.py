@@ -50,6 +50,35 @@ def test_default_weights_is_immutable():
         nba.DEFAULT_WEIGHTS["value"] = 999
 
 
+def test_value_amounts_for_issues_matches_single_issue_form(ws_db):
+    """Hardening pass #3: batched form must agree with value_amount_for_issue
+    exactly - it's a query-count optimization, not a behavior change."""
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
+    ra = ws_db.insert_raw_item(source="outlook_mail", stable_key="va1", thread_key="va1", dedupe_key="va1",
+                                occurred_ts=100.0, subject="Worth $2.5 million", from_actor="a@example.com",
+                                participants_json="[]")
+    ws_db.link_raw_item_to_issue(ra, a)
+    rb = ws_db.insert_raw_item(source="outlook_mail", stable_key="va2", thread_key="va2", dedupe_key="va2",
+                                occurred_ts=100.0, subject="no dollar figure here", from_actor="a@example.com",
+                                participants_json="[]")
+    ws_db.link_raw_item_to_issue(rb, b)
+
+    result = nba.value_amounts_for_issues([a, b])
+
+    assert result[a] == nba.value_amount_for_issue(a) == 2_500_000.0
+    assert result[b] == nba.value_amount_for_issue(b) == 0.0
+
+
+def test_value_amounts_for_issues_empty_list_is_safe(ws_db):
+    assert nba.value_amounts_for_issues([]) == {}
+
+
+def test_value_amounts_for_issues_issue_with_no_raw_items_is_zero(ws_db):
+    iid = ws_db.create_issue_with_new_id(title="No items", state="active", category="other")
+    assert nba.value_amounts_for_issues([iid]) == {iid: 0.0}
+
+
 def test_staleness_and_due_urgency_use_same_named_constant():
     now = time.time()
     u = nba._staleness_urgency(now - 7 * nba.DAY, now)

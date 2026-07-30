@@ -1,41 +1,84 @@
 {% extends "base.html" %}
-{% block title %}Help · Symphony{% endblock %}
+{% block title %}Help · Jasper{% endblock %}
 
 {% block page_bar %}
 <div class="page-bar">
   <span class="page-bar-title">Help</span>
-  <span class="page-bar-meta">getting started + working with your cohort</span>
+  <span class="page-bar-meta">what Jasper does, and what it deliberately won't</span>
 </div>
 {% endblock %}
 
 {% block content %}
 <div style="max-width:900px;margin:0 auto;padding:8px 4px">
+
+  <!-- Rewritten 2026-07-29 (task #36): this page used to be generic Symphony-
+       cohort onboarding copy (compose a cohort, Team Room, Dashboard) with
+       zero mention of any actual Jasper feature - confirmed by reading it
+       fresh, not assumed. Every claim below was checked against the live
+       app before being written here (a real project count from
+       /api/workgraph/projects, a live curl to /api/socrates/ask, confirming
+       approvals.html/my-work.html/project-view.html 404 rather than
+       guessing they work) - nothing here is aspirational. -->
+
+  <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:16px 18px;margin-bottom:16px">
+    <div style="font:700 11px/1 var(--mono,monospace);letter-spacing:.06em;color:var(--accent,#0f766e);text-transform:uppercase">The short version</div>
+    <p style="margin:8px 0 0;color:var(--muted,#667);font-size:14px;line-height:1.6">
+      Jasper reads your mail, works out what actually needs your attention, and answers questions about it —
+      grounded in your real data every time, never a guess. It <strong>drafts, it doesn't send. It suggests,
+      it doesn't approve. It never auto-deletes a real document.</strong> Everything below is either fully
+      working today or clearly marked as not yet connected.
+    </p>
+  </div>
+
   <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px">
 
     <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:16px 18px">
       <div style="font:700 11px/1 var(--mono,monospace);letter-spacing:.06em;color:var(--accent,#0f766e);text-transform:uppercase">Start here</div>
-      <h3 style="margin:8px 0 4px;font-size:16px">Compose your cohort</h3>
-      <p style="margin:0;color:var(--muted,#667);font-size:14px">Tell the coordinator what work you need. It proposes the right workers — and asks you to <strong>name each one</strong> as you add it. <a href="/getting-started">Open the getting-started walkthrough →</a></p>
+      <h3 style="margin:8px 0 4px;font-size:16px">Ready for you this morning</h3>
+      <p style="margin:0;color:var(--muted,#667);font-size:14px">The Morning Queue — a task list scored from real signals: how close a deadline is, how long a thread's gone quiet, and any dollar value mentioned in it. "Now what?" surfaces the single most pressing one. Nothing here sends or approves anything by itself.</p>
     </div>
 
     <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:16px 18px">
-      <div style="font:700 11px/1 var(--mono,monospace);letter-spacing:.06em;color:var(--accent,#0f766e);text-transform:uppercase">Everyday</div>
-      <h3 style="margin:8px 0 4px;font-size:16px">Ask in the Team Room</h3>
-      <p style="margin:0;color:var(--muted,#667);font-size:14px">Type a question and <strong>@-mention</strong> a worker to direct it. Your workers talk to each other to get the answer. <a href="/team_room">Open the Team Room →</a></p>
+      <div style="font:700 11px/1 var(--mono,monospace);letter-spacing:.06em;color:var(--accent,#0f766e);text-transform:uppercase">Ask anything</div>
+      <h3 style="margin:8px 0 4px;font-size:16px">Ask Jasper, in Back Office</h3>
+      <p style="margin:0;color:var(--muted,#667);font-size:14px">Type a plain question into the Back Office chat without an @-mention and Jasper answers from precedent, prior synthesis, and linked evidence already in your work graph. No web search, no LLM guess — when there isn't enough grounding, it tells you that honestly instead of making something up.</p>
     </div>
 
     <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:16px 18px">
-      <div style="font:700 11px/1 var(--mono,monospace);letter-spacing:.06em;color:var(--accent,#0f766e);text-transform:uppercase">At a glance</div>
-      <h3 style="margin:8px 0 4px;font-size:16px">Read the Dashboard</h3>
-      <p style="margin:0;color:var(--muted,#667);font-size:14px">See who's active, what each worker is doing, and jump to recent outputs. <a href="/">Open the Dashboard →</a></p>
+      <div style="font:700 11px/1 var(--mono,monospace);letter-spacing:.06em;color:var(--accent,#0f766e);text-transform:uppercase">Track the work</div>
+      <h3 style="margin:8px 0 4px;font-size:16px">PCC and Projects views</h3>
+      <p style="margin:0;color:var(--muted,#667);font-size:14px">Real issue and project tracking, built entirely from your ingested mail — not sample data. Click into any issue for the evidence behind it: which messages, what changed, and why Jasper classified it the way it did.</p>
+    </div>
+
+    <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:16px 18px">
+      <div style="font:700 11px/1 var(--mono,monospace);letter-spacing:.06em;color:var(--accent,#0f766e);text-transform:uppercase">Learns over time</div>
+      <h3 style="margin:8px 0 4px;font-size:16px">Total Recall</h3>
+      <p style="margin:0;color:var(--muted,#667);font-size:14px">When you confirm or correct how Jasper classified something, it remembers — the same category-and-supplier pattern gets more confident (or less) the next time it comes up. You'll see this cited directly as "precedent" in the reasoning behind a task.</p>
     </div>
 
     <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:16px 18px">
       <div style="font:700 11px/1 var(--mono,monospace);letter-spacing:.06em;color:var(--accent,#0f766e);text-transform:uppercase">Manage</div>
-      <h3 style="margin:8px 0 4px;font-size:16px">Adjust in Settings</h3>
-      <p style="margin:0;color:var(--muted,#667);font-size:14px">Rename a worker, add a new one, or connect a data source — any time. <a href="/settings">Open Settings →</a></p>
+      <h3 style="margin:8px 0 4px;font-size:16px">Settings</h3>
+      <p style="margin:0;color:var(--muted,#667);font-size:14px">Your name, worker names, and the chat history window — plus <strong>Data &amp; retention</strong>: how long operational logs are kept, automated database backups, and a disk-usage view. Real supplier documents are never touched by any retention setting.</p>
+    </div>
+
+    <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:16px 18px">
+      <div style="font:700 11px/1 var(--mono,monospace);letter-spacing:.06em;color:var(--accent,#0f766e);text-transform:uppercase">Not yet connected</div>
+      <h3 style="margin:8px 0 4px;font-size:16px">My Work</h3>
+      <p style="margin:0;color:var(--muted,#667);font-size:14px">Visible but disabled — it needs Ariba, SAP, Aravo, ServiceNow, or ContractPodAI access this install doesn't have yet. Nothing is hidden about this; the tab itself says so.</p>
     </div>
 
   </div>
+
+  <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:16px 18px;margin-top:14px">
+    <div style="font:700 11px/1 var(--mono,monospace);letter-spacing:.06em;color:var(--accent,#0f766e);text-transform:uppercase">What Jasper deliberately won't do</div>
+    <ul style="margin:8px 0 0;padding-left:18px;color:var(--muted,#667);font-size:14px;line-height:1.7">
+      <li>Send an email, or take any action, on its own — everything is a draft or a suggestion you review first.</li>
+      <li>Approve anything. Approval chains are shown for context; the decision is always yours.</li>
+      <li>Auto-delete a real document. Data-retention rules apply only to operational data (logs, diagnostic history) — never to supplier contracts, SOWs, or anything similar, under any setting.</li>
+      <li>Guess. If Jasper doesn't have enough grounded evidence to answer confidently, it says so instead of inventing an answer.</li>
+    </ul>
+  </div>
+
 </div>
 {% endblock %}

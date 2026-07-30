@@ -60,6 +60,64 @@ def _no_evidence(detail: str) -> dict:
     return {"band": "none", "needs_review": False, "detail": detail}
 
 
+# Fixed 2026-07-29 (task #36): a meta-question about Jasper itself ("what can
+# you do", "help") used to fall through the normal evidence pipeline and hit
+# the generic "I don't have grounded evidence for that yet" abstain - honest,
+# but useless for a question that was never about workgraph data in the first
+# place. This is a FIXED, accurate description of the real system (verified
+# against the live app, not aspirational) - not an LLM call, not improvised;
+# same "grounded, never guessed" discipline as every other tier, just grounded
+# in the app's own real feature set instead of a workgraph row.
+# Anchored to the WHOLE message (allowing only leading/trailing punctuation
+# and whitespace), not a loose substring search - confirmed by testing that
+# a bare substring match false-positives on real business questions that
+# happen to contain these words ("can you help me understand the Acme
+# escalation", "how do you work through the SAP renewal timeline"). A meta-
+# question about the app itself is typically short and standalone; a real
+# question almost never IS just "help" or exactly "what can you do".
+_META_QUESTION_RE = re.compile(
+    r"^[\s?!.]*(what can you do|what do you do|how do (you|this) work|"
+    r"what are you|who are you|help|what is jasper)[\s?!.]*$", re.IGNORECASE)
+
+_CAPABILITY_ANSWER = (
+    "I'm Jasper's ask-anything path (Socrates) - I answer from precedent, "
+    "synthesis, and linked evidence already in your work graph, never a guess; "
+    "when nothing clears the confidence bar I say so honestly instead of "
+    "making something up. A few other things in Jasper: the Morning Queue "
+    "('Ready for you this morning') is a task list scored from real signals - "
+    "deadlines, how long a thread's gone quiet, dollar value mentioned in the "
+    "thread. The PCC and Projects views track your real issues and projects, "
+    "built from your ingested mail. Everything drafts or suggests, nothing "
+    "sends or approves on its own, and real documents are never auto-deleted. "
+    "'My Work' isn't connected yet - it needs Ariba/SAP/Aravo/ServiceNow/"
+    "ContractPodAI access this install doesn't have."
+)
+
+
+def _meta_question_answer(question: str, asked_ts: float) -> Optional[dict]:
+    """Deliberately does NOT write to socrates_retrieval_log: that table's
+    tier column is a real evidence tier (recall/materialized/targeted-
+    research/broad-research, enforced by a CHECK constraint), and no tier was
+    actually consulted here - this is a question about Jasper itself, not
+    workgraph data. Logging it under a real tier name would misleadingly
+    skew the learned-tier-ordering stats for genuine future questions."""
+    if not _META_QUESTION_RE.search(question or ""):
+        return None
+    signature = situation_signature(question)
+    return {
+        "answer": _CAPABILITY_ANSWER,
+        "confidence": "high",
+        "needs_review": False,
+        "outcome": "answered",
+        "depth": "meta",
+        "rationale": ["recognized as a question about Jasper itself, not workgraph data"],
+        "provenance": [],
+        "signature": signature,
+        "steps": [],
+        "generated_ts": asked_ts,
+    }
+
+
 def _extract_candidates(text: str) -> tuple[Optional[str], Optional[str]]:
     """Best-effort (category, company) spotted in free text, checked against
     what's actually on record (never a fixed/hardcoded vocabulary, so it can't
@@ -237,6 +295,11 @@ def answer(*, question: str, issue_id: Optional[str] = None, asker: Optional[str
     degrades honestly (outcome 'degraded'/'abstained', an empty-evidence
     explanation) rather than guessing. Always logs every tier it consulted."""
     asked_ts = now if now is not None else time.time()
+
+    meta_answer = _meta_question_answer(question, asked_ts)
+    if meta_answer is not None:
+        return meta_answer
+
     issue = ws.get_issue(issue_id) if issue_id else None
 
     depth_plan = workgraph_socrates_depth.classify_depth(

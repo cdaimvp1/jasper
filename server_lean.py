@@ -70,6 +70,7 @@ import workgraph_projects
 import workgraph_lessons
 import workgraph_socrates
 import workgraph_deadlines
+import workgraph_signal_trends
 
 
 PORT = int(os.environ.get("TEAM_PORT", "8700"))  # born-local default (Tia's live-review catch, 2026-07-23):
@@ -1257,6 +1258,17 @@ async def api_workgraph_issues_bulk_status(body: BulkIssueStatusBody):
         wg.update_issue(issue_id, state=body.state)
         updated.append(issue_id)
     return JSONResponse({"ok": True, "updated": updated, "missing": missing})
+
+
+@app.get("/api/workgraph/signal-trends")
+async def api_signal_trends(months: int = 6):
+    """Task #66 (month-over-month signal trend view). Pure aggregation over
+    raw_items.signal_type (workgraph_signals.classify_signal's output at
+    ingest) - zero LLM, no interpretation, so unlike Deadline Radar's
+    `mentioned` tier this data is safe to chart directly."""
+    if months < 1 or months > 24:
+        raise HTTPException(400, "months must be between 1 and 24")
+    return JSONResponse(sanitize_surrogates(workgraph_signal_trends.monthly_signal_trends(time.time(), months)))
 
 
 @app.get("/api/workgraph/value-at-risk")

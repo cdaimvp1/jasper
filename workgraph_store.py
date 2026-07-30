@@ -1783,6 +1783,31 @@ def get_raw_items_by_signal_type(signal_type: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def count_raw_items_by_month_and_signal_type(since_ts: float) -> list[dict]:
+    """Task #66 (signal trend view): one row per (month, signal_type) with
+    a count, for every classified raw_item occurring at/after since_ts.
+    Month bucketing is UTC (strftime with 'unixepoch' - occurred_ts is
+    itself a UTC epoch, so this avoids the local-timezone-near-a-boundary
+    drift already named/fixed elsewhere in this codebase, e.g. workgraph_
+    nba._due_urgency). Pure aggregation, no LLM, no interpretation - the
+    caller decides which months/types to show."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                """SELECT strftime('%Y-%m', occurred_ts, 'unixepoch') AS month,
+                          signal_type, COUNT(*) AS count
+                   FROM raw_items
+                   WHERE signal_type IS NOT NULL AND occurred_ts >= ?
+                   GROUP BY month, signal_type
+                   ORDER BY month ASC""",
+                (since_ts,),
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
 # --- pending_prerequisite_suggestions (Aristotle, tasks #52/#54) ------------
 
 def create_prerequisite_suggestion(*, origin: str, trigger_signal_type: Optional[str],

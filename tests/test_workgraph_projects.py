@@ -14,6 +14,7 @@ from __future__ import annotations
 import time
 
 import workgraph_projects as wp
+import workgraph_signals
 
 
 def _issue(ws_db, title, opened_at=None):
@@ -26,11 +27,22 @@ def _issue(ws_db, title, opened_at=None):
 
 
 def _raw_item(ws_db, issue_id, subject, key, from_actor="a@example.com"):
+    """Task #83: _reference_ids_for_issue now reads the persisted
+    raw_items.pr_number field instead of re-scanning subject text live, so
+    this helper populates it the same way workgraph_classify.classify_item
+    really would - extracting from the given subject with the same shared
+    regex - rather than the test relying on a live rescan that no longer
+    happens."""
     rid = ws_db.insert_raw_item(
         source="outlook_mail", stable_key=key, thread_key=key, dedupe_key=key,
         occurred_ts=time.time(), subject=subject, from_actor=from_actor, participants_json="[]",
     )
     ws_db.link_raw_item_to_issue(rid, issue_id)
+    m = workgraph_signals.REFERENCE_ID_RE.search(subject or "")
+    if m:
+        conn = ws_db._connect()
+        conn.execute("UPDATE raw_items SET pr_number = ? WHERE id = ?", (m.group(0).upper(), rid))
+        conn.close()
     return rid
 
 

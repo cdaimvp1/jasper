@@ -32,7 +32,6 @@ confirm or reject via workgraph_store.resolve_project_suggestion.
 """
 from __future__ import annotations
 
-import re
 import sys
 import time
 from difflib import SequenceMatcher
@@ -62,17 +61,26 @@ WEAK_SIGNAL_WINDOW_DAYS = 45
 # so a disjoint reference-number pair is treated the same way the existing
 # disjoint-company check already is: positively contradicting evidence,
 # not just an absence of confirming evidence.
-_REFERENCE_ID_RE = re.compile(r"\b(?:PR|PO)\d{4,}(?:-V\d+)?\b", re.I)
+#
+# Widened 2026-07-30 (enhancement #1): this used to re-scan every linked
+# raw_item's subject+body text with its own regex on EVERY call - and this
+# gets called for every pairwise candidate comparison during grouping, so
+# the same unchanging text was rescanned repeatedly (O(issues^2) rescans in
+# the worst case). raw_items.pr_number is now a real, persisted field
+# (workgraph_classify.py computes it once at classify time, using the same
+# pattern - see workgraph_signals.REFERENCE_ID_RE, the single shared
+# source now instead of two separate copies of this regex) - this is a
+# plain read of already-computed data instead of a live rescan.
 
 
 def _reference_ids_for_issue(issue_id: str) -> set:
-    """Every PR#/PO# found across this issue's own raw_items' subject +
-    body_preview text, uppercased for comparison."""
-    ids = set()
-    for item in ws.get_raw_items_for_issue(issue_id):
-        text = f"{item.get('subject') or ''} {item.get('body_preview') or ''}"
-        ids.update(m.upper() for m in _REFERENCE_ID_RE.findall(text))
-    return ids
+    """Every real, persisted PR#/PO# across this issue's own raw_items,
+    uppercased for comparison. A raw_item with no recognized reference
+    contributes nothing (None), never a guess."""
+    return {
+        item["pr_number"].upper() for item in ws.get_raw_items_for_issue(issue_id)
+        if item.get("pr_number")
+    }
 
 
 def _vetoed_by_reference_mismatch(issue_id: str, sibling_id: str) -> bool:

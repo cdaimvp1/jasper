@@ -39,7 +39,15 @@ import workgraph_store as ws
 # (actionable - it's now genuinely his move).
 OWNER_NAME_UPPER = "MARC LANE"
 
-PR_NUMBER_RE = re.compile(r"\bPR\d+(?:-V\d+)?\b")
+# Widened 2026-07-30 (enhancement #1, persisting reference numbers as a real
+# field): was PR-only, case-sensitive, and only ever checked when an email
+# already matched a recognized automated-sender signal below - real data
+# investigation found 150 raw_items with a real PR/PO reference in their
+# text, but only 117 had this narrower version populated. Also matches real
+# confirmed formats this session found: "PR1111865", "PR416079-V33",
+# "PO4200703817" - same pattern workgraph_projects.py's grouping veto
+# already uses, now the single shared source instead of two copies.
+REFERENCE_ID_RE = re.compile(r"\b(?:PR|PO)\d{4,}(?:-V\d+)?\b", re.I)
 
 # (signal_type, sender-substring-or-None, subject regex, default treatment).
 # Order matters - first match wins; within one sender family, the most
@@ -150,7 +158,7 @@ def classify_signal(*, subject: str, from_actor: str) -> Optional[dict]:
         except Exception:
             pass  # fail-open to the hardcoded default rather than block classification
 
-        m = PR_NUMBER_RE.search(subject)
-        return {"signal_type": signal_type, "treatment": treatment, "pr_number": m.group(0) if m else None}
+        m = REFERENCE_ID_RE.search(subject)
+        return {"signal_type": signal_type, "treatment": treatment, "pr_number": m.group(0).upper() if m else None}
 
     return None

@@ -275,6 +275,18 @@ def classify_item(*, subject: str, body_preview: str, from_actor: str) -> dict:
     else:
         confidence = "L"
 
+    # Widened 2026-07-30 (enhancement #1): a recognized automated signal's
+    # own pr_number (workgraph_signals.classify_signal, subject-only) wins
+    # when present - a known, real-data-confirmed template, not a guess.
+    # Otherwise fall back to scanning the FULL text (subject + body, not
+    # just subject) with the same shared regex - a real requisition/order
+    # number can appear in a normal human email that never matches a known
+    # automated-sender pattern at all, and used to be invisible here.
+    pr_number = signal["pr_number"] if signal else None
+    if not pr_number:
+        m = workgraph_signals.REFERENCE_ID_RE.search(text)
+        pr_number = m.group(0).upper() if m else None
+
     return {
         "item_class": item_class,
         "direction": direction, "direction_inferred": direction_inferred,
@@ -283,7 +295,7 @@ def classify_item(*, subject: str, body_preview: str, from_actor: str) -> dict:
         "anomaly_flag": anomaly_flag,
         "confidence": confidence,
         "signal_type": signal["signal_type"] if signal else None,
-        "pr_number": signal["pr_number"] if signal else None,
+        "pr_number": pr_number,
     }
 
 
@@ -506,7 +518,8 @@ def backfill_reclassify() -> dict:
                 and result["signal_type"] == item.get("signal_type")
                 and result["direction"] == item.get("direction")
                 and result["sentiment"] == item.get("sentiment")
-                and result["anomaly_flag"] == bool(item.get("anomaly_flag"))):
+                and result["anomaly_flag"] == bool(item.get("anomaly_flag"))
+                and result["pr_number"] == item.get("pr_number")):
             continue  # already correct - nothing to update
 
         if item.get("issue_id") and result["topic"] and item["issue_id"] not in issue_new_topic:

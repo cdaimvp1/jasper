@@ -4177,6 +4177,24 @@ body.ownerlock #ownernote{display:block}
           <div class="pcc-var-body" id="pccCommitList"></div>
         </details>
       </div>
+      <!-- enhancement #2: Asks & Decisions Tracker + Key Facts panel. Same
+           rationale as Commitments above - curator already extracts all
+           three on every wake; grepping the whole codebase found none of
+           them ever displayed anywhere (asks/decisions only ever checked
+           for truthiness in workgraph_synthesis.py's staleness logic,
+           key_facts read nowhere at all). Grouped into one card (not three
+           separate ones) to avoid stacking yet another collapsed card
+           above the inbox. -->
+      <div class="card pcc-var-card" id="pccAsksCard" style="display:none">
+        <details>
+          <summary class="pcc-var-summary">
+            <span class="pcc-var-total" id="pccAsksCount"></span>
+            <span class="pcc-var-label">asks, decisions &amp; key facts across open threads</span>
+            <span class="pcc-var-caveat">real extracted judgment — newly surfaced, not new analysis</span>
+          </summary>
+          <div class="pcc-var-body" id="pccAsksBody"></div>
+        </details>
+      </div>
       <div id="pccBoardWrap">
         <div class="pcc-board" id="pccBoard">
           <div class="card pcc-list-card">
@@ -7950,6 +7968,50 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
     }
   }
 
+  // --- enhancement #2: Asks & Decisions Tracker + Key Facts panel ----------
+  function pccAsksSection(label, entries) {
+    if (!entries.length) return "";
+    const rows = entries.map(e => `
+      <div class="pcc-radar-row pcc-radar-row-mentioned" data-id="${pccEsc(e.issue_id)}">
+        <span class="pcc-radar-title">${pccEsc(e.title)}</span>
+        <span class="pcc-radar-mention-text">${pccEsc(e.text)}</span>
+      </div>`).join("");
+    return `<div style="margin-bottom:14px">
+      <div style="font:700 10px/1 var(--mono);text-transform:uppercase;letter-spacing:.04em;color:var(--mut2);margin-bottom:4px">${pccEsc(label)} (${entries.length})</div>
+      ${rows}
+    </div>`;
+  }
+
+  async function pccLoadAsksDecisions() {
+    let asksResp, factsResp;
+    try {
+      const [r1, r2] = await Promise.all([
+        fetch("/api/workgraph/asks-decisions", { cache: "no-store" }),
+        fetch("/api/workgraph/key-facts", { cache: "no-store" }),
+      ]);
+      if (!r1.ok || !r2.ok) throw new Error(`asks/decisions/key-facts fetch failed: ${r1.status}/${r2.status}`);
+      asksResp = await r1.json();
+      factsResp = await r2.json();
+    } catch (e) {
+      console.error("pccLoadAsksDecisions failed:", e);
+      return;
+    }
+    const card = document.getElementById("pccAsksCard");
+    if (!card) return;
+    const asks = asksResp.asks || [], decisions = asksResp.decisions || [], keyFacts = factsResp.key_facts || [];
+    const total = asks.length + decisions.length + keyFacts.length;
+    if (!total) { card.style.display = "none"; return; }
+    card.style.display = "";
+    document.getElementById("pccAsksCount").textContent = total;
+    const body = document.getElementById("pccAsksBody");
+    if (body) {
+      body.innerHTML = pccAsksSection("Asks", asks) + pccAsksSection("Decisions", decisions) + pccAsksSection("Key facts", keyFacts);
+      body.querySelectorAll(".pcc-radar-row").forEach(row => {
+        row.addEventListener("click", () => pccSelectIssue(row.getAttribute("data-id")));
+      });
+    }
+  }
+
   // task #80: pccFmtDaysOut is still used (issue detail's Deadlines section
   // below), the standalone Deadline Radar panel/loader/renderer are not -
   // removed per Marc's direct feedback that a separate panel was the wrong
@@ -8756,6 +8818,7 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
       setInterval(pccLoadIssues, 20000);
       pccLoadValueAtRisk();
       pccLoadCommitments();
+      pccLoadAsksDecisions();
     }
   }
   window.pccShowView = pccShowView;  // exposed for the left-rail nav script (separate scope)

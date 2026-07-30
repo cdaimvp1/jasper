@@ -74,6 +74,8 @@ import workgraph_signal_trends
 import workgraph_aristotle
 import workgraph_export
 import workgraph_commitments
+import workgraph_asks_decisions
+import workgraph_key_facts
 import health_check
 import workgraph_suppliers
 import workgraph_digest
@@ -1352,6 +1354,27 @@ async def api_commitments():
     the underlying extraction doesn't attribute who made each one, and a
     keyword guess would repeat the Ariba expiration-date mistake."""
     return JSONResponse(sanitize_surrogates({"commitments": workgraph_commitments.list_open_commitments()}))
+
+
+@app.get("/api/workgraph/asks-decisions")
+async def api_asks_decisions():
+    """Enhancement #2 (Asks & Decisions Tracker). Curator already extracts
+    both fields on every wake (same pass as commitments/dates_mentioned) -
+    grepping the whole codebase found neither ever displayed anywhere,
+    only checked for truthiness in workgraph_synthesis.py's staleness
+    logic. Zero new extraction - a plain reflect-only rollup."""
+    return JSONResponse(sanitize_surrogates({
+        "asks": workgraph_asks_decisions.list_open_asks(),
+        "decisions": workgraph_asks_decisions.list_open_decisions(),
+    }))
+
+
+@app.get("/api/workgraph/key-facts")
+async def api_key_facts():
+    """Enhancement #2 (Key Facts panel). Same rationale as asks-decisions
+    above - curator already extracts this on every wake, nothing anywhere
+    reads it back."""
+    return JSONResponse(sanitize_surrogates({"key_facts": workgraph_key_facts.list_open_key_facts()}))
 
 
 _ALERT_SEVERITY_ORDER = {"critical": 0, "warn": 1, "info": 2}

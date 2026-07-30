@@ -200,6 +200,8 @@
 .mqwmid{min-width:0}
 .mqwt{font-size:13px;font-weight:600;color:var(--ink);display:flex;align-items:flex-start;gap:6px;line-height:1.35}
 .mqwdesc{font-size:11.5px;color:var(--mut);margin-top:3px;line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.mqw-reason{font-size:10.5px;color:var(--mut2);margin-top:3px;font-family:var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mqw-reason-warn{color:var(--amber-d)}
 .mqwrowmeta{display:flex;gap:6px;align-items:center;margin-top:6px;flex-wrap:wrap}
 .mqw-chip{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.03em;padding:1px 7px;border:1px solid var(--line2);color:var(--mut);white-space:nowrap;background:var(--surface)}
 .mqw-chip.status-active{color:var(--red);border-color:var(--red)}
@@ -3770,6 +3772,9 @@ body.ownerlock #ownernote{display:block}
 .mqwt{font-size:13px;font-weight:600;line-height:1.35;color:var(--lk-ink)}
 .mqwdesc{font-size:12px;color:var(--lk-mut2);line-height:1.45;margin-top:3px;
   display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.mqw-reason{font-size:11px;color:var(--lk-mut2);margin-top:3px;font-family:var(--mono);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mqw-reason-warn{color:var(--amber-d)}
 .mqwrowmeta{margin-top:7px;gap:7px}
 /* status is monochrome graphite; only a real blocker earns red */
 .mqw-chip{font-size:10.5px;font-weight:600;padding:2px 9px;border-radius:999px;
@@ -7955,6 +7960,12 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
       staleRowCls: stale.cls !== "fresh" ? ` pcc-stalerow-${stale.cls}` : "",
       priorityFlag: iss.priority === "high"
         ? '<span class="mqw-flag" title="High priority"><svg viewBox="0 0 24 24"><path d="M6 3v18"/><path d="M6 4h12l-2.5 4L18 12H6"/></svg></span>' : "",
+      // task #56: nba_reason was already computed for every issue (workgraph_
+      // nba.py) but only ever shown on the rare low-confidence abstain card -
+      // surfacing it here makes the "why is this ranked where it is" reasoning
+      // visible for every issue, not just that one path.
+      reason: iss.nba_reason || "",
+      unmetPrereq: !!iss.has_unmet_prerequisite,
     };
   }
 
@@ -7968,6 +7979,7 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
         <div class="mqwmid">
           <div class="mqwt" title="${pccEsc(f.title)}">${f.priorityFlag}${pccEsc(f.title)}</div>
           <div class="mqwdesc">${pccEsc(pccDescriptionFor(iss))}</div>
+          ${f.reason ? `<div class="mqw-reason${f.unmetPrereq ? " mqw-reason-warn" : ""}" title="${pccEsc(f.reason)}">${pccEsc(f.reason)}</div>` : ""}
           <div class="mqwrowmeta">
             <span class="mqw-chip ${f.statusCls}">${pccEsc(f.statusLabel)}</span>
             ${f.company ? `<span class="mqw-chip company">${pccEsc(f.company)}</span>` : ""}
@@ -7986,7 +7998,8 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
     const rows = issues.map(iss => {
       const f = pccRowFields(iss);
       const active = iss.id === pccSelectedId ? " is-active" : "";
-      return `<tr class="${active.trim()}" data-id="${pccEsc(iss.id)}" title="${pccEsc(f.stale.label)}">
+      const rowTitle = f.reason ? `${f.stale.label} — ${f.reason}` : f.stale.label;
+      return `<tr class="${active.trim()}" data-id="${pccEsc(iss.id)}" title="${pccEsc(rowTitle)}">
         <td><span class="pcc-table-state ${f.statusCls}">${pccEsc(f.statusLabel)}</span></td>
         <td><div class="row-title">${f.priorityFlag}${pccEsc(f.title)}</div><div class="row-desc">${pccEsc(pccDescriptionFor(iss))}</div></td>
         <td>${f.company ? pccEsc(f.company) : "—"}</td>

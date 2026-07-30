@@ -1228,6 +1228,36 @@ async def api_workgraph_issue_status(issue_id: str, body: WorkgraphIssueStatusBo
     return JSONResponse({"ok": True, "issue": sanitize_surrogates(wg.get_issue(issue_id))})
 
 
+class BulkIssueStatusBody(BaseModel):
+    issue_ids: list[str]
+    state: str
+
+
+@app.post("/api/workgraph/issues/bulk-status")
+async def api_workgraph_issues_bulk_status(body: BulkIssueStatusBody):
+    """Task #63 (bulk triage): the same deterministic state change
+    pccRunDeterministic already applies one issue at a time (Mark done /
+    Snooze / Archive as noise), applied to many issues from a single
+    request - for clearing a pile of low-priority items from the Morning
+    Queue list without opening each one individually. Restricted to the
+    same 3 states the single-issue action buttons already use - this isn't
+    a general-purpose bulk field editor, just bulk triage. Unknown issue
+    ids are skipped and reported back in `missing`, never silently dropped
+    or allowed to fail the whole batch."""
+    if body.state not in ("done", "noise-archived", "waiting"):
+        raise HTTPException(400, f"unsupported bulk triage state: {body.state!r}")
+    if not body.issue_ids:
+        raise HTTPException(400, "issue_ids must be a non-empty list")
+    updated, missing = [], []
+    for issue_id in body.issue_ids:
+        if wg.get_issue(issue_id) is None:
+            missing.append(issue_id)
+            continue
+        wg.update_issue(issue_id, state=body.state)
+        updated.append(issue_id)
+    return JSONResponse({"ok": True, "updated": updated, "missing": missing})
+
+
 _ALERT_SEVERITY_ORDER = {"critical": 0, "warn": 1, "info": 2}
 
 

@@ -193,6 +193,20 @@
 .mqwrow{display:grid;grid-template-columns:28px minmax(0,1fr) auto;gap:12px;align-items:start;padding:12px 20px;background:var(--surface);border-bottom:1px solid var(--line);transition:background .12s;width:100%;box-sizing:border-box;text-align:left}
 .mqwrow:hover{background:var(--bg)}
 .mqwrow:last-child{border-bottom:none}
+/* task #63 (bulk triage): checkbox lives OUTSIDE the <button class="mqwrow">
+   (nesting interactive content inside a <button> is invalid HTML) - the
+   shell wrapper takes over the row border/last-child so .mqwrow's own
+   versions (used un-wrapped elsewhere, e.g. the Projects sidebar list)
+   don't need to change. */
+.mqwrow-shell{display:flex;align-items:stretch;border-bottom:1px solid var(--line)}
+.mqwrow-shell:last-child{border-bottom:none}
+.mqwrow-shell .mqwrow{border-bottom:none;flex:1;min-width:0}
+.pcc-bulk-check{flex:none;align-self:center;margin:0 4px 0 16px;width:15px;height:15px;cursor:pointer;accent-color:var(--red)}
+.pcc-table-check-cell{width:28px}
+.pcc-bulk-bar{display:flex;align-items:center;gap:14px;padding:9px 20px;background:var(--pink-t);border-bottom:1px solid var(--line)}
+.pcc-bulk-count{font-size:12px;font-weight:700;color:var(--red-d);font-family:var(--mono);white-space:nowrap}
+.pcc-bulk-actions{display:flex;gap:8px;flex:1}
+.pcc-bulk-clear{font-size:11.5px;color:var(--mut2);background:none;border:none;cursor:pointer;text-decoration:underline;padding:0}
 .mqwic{width:28px;height:28px;border-radius:8px;flex:none;display:flex;align-items:center;justify-content:center;margin-top:1px}
 .mqwic svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:2;display:block}
 .mqwic.wait{background:#F2EEEE;color:var(--mut2)}
@@ -3780,6 +3794,13 @@ body.ownerlock #ownernote{display:block}
 .mqw-reason-warn{color:var(--amber-d)}
 .pcc-why-line{font-size:12px;color:var(--lk-mut2);margin-top:8px;font-family:var(--mono);line-height:1.4}
 .mqwrowmeta{margin-top:7px;gap:7px}
+/* task #63 (bulk triage) - scoped to match this view's --lk- surface/line tokens */
+.mqwrow-shell{border-bottom:1px solid var(--lk-line);background:var(--lk-surface)}
+.mqwrow-shell:hover{background:var(--lk-panel)}
+.mqwrow-shell .mqwrow{background:transparent}
+.pcc-bulk-bar{background:var(--lk-nested);border-bottom:1px solid var(--lk-line)}
+.pcc-bulk-count{color:var(--lk-danger,var(--red-d))}
+.pcc-bulk-clear{color:var(--lk-mut2)}
 /* status is monochrome graphite; only a real blocker earns red */
 .mqw-chip{font-size:10.5px;font-weight:600;padding:2px 9px;border-radius:999px;
   letter-spacing:.01em;background:none;color:var(--lk-flag);
@@ -4120,6 +4141,15 @@ body.ownerlock #ownernote{display:block}
                   </button>
                 </div>
               </div>
+            </div>
+            <div class="pcc-bulk-bar" id="pccBulkBar" style="display:none">
+              <span class="pcc-bulk-count" id="pccBulkCount"></span>
+              <div class="pcc-bulk-actions">
+                <button type="button" class="mqb ghost" data-bulk="waiting">Snooze 3d</button>
+                <button type="button" class="mqb ghost" data-bulk="noise-archived">Archive as noise</button>
+                <button type="button" class="mqb primary" data-bulk="done">✓ Mark done</button>
+              </div>
+              <button type="button" class="pcc-bulk-clear" id="pccBulkClear">Clear</button>
             </div>
             <div class="pcc-list" id="pccList"><div class="pcc-empty">Loading…</div></div>
             <div class="pcc-hint-note" id="pccHintNote" style="display:none"></div>
@@ -7676,6 +7706,7 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
   let pccSelectedId = null;
   let pccInited = false;
   let pccSearchQuery = "";
+  const pccSelectedIds = new Set();  // task #63 (bulk triage) - checkbox selection, separate from pccSelectedId (detail-pane focus)
   const pccIconFilterState = new Set();  // subset of "priority" | "lowconf" | "pending"
 
   const PCC_ICON_FILTERS = [
@@ -7977,26 +8008,35 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
 
   function pccRenderCardList(issues) {
     const listEl = document.getElementById("pccList");
+    // Checkbox lives OUTSIDE the <button> (task #63, bulk triage) - a
+    // checkbox nested inside a <button> is invalid HTML and would double-
+    // fire pccSelectIssue on every selection click. The shell wrapper keeps
+    // the existing button (and its click-to-open-detail behavior) untouched.
     listEl.innerHTML = issues.map(iss => {
       const f = pccRowFields(iss);
       const active = iss.id === pccSelectedId ? " is-active" : "";
-      return `<button type="button" class="mqwrow${active}${f.staleRowCls}" data-id="${pccEsc(iss.id)}" title="${pccEsc(f.stale.label)}">
-        <div class="mqwic ${f.icCls}">${f.icSvg}</div>
-        <div class="mqwmid">
-          <div class="mqwt" title="${pccEsc(f.title)}">${f.priorityFlag}${pccEsc(f.title)}</div>
-          <div class="mqwdesc">${pccEsc(pccDescriptionFor(iss))}</div>
-          ${f.reason ? `<div class="mqw-reason${f.unmetPrereq ? " mqw-reason-warn" : ""}" title="${pccEsc(f.reason)}">${pccEsc(f.reason)}</div>` : ""}
-          <div class="mqwrowmeta">
-            <span class="mqw-chip ${f.statusCls}">${pccEsc(f.statusLabel)}</span>
-            ${f.company ? `<span class="mqw-chip company">${pccEsc(f.company)}</span>` : ""}
+      const checked = pccSelectedIds.has(iss.id) ? " checked" : "";
+      return `<div class="mqwrow-shell${f.staleRowCls}" data-id="${pccEsc(iss.id)}">
+        <input type="checkbox" class="pcc-bulk-check" data-id="${pccEsc(iss.id)}" aria-label="Select ${pccEsc(f.title)}"${checked}>
+        <button type="button" class="mqwrow${active}" data-id="${pccEsc(iss.id)}" title="${pccEsc(f.stale.label)}">
+          <div class="mqwic ${f.icCls}">${f.icSvg}</div>
+          <div class="mqwmid">
+            <div class="mqwt" title="${pccEsc(f.title)}">${f.priorityFlag}${pccEsc(f.title)}</div>
+            <div class="mqwdesc">${pccEsc(pccDescriptionFor(iss))}</div>
+            ${f.reason ? `<div class="mqw-reason${f.unmetPrereq ? " mqw-reason-warn" : ""}" title="${pccEsc(f.reason)}">${pccEsc(f.reason)}</div>` : ""}
+            <div class="mqwrowmeta">
+              <span class="mqw-chip ${f.statusCls}">${pccEsc(f.statusLabel)}</span>
+              ${f.company ? `<span class="mqw-chip company">${pccEsc(f.company)}</span>` : ""}
+            </div>
           </div>
-        </div>
-        <div class="mqwend"><span class="mqwage">${pccFmtDate(f.lastTs)}</span></div>
-      </button>`;
+          <div class="mqwend"><span class="mqwage">${pccFmtDate(f.lastTs)}</span></div>
+        </button>
+      </div>`;
     }).join("");
     listEl.querySelectorAll(".mqwrow").forEach(row => {
       row.addEventListener("click", () => pccSelectIssue(row.getAttribute("data-id")));
     });
+    pccWireBulkCheckboxes(listEl);
   }
 
   function pccRenderTableList(issues) {
@@ -8004,7 +8044,9 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
     const rows = issues.map(iss => {
       const f = pccRowFields(iss);
       const active = iss.id === pccSelectedId ? " is-active" : "";
+      const checked = pccSelectedIds.has(iss.id) ? " checked" : "";
       return `<tr class="${active.trim()}" data-id="${pccEsc(iss.id)}" title="${pccEsc(f.stale.label)}">
+        <td class="pcc-table-check-cell"><input type="checkbox" class="pcc-bulk-check" data-id="${pccEsc(iss.id)}" aria-label="Select ${pccEsc(f.title)}"${checked}></td>
         <td><span class="pcc-table-state ${f.statusCls}">${pccEsc(f.statusLabel)}</span></td>
         <td><div class="row-title">${f.priorityFlag}${pccEsc(f.title)}</div><div class="row-desc">${pccEsc(pccDescriptionFor(iss))}</div>${f.reason ? `<div class="mqw-reason${f.unmetPrereq ? " mqw-reason-warn" : ""}">${pccEsc(f.reason)}</div>` : ""}</td>
         <td>${f.company ? pccEsc(f.company) : "—"}</td>
@@ -8012,13 +8054,69 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
       </tr>`;
     }).join("");
     listEl.innerHTML = `<table class="pcc-table">
-      <thead><tr><th>State</th><th>Subject</th><th>Source</th><th>Age</th></tr></thead>
+      <thead><tr><th></th><th>State</th><th>Subject</th><th>Source</th><th>Age</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>`;
     listEl.querySelectorAll("tbody tr").forEach(row => {
-      row.addEventListener("click", () => pccSelectIssue(row.getAttribute("data-id")));
+      row.addEventListener("click", (e) => {
+        if (e.target.closest(".pcc-bulk-check")) return;  // let the checkbox handle its own click
+        pccSelectIssue(row.getAttribute("data-id"));
+      });
+    });
+    pccWireBulkCheckboxes(listEl);
+  }
+
+  // --- task #63: bulk triage (select multiple issues, act on all at once) --
+  function pccWireBulkCheckboxes(listEl) {
+    listEl.querySelectorAll(".pcc-bulk-check").forEach(cb => {
+      cb.addEventListener("click", (e) => e.stopPropagation());  // don't also trigger the row's own click-to-open
+      cb.addEventListener("change", () => {
+        const id = cb.getAttribute("data-id");
+        if (cb.checked) pccSelectedIds.add(id); else pccSelectedIds.delete(id);
+        pccRenderBulkBar();
+      });
     });
   }
+
+  function pccRenderBulkBar() {
+    const bar = document.getElementById("pccBulkBar");
+    const count = document.getElementById("pccBulkCount");
+    if (!bar || !count) return;
+    const n = pccSelectedIds.size;
+    bar.style.display = n > 0 ? "" : "none";
+    count.textContent = n === 1 ? "1 selected" : `${n} selected`;
+  }
+
+  function pccClearBulkSelection() {
+    pccSelectedIds.clear();
+    document.querySelectorAll(".pcc-bulk-check").forEach(cb => { cb.checked = false; });
+    pccRenderBulkBar();
+  }
+
+  async function pccRunBulkAction(state) {
+    const issueIds = Array.from(pccSelectedIds);
+    if (!issueIds.length) return;
+    const bar = document.getElementById("pccBulkBar");
+    if (bar) bar.querySelectorAll("button").forEach(b => b.disabled = true);
+    try {
+      await fetch("/api/workgraph/issues/bulk-status", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ issue_ids: issueIds, state }),
+      });
+    } finally {
+      if (bar) bar.querySelectorAll("button").forEach(b => b.disabled = false);
+    }
+    issueIds.forEach(id => delete pccDetailCache[id]);
+    pccClearBulkSelection();
+    await pccLoadIssues();
+    if (pccSelectedId && issueIds.includes(pccSelectedId)) pccSelectIssue(pccSelectedId);
+  }
+
+  document.querySelectorAll("#pccBulkBar [data-bulk]").forEach(btn => {
+    btn.addEventListener("click", () => pccRunBulkAction(btn.getAttribute("data-bulk")));
+  });
+  const pccBulkClearBtn = document.getElementById("pccBulkClear");
+  if (pccBulkClearBtn) pccBulkClearBtn.addEventListener("click", pccClearBulkSelection);
 
   function pccRenderList() {
     const listEl = document.getElementById("pccList");

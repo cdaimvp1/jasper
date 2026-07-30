@@ -69,3 +69,30 @@ def test_record_confirmed_truncates_long_statement(ws_db):
     result2 = wl.record_confirmed_or_rejected(issue_id_a=iid, status="confirmed")
     assert result2 is not None
     assert result2["hit_count"] == 2
+
+
+def test_situation_key_for_issue_deterministic_tie_break_by_first_seen(ws_db):
+    """Fixed 2026-07-30 (same real bug hardening pass #2 found twice
+    elsewhere - workgraph_projects._project_name_for and
+    workgraph_suppliers.attach_supplier_precedent): list_parties_for_issue
+    has no ORDER BY, so picking the first external company from an
+    unordered result was non-deterministic when an issue has more than one.
+    first_seen_ts ascending (earliest-known contact) is the real tie-break."""
+    iid = ws_db.create_issue_with_new_id(title="Multi-party", state="active", category="renewal")
+    ws_db.upsert_party(id="later_party", primary_email="later@laterco.com", display_name="later",
+                        affiliation="external", affiliation_confidence="H",
+                        affiliation_source="domain", company="laterco")
+    ws_db.link_party_to_issue(iid, "later_party")
+    ws_db.upsert_party(id="earlier_party", primary_email="earlier@earlierco.com", display_name="earlier",
+                        affiliation="external", affiliation_confidence="H",
+                        affiliation_source="domain", company="earlierco")
+    ws_db.link_party_to_issue(iid, "earlier_party")
+    conn = ws_db._connect()
+    conn.execute("UPDATE parties SET first_seen_ts = ? WHERE id = ?", (200.0, "later_party"))
+    conn.execute("UPDATE parties SET first_seen_ts = ? WHERE id = ?", (100.0, "earlier_party"))
+    conn.close()
+
+    issue = ws_db.get_issue(iid)
+    key = wl.situation_key_for_issue(issue)
+
+    assert key == "category:renewal|company:earlierco"

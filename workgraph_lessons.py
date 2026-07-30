@@ -70,11 +70,20 @@ def situation_key(category: Optional[str], company: Optional[str]) -> Optional[s
 
 
 def _first_external_company(issue_id: str) -> Optional[str]:
-    for p in ws.list_parties_for_issue(issue_id):
-        if (p.get("affiliation") == "external" and p.get("company")
-                and not workgraph_signals._SYSTEM_SENDER.match(p.get("primary_email") or "")):
-            return p["company"]
-    return None
+    """Fixed 2026-07-30 (same real bug hardening pass #2 found and fixed in
+    workgraph_projects._project_name_for and workgraph_suppliers.
+    attach_supplier_precedent): workgraph_store.list_parties_for_issue has
+    no ORDER BY, so picking a bare first match from an unordered JOIN
+    result was non-deterministic whenever an issue has more than one
+    identifiable external company. first_seen_ts ascending (earliest-known
+    contact) is a real, stable tie-break, not an arbitrary one."""
+    candidates = [
+        p for p in ws.list_parties_for_issue(issue_id)
+        if p.get("affiliation") == "external" and p.get("company")
+        and not workgraph_signals._SYSTEM_SENDER.match(p.get("primary_email") or "")
+    ]
+    candidates.sort(key=lambda p: p.get("first_seen_ts") or 0)
+    return candidates[0]["company"] if candidates else None
 
 
 def situation_key_for_issue(issue: dict) -> Optional[str]:

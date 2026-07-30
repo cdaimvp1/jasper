@@ -231,3 +231,100 @@ def test_attach_supplier_precedent_deterministic_tie_break_by_first_seen(ws_db):
     wsup.attach_supplier_precedent(issue)
 
     assert issue["supplier_precedent"]["issue_id"] == earlier_closed
+
+
+# --- enhancement #3: Aristotle gate status + Total Recall precedent join --
+
+def test_list_suppliers_gated_open_issue_count_zero_when_none_gated(ws_db):
+    _party(ws_db, "p1", "Acme")
+    iid = ws_db.create_issue_with_new_id(title="Deal", state="active", category="other")
+    ws_db.link_party_to_issue(iid, "p1")
+
+    suppliers = wsup.list_suppliers()
+
+    assert suppliers[0]["gated_open_issue_count"] == 0
+
+
+def test_list_suppliers_gated_open_issue_count_reflects_real_flag(ws_db):
+    """Reuses has_unmet_prerequisite - a column workgraph_nba.recompute_all
+    already maintains - rather than re-running check_prerequisites() here."""
+    _party(ws_db, "p1", "Acme")
+    gated = ws_db.create_issue_with_new_id(title="Sign this", state="active", category="other")
+    ws_db.link_party_to_issue(gated, "p1")
+    ws_db.update_issue(gated, has_unmet_prerequisite=1)
+    ungated = ws_db.create_issue_with_new_id(title="Fine", state="active", category="other")
+    ws_db.link_party_to_issue(ungated, "p1")
+
+    suppliers = wsup.list_suppliers()
+
+    assert suppliers[0]["gated_open_issue_count"] == 1
+    assert suppliers[0]["open_issue_count"] == 2
+
+
+def test_list_suppliers_gated_open_issue_count_excludes_closed_issues(ws_db):
+    _party(ws_db, "p1", "Acme")
+    closed_gated = ws_db.create_issue_with_new_id(title="Old", state="done", category="other")
+    ws_db.link_party_to_issue(closed_gated, "p1")
+    ws_db.update_issue(closed_gated, has_unmet_prerequisite=1)
+    open_issue = ws_db.create_issue_with_new_id(title="New", state="active", category="other")
+    ws_db.link_party_to_issue(open_issue, "p1")
+
+    suppliers = wsup.list_suppliers()
+
+    assert suppliers[0]["gated_open_issue_count"] == 0
+
+
+def test_list_suppliers_precedent_none_when_no_lesson_exists(ws_db):
+    _party(ws_db, "p1", "Acme")
+    iid = ws_db.create_issue_with_new_id(title="Deal", state="active", category="contract")
+    ws_db.link_party_to_issue(iid, "p1")
+
+    suppliers = wsup.list_suppliers()
+
+    assert suppliers[0]["precedent"] is None
+
+
+def test_list_suppliers_precedent_surfaces_validated_lesson_for_open_category(ws_db):
+    _party(ws_db, "p1", "Acme")
+    iid = ws_db.create_issue_with_new_id(title="Deal", state="active", category="contract")
+    ws_db.link_party_to_issue(iid, "p1")
+    source = ws_db.create_issue_with_new_id(title="Source", state="done", category="contract")
+    ws_db.upsert_lesson(situation_key="category:contract|company:acme", outcome="confirmed",
+                         statement="Acme contracts close fast", source_issue_id=source,
+                         default_trust=0.75, bump=0.1, ceiling=0.9)
+
+    suppliers = wsup.list_suppliers()
+
+    assert suppliers[0]["precedent"] == {"statement": "Acme contracts close fast", "confidence": "medium"}
+
+
+def test_list_suppliers_precedent_ignores_low_trust_lesson(ws_db):
+    """best_lesson_for_key already abstains below MIN_TRUST - confirming the
+    join respects that rather than surfacing a low-confidence guess."""
+    _party(ws_db, "p1", "Acme")
+    iid = ws_db.create_issue_with_new_id(title="Deal", state="active", category="contract")
+    ws_db.link_party_to_issue(iid, "p1")
+    source = ws_db.create_issue_with_new_id(title="Source", state="done", category="contract")
+    ws_db.upsert_lesson(situation_key="category:contract|company:acme", outcome="confirmed",
+                         statement="Weak signal", source_issue_id=source,
+                         default_trust=0.2, bump=0.1, ceiling=0.9)
+
+    suppliers = wsup.list_suppliers()
+
+    assert suppliers[0]["precedent"] is None
+
+
+def test_supplier_detail_includes_gated_count_and_precedent(ws_db):
+    _party(ws_db, "p1", "Acme")
+    gated = ws_db.create_issue_with_new_id(title="Sign this", state="active", category="contract")
+    ws_db.link_party_to_issue(gated, "p1")
+    ws_db.update_issue(gated, has_unmet_prerequisite=1)
+    source = ws_db.create_issue_with_new_id(title="Source", state="done", category="contract")
+    ws_db.upsert_lesson(situation_key="category:contract|company:acme", outcome="confirmed",
+                         statement="Acme contracts close fast", source_issue_id=source,
+                         default_trust=0.75, bump=0.1, ceiling=0.9)
+
+    detail = wsup.supplier_detail("Acme")
+
+    assert detail["gated_open_issue_count"] == 1
+    assert detail["precedent"]["statement"] == "Acme contracts close fast"

@@ -5987,8 +5987,13 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
         var contacts = (byCompany[s.company] || []).map(function (p) { return esc(p.display_name || p.primary_email); }).join(', ') || 'no named contact yet';
         var bits = [s.open_issue_count + ' open', hoFmtMoney(s.value_found) + ' found'];
         if (s.has_hard_deadline) bits.push('<span style="color:#B41E16;font-weight:700">hard deadline</span>');
+        // enhancement #3: Aristotle gate status + Total Recall precedent, joined
+        // server-side (workgraph_suppliers.py) - real, already-computed signals,
+        // not re-derived here.
+        if (s.gated_open_issue_count) bits.push('<span style="color:#B45309;font-weight:700">' + s.gated_open_issue_count + ' gated</span>');
+        var precedentLine = s.precedent ? '<br><span style="color:var(--mut,#888);font-size:12px">Precedent (' + esc(s.precedent.confidence) + '): ' + esc(s.precedent.statement) + '</span>' : '';
         return '<li><b>' + esc(s.company) + '</b> — ' + contacts +
-          '<br><span style="color:var(--mut,#888);font-size:12px">' + bits.join(' · ') + '</span></li>';
+          '<br><span style="color:var(--mut,#888);font-size:12px">' + bits.join(' · ') + '</span>' + precedentLine + '</li>';
       }).join('') : Object.keys(byCompany).sort().map(function (k) {
         return '<li><b>' + esc(k) + '</b> — ' + byCompany[k].map(function (p) { return esc(p.display_name || p.primary_email); }).join(', ') + '</li>';
       }).join('');

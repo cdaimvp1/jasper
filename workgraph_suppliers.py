@@ -17,10 +17,42 @@ from __future__ import annotations
 from typing import Optional
 
 import workgraph_deadlines
+import workgraph_lessons
 import workgraph_nba
 import workgraph_store as ws
 
 _OPEN_STATES = ("active", "waiting", "blocked")
+
+
+def _gated_open_issue_count(open_issues: list[dict]) -> int:
+    """Enhancement #3 (Aristotle join): count of this company's open issues
+    currently flagged has_unmet_prerequisite=1 - a column workgraph_nba.
+    recompute_all() already maintains on every scoring pass. Deliberately
+    NOT re-running workgraph_aristotle.check_prerequisites() here - that
+    would answer a different question ('which RULE is gating right now')
+    than what the Supplier Dashboard needs ('how many of this supplier's
+    open issues are gated, per the last real recompute')."""
+    return sum(1 for i in open_issues if i.get("has_unmet_prerequisite"))
+
+
+def _total_recall_precedent_for_company(company: str, categories: set) -> Optional[dict]:
+    """Enhancement #3 (Total Recall join): a supplier's open issues can span
+    more than one category, and workgraph_lessons.situation_key is keyed on
+    (category, company) together - there's no single situation_key for a
+    company alone. So this checks every distinct real category this
+    supplier currently has open issues in, and surfaces the highest-trust
+    validated lesson found across them (None if none of them have one)."""
+    best = None
+    for category in categories:
+        key = workgraph_lessons.situation_key(category, company)
+        if key is None:
+            continue
+        lesson = workgraph_lessons.best_lesson_for_key(key)
+        if lesson and (best is None or lesson["trust_score"] > best["trust_score"]):
+            best = lesson
+    if best is None:
+        return None
+    return {"statement": best["statement"], "confidence": workgraph_lessons.confidence_band(best["trust_score"])}
 
 
 def list_suppliers() -> list[dict]:
@@ -45,6 +77,7 @@ def list_suppliers() -> list[dict]:
         workgraph_deadlines.attach_deadline_info(open_issues)
         has_hard_deadline = any(i.get("has_hard_deadline") for i in open_issues)
         last_activity_ts = max((i["updated_at"] for i in issues), default=None)
+        categories = {i["category"] for i in open_issues if i.get("category")}
 
         out.append({
             "company": company,
@@ -53,6 +86,8 @@ def list_suppliers() -> list[dict]:
             "value_found": value_found,
             "has_hard_deadline": has_hard_deadline,
             "last_activity_ts": last_activity_ts,
+            "gated_open_issue_count": _gated_open_issue_count(open_issues),
+            "precedent": _total_recall_precedent_for_company(company, categories),
         })
 
     out.sort(key=lambda s: (s["open_issue_count"], s["last_activity_ts"] or 0), reverse=True)
@@ -123,4 +158,11 @@ def supplier_detail(company: str) -> Optional[dict]:
     workgraph_deadlines.attach_deadline_info(issues)
     for issue in issues:
         issue["value_found"] = workgraph_nba.value_amount_for_issue(issue["id"])
-    return {"company": company, "issues": issues}
+    open_issues = [i for i in issues if i["state"] in _OPEN_STATES]
+    categories = {i["category"] for i in open_issues if i.get("category")}
+    return {
+        "company": company,
+        "issues": issues,
+        "gated_open_issue_count": _gated_open_issue_count(open_issues),
+        "precedent": _total_recall_precedent_for_company(company, categories),
+    }

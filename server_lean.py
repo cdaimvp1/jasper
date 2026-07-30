@@ -75,6 +75,7 @@ import workgraph_aristotle
 import workgraph_export
 import workgraph_commitments
 import health_check
+import workgraph_suppliers
 
 
 PORT = int(os.environ.get("TEAM_PORT", "8700"))  # born-local default (Tia's live-review catch, 2026-07-23):
@@ -1469,6 +1470,24 @@ async def api_project_suggestion_resolve(suggestion_id: int, body: ProjectSugges
 @app.get("/api/workgraph/parties")
 async def api_parties_list(affiliation: Optional[str] = None):
     return JSONResponse({"parties": sanitize_surrogates(wg.list_parties(affiliation=affiliation))})
+
+
+@app.get("/api/workgraph/suppliers")
+async def api_suppliers_list():
+    """Task #75 (Supplier Relationship Dashboard). Grouped by external
+    party company - see workgraph_suppliers.py's docstring. Zero LLM,
+    zero new data; everything here is grouped/summed from parties/issues/
+    workgraph_nba's own value extraction/workgraph_deadlines' own
+    hard/soft classification."""
+    return JSONResponse({"suppliers": sanitize_surrogates(workgraph_suppliers.list_suppliers())})
+
+
+@app.get("/api/workgraph/suppliers/{company}")
+async def api_supplier_detail(company: str):
+    detail = workgraph_suppliers.supplier_detail(company)
+    if detail is None:
+        raise HTTPException(404, f"no such supplier: {company}")
+    return JSONResponse(sanitize_surrogates(detail))
 
 
 class PartyCorrectionBody(BaseModel):

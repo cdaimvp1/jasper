@@ -5911,8 +5911,14 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
     var days = Math.floor((Date.now() / 1000 - ts) / 86400);
     return days <= 0 ? 'today' : (days + 'd ago');
   }
+  function hoFmtMoney(amount) {
+    if (amount >= 1e9) return '$' + (amount / 1e9).toFixed(1) + 'B';
+    if (amount >= 1e6) return '$' + (amount / 1e6).toFixed(1) + 'M';
+    if (amount >= 1e3) return '$' + (amount / 1e3).toFixed(0) + 'K';
+    return '$' + Math.round(amount);
+  }
 
-  var state = { parties: [], projects: [], projectDetail: {}, issueParties: {} };
+  var state = { parties: [], projects: [], projectDetail: {}, issueParties: {}, suppliers: [] };
 
   function projectsForParty(partyId) {
     var out = [];
@@ -5955,7 +5961,17 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
         var k = p.company || 'Unknown company';
         (byCompany[k] = byCompany[k] || []).push(p);
       });
-      var whoWorksWith = Object.keys(byCompany).sort().map(function (k) {
+      // task #75 (Supplier Relationship Dashboard): state.suppliers is real
+      // per-company open-issue-count/value-found/hard-deadline, computed
+      // server-side (workgraph_suppliers.py) - already sorted busiest-first.
+      // Falls back to the old plain contact list if that fetch failed.
+      var whoWorksWith = state.suppliers.length ? state.suppliers.map(function (s) {
+        var contacts = (byCompany[s.company] || []).map(function (p) { return esc(p.display_name || p.primary_email); }).join(', ') || 'no named contact yet';
+        var bits = [s.open_issue_count + ' open', hoFmtMoney(s.value_found) + ' found'];
+        if (s.has_hard_deadline) bits.push('<span style="color:#B41E16;font-weight:700">hard deadline</span>');
+        return '<li><b>' + esc(s.company) + '</b> — ' + contacts +
+          '<br><span style="color:var(--mut,#888);font-size:12px">' + bits.join(' · ') + '</span></li>';
+      }).join('') : Object.keys(byCompany).sort().map(function (k) {
         return '<li><b>' + esc(k) + '</b> — ' + byCompany[k].map(function (p) { return esc(p.display_name || p.primary_email); }).join(', ') + '</li>';
       }).join('');
       var recent = state.projects.slice().sort(function (a, b) { return (b.updated_at || 0) - (a.updated_at || 0); }).slice(0, 5)
@@ -5988,6 +6004,11 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
         var r = await fetch('/api/workgraph/issues/' + encodeURIComponent(id), { cache: 'no-store' });
         if (r.ok) state.issueParties[id] = (await r.json()).parties || [];
       }));
+      // task #75: Supplier Relationship Dashboard - real per-company open-issue
+      // count/value-found/hard-deadline, grouped server-side (workgraph_
+      // suppliers.py) rather than re-deriving it client-side from parties alone.
+      var sr = await fetch('/api/workgraph/suppliers', { cache: 'no-store' });
+      state.suppliers = sr.ok ? ((await sr.json()).suppliers || []) : [];
     } catch (e) { /* leave whatever loaded so far on screen */ }
     hoRender();
   }

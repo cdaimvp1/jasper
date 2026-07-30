@@ -131,6 +131,14 @@ def _extract_value_amount(raw_items: list[dict]) -> float:
     return best
 
 
+def value_amount_for_issue(issue_id: str) -> float:
+    """Public wrapper around _extract_value_amount for other modules
+    (task #75, Supplier Relationship Dashboard) that need the same
+    deterministic per-issue dollar figure without reaching into a private
+    name or re-implementing the regex extraction."""
+    return _extract_value_amount(ws.get_raw_items_for_issue(issue_id))
+
+
 def value_at_risk_rollup() -> dict:
     """Task #65 (Value-at-risk rollup banner): sums _extract_value_amount
     across every open issue. Reuses the SAME deterministic, zero-LLM

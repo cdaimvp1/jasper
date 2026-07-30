@@ -1588,8 +1588,12 @@ class SignalTreatmentBody(BaseModel):
 async def api_signal_rules_list():
     """Every known-signal-type treatment override currently in effect (see
     workgraph_signals.py) - an audit view of what's been corrected away from
-    the code default."""
-    return JSONResponse({"overrides": sanitize_surrogates(wg.list_signal_treatments())})
+    the code default. known_signal_types included so Settings (task #58) can
+    populate its dropdown from real, confirmed values - never freeform text."""
+    return JSONResponse({
+        "overrides": sanitize_surrogates(wg.list_signal_treatments()),
+        "known_signal_types": workgraph_signals.known_signal_types(),
+    })
 
 
 @app.post("/api/workgraph/signal-rules/{signal_type}")

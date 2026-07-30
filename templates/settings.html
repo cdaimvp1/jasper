@@ -161,8 +161,14 @@
     </div>
   </div>
 
+  <!-- ── Rules & overrides group (task #61 gap fix: 4 rule-shaped sections
+       had no grouping, forcing a lot of scrolling to find any one of them) -->
+  <details open style="margin:26px 0 0">
+  <summary style="cursor:pointer;font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667)">Rules &amp; overrides</summary>
+  <div style="margin-top:10px">
+
   <!-- ── Aristotle: prerequisite rules (added 2026-07-29, task #51) ────── -->
-  <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:26px 0 10px">Prerequisite rules (Aristotle)</div>
+  <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:16px 0 10px">Prerequisite rules (Aristotle)</div>
   <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px">
     <div style="color:var(--muted,#667);font-size:13px;margin-bottom:12px">
       Teach Jasper a gate: "don't treat X as ready to act on until Y has been seen for the same project or supplier."
@@ -207,16 +213,7 @@
       until you confirm it.
     </div>
     <div id="arsug-list">Loading…</div>
-  </div>
-
-  <!-- ── Capability suggestions (added 2026-07-30, task #57) ───────────── -->
-  <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:26px 0 10px">Capability suggestions</div>
-  <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px">
-    <div style="color:var(--muted,#667);font-size:13px;margin-bottom:12px">
-      Any worker can log a note here when it notices a real gap in what Jasper can do. Confirming means "worth
-      building" — it doesn't trigger anything automatic on its own.
-    </div>
-    <div id="capsug-list">Loading…</div>
+    <span id="arsug-fb" style="font-size:12px;color:var(--muted,#888);display:block;margin-top:6px"></span>
   </div>
 
   <!-- ── Signal-treatment overrides (added 2026-07-30, task #58) ───────── -->
@@ -255,11 +252,25 @@
   <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:26px 0 10px">Ownership rules</div>
   <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px">
     <div style="color:var(--muted,#667);font-size:13px;margin-bottom:12px">
-      A standing rule for who owns a task by default, for a given category/company/domain/topic match — created when
-      you tell a worker "always assign these to X" in chat. Listed here so nothing gets created without you being
-      able to see or remove it.
+      A standing rule for who owns a task by default, for a given category/company/domain/topic match. There's no
+      UI to create one yet — this list exists so that if one is ever created (via the underlying API), nothing sits
+      invisible with no way to see or remove it.
     </div>
     <div id="ownrules-list">Loading…</div>
+  </div>
+
+  </div>
+  </details>
+
+  <!-- ── Capability suggestions (added 2026-07-30, task #57) ───────────── -->
+  <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:26px 0 10px">Capability suggestions</div>
+  <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px">
+    <div style="color:var(--muted,#667);font-size:13px;margin-bottom:12px">
+      Any worker can log a note here when it notices a real gap in what Jasper can do. Confirming means "worth
+      building" — it doesn't trigger anything automatic on its own.
+    </div>
+    <div id="capsug-list">Loading…</div>
+    <span id="capsug-fb" style="font-size:12px;color:var(--muted,#888);display:block;margin-top:6px"></span>
   </div>
 
   <!-- ── Server · Settings #6 ──────────────────────────────────────────── -->
@@ -514,8 +525,14 @@
         <button data-ar-delete="${r.id}" style="border:1px solid var(--border,#ddd);background:none;color:inherit;font:600 12px sans-serif;padding:5px 10px;border-radius:7px;cursor:pointer">Delete</button>
       </div>`).join('');
     arList.querySelectorAll('[data-ar-toggle]').forEach(cb => cb.addEventListener('change', async () => {
-      await fetch(`/api/settings/prerequisite-rules/${cb.getAttribute('data-ar-toggle')}/active`,
-        {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({active: cb.checked})});
+      // task #61 gap fix: was fire-and-forget - a failed save left the
+      // checkbox visually flipped with no sign the backend didn't change.
+      const wasChecked = !cb.checked;  // change already fired, this is the PRE-click state
+      try{
+        const r = await fetch(`/api/settings/prerequisite-rules/${cb.getAttribute('data-ar-toggle')}/active`,
+          {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({active: cb.checked})});
+        if(!r.ok){ cb.checked = wasChecked; const d = await r.json().catch(()=>({})); arFb.textContent = d.detail || "couldn't save"; setTimeout(()=>arFb.textContent='',3000); }
+      }catch(e){ cb.checked = wasChecked; arFb.textContent = "couldn't save"; setTimeout(()=>arFb.textContent='',3000); }
     }));
     arList.querySelectorAll('[data-ar-delete]').forEach(btn => btn.addEventListener('click', async () => {
       if(!confirm('Delete this prerequisite rule?')) return;
@@ -570,16 +587,20 @@
     arsugList.querySelectorAll('[data-arsug-confirm]').forEach(btn => btn.addEventListener('click', () => arsugResolve(btn.getAttribute('data-arsug-confirm'), 'confirm')));
     arsugList.querySelectorAll('[data-arsug-reject]').forEach(btn => btn.addEventListener('click', () => arsugResolve(btn.getAttribute('data-arsug-reject'), 'reject')));
   }
+  const arsugFb = document.getElementById('arsug-fb');
   function arsugLoad(){
     return fetch('/api/settings/prerequisite-rule-suggestions').then(r=>r.json()).then(d=>arsugRender(d.suggestions))
       .catch(()=>{ arsugList.textContent = 'Could not load.'; });
   }
   async function arsugResolve(id, action){
+    // task #61 gap fix: was a blocking alert() on failure, inconsistent with
+    // every other panel's quiet inline feedback.
     try{
       const r = await fetch(`/api/settings/prerequisite-rule-suggestions/${id}/resolve`,{method:'POST',
         headers:{'Content-Type':'application/json'}, body:JSON.stringify({action})});
-      if(r.ok){ arsugLoad(); arLoad(); } else { const d = await r.json().catch(()=>({})); alert(d.detail || 'error'); }
-    }catch(e){ alert('error'); }
+      if(r.ok){ arsugFb.textContent = ''; arsugLoad(); arLoad(); }
+      else { const d = await r.json().catch(()=>({})); arsugFb.textContent = d.detail || 'error'; setTimeout(()=>arsugFb.textContent='',3000); }
+    }catch(e){ arsugFb.textContent = 'error'; setTimeout(()=>arsugFb.textContent='',3000); }
   }
   arsugLoad();
 
@@ -601,16 +622,19 @@
     capsugList.querySelectorAll('[data-capsug-confirm]').forEach(btn => btn.addEventListener('click', () => capsugResolve(btn.getAttribute('data-capsug-confirm'), 'confirmed')));
     capsugList.querySelectorAll('[data-capsug-reject]').forEach(btn => btn.addEventListener('click', () => capsugResolve(btn.getAttribute('data-capsug-reject'), 'rejected')));
   }
+  const capsugFb = document.getElementById('capsug-fb');
   function capsugLoad(){
     return fetch('/api/workgraph/capability-suggestions?status=pending').then(r=>r.json()).then(d=>capsugRender(d.suggestions))
       .catch(()=>{ capsugList.textContent = 'Could not load.'; });
   }
   async function capsugResolve(id, status){
+    // task #61 gap fix: was a blocking alert() on failure.
     try{
       const r = await fetch(`/api/workgraph/capability-suggestions/${id}/resolve`,{method:'POST',
         headers:{'Content-Type':'application/json'}, body:JSON.stringify({status})});
-      if(r.ok){ capsugLoad(); } else { const d = await r.json().catch(()=>({})); alert(d.detail || 'error'); }
-    }catch(e){ alert('error'); }
+      if(r.ok){ capsugFb.textContent = ''; capsugLoad(); }
+      else { const d = await r.json().catch(()=>({})); capsugFb.textContent = d.detail || 'error'; setTimeout(()=>capsugFb.textContent='',3000); }
+    }catch(e){ capsugFb.textContent = 'error'; setTimeout(()=>capsugFb.textContent='',3000); }
   }
   capsugLoad();
 

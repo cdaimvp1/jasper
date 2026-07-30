@@ -7999,10 +7999,9 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
     const rows = issues.map(iss => {
       const f = pccRowFields(iss);
       const active = iss.id === pccSelectedId ? " is-active" : "";
-      const rowTitle = f.reason ? `${f.stale.label} — ${f.reason}` : f.stale.label;
-      return `<tr class="${active.trim()}" data-id="${pccEsc(iss.id)}" title="${pccEsc(rowTitle)}">
+      return `<tr class="${active.trim()}" data-id="${pccEsc(iss.id)}" title="${pccEsc(f.stale.label)}">
         <td><span class="pcc-table-state ${f.statusCls}">${pccEsc(f.statusLabel)}</span></td>
-        <td><div class="row-title">${f.priorityFlag}${pccEsc(f.title)}</div><div class="row-desc">${pccEsc(pccDescriptionFor(iss))}</div></td>
+        <td><div class="row-title">${f.priorityFlag}${pccEsc(f.title)}</div><div class="row-desc">${pccEsc(pccDescriptionFor(iss))}</div>${f.reason ? `<div class="mqw-reason${f.unmetPrereq ? " mqw-reason-warn" : ""}">${pccEsc(f.reason)}</div>` : ""}</td>
         <td>${f.company ? pccEsc(f.company) : "—"}</td>
         <td>${pccFmtAgeDays(f.lastTs)}</td>
       </tr>`;
@@ -8596,9 +8595,17 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
   // Jasper anything, answered from precedent/synthesis/evidence it already
   // has, with an honest "not enough grounding" when nothing clears the bar -
   // see workgraph_socrates.py. No LLM call, nothing fabricated.
-  async function askSocrates(text) {
-    socratesMsgs.push({ from: window.MANAGER_TAG, body: text, ts: new Date().toISOString(), workerSlug: "socrates" });
-    renderThread();
+  async function askSocrates(text, opts) {
+    // task #61 gap fix: when a message is BOTH @mentioned to a worker AND an
+    // #addrule statement, send() already posts it to that worker's real
+    // thread (rendered via the normal @-mention path) - pushing it into
+    // socratesMsgs too duplicated the user's own line on screen. skipUserEcho
+    // lets the #addrule capture still run (and its reply still show) without
+    // re-displaying a message that's already visible.
+    if (!(opts && opts.skipUserEcho)) {
+      socratesMsgs.push({ from: window.MANAGER_TAG, body: text, ts: new Date().toISOString(), workerSlug: "socrates" });
+      renderThread();
+    }
     let replyText;
     try {
       const r = await fetch("/api/socrates/ask", {
@@ -8650,7 +8657,7 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
       input.value = text;
       return;
     }
-    if (addRule) await askSocrates(text);
+    if (addRule) await askSocrates(text, { skipUserEcho: true });
     await loadAll();
   }
   sendBtn.addEventListener("click", send);

@@ -93,3 +93,39 @@ def test_list_open_asks_sorted_most_recently_extracted_first(ws_db):
     entries = wad.list_open_asks()
 
     assert [e["text"] for e in entries] == ["newer ask", "older ask"]
+
+
+# --- enhancement #87: per-issue scoping (issue detail panel) -------------
+
+def test_list_asks_for_issue_scoped_to_one_issue(ws_db):
+    iid = _issue_with_extraction(ws_db, "Renewal", "pi1", {"asks": ["confirm the redline"]})
+    _issue_with_extraction(ws_db, "Other", "pi2", {"asks": ["unrelated ask"]})
+
+    assert wad.list_asks_for_issue(iid) == ["confirm the redline"]
+
+
+def test_list_decisions_for_issue_scoped_to_one_issue(ws_db):
+    iid = _issue_with_extraction(ws_db, "Renewal", "pi3", {"decisions": ["approved for FY27"]})
+    _issue_with_extraction(ws_db, "Other", "pi4", {"decisions": ["unrelated decision"]})
+
+    assert wad.list_decisions_for_issue(iid) == ["approved for FY27"]
+
+
+def test_list_asks_for_issue_includes_closed_issues(ws_db):
+    """Unlike the global rollup, the per-issue read has no open-state
+    filter - Marc looking at a specific (even closed) issue should still
+    see what was really asked on it."""
+    issue_id = ws_db.create_issue_with_new_id(title="Closed deal", state="done", category="other")
+    rid = ws_db.insert_raw_item(source="outlook_mail", stable_key="pi5", thread_key="pi5", dedupe_key="pi5",
+                                 occurred_ts=time.time(), subject="s", from_actor="a@example.com",
+                                 participants_json="[]")
+    ws_db.link_raw_item_to_issue(rid, issue_id)
+    ws_db.create_extraction(rid, json.dumps({"asks": ["closed-issue ask"]}))
+
+    assert wad.list_asks_for_issue(issue_id) == ["closed-issue ask"]
+
+
+def test_list_asks_for_issue_empty_when_none(ws_db):
+    iid = _issue_with_extraction(ws_db, "No asks", "pi6", {"decisions": ["something"]})
+
+    assert wad.list_asks_for_issue(iid) == []

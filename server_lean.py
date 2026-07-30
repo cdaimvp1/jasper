@@ -1166,13 +1166,27 @@ async def api_workgraph_issue_detail(issue_id: str):
     workgraph_lessons.attach_learned([issue])
     workgraph_deadlines.attach_deadline_info([issue])
     workgraph_suppliers.attach_supplier_precedent(issue)
+    # Enhancement #86: real, persisted PR#/PO# reference IDs for this issue -
+    # same set workgraph_projects' own grouping veto already reads, not a
+    # second live rescan.
+    issue["reference_ids"] = sorted(workgraph_projects.reference_ids_for_issue(issue_id))
+    # Enhancement #88: dollar value in play, already computed for Value-at-
+    # risk/the Supplier Dashboard, just never attached to the issue itself.
+    issue["value_found"] = workgraph_nba.value_amount_for_issue(issue_id)
     return JSONResponse({"issue": sanitize_surrogates(issue), "evidence": sanitize_surrogates(evidence),
                         "pending_actions": sanitize_surrogates(pending), "tasks": sanitize_surrogates(tasks),
                         "state_history": sanitize_surrogates(state_history),
                         "parties": sanitize_surrogates(parties), "project": sanitize_surrogates(project),
                         "synthesis": sanitize_surrogates(synthesis),
                         "project_synthesis": sanitize_surrogates(project_synthesis),
-                        "attachments": sanitize_surrogates(attachments)})
+                        "attachments": sanitize_surrogates(attachments),
+                        # Enhancement #87: this issue's own asks/decisions/key
+                        # facts - the same real extraction fields the global
+                        # rollup cards already surface, scoped to just this
+                        # issue rather than every open issue.
+                        "asks": sanitize_surrogates(workgraph_asks_decisions.list_asks_for_issue(issue_id)),
+                        "decisions": sanitize_surrogates(workgraph_asks_decisions.list_decisions_for_issue(issue_id)),
+                        "key_facts": sanitize_surrogates(workgraph_key_facts.list_key_facts_for_issue(issue_id))})
 
 
 class OpenEmailBody(BaseModel):

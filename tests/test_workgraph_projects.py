@@ -27,7 +27,7 @@ def _issue(ws_db, title, opened_at=None):
 
 
 def _raw_item(ws_db, issue_id, subject, key, from_actor="a@example.com"):
-    """Task #83: _reference_ids_for_issue now reads the persisted
+    """Task #83: reference_ids_for_issue now reads the persisted
     raw_items.pr_number field instead of re-scanning subject text live, so
     this helper populates it the same way workgraph_classify.classify_item
     really would - extracting from the given subject with the same shared
@@ -53,37 +53,37 @@ def _link_party(ws_db, issue_id, party_id, email, affiliation="external", compan
     ws_db.link_party_to_issue(issue_id, party_id)
 
 
-# --- _reference_ids_for_issue --------------------------------------------
+# --- reference_ids_for_issue --------------------------------------------
 
 def test_reference_ids_extracts_pr_number(ws_db):
     iid = _issue(ws_db, "Requisition")
     _raw_item(ws_db, iid, "Approve PR1111865 - SAP RISE", "r1")
-    assert wp._reference_ids_for_issue(iid) == {"PR1111865"}
+    assert wp.reference_ids_for_issue(iid) == {"PR1111865"}
 
 
 def test_reference_ids_extracts_versioned_pr_number(ws_db):
     iid = _issue(ws_db, "Requisition")
     _raw_item(ws_db, iid, "PR416079-V33 - Tower X PO Request", "r2")
-    assert wp._reference_ids_for_issue(iid) == {"PR416079-V33"}
+    assert wp.reference_ids_for_issue(iid) == {"PR416079-V33"}
 
 
 def test_reference_ids_extracts_po_number(ws_db):
     iid = _issue(ws_db, "PO notice")
     _raw_item(ws_db, iid, "Your PO4200703817 has shipped", "r3")
-    assert wp._reference_ids_for_issue(iid) == {"PO4200703817"}
+    assert wp.reference_ids_for_issue(iid) == {"PO4200703817"}
 
 
 def test_reference_ids_empty_when_none_present(ws_db):
     iid = _issue(ws_db, "Just a normal email")
     _raw_item(ws_db, iid, "Let's catch up next week", "r4")
-    assert wp._reference_ids_for_issue(iid) == set()
+    assert wp.reference_ids_for_issue(iid) == set()
 
 
 def test_reference_ids_union_across_multiple_raw_items(ws_db):
     iid = _issue(ws_db, "Multi")
     _raw_item(ws_db, iid, "PR1000001 first mention", "r5")
     _raw_item(ws_db, iid, "Follow-up on PR1000002", "r6")
-    assert wp._reference_ids_for_issue(iid) == {"PR1000001", "PR1000002"}
+    assert wp.reference_ids_for_issue(iid) == {"PR1000001", "PR1000002"}
 
 
 # --- _vetoed_by_reference_mismatch ---------------------------------------

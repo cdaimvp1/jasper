@@ -8509,6 +8509,7 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
     const issue = d.issue, evidence = d.evidence || [], pending = d.pending_actions || [];
     const tasks = d.tasks || [], stateHistory = d.state_history || [];
     const parties = d.parties || [], project = d.project || null;
+    const asks = d.asks || [], decisions = d.decisions || [], keyFacts = d.key_facts || [];
     const body = document.getElementById("pccDetail");
     const timeline = pccBuildTimeline(evidence, stateHistory);
     const lastTs = timeline.length ? timeline[0].ts : null;
@@ -8530,8 +8531,15 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
     // showed no reasoning at all in PCC Detail (task #70 gap) even though
     // the Morning Queue list row right next to it does. Persistent, not
     // gated to a confidence tier.
+    // Enhancement #91: has_unmet_prerequisite previously only tinted this
+    // line amber - nothing named it AS an Aristotle gate, so it read like
+    // any other priority reason. nba_reason already carries the specific
+    // unmet-signal text (workgraph_aristotle._build_warning), this just
+    // labels it plainly so Marc doesn't have to visit the Gate Board to
+    // recognize what kind of reason this is.
+    const gatedBadgeHtml = issue.has_unmet_prerequisite ? '<span class="pcc-deadline-badge" style="margin-right:6px;background:var(--pink-t);color:var(--red-d)">Gated</span>' : "";
     const whyLineHtml = (issue.confidence_tier !== "L" && issue.nba_reason)
-      ? `<div class="pcc-why-line${issue.has_unmet_prerequisite ? " mqw-reason-warn" : ""}">${pccEsc(issue.nba_reason)}</div>` : "";
+      ? `<div class="pcc-why-line${issue.has_unmet_prerequisite ? " mqw-reason-warn" : ""}">${gatedBadgeHtml}${pccEsc(issue.nba_reason)}</div>` : "";
     const learnedHtml = window.mqLearn ? window.mqLearn(issue) : "";
 
     // task #77: supplier precedent ("last time with this supplier") - the
@@ -8542,6 +8550,13 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
     const precedent = issue.supplier_precedent;
     const precedentHtml = precedent
       ? `<div class="mqlearn"><span class="lk">✦ Last time with this supplier</span><span class="lt">${pccEsc(precedent.title)} — closed in ${precedent.days_to_close}d</span></div>`
+      : "";
+    // Enhancement #89: this same supplier's OTHER open issues currently
+    // gated - real signal Marc previously only saw by visiting the
+    // Handover panel's supplier list, not on the issue itself.
+    const otherGated = issue.supplier_other_gated_count || 0;
+    const supplierGateHtml = otherGated
+      ? `<div class="mqlearn"><span class="lk">⛔ This supplier</span><span class="lt">${otherGated} other open issue${otherGated === 1 ? "" : "s"} currently gated</span></div>`
       : "";
 
     // task #80: Deadlines - replaces the standalone Deadline Radar panel
@@ -8567,6 +8582,29 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
       <div class="pcc-zone">
         <div class="pcc-zone-hd"><span>Deadlines</span></div>
         ${dueRowHtml}${mentionRowsHtml}
+      </div>` : "";
+
+    // Enhancement #87: this issue's own asks/decisions/key facts - curator's
+    // real extraction, previously only ever shown in the GLOBAL rollup cards
+    // (workgraph_asks_decisions.py/workgraph_key_facts.py), never scoped to
+    // the one issue Marc is actually looking at. Reuses the shared
+    // pcc-radar-row markup (Value-at-risk/Commitments/global Asks card).
+    const extractionRow = (label, text) => `
+      <div class="pcc-radar-row" style="cursor:default">
+        <span class="pcc-deadline-badge" style="background:var(--bg);color:var(--mut2)">${label}</span>
+        <span class="pcc-radar-mention-text">${pccEsc(text)}</span>
+      </div>`;
+    const extractionRowsHtml = [
+      ...asks.map(t => extractionRow("Ask", t)),
+      ...decisions.map(t => extractionRow("Decision", t)),
+      ...keyFacts.map(t => extractionRow("Key fact", t)),
+    ].join("");
+    const extractionZoneHtml = extractionRowsHtml ? `
+      <div class="pcc-zone">
+        <div class="pcc-zone-hd"><span>Asks, decisions &amp; key facts</span>
+          <span class="pcc-zone-note">${asks.length} ask${asks.length === 1 ? "" : "s"} &middot; ${decisions.length} decision${decisions.length === 1 ? "" : "s"} &middot; ${keyFacts.length} key fact${keyFacts.length === 1 ? "" : "s"}</span>
+        </div>
+        ${extractionRowsHtml}
       </div>` : "";
 
     // Progress pairs each event with what the system can do about it. The
@@ -8640,12 +8678,20 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
     // that a calmer header reads much better than a "chip zoo."
     const statusLabel = PCC_STATE_LABEL[issue.state] || issue.state;
     const primaryChannel = evidence.length ? (PCC_CHANNEL_META[evidence[0].type] || { label: evidence[0].type }).label : null;
+    // Enhancement #90: category isn't shown anywhere in the detail panel
+    // today despite driving Total Recall matching and NBA scoring - a quiet
+    // label here explains WHY a precedent/lesson badge appeared.
+    const pccCategoryLabel = c => c ? c.replace(/-/g, " ").replace(/\b\w/g, ch => ch.toUpperCase()) : "";
     const metaBits = [];
     if (primaryChannel) metaBits.push(primaryChannel.toUpperCase());
     metaBits.push(`Thread of ${evidence.length || 1}`);
     metaBits.push(`Owner ${pccEsc(issue.owner === "marc" ? "Marc Lane" : (issue.owner || "Marc Lane"))}`);
+    if (issue.category) metaBits.push(pccEsc(pccCategoryLabel(issue.category)));
     if (project) metaBits.push(`Project: ${pccEsc(project.name)}`);
     if (issue.due) metaBits.push(`Due ${pccEsc(issue.due)}`);
+    // Enhancement #88: dollar value in play - already computed for Value-at-
+    // risk/the Supplier Dashboard, never previously shown on the issue itself.
+    if (issue.value_found) metaBits.push(`${hoFmtMoney(issue.value_found)} in play`);
     const metaLine = metaBits.join(" &middot; ");
 
     // Synthesis: prefer this issue's own synthesis; once an issue is grouped
@@ -8696,12 +8742,14 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
         <div class="pcc-detail-hd-main">
           <div class="pcc-detail-meta">
             <span class="pcc-status-badge status-${issue.state}">${pccEsc(statusLabel)}</span>
+            ${(issue.reference_ids || []).map(r => `<span class="pcc-deadline-badge" style="background:var(--bg);color:var(--mut2)">${pccEsc(r)}</span>`).join("")}
             <span class="pcc-meta-line">${metaLine}</span>
           </div>
           <div class="pcc-detail-title">${pccEsc(displayTitle)}</div>
           ${whyLineHtml}
           ${learnedHtml}
           ${precedentHtml}
+          ${supplierGateHtml}
         </div>
         <div class="pcc-actions-row pcc-detail-hd-actions">
           ${issue.state === "waiting" ? '<button class="mqb primary" type="button" data-gen="nudge">✉ Nudge</button>' : ""}
@@ -8723,6 +8771,7 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
         ${summaryZoneHtml}
         ${suggestZoneHtml}
         ${deadlinesZoneHtml}
+        ${extractionZoneHtml}
         <div class="pcc-zone">
           <div class="pcc-zone-hd"><span>Progress</span><span class="pcc-zone-note">What happened, and what can be done about it</span><span class="pcc-stale-pill pcc-stale-${stale.cls}">${pccEsc(stale.label)}</span></div>
           <div class="pcc-tl">${timelineRows}</div>

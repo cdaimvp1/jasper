@@ -73,10 +73,13 @@ WEAK_SIGNAL_WINDOW_DAYS = 45
 # plain read of already-computed data instead of a live rescan.
 
 
-def _reference_ids_for_issue(issue_id: str) -> set:
+def reference_ids_for_issue(issue_id: str) -> set:
     """Every real, persisted PR#/PO# across this issue's own raw_items,
     uppercased for comparison. A raw_item with no recognized reference
-    contributes nothing (None), never a guess."""
+    contributes nothing (None), never a guess. Public (not underscore-
+    prefixed): enhancement #86 (issue detail panel reference-ID chip)
+    reuses this exact same set from server_lean.py rather than re-deriving
+    it - one real source, not two copies of the same read."""
     return {
         item["pr_number"].upper() for item in ws.get_raw_items_for_issue(issue_id)
         if item.get("pr_number")
@@ -89,10 +92,10 @@ def _vetoed_by_reference_mismatch(issue_id: str, sibling_id: str) -> bool:
     ANY of the strong-signal checks below (shared party/company/subject),
     since two different purchase requisitions are two different
     transactions no matter how similar their surrounding text looks."""
-    my_refs = _reference_ids_for_issue(issue_id)
+    my_refs = reference_ids_for_issue(issue_id)
     if not my_refs:
         return False
-    sibling_refs = _reference_ids_for_issue(sibling_id)
+    sibling_refs = reference_ids_for_issue(sibling_id)
     return bool(sibling_refs) and my_refs.isdisjoint(sibling_refs)
 
 

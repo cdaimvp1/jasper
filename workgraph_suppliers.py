@@ -119,28 +119,55 @@ def last_closed_issue_for_company(company: str, exclude_issue_id: Optional[str] 
     }
 
 
-def attach_supplier_precedent(issue: dict) -> dict:
-    """Mutates and returns `issue`: adds `supplier_precedent` (dict or
-    None) - the most recently closed issue with the SAME real external
-    supplier company, excluding this issue itself. A system-sender-only
-    party (e.g. Ariba's no-reply) never has a `company` set, so it's
-    naturally excluded rather than needing a separate check here.
+def _resolved_company_for_issue(issue_id: str) -> Optional[str]:
+    """The one real external supplier company for this issue, or None. A
+    system-sender-only party (e.g. Ariba's no-reply) never has a `company`
+    set, so it's naturally excluded rather than needing a separate check.
 
     Fixed 2026-07-30 (hardening pass #2): workgraph_store.
     list_parties_for_issue has no ORDER BY, so taking the first match
     from an unordered JOIN result was non-deterministic whenever an issue
     has more than one identifiable external company - two otherwise-
-    identical requests could get a different supplier's precedent.
-    first_seen_ts ascending (the earliest-known contact on this issue) is
-    a real, stable tie-break, not an arbitrary one."""
+    identical requests could resolve to a different supplier. first_seen_ts
+    ascending (the earliest-known contact on this issue) is a real, stable
+    tie-break, not an arbitrary one."""
     candidates = [
-        p for p in ws.list_parties_for_issue(issue["id"])
+        p for p in ws.list_parties_for_issue(issue_id)
         if p.get("affiliation") == "external" and p.get("company")
     ]
     candidates.sort(key=lambda p: p.get("first_seen_ts") or 0)
-    company = candidates[0]["company"] if candidates else None
+    return candidates[0]["company"] if candidates else None
+
+
+def other_gated_open_issue_count_for_company(company: str, exclude_issue_id: str) -> int:
+    """Enhancement #89 (issue detail panel): how many of this SAME
+    supplier's OTHER open issues are currently gated - real signal Marc
+    previously only saw by visiting the Handover panel's supplier list.
+    0 if there's no real company or nothing else is gated."""
+    if not company:
+        return 0
+    count = 0
+    for iid in ws.list_issues_for_company(company):
+        if iid == exclude_issue_id:
+            continue
+        other = ws.get_issue(iid)
+        if other and other["state"] in _OPEN_STATES and other.get("has_unmet_prerequisite"):
+            count += 1
+    return count
+
+
+def attach_supplier_precedent(issue: dict) -> dict:
+    """Mutates and returns `issue`: adds `supplier_precedent` (dict or
+    None) - the most recently closed issue with the SAME real external
+    supplier company, excluding this issue itself - and
+    `supplier_other_gated_count` - how many of this supplier's OTHER open
+    issues are currently gated (enhancement #89)."""
+    company = _resolved_company_for_issue(issue["id"])
     issue["supplier_precedent"] = (
         last_closed_issue_for_company(company, exclude_issue_id=issue["id"]) if company else None
+    )
+    issue["supplier_other_gated_count"] = (
+        other_gated_open_issue_count_for_company(company, exclude_issue_id=issue["id"]) if company else 0
     )
     return issue
 

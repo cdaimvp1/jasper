@@ -75,3 +75,29 @@ def test_list_open_key_facts_multiple_per_issue_all_included(ws_db):
     entries = wkf.list_open_key_facts()
 
     assert {e["text"] for e in entries} == {"first fact", "second fact"}
+
+
+# --- enhancement #87: per-issue scoping (issue detail panel) -------------
+
+def test_list_key_facts_for_issue_scoped_to_one_issue(ws_db):
+    iid = _issue_with_facts(ws_db, "Renewal", "pk1", ["Contract value is $2.4M"])
+    _issue_with_facts(ws_db, "Other", "pk2", ["unrelated fact"])
+
+    assert wkf.list_key_facts_for_issue(iid) == ["Contract value is $2.4M"]
+
+
+def test_list_key_facts_for_issue_includes_closed_issues(ws_db):
+    issue_id = ws_db.create_issue_with_new_id(title="Closed deal", state="done", category="other")
+    rid = ws_db.insert_raw_item(source="outlook_mail", stable_key="pk3", thread_key="pk3", dedupe_key="pk3",
+                                 occurred_ts=time.time(), subject="s", from_actor="a@example.com",
+                                 participants_json="[]")
+    ws_db.link_raw_item_to_issue(rid, issue_id)
+    ws_db.create_extraction(rid, json.dumps({"key_facts": ["closed-issue fact"]}))
+
+    assert wkf.list_key_facts_for_issue(issue_id) == ["closed-issue fact"]
+
+
+def test_list_key_facts_for_issue_empty_when_none(ws_db):
+    iid = ws_db.create_issue_with_new_id(title="No facts", state="active", category="other")
+
+    assert wkf.list_key_facts_for_issue(iid) == []

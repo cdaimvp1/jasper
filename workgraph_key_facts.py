@@ -42,3 +42,16 @@ def list_open_key_facts() -> list[dict]:
                 })
     entries.sort(key=lambda e: e["extracted_ts"], reverse=True)
     return entries
+
+
+def list_key_facts_for_issue(issue_id: str) -> list[str]:
+    """Enhancement #87 (issue detail panel): the same real field, scoped to
+    ONE issue's own extractions rather than every open issue - no state
+    filter, same reasoning as workgraph_asks_decisions._texts_for_issue."""
+    extractions_by_issue = ws.list_extractions_for_issues([issue_id])
+    out = []
+    for extraction in extractions_by_issue.get(issue_id, []):
+        for text in (extraction.get("extracted_json") or {}).get("key_facts") or []:
+            if isinstance(text, str) and text.strip():
+                out.append(text.strip())
+    return out

@@ -52,3 +52,25 @@ def list_open_asks() -> list[dict]:
 def list_open_decisions() -> list[dict]:
     """Same, for the `decisions` field."""
     return _rollup("decisions")
+
+
+def _texts_for_issue(issue_id: str, field_name: str) -> list[str]:
+    """Enhancement #87 (issue detail panel): the same real field, scoped to
+    ONE issue's own extractions rather than every open issue - no state
+    filter, since Marc looking at a specific issue (open or closed) should
+    still see what was actually asked/decided on it."""
+    extractions_by_issue = ws.list_extractions_for_issues([issue_id])
+    out = []
+    for extraction in extractions_by_issue.get(issue_id, []):
+        for text in (extraction.get("extracted_json") or {}).get(field_name) or []:
+            if isinstance(text, str) and text.strip():
+                out.append(text.strip())
+    return out
+
+
+def list_asks_for_issue(issue_id: str) -> list[str]:
+    return _texts_for_issue(issue_id, "asks")
+
+
+def list_decisions_for_issue(issue_id: str) -> list[str]:
+    return _texts_for_issue(issue_id, "decisions")

@@ -314,6 +314,46 @@ def test_list_suppliers_precedent_ignores_low_trust_lesson(ws_db):
     assert suppliers[0]["precedent"] is None
 
 
+def test_attach_supplier_precedent_includes_other_gated_count(ws_db):
+    """Enhancement #89: this supplier's OTHER open gated issues, not the
+    issue being viewed itself."""
+    _party(ws_db, "p1", "Acme")
+    other_gated = ws_db.create_issue_with_new_id(title="Sign this", state="active", category="other")
+    ws_db.link_party_to_issue(other_gated, "p1")
+    ws_db.update_issue(other_gated, has_unmet_prerequisite=1)
+
+    viewed_id = ws_db.create_issue_with_new_id(title="Viewing this one", state="active", category="other")
+    ws_db.link_party_to_issue(viewed_id, "p1")
+    issue = ws_db.get_issue(viewed_id)
+
+    wsup.attach_supplier_precedent(issue)
+
+    assert issue["supplier_other_gated_count"] == 1
+
+
+def test_attach_supplier_precedent_other_gated_count_excludes_self(ws_db):
+    """The issue being viewed must never count itself, even if it's the
+    gated one."""
+    _party(ws_db, "p1", "Acme")
+    viewed_id = ws_db.create_issue_with_new_id(title="Sign this", state="active", category="other")
+    ws_db.link_party_to_issue(viewed_id, "p1")
+    ws_db.update_issue(viewed_id, has_unmet_prerequisite=1)
+    issue = ws_db.get_issue(viewed_id)
+
+    wsup.attach_supplier_precedent(issue)
+
+    assert issue["supplier_other_gated_count"] == 0
+
+
+def test_attach_supplier_precedent_other_gated_count_zero_when_no_company(ws_db):
+    iid = ws_db.create_issue_with_new_id(title="No supplier", state="active", category="other")
+    issue = ws_db.get_issue(iid)
+
+    wsup.attach_supplier_precedent(issue)
+
+    assert issue["supplier_other_gated_count"] == 0
+
+
 def test_supplier_detail_includes_gated_count_and_precedent(ws_db):
     _party(ws_db, "p1", "Acme")
     gated = ws_db.create_issue_with_new_id(title="Sign this", state="active", category="contract")

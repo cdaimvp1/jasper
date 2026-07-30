@@ -202,6 +202,7 @@
 .mqwdesc{font-size:11.5px;color:var(--mut);margin-top:3px;line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .mqw-reason{font-size:10.5px;color:var(--mut2);margin-top:3px;font-family:var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .mqw-reason-warn{color:var(--amber-d)}
+.pcc-why-line{font-size:11.5px;color:var(--mut2);margin-top:8px;font-family:var(--mono);line-height:1.4}
 .mqwrowmeta{display:flex;gap:6px;align-items:center;margin-top:6px;flex-wrap:wrap}
 .mqw-chip{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.03em;padding:1px 7px;border:1px solid var(--line2);color:var(--mut);white-space:nowrap;background:var(--surface)}
 .mqw-chip.status-active{color:var(--red);border-color:var(--red)}
@@ -2731,6 +2732,8 @@ html[data-theme="dark"]{--header:#0A0A0A;--tint-8fb3f0:#19253a;--tint-9fb4d2:#17
 .pcc-zone{margin-top:18px}
 .pcc-zone-hd{display:flex;align-items:center;justify-content:space-between;font-family:var(--sans);font-weight:800;font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--ink);margin-bottom:8px;padding-bottom:6px;border-bottom:1.5px solid var(--ink)}
 .pcc-task-row{display:flex;align-items:center;gap:9px;padding:7px 0;border-bottom:1px solid var(--line)}
+.pj-issue-row{margin:0 -8px;padding:7px 8px;border-radius:6px}
+.pj-issue-row:hover{background:var(--bg)}
 .pcc-task-row:last-child{border-bottom:none}
 .pcc-task-check{width:20px;height:20px;border-radius:6px;border:1.5px solid var(--line2);background:var(--surface);cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--bblue);flex:none;padding:0}
 .pcc-task-check.pcc-task-done{background:var(--blue-t);border-color:var(--blue-d)}
@@ -3775,6 +3778,7 @@ body.ownerlock #ownernote{display:block}
 .mqw-reason{font-size:11px;color:var(--lk-mut2);margin-top:3px;font-family:var(--mono);
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .mqw-reason-warn{color:var(--amber-d)}
+.pcc-why-line{font-size:12px;color:var(--lk-mut2);margin-top:8px;font-family:var(--mono);line-height:1.4}
 .mqwrowmeta{margin-top:7px;gap:7px}
 /* status is monochrome graphite; only a real blocker earns red */
 .mqw-chip{font-size:10.5px;font-weight:600;padding:2px 9px;border-radius:999px;
@@ -5951,6 +5955,7 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
   // boost is applied server-side and shown here so the "why" is transparent + cited.
   function mqEscL(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
   function mqLearn(t){var l=t.learned;if(!l||!l.statement)return '';var cf=(l.confidence==='high'||l.confidence==='medium'||l.confidence==='low')?l.confidence:'medium';return '<div class="mqlearn"><span class="lk">✦ Total Recall</span><span class="lt">'+mqEscL(l.statement)+'</span><span class="lc mqlc-'+cf+'">'+cf+' trust</span></div>';}
+  window.mqLearn = mqLearn;  // reused by pccRenderDetail (separate IIFE) for the PCC Detail pane's learned-precedent line
   // Shared approval drawer (chain), routes the approval task through the SAME
   // component (assets/approval-chain.js) used by Approvals + project-details, so
   // the identical drawer renders from Tasks too. Guarded: if the component is not
@@ -8131,6 +8136,15 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
         <p class="abstain-resolve"><strong>What would resolve it:</strong> more recent evidence, or an explicit reply, would raise this above low confidence.</p>
       </div></div>` : "";
 
+    // "Why this rank" - the abstain card above already shows nba_reason for
+    // Low-confidence issues, but Medium/High-confidence issues previously
+    // showed no reasoning at all in PCC Detail (task #70 gap) even though
+    // the Morning Queue list row right next to it does. Persistent, not
+    // gated to a confidence tier.
+    const whyLineHtml = (issue.confidence_tier !== "L" && issue.nba_reason)
+      ? `<div class="pcc-why-line${issue.has_unmet_prerequisite ? " mqw-reason-warn" : ""}">${pccEsc(issue.nba_reason)}</div>` : "";
+    const learnedHtml = window.mqLearn ? window.mqLearn(issue) : "";
+
     // Progress pairs each event with what the system can do about it. The
     // recommendation column is optional and stays empty when the event carries
     // none - "if any", per the locked design. `recommendation` is not in the
@@ -8261,6 +8275,8 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
             <span class="pcc-meta-line">${metaLine}</span>
           </div>
           <div class="pcc-detail-title">${pccEsc(displayTitle)}</div>
+          ${whyLineHtml}
+          ${learnedHtml}
         </div>
         <div class="pcc-actions-row pcc-detail-hd-actions">
           ${issue.state === "waiting" ? '<button class="mqb primary" type="button" data-gen="nudge">✉ Nudge</button>' : ""}
@@ -8382,6 +8398,7 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
     }
   }
   window.pccShowView = pccShowView;  // exposed for the left-rail nav script (separate scope)
+  window.pccSelectIssue = pccSelectIssue;  // exposed so the Projects view (separate scope) can jump an issue row straight into PCC Detail (task #70)
   document.getElementById("cpViewMyWorkBtn").addEventListener("click", () => { if (!cpViewMyWorkBtn.disabled) pccShowView("mywork"); });
   document.getElementById("cpViewPccBtn").addEventListener("click", () => pccShowView("pcc"));
   // My Work is disabled (grayed tab, see CSS + the `disabled` attribute on the button
@@ -9034,15 +9051,24 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
       } catch (e) { /* row just renders without party chips */ }
     }));
     const body = document.getElementById("pjProjectDetail");
-    const issueRows = issues.map(iss => {
+    // issues arrives pre-sorted priority_score DESC (workgraph_store.
+    // list_issues_for_project) - the rank badge below just makes that order
+    // visible, rather than leaving it as an invisible fetch-order fact (task
+    // #70 gap). Rows are clickable straight into PCC Detail (also task #70 -
+    // this list used to be read-only, with no way to act on what it showed).
+    const issueRows = issues.map((iss, idx) => {
       const full = pjIssueDetailCache[iss.id];
       const parties = (full && full.parties) || [];
       const chips = parties.length
         ? `<div class="pcc-actions-row" style="margin-top:6px">${parties.map(p => window.renderPartyChip(p)).join("")}</div>` : "";
-      return `<div class="pcc-task-row" style="align-items:flex-start">
-        <div style="flex:1">
+      const reasonHtml = iss.nba_reason
+        ? `<div class="mqw-reason${iss.has_unmet_prerequisite ? " mqw-reason-warn" : ""}">${pjEsc(iss.nba_reason)}</div>` : "";
+      return `<div class="pcc-task-row pj-issue-row" data-id="${pjEsc(iss.id)}" style="align-items:flex-start;cursor:pointer">
+        <div class="mqw-chip" style="flex:none;margin-top:1px">#${idx + 1}</div>
+        <div style="flex:1;min-width:0">
           <div class="mqwt">${pjEsc(iss.title)}</div>
           <div class="mqwmeta">${pjEsc(iss.state)}${iss.due ? " · due " + pjEsc(iss.due) : ""}</div>
+          ${reasonHtml}
           ${chips}
         </div>
       </div>`;
@@ -9109,6 +9135,13 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
         <div class="pcc-zone-hd"><span>Related documents</span></div>
         ${docRows}
       </div>`;
+    body.querySelectorAll(".pj-issue-row").forEach(row => {
+      row.addEventListener("click", () => {
+        const issueId = row.getAttribute("data-id");
+        if (window.pccShowView) window.pccShowView("pcc");
+        if (window.pccSelectIssue) window.pccSelectIssue(issueId);
+      });
+    });
   }
 
   // ---- Parties lane: standalone review list ------------------------------

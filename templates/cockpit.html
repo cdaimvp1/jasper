@@ -3819,6 +3819,42 @@ body.ownerlock #ownernote{display:block}
 .pcc-doc-row:hover{background:var(--lk-panel)}
 @media(max-width:1200px){.pcc-tl-row{grid-template-columns:1fr}.pcc-tl-rec-none{display:none}}
 } /* close #cp-view-pcc scoping wrapper opened above, right after :root{} */
+
+/* Fixed 2026-07-29: same scoping bug class as the #hello/masthead fix above,
+   found via a screenshot of the Back Office drawer's search box rendering
+   with zero custom styling (default browser input) and its filter chips
+   rendering in the OLDER bordered-box style instead of the underline-tab
+   style. Root cause: .cp-chat-cmd/.cp-chat-search/.cp-chat-filters/
+   .cp-chat-filter-btn's real styling lives ONLY inside the #cp-view-pcc{}
+   wrapper above, but buildAmbientAssistant() moves the whole chat-panel node
+   (id="cpChatPanel") to wherever it's needed via appendChild - on the
+   Home/My-Work view (no #cp-view-pcc ancestor there), the drawer falls
+   outside that scope entirely, landing on nothing for the search box and the
+   OLD pre-LK-redesign rules for the filter buttons (still present, unscoped,
+   further up this file). Rather than re-nest the huge existing block (risk
+   of breaking what already works inside PCC), duplicating just these 4
+   selectors here - OUTSIDE any scope - makes them apply everywhere the
+   ambient drawer actually lives, Home included. --lk-* tokens are already
+   real custom properties on :root (defined further up, deliberately OUTSIDE
+   the #cp-view-pcc wrapper too - see that comment), so they resolve
+   correctly here regardless of ancestry. Wherever the drawer IS inside
+   #cp-view-pcc, this and the scoped block agree exactly - not a conflict. */
+.cp-chat-cmd{padding:8px 10px;flex:none;border-bottom:1px solid var(--lk-line);background:var(--lk-surface)}
+.cp-chat-search{
+  width:100%;box-sizing:border-box;height:31px;border:1px solid transparent;
+  background:var(--lk-panel);border-radius:var(--lk-r-c);padding:0 11px;
+  font:400 13px var(--sans);color:var(--lk-ink);outline:none;-webkit-appearance:none;min-width:0}
+.cp-chat-search:hover{background:#EFECE6}
+.cp-chat-search:focus{background:#fff;border-color:var(--lk-mut2)}
+.cp-chat-filters{display:flex;gap:2px;padding:0 10px;flex:none;
+  border-bottom:1px solid var(--lk-line);background:var(--lk-surface);margin:0;overflow-x:auto}
+.cp-chat-filter-btn{
+  background:none!important;border:none;border-radius:0;padding:9px 10px 8px;
+  color:var(--lk-mut);font:600 12.5px var(--sans);cursor:pointer;position:relative;white-space:nowrap}
+.cp-chat-filter-btn:hover{color:var(--lk-ink)}
+.cp-chat-filter-btn.on{color:var(--w-hue,var(--lk-ink))}
+.cp-chat-filter-btn.on::after{content:"";position:absolute;left:10px;right:10px;bottom:0;
+  height:2px;background:var(--w-hue,var(--lk-pri));border-radius:2px 2px 0 0}
 </style>
 </head>
 <body>

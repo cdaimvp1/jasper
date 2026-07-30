@@ -73,6 +73,7 @@ import workgraph_deadlines
 import workgraph_signal_trends
 import workgraph_aristotle
 import workgraph_export
+import workgraph_commitments
 
 
 PORT = int(os.environ.get("TEAM_PORT", "8700"))  # born-local default (Tia's live-review catch, 2026-07-23):
@@ -1317,6 +1318,15 @@ async def api_value_at_risk():
     the frontend must present this as "value found in open threads," not
     as a certain "at risk" claim."""
     return JSONResponse(sanitize_surrogates(workgraph_nba.value_at_risk_rollup()))
+
+
+@app.get("/api/workgraph/commitments")
+async def api_commitments():
+    """Task #73 (Commitments Tracker). See workgraph_commitments.py's
+    docstring for why this isn't scoped to "Marc's own" commitments -
+    the underlying extraction doesn't attribute who made each one, and a
+    keyword guess would repeat the Ariba expiration-date mistake."""
+    return JSONResponse(sanitize_surrogates({"commitments": workgraph_commitments.list_open_commitments()}))
 
 
 @app.get("/api/workgraph/deadline-radar")

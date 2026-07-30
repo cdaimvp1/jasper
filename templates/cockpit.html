@@ -4158,6 +4158,23 @@ body.ownerlock #ownernote{display:block}
           <div class="pcc-var-body" id="pccVarTop"></div>
         </details>
       </div>
+      <!-- task #73: Commitments Tracker. Named that, not "What I Owe" -
+           the underlying extraction (raw_item_extractions.commitments)
+           doesn't attribute WHO made each commitment, and real data
+           checked before building this showed a keyword guess for "Marc's
+           own" would be unreliable (same lesson as the Ariba expiration-
+           date signal, task #61/#72). Surfaces every real commitment
+           verbatim; Marc's own reading decides whose it is. -->
+      <div class="card pcc-var-card" id="pccCommitCard" style="display:none">
+        <details>
+          <summary class="pcc-var-summary">
+            <span class="pcc-var-total" id="pccCommitCount"></span>
+            <span class="pcc-var-label">commitments mentioned in open threads</span>
+            <span class="pcc-var-caveat">not attributed to you specifically — read to judge whose</span>
+          </summary>
+          <div class="pcc-var-body" id="pccCommitList"></div>
+        </details>
+      </div>
       <!-- task #64: Deadline Radar. Two tiers, never merged - see workgraph_
            deadlines.py's docstring for why (the Ariba expiration-date signal
            was found wrong ~98% of the time when auto-parsed as a real
@@ -7900,6 +7917,36 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
     }
   }
 
+  // --- task #73: Commitments Tracker ---------------------------------------
+  async function pccLoadCommitments() {
+    let d;
+    try {
+      const r = await fetch("/api/workgraph/commitments", { cache: "no-store" });
+      if (!r.ok) throw new Error(`commitments fetch failed: ${r.status}`);
+      d = await r.json();
+    } catch (e) {
+      console.error("pccLoadCommitments failed:", e);
+      return;
+    }
+    const card = document.getElementById("pccCommitCard");
+    if (!card) return;
+    const commitments = d.commitments || [];
+    if (!commitments.length) { card.style.display = "none"; return; }
+    card.style.display = "";
+    document.getElementById("pccCommitCount").textContent = commitments.length;
+    const listEl = document.getElementById("pccCommitList");
+    if (listEl) {
+      listEl.innerHTML = commitments.map(c => `
+        <div class="pcc-radar-row pcc-radar-row-mentioned" data-id="${pccEsc(c.issue_id)}">
+          <span class="pcc-radar-title">${pccEsc(c.title)}</span>
+          <span class="pcc-radar-mention-text">${pccEsc(c.text)}</span>
+        </div>`).join("");
+      listEl.querySelectorAll(".pcc-radar-row").forEach(row => {
+        row.addEventListener("click", () => pccSelectIssue(row.getAttribute("data-id")));
+      });
+    }
+  }
+
   // --- task #64: Deadline Radar --------------------------------------------
   async function pccLoadDeadlineRadar() {
     let d;
@@ -8696,6 +8743,7 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
       setInterval(pccLoadIssues, 20000);
       pccLoadDeadlineRadar();
       pccLoadValueAtRisk();
+      pccLoadCommitments();
     }
   }
   window.pccShowView = pccShowView;  // exposed for the left-rail nav script (separate scope)

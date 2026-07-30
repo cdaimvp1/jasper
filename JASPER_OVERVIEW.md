@@ -1,6 +1,6 @@
 # Jasper: A Working Overview
 
-*The closest thing to a project-management system for work that doesn't have one — an overview for anyone deciding whether it's worth adopting*
+*JASPER — Just Another System for Planning, Execution, & Routing. The closest thing to a project-management system for work that doesn't have one — an overview for anyone deciding whether it's worth adopting*
 
 ---
 

@@ -127,7 +127,13 @@
 .mqrefresh{position:absolute;top:14px;right:50px;width:30px;height:30px;border-radius:9px;border:none;background:transparent;color:var(--mut);cursor:pointer;display:flex;align-items:center;justify-content:center}
 .mqrefresh:hover{background:var(--bg);color:var(--red)}
 .mqrefresh svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:2}
-.mqrefresh.spin svg{animation:mqspin .7s linear}
+/* infinite (fixed 2026-07-29): a single .7s spin used to be plenty when this
+   button only re-rendered already-loaded client data; now that manual
+   refresh triggers a real backend ingest pass (can run several seconds),
+   one non-repeating spin would visually stop well before the work is done.
+   Looping while .spin is applied, removed in JS once the fetch settles. */
+.mqrefresh.spin svg{animation:mqspin .7s linear infinite}
+.mqrefresh:disabled{cursor:default;opacity:.6}
 @keyframes mqspin{from{transform:rotate(0)}to{transform:rotate(360deg)}}
 .mqrefreshed{font-family:var(--mono);font-size:10px;color:var(--mut2);margin-top:4px}
 /* --- task states: Open / Done & dismissed view toggle (segmented) ---------- */
@@ -6465,7 +6471,37 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
   // --- auto-refresh (hourly) + manual refresh icon + last-refreshed stamp ------
   var mqLast=null;
   function mqStamp(){mqLast=new Date();var el=document.getElementById('mqrefreshed');if(el)el.textContent='Updated '+mqLast.toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});}
-  window.mqRefresh=function(manual){var b=document.getElementById('mqrefreshbtn');if(b&&manual){b.classList.add('spin');setTimeout(function(){b.classList.remove('spin');},700);}mqRender();mqStamp();if(manual)mqToast('Refreshed, re-pulled your queue from the work graph');};
+  // Fixed 2026-07-29: "Refresh now" used to only re-render already-loaded
+  // client-side data (mqRender() below) - it never actually asked the
+  // backend to go re-check mail. A manual refresh now calls
+  // POST /api/cockpit/refresh first (real ingest + classify + NBA + alerts,
+  // guarded server-side against two overlapping runs), then re-renders once
+  // that completes. The hourly auto-refresh (manual=false/undefined) is left
+  // as a pure client-side re-render, same as before - only the explicit
+  // button click triggers a real backend pass.
+  var mqRefreshInFlight=false;
+  window.mqRefresh=function(manual){
+   var b=document.getElementById('mqrefreshbtn');
+   if(!manual){mqRender();mqStamp();return;}
+   if(mqRefreshInFlight){mqToast('A refresh is already in progress'); return;}
+   mqRefreshInFlight=true;
+   if(b){b.classList.add('spin');b.disabled=true;}
+   fetch('/api/cockpit/refresh',{method:'POST'})
+    .then(function(r){
+     if(r.status===409){mqToast('A refresh is already in progress'); return null;}
+     if(!r.ok) throw new Error('refresh failed');
+     return r.json();
+    })
+    .then(function(result){
+     mqRender();mqStamp();
+     if(result) mqToast('Refreshed — re-checked mail and re-scored your queue');
+    })
+    .catch(function(){ mqToast('Refresh failed — see server logs'); })
+    .finally(function(){
+     mqRefreshInFlight=false;
+     if(b){b.classList.remove('spin');b.disabled=false;}
+    });
+  };
   function mqInjectHeader(){var head=document.querySelector('#mqdrawer .mqhead');if(!head||document.getElementById('mqrefreshbtn'))return;
    var b=document.createElement('button');b.id='mqrefreshbtn';b.className='mqrefresh';b.title='Refresh now';b.setAttribute('aria-label','Refresh tasks + work graph');
    b.innerHTML='<svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 11-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>';

@@ -1647,20 +1647,38 @@ async def api_cockpit_action(body: CockpitActionBody):
     return JSONResponse({"ok": True, "pending_action_id": pending_id, "message_id": result.get("message_id")})
 
 
+_cockpit_refresh_in_flight = False
+
+
 @app.post("/api/cockpit/refresh")
 async def api_cockpit_refresh():
     """Synchronous mail re-ingest + classify + re-score, for the cockpit's
     'Refresh' button — mail doesn't need a worker wake (pure COM automation),
     so this returns fresh results immediately rather than waiting on relay's
     own scheduled cadence. Teams/Calendar/SharePoint still need relay's wake
-    (the MCP tools aren't reachable from this plain server process)."""
+    (the MCP tools aren't reachable from this plain server process).
+
+    In-flight guard (added 2026-07-29): this endpoint existed but was never
+    actually wired to a UI button - the cockpit's "Refresh now" control only
+    re-rendered already-loaded client-side data, never called this. Now that
+    it's wired for real (see mqRefresh in cockpit.html), a real ingest pass
+    can take several seconds; refusing a second concurrent call (409, not a
+    silent queue or a second overlapping ingest) is cheap insurance against
+    mashing the button twice."""
+    global _cockpit_refresh_in_flight
+    if _cockpit_refresh_in_flight:
+        raise HTTPException(409, "a refresh is already in progress")
+    _cockpit_refresh_in_flight = True
     try:
-        ingest_result = outlook_com_ingest.run()
-    except Exception as e:
-        ingest_result = {"ok": False, "error": str(e)}
-    classify_result = workgraph_classify.run()
-    nba_result = workgraph_nba.recompute_all()
-    alerts_result = workgraph_alerts.run()
+        try:
+            ingest_result = outlook_com_ingest.run()
+        except Exception as e:
+            ingest_result = {"ok": False, "error": str(e)}
+        classify_result = workgraph_classify.run()
+        nba_result = workgraph_nba.recompute_all()
+        alerts_result = workgraph_alerts.run()
+    finally:
+        _cockpit_refresh_in_flight = False
     return JSONResponse({"ingest": ingest_result, "classify": classify_result, "nba": nba_result,
                         "alerts": alerts_result})
 

@@ -294,3 +294,114 @@ def test_check_prerequisites_falls_back_to_generic_wording_without_reason(ws_db)
 
     result = ar.check_prerequisites(issue_id, raw_items)
     assert "ariba_pr_fully_approved" in result["warning"]
+
+
+# --- task #67: gate_board -----------------------------------------------
+
+def test_gate_board_empty_when_nothing_exists(ws_db):
+    board = ar.gate_board()
+    assert board == {"active": [], "pending": [], "inactive": []}
+
+
+def test_gate_board_counts_a_currently_gated_issue(ws_db):
+    issue_id = _issue(ws_db)
+    _raw_item(ws_db, issue_id, "signature_requested_docusign", "gb1")
+    rule_id = ws_db.create_prerequisite_rule(
+        trigger_signal_type="signature_requested_docusign", requires_signal_type="ariba_pr_fully_approved",
+        match_on="project", reason="an approved PO", created_by="marc",
+    )
+
+    board = ar.gate_board()
+
+    assert len(board["active"]) == 1
+    assert board["active"][0]["id"] == rule_id
+    assert board["active"][0]["currently_gating"] == 1
+
+
+def test_gate_board_active_rule_with_zero_gated_issues_is_still_listed(ws_db):
+    ws_db.create_prerequisite_rule(
+        trigger_signal_type="signature_requested_docusign", requires_signal_type="ariba_pr_fully_approved",
+        match_on="project", reason="x", created_by="marc",
+    )
+
+    board = ar.gate_board()
+
+    assert len(board["active"]) == 1
+    assert board["active"][0]["currently_gating"] == 0
+
+
+def test_gate_board_satisfied_prerequisite_does_not_count_as_gating(ws_db):
+    project_id = ws_db.create_project_with_new_id(name="P", category="other")
+    trigger_issue = _issue(ws_db, project_id=project_id)
+    requires_issue = _issue(ws_db, title="req", project_id=project_id)
+    _raw_item(ws_db, trigger_issue, "signature_requested_docusign", "gb2")
+    _raw_item(ws_db, requires_issue, "ariba_pr_fully_approved", "gb3")
+    ws_db.create_prerequisite_rule(
+        trigger_signal_type="signature_requested_docusign", requires_signal_type="ariba_pr_fully_approved",
+        match_on="project", reason="x", created_by="marc",
+    )
+
+    board = ar.gate_board()
+
+    assert board["active"][0]["currently_gating"] == 0
+
+
+def test_gate_board_sorts_active_rules_by_currently_gating_descending(ws_db):
+    rule_a = ws_db.create_prerequisite_rule(
+        trigger_signal_type="signature_requested_docusign", requires_signal_type="ariba_pr_fully_approved",
+        match_on="project", reason="x", created_by="marc",
+    )
+    rule_b = ws_db.create_prerequisite_rule(
+        trigger_signal_type="signature_requested", requires_signal_type="ariba_pr_approval_needed",
+        match_on="project", reason="y", created_by="marc",
+    )
+    for i in range(3):
+        issue_id = _issue(ws_db, title=f"gated-{i}")
+        _raw_item(ws_db, issue_id, "signature_requested", f"gb4-{i}")
+
+    board = ar.gate_board()
+
+    assert [r["id"] for r in board["active"]] == [rule_b, rule_a]
+    assert board["active"][0]["currently_gating"] == 3
+    assert board["active"][1]["currently_gating"] == 0
+
+
+def test_gate_board_includes_pending_suggestions(ws_db):
+    sid = ws_db.create_prerequisite_suggestion(
+        origin="taught_via_chat", trigger_signal_type="signature_requested_docusign",
+        requires_signal_type="ariba_pr_fully_approved", match_on="project",
+        reason="x", evidence=None, raw_explanation="x", proposed_by="marc",
+    )
+
+    board = ar.gate_board()
+
+    assert len(board["pending"]) == 1
+    assert board["pending"][0]["id"] == sid
+
+
+def test_gate_board_excludes_resolved_suggestions(ws_db):
+    sid = ws_db.create_prerequisite_suggestion(
+        origin="taught_via_chat", trigger_signal_type="signature_requested_docusign",
+        requires_signal_type="ariba_pr_fully_approved", match_on="project",
+        reason="x", evidence=None, raw_explanation="x", proposed_by="marc",
+    )
+    ws_db.resolve_prerequisite_suggestion(sid, "rejected")
+
+    board = ar.gate_board()
+
+    assert board["pending"] == []
+
+
+def test_gate_board_lists_deactivated_rules_as_inactive_without_gating_count(ws_db):
+    rule_id = ws_db.create_prerequisite_rule(
+        trigger_signal_type="signature_requested_docusign", requires_signal_type="ariba_pr_fully_approved",
+        match_on="project", reason="x", created_by="marc",
+    )
+    ws_db.set_prerequisite_rule_active(rule_id, False)
+
+    board = ar.gate_board()
+
+    assert board["active"] == []
+    assert len(board["inactive"]) == 1
+    assert board["inactive"][0]["id"] == rule_id
+    assert "currently_gating" not in board["inactive"][0]

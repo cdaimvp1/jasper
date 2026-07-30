@@ -167,6 +167,17 @@
   <summary style="cursor:pointer;font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667)">Rules &amp; overrides</summary>
   <div style="margin-top:10px">
 
+  <!-- ── Gate Board (added 2026-07-30, task #67) ───────────────────────── -->
+  <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:0 0 10px">Gate Board</div>
+  <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px;margin-bottom:20px">
+    <div style="color:var(--muted,#667);font-size:13px;margin-bottom:12px">
+      Every prerequisite rule at a glance, with how many currently-open issues each one is actually gating right
+      now — computed live each time you load this, not a separate counter that could drift. A rule gating zero
+      issues isn't wrong, just dormant right now.
+    </div>
+    <div id="gateboard-list">Loading…</div>
+  </div>
+
   <!-- ── Aristotle: prerequisite rules (added 2026-07-29, task #51) ────── -->
   <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:16px 0 10px">Prerequisite rules (Aristotle)</div>
   <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px">
@@ -513,6 +524,30 @@
     }catch(e){ prlForgetFb.textContent = 'error'; }
   });
 
+  // ── Gate Board (task #67) ────────────────────────────────────────────────
+  const gateboardList = document.getElementById('gateboard-list');
+  function gateboardRender(board){
+    if(!board.active.length && !board.pending.length && !board.inactive.length){
+      gateboardList.innerHTML = '<div style="color:var(--muted,#667);font-size:13px">No rules yet — add one below, or teach one in Back Office chat with #addrule.</div>';
+      return;
+    }
+    const activeHtml = board.active.length ? board.active.map(r => `
+      <div style="display:flex;align-items:baseline;gap:10px;padding:6px 0;border-bottom:1px solid var(--border,#eee);font-size:13px">
+        <span style="font-weight:600">${esc(r.trigger_signal_type)} <span style="color:var(--muted,#999);font-weight:400">needs</span> ${esc(r.requires_signal_type)}</span>
+        <span style="margin-left:auto;font:700 11px monospace;padding:2px 8px;border-radius:20px;white-space:nowrap;background:${r.currently_gating > 0 ? 'var(--amber-t,#fbf1da)' : 'var(--bg,#fafafa)'};color:${r.currently_gating > 0 ? 'var(--amber-d,#8a5a00)' : 'var(--muted,#999)'}">gating ${r.currently_gating}</span>
+      </div>`).join('') : '<div style="color:var(--muted,#667);font-size:13px;padding:6px 0">No active rules yet.</div>';
+    const pendingHtml = board.pending.length
+      ? `<div style="margin-top:10px;font-size:12px;color:var(--muted,#888)">${board.pending.length} suggestion${board.pending.length === 1 ? '' : 's'} awaiting confirmation — see Suggested rules below.</div>` : '';
+    const inactiveHtml = board.inactive.length
+      ? `<div style="margin-top:4px;font-size:12px;color:var(--muted,#888)">${board.inactive.length} deactivated rule${board.inactive.length === 1 ? '' : 's'}.</div>` : '';
+    gateboardList.innerHTML = activeHtml + pendingHtml + inactiveHtml;
+  }
+  function gateboardLoad(){
+    return fetch('/api/workgraph/gate-board').then(r => r.json()).then(gateboardRender)
+      .catch(() => { gateboardList.textContent = 'Could not load.'; });
+  }
+  gateboardLoad();
+
   // ── Aristotle: prerequisite rules ──────────────────────────────────────
   const arList = document.getElementById('ar-rules-list');
   const arTrigger = document.getElementById('ar-trigger');
@@ -548,7 +583,7 @@
     arList.querySelectorAll('[data-ar-delete]').forEach(btn => btn.addEventListener('click', async () => {
       if(!confirm('Delete this prerequisite rule?')) return;
       await fetch(`/api/settings/prerequisite-rules/${btn.getAttribute('data-ar-delete')}`, {method:'DELETE'});
-      arLoad();
+      arLoad(); gateboardLoad();
     }));
   }
   function arLoad(){
@@ -568,7 +603,7 @@
         body:JSON.stringify({trigger_signal_type: arTrigger.value, requires_signal_type: arRequires.value,
           match_on: arMatchOn.value, reason: arReason.value})});
       const d = await r.json();
-      if(r.ok){ arFb.textContent = '✓ added'; arReason.value=''; setTimeout(()=>arFb.textContent='',2000); arLoad(); }
+      if(r.ok){ arFb.textContent = '✓ added'; arReason.value=''; setTimeout(()=>arFb.textContent='',2000); arLoad(); gateboardLoad(); }
       else { arFb.textContent = d.detail || 'error'; }
     }catch(e){ arFb.textContent = 'error'; }
   });
@@ -609,7 +644,7 @@
     try{
       const r = await fetch(`/api/settings/prerequisite-rule-suggestions/${id}/resolve`,{method:'POST',
         headers:{'Content-Type':'application/json'}, body:JSON.stringify({action})});
-      if(r.ok){ arsugFb.textContent = ''; arsugLoad(); arLoad(); }
+      if(r.ok){ arsugFb.textContent = ''; arsugLoad(); arLoad(); gateboardLoad(); }
       else { const d = await r.json().catch(()=>({})); arsugFb.textContent = d.detail || 'error'; setTimeout(()=>arsugFb.textContent='',3000); }
     }catch(e){ arsugFb.textContent = 'error'; setTimeout(()=>arsugFb.textContent='',3000); }
   }

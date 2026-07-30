@@ -71,6 +71,7 @@ import workgraph_lessons
 import workgraph_socrates
 import workgraph_deadlines
 import workgraph_signal_trends
+import workgraph_aristotle
 
 
 PORT = int(os.environ.get("TEAM_PORT", "8700"))  # born-local default (Tia's live-review catch, 2026-07-23):
@@ -1258,6 +1259,14 @@ async def api_workgraph_issues_bulk_status(body: BulkIssueStatusBody):
         wg.update_issue(issue_id, state=body.state)
         updated.append(issue_id)
     return JSONResponse({"ok": True, "updated": updated, "missing": missing})
+
+
+@app.get("/api/workgraph/gate-board")
+async def api_gate_board():
+    """Task #67 (Gate Board): a portfolio view of every Aristotle
+    prerequisite rule - see workgraph_aristotle.gate_board's docstring for
+    why "currently_gating" is computed live rather than a stored counter."""
+    return JSONResponse(sanitize_surrogates(workgraph_aristotle.gate_board()))
 
 
 @app.get("/api/workgraph/signal-trends")

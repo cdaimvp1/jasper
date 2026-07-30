@@ -224,3 +224,39 @@ def check_prerequisites(issue_id: str, raw_items: list[dict]) -> Optional[dict]:
             if not _prerequisite_satisfied(issue_id, rule):
                 return {"warning": _build_warning(rule), "rule_id": rule["id"]}
     return None
+
+
+def gate_board() -> dict:
+    """Task #67 (Gate Board): a portfolio view of every prerequisite rule -
+    active rules, each annotated with how many currently-open issues it is
+    ACTUALLY gating right now; pending suggestions awaiting confirmation
+    (detected or chat-taught, task #52/#54); and inactive/deactivated rules
+    kept for the record. Zero LLM, zero new schema.
+
+    "currently_gating" is computed live by running the exact same
+    check_prerequisites() every issue's own NBA score already calls - never
+    a separately-tracked counter that could drift from what the app is
+    actually doing right now. A rule that's active but currently gating
+    zero issues is real, useful information (it's dormant, not wrong)."""
+    active_rules = ws.list_prerequisite_rules(active_only=True)
+    all_rules = ws.list_prerequisite_rules(active_only=False)
+    inactive_rules = [r for r in all_rules if not r["active"]]
+
+    gating_counts: dict[int, int] = {rule["id"]: 0 for rule in active_rules}
+    open_issues = ws.list_issues(states=["active", "waiting", "blocked"], limit=1000)
+    for issue in open_issues:
+        raw_items = ws.get_raw_items_for_issue(issue["id"])
+        result = check_prerequisites(issue["id"], raw_items)
+        if result and result["rule_id"] in gating_counts:
+            gating_counts[result["rule_id"]] += 1
+
+    active_with_counts = [
+        {**rule, "currently_gating": gating_counts[rule["id"]]} for rule in active_rules
+    ]
+    active_with_counts.sort(key=lambda r: r["currently_gating"], reverse=True)
+
+    return {
+        "active": active_with_counts,
+        "pending": ws.list_prerequisite_suggestions("pending"),
+        "inactive": inactive_rules,
+    }

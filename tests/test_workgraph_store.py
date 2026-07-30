@@ -170,6 +170,76 @@ def test_alerts_migration_preserves_existing_rows_from_old_schema(ws_db):
     assert new_id is not None
 
 
+def test_alerts_migration_is_crash_safe(ws_db, monkeypatch):
+    """Fixed (adversarial review, task #61): the migration used to run as 4
+    independent autocommit statements - a crash between RENAME and DROP
+    permanently orphaned the real data under alerts_pre_task55 behind a
+    fresh, EMPTY alerts table. Wrapped in an explicit transaction, SQLite's
+    DDL is fully atomic: this simulates a genuine crash (an exception that
+    isn't the caught sqlite3.OperationalError) firing right after the RENAME
+    step, and proves the ORIGINAL table+row survives untouched - nothing was
+    ever committed, so nothing was ever lost."""
+    conn = ws_db._connect()
+    conn.execute("DROP TABLE alerts")
+    conn.execute("""
+        CREATE TABLE alerts (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            issue_id     TEXT,
+            kind         TEXT NOT NULL CHECK (kind IN ('stale','high_priority_ask','anomaly','stuck_action')),
+            severity     TEXT NOT NULL CHECK (severity IN ('info','warn','critical')),
+            summary      TEXT NOT NULL,
+            source_ref   TEXT,
+            created_ts   REAL NOT NULL,
+            dismissed    INTEGER NOT NULL DEFAULT 0,
+            dismissed_ts REAL
+        )
+    """)
+    conn.execute(
+        "INSERT INTO alerts (issue_id, kind, severity, summary, created_ts) VALUES (NULL, 'stale', 'warn', 'must survive a crash', 1.0)"
+    )
+    conn.close()
+
+    real_connect = sqlite3.connect
+    call_count = {"renames": 0}
+
+    class _CrashingConnection(sqlite3.Connection):
+        def execute(self, sql, *args, **kwargs):
+            if "RENAME TO alerts_pre_task55" in sql:
+                call_count["renames"] += 1
+                result = super().execute(sql, *args, **kwargs)
+                raise RuntimeError("simulated crash right after the rename")
+            return super().execute(sql, *args, **kwargs)
+
+    def fake_sqlite_connect(*args, **kwargs):
+        kwargs["factory"] = _CrashingConnection
+        return real_connect(*args, **kwargs)
+
+    sqlite3.connect = fake_sqlite_connect
+    try:
+        with pytest.raises(RuntimeError, match="simulated crash"):
+            ws_db.init_workgraph()
+    finally:
+        # Restore ONLY sqlite3.connect directly - monkeypatch.undo() would
+        # also revert the ws_db fixture's OWN WORKGRAPH_DB redirection
+        # (same monkeypatch instance), pointing the "verify nothing was
+        # lost" check below at a completely different database.
+        sqlite3.connect = real_connect
+    assert call_count["renames"] == 1  # confirms the crash point was actually hit
+
+    # Reconnect for real and verify nothing was lost: the original table,
+    # under its original name, with its original row, exactly as if the
+    # migration had never been attempted.
+    conn2 = ws_db._connect()
+    row = conn2.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='alerts'").fetchone()
+    assert "unmet_prerequisite" not in (row["sql"] or "")  # still the OLD schema - migration never committed
+    surviving = conn2.execute("SELECT summary FROM alerts WHERE summary = 'must survive a crash'").fetchone()
+    assert surviving is not None
+    orphan_check = conn2.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='alerts_pre_task55'"
+    ).fetchone()
+    assert orphan_check is None  # no orphaned table left behind either
+
+
 def test_list_distinct_signal_types_in_use(ws_db):
     ws_db.insert_raw_item(source="outlook_mail", stable_key="a", thread_key="a", dedupe_key="a",
                           occurred_ts=1.0, subject="s", from_actor="x@example.com", participants_json="[]")

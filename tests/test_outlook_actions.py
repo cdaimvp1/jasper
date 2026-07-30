@@ -100,3 +100,27 @@ def test_draft_reply_raises_runtime_error_on_failure(monkeypatch):
     monkeypatch.setattr(subprocess, "run", fake_run)
     with pytest.raises(RuntimeError, match="stale entry id"):
         oa.draft_reply("stale-id")
+
+
+def test_open_email_timeout_raises_runtime_error_not_timeout_expired(monkeypatch):
+    """Fixed (adversarial review, task #61): subprocess.run's own timeout
+    used to raise subprocess.TimeoutExpired, a different exception than the
+    module's own documented "raises RuntimeError" contract - callers
+    catching only RuntimeError would have seen an undocumented, unhandled
+    exception on a genuinely slow/hung Outlook COM call instead of a clean
+    HTTP 500."""
+    def fake_run(args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=args, timeout=kwargs.get("timeout", 20))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match="timed out"):
+        oa.open_email("some-entry-id")
+
+
+def test_draft_reply_timeout_raises_runtime_error_not_timeout_expired(monkeypatch):
+    def fake_run(args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=args, timeout=kwargs.get("timeout", 20))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match="timed out"):
+        oa.draft_reply("some-entry-id")

@@ -115,14 +115,24 @@ def mine_sent_mail(since_ts: float) -> dict:
     (not outlook_com_ingest.py's pipeline - see module docstring). Extracts
     patterns from subject + a body excerpt, upserts under
     source_surface='sent_mail'. Returns {"scanned","matched","cursor"} - same
-    shape as mine_app_chat. A PowerShell failure (Outlook not running, etc.)
-    is reported as scanned=0 with an "error" key rather than raised, so one
-    bad scan never blocks the day's app_chat mining."""
-    proc = subprocess.run(
-        ["powershell", "-NoProfile", "-File", str(_SENT_SCAN_SCRIPT),
-         "-SinceEpoch", str(since_ts), "-MaxItems", "500"],
-        capture_output=True, encoding="utf-8", timeout=120,
-    )
+    shape as mine_app_chat. A PowerShell failure (Outlook not running, a
+    timeout, etc.) is reported as scanned=0 with an "error" key rather than
+    raised, so one bad scan never blocks the day's app_chat mining.
+
+    Fixed (adversarial review, task #61): a hung scan used to raise
+    subprocess.TimeoutExpired straight out of this function - a different,
+    unhandled exception than the "reported, never raised" contract this
+    docstring already promised, which would have skipped setting
+    ingest_cursors' last_run_date for the whole day (only written at the end
+    of run_daily_if_due), silently blocking app_chat/sent_teams mining too."""
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-File", str(_SENT_SCAN_SCRIPT),
+             "-SinceEpoch", str(since_ts), "-MaxItems", "500"],
+            capture_output=True, encoding="utf-8", timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        return {"scanned": 0, "matched": 0, "cursor": since_ts, "error": "timed out after 120s"}
     scanned = 0
     matched = 0
     max_ts = since_ts

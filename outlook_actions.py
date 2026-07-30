@@ -17,23 +17,37 @@ from pathlib import Path
 _SCRIPT_DIR = Path(__file__).resolve().parent / "ingest"
 _OPEN_ITEM_SCRIPT = _SCRIPT_DIR / "outlook_open_item.ps1"
 _DRAFT_REPLY_SCRIPT = _SCRIPT_DIR / "outlook_draft_reply.ps1"
+_TIMEOUT_SECONDS = 20
+
+
+def _run_powershell(args: list[str]) -> dict:
+    """Shared subprocess wrapper - both callers below need the exact same
+    "raise RuntimeError with a real reason, or return ok" contract. Fixed
+    (adversarial review, task #61): subprocess.run's own timeout=... raises
+    subprocess.TimeoutExpired, a DIFFERENT exception than the docstrings here
+    promised ("Raises RuntimeError... which the caller translates into an
+    HTTP error") - a genuinely slow/hung Outlook COM call (a blocked security
+    prompt, a slow profile - both real, known COM failure modes) used to
+    escape as an undocumented, undetailed exception instead of the honest
+    500 the caller's `except RuntimeError` was built to handle."""
+    try:
+        proc = subprocess.run(args, capture_output=True, encoding="utf-8", timeout=_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"timed out after {_TIMEOUT_SECONDS}s - Outlook may be busy or showing a prompt")
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or f"exit code {proc.returncode}")
+    return {"ok": True}
 
 
 def open_email(entry_id: str) -> dict:
     """Opens the exact Outlook item (by EntryID) in a real Outlook reading
     window via COM's Display() - read+display only, never sends or modifies
-    anything about the item. Raises RuntimeError (with the script's stderr)
-    on failure - a bad/stale EntryID, Outlook not running, etc. - which the
-    caller translates into an HTTP error."""
+    anything about the item. Raises RuntimeError (with a real reason) on
+    failure - a bad/stale EntryID, Outlook not running, a timeout, etc. -
+    which the caller translates into an HTTP error."""
     if not entry_id:
         raise ValueError("entry_id is required")
-    proc = subprocess.run(
-        ["powershell", "-NoProfile", "-File", str(_OPEN_ITEM_SCRIPT), "-EntryID", entry_id],
-        capture_output=True, encoding="utf-8", timeout=20,
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(proc.stderr.strip() or f"exit code {proc.returncode}")
-    return {"ok": True}
+    return _run_powershell(["powershell", "-NoProfile", "-File", str(_OPEN_ITEM_SCRIPT), "-EntryID", entry_id])
 
 
 def draft_reply(entry_id: str, reply_all: bool = False) -> dict:
@@ -41,14 +55,11 @@ def draft_reply(entry_id: str, reply_all: bool = False) -> dict:
     COM's own Reply()/ReplyAll() - a new draft MailItem, already addressed
     and quoting the original thread - then Display()s it for review. Never
     calls Send(): this only ever puts a draft on screen, the same as a
-    person clicking Reply themselves. Raises RuntimeError (with the script's
-    stderr) on failure."""
+    person clicking Reply themselves. Raises RuntimeError (with a real
+    reason) on failure."""
     if not entry_id:
         raise ValueError("entry_id is required")
     args = ["powershell", "-NoProfile", "-File", str(_DRAFT_REPLY_SCRIPT), "-EntryID", entry_id]
     if reply_all:
         args.append("-ReplyAll")
-    proc = subprocess.run(args, capture_output=True, encoding="utf-8", timeout=20)
-    if proc.returncode != 0:
-        raise RuntimeError(proc.stderr.strip() or f"exit code {proc.returncode}")
-    return {"ok": True}
+    return _run_powershell(args)

@@ -211,34 +211,58 @@ def init_workgraph() -> None:
             # alerts table created before task #55 added 'unmet_prerequisite'
             # still enforces the OLD constraint even though the CREATE TABLE
             # above is a no-op against it (IF NOT EXISTS). Detect that exact
-            # case and rebuild, migrating every existing row - the same
-            # "detect real schema drift, don't just assume" discipline used
-            # everywhere else in this codebase.
+            # case and rebuild, migrating every existing row.
+            #
+            # Fixed (adversarial review, task #61): the rename+rebuild+copy+
+            # drop used to run as 4 independent autocommit statements on this
+            # isolation_level=None connection - a crash between RENAME and
+            # DROP left the real data permanently orphaned under
+            # alerts_pre_task55 with a fresh, EMPTY alerts table silently
+            # taking its place (and the empty table's schema already
+            # satisfies the "already migrated" check above, so nothing would
+            # ever retry it). Wrapped in an explicit transaction: SQLite's DDL
+            # is fully transactional, so this is now all-or-nothing - a crash
+            # mid-migration rolls back to the untouched original table, not a
+            # half-renamed mess. Also fixes the concurrent-process case (this
+            # init_workgraph() runs from many independent processes against
+            # the same WAL file): BEGIN IMMEDIATE serializes against a
+            # concurrent migration instead of both racing the same renames,
+            # and the broad except below is the same "another process beat us
+            # to it, and that's fine" pattern already used for every other
+            # migration in this file.
             existing_sql = conn.execute(
                 "SELECT sql FROM sqlite_master WHERE type='table' AND name='alerts'"
             ).fetchone()
             if existing_sql and "unmet_prerequisite" not in (existing_sql["sql"] or ""):
-                conn.execute("ALTER TABLE alerts RENAME TO alerts_pre_task55")
-                conn.execute("""
-                    CREATE TABLE alerts (
-                        id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                        issue_id     TEXT,
-                        kind         TEXT NOT NULL CHECK (kind IN ('stale','high_priority_ask','anomaly','stuck_action','unmet_prerequisite')),
-                        severity     TEXT NOT NULL CHECK (severity IN ('info','warn','critical')),
-                        summary      TEXT NOT NULL,
-                        source_ref   TEXT,
-                        created_ts   REAL NOT NULL,
-                        dismissed    INTEGER NOT NULL DEFAULT 0,
-                        dismissed_ts REAL
-                    )
-                """)
-                conn.execute("""
-                    INSERT INTO alerts (id, issue_id, kind, severity, summary, source_ref,
-                                         created_ts, dismissed, dismissed_ts)
-                    SELECT id, issue_id, kind, severity, summary, source_ref,
-                           created_ts, dismissed, dismissed_ts FROM alerts_pre_task55
-                """)
-                conn.execute("DROP TABLE alerts_pre_task55")
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    conn.execute("ALTER TABLE alerts RENAME TO alerts_pre_task55")
+                    conn.execute("""
+                        CREATE TABLE alerts (
+                            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                            issue_id     TEXT,
+                            kind         TEXT NOT NULL CHECK (kind IN ('stale','high_priority_ask','anomaly','stuck_action','unmet_prerequisite')),
+                            severity     TEXT NOT NULL CHECK (severity IN ('info','warn','critical')),
+                            summary      TEXT NOT NULL,
+                            source_ref   TEXT,
+                            created_ts   REAL NOT NULL,
+                            dismissed    INTEGER NOT NULL DEFAULT 0,
+                            dismissed_ts REAL
+                        )
+                    """)
+                    conn.execute("""
+                        INSERT INTO alerts (id, issue_id, kind, severity, summary, source_ref,
+                                             created_ts, dismissed, dismissed_ts)
+                        SELECT id, issue_id, kind, severity, summary, source_ref,
+                               created_ts, dismissed, dismissed_ts FROM alerts_pre_task55
+                    """)
+                    conn.execute("DROP TABLE alerts_pre_task55")
+                    conn.execute("COMMIT")
+                except sqlite3.OperationalError:
+                    try:
+                        conn.execute("ROLLBACK")
+                    except sqlite3.OperationalError:
+                        pass  # no transaction was actually open (e.g. BEGIN itself failed) - nothing to roll back
             conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_dismissed ON alerts(dismissed, created_ts DESC)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_issue_kind ON alerts(issue_id, kind)")
 

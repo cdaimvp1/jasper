@@ -114,6 +114,20 @@ def test_mine_sent_mail_skips_malformed_lines(pp_env, monkeypatch):
     assert result["matched"] == 0
 
 
+def test_mine_sent_mail_reports_error_on_timeout_without_raising(pp_env, monkeypatch):
+    """Fixed (adversarial review, task #61): subprocess.TimeoutExpired used
+    to propagate straight out of this function instead of being reported,
+    contradicting the docstring's own "never raised" contract."""
+    def fake_run(*a, **kw):
+        raise subprocess.TimeoutExpired(cmd=a[0] if a else [], timeout=kw.get("timeout", 120))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = pp_env.mine_sent_mail(since_ts=0)
+    assert result["error"] == "timed out after 120s"
+    assert result["scanned"] == 0
+    assert result["cursor"] == 0
+
+
 def test_mine_sent_mail_reports_error_on_nonzero_exit_without_raising(pp_env, monkeypatch):
     monkeypatch.setattr(subprocess, "run",
                          lambda *a, **kw: _FakeCompletedProcess(returncode=1, stderr="Outlook not running"))

@@ -61,6 +61,7 @@ import workgraph_nba
 import workgraph_recommend
 import deep_links
 import outlook_actions
+import workgraph_signals
 import workgraph_alerts
 import workgraph_synthesis
 import workgraph_projects
@@ -1405,6 +1406,60 @@ async def api_ownership_rules_list():
 @app.delete("/api/workgraph/ownership-rules/{rule_id}")
 async def api_ownership_rule_delete(rule_id: int):
     wg.delete_ownership_rule(rule_id)
+    return JSONResponse({"ok": True})
+
+
+# --- Aristotle: taught prerequisite/gate rules (task #51) ------------------
+# Rules are only ever created here, by explicit Settings input - never
+# inferred from mail patterns (see workgraph_aristotle.py's own docstring).
+
+class PrerequisiteRuleBody(BaseModel):
+    trigger_signal_type: str
+    requires_signal_type: str
+    match_on: str
+    reason: Optional[str] = None
+
+
+@app.get("/api/settings/prerequisite-rules")
+async def api_prerequisite_rules_list():
+    return JSONResponse({
+        "rules": sanitize_surrogates(wg.list_prerequisite_rules()),
+        "known_signal_types": workgraph_signals.known_signal_types(),
+    })
+
+
+@app.post("/api/settings/prerequisite-rules")
+async def api_prerequisite_rule_create(body: PrerequisiteRuleBody):
+    if body.match_on not in ("project", "supplier"):
+        raise HTTPException(400, "match_on must be 'project' or 'supplier'")
+    known = workgraph_signals.known_signal_types()
+    if body.trigger_signal_type not in known:
+        raise HTTPException(400, f"unknown trigger_signal_type: {body.trigger_signal_type!r}")
+    if body.requires_signal_type not in known:
+        raise HTTPException(400, f"unknown requires_signal_type: {body.requires_signal_type!r}")
+    if body.trigger_signal_type == body.requires_signal_type:
+        raise HTTPException(400, "trigger_signal_type and requires_signal_type must differ")
+    rule_id = wg.create_prerequisite_rule(
+        trigger_signal_type=body.trigger_signal_type, requires_signal_type=body.requires_signal_type,
+        match_on=body.match_on, reason=body.reason or "",
+        created_by=config.get("manager", "id") or "marc",
+    )
+    return JSONResponse({"ok": True, "rule_id": rule_id})
+
+
+class PrerequisiteRuleActiveBody(BaseModel):
+    active: bool
+
+
+@app.post("/api/settings/prerequisite-rules/{rule_id}/active")
+async def api_prerequisite_rule_set_active(rule_id: int, body: PrerequisiteRuleActiveBody):
+    wg.set_prerequisite_rule_active(rule_id, body.active)
+    return JSONResponse({"ok": True})
+
+
+@app.delete("/api/settings/prerequisite-rules/{rule_id}")
+async def api_prerequisite_rule_delete(rule_id: int):
+    wg.delete_prerequisite_rule(rule_id)
     return JSONResponse({"ok": True})
 
 

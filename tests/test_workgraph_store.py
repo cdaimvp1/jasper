@@ -90,6 +90,31 @@ def test_get_socrates_log_since_dedupes_multi_tier_rows(ws_db):
     assert rows[0]["question"] == "q1"
 
 
+def test_list_prerequisite_rules_active_only_filter(ws_db):
+    r1 = ws_db.create_prerequisite_rule(trigger_signal_type="a", requires_signal_type="b",
+                                         match_on="project", reason="x", created_by="marc")
+    r2 = ws_db.create_prerequisite_rule(trigger_signal_type="c", requires_signal_type="d",
+                                         match_on="supplier", reason="y", created_by="marc")
+    ws_db.set_prerequisite_rule_active(r2, False)
+
+    all_rules = ws_db.list_prerequisite_rules()
+    active_rules = ws_db.list_prerequisite_rules(active_only=True)
+
+    assert {r["id"] for r in all_rules} == {r1, r2}
+    assert {r["id"] for r in active_rules} == {r1}
+
+
+def test_delete_prerequisite_rule(ws_db):
+    rule_id = ws_db.create_prerequisite_rule(trigger_signal_type="a", requires_signal_type="b",
+                                              match_on="project", reason="x", created_by="marc")
+    ws_db.delete_prerequisite_rule(rule_id)
+    assert ws_db.list_prerequisite_rules() == []
+
+
+def test_get_active_prerequisite_rules_for_trigger_empty_for_unknown_type(ws_db):
+    assert ws_db.get_active_prerequisite_rules_for_trigger("nonexistent_signal") == []
+
+
 def test_get_teams_messages_from_actor_since_matches_case_insensitively(ws_db):
     ws_db.insert_raw_item(source="teams_chat", stable_key="c1:m1", thread_key="c1",
                            dedupe_key="d1", occurred_ts=100.0, subject=None,

@@ -509,6 +509,29 @@ def init_workgraph() -> None:
             # "Forget what's been learned") without touching anything else.
             # Off by default - see config.get("personal_learning", ...) and
             # personal_patterns.py's module docstring for the full gate.
+            # Aristotle (task #51) - a taught, not-inferred prerequisite/gate
+            # rule: "a raw_item classified as trigger_signal_type shouldn't
+            # be treated as ready to act on until requires_signal_type has
+            # been seen for the same project/supplier". Rules are only ever
+            # created by explicit Settings input (see server_lean.py's
+            # /api/settings/prerequisite-rules) - nothing here is inferred
+            # from patterns in the mail, matching workgraph_signals.py's own
+            # "none of this is guessed" discipline for the signal types these
+            # rules reference.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS prerequisite_rules (
+                    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+                    trigger_signal_type   TEXT NOT NULL,
+                    requires_signal_type  TEXT NOT NULL,
+                    match_on              TEXT NOT NULL CHECK (match_on IN ('project','supplier')),
+                    reason                TEXT,
+                    active                INTEGER NOT NULL DEFAULT 1,
+                    created_ts            REAL NOT NULL,
+                    created_by            TEXT
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_prereq_trigger ON prerequisite_rules(trigger_signal_type, active)")
+
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS response_patterns (
                     id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1507,6 +1530,71 @@ def list_issues_for_company(company: str) -> list[str]:
         finally:
             conn.close()
     return [r["issue_id"] for r in rows]
+
+
+# --- prerequisite_rules (Aristotle, task #51) --------------------------------
+
+def create_prerequisite_rule(*, trigger_signal_type: str, requires_signal_type: str,
+                              match_on: str, reason: str, created_by: str) -> int:
+    with _lock:
+        conn = _connect()
+        try:
+            cur = conn.execute(
+                """INSERT INTO prerequisite_rules
+                   (trigger_signal_type, requires_signal_type, match_on, reason, active, created_ts, created_by)
+                   VALUES (?, ?, ?, ?, 1, ?, ?)""",
+                (trigger_signal_type, requires_signal_type, match_on, reason, time.time(), created_by),
+            )
+            return cur.lastrowid
+        finally:
+            conn.close()
+
+
+def list_prerequisite_rules(active_only: bool = False) -> list[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            sql = "SELECT * FROM prerequisite_rules"
+            if active_only:
+                sql += " WHERE active = 1"
+            sql += " ORDER BY created_ts DESC"
+            rows = conn.execute(sql).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_active_prerequisite_rules_for_trigger(trigger_signal_type: str) -> list[dict]:
+    if not trigger_signal_type:
+        return []
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM prerequisite_rules WHERE active = 1 AND trigger_signal_type = ?",
+                (trigger_signal_type,),
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def set_prerequisite_rule_active(rule_id: int, active: bool) -> None:
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute("UPDATE prerequisite_rules SET active = ? WHERE id = ?", (1 if active else 0, rule_id))
+        finally:
+            conn.close()
+
+
+def delete_prerequisite_rule(rule_id: int) -> None:
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute("DELETE FROM prerequisite_rules WHERE id = ?", (rule_id,))
+        finally:
+            conn.close()
 
 
 _TOPIC_KEY_STRIP = re.compile(r"^\s*(?:\[[^\]]{1,20}\]|re|fwd?|fw)\s*:?\s*", re.I)

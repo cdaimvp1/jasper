@@ -160,6 +160,43 @@
     </div>
   </div>
 
+  <!-- ── Aristotle: prerequisite rules (added 2026-07-29, task #51) ────── -->
+  <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:26px 0 10px">Prerequisite rules (Aristotle)</div>
+  <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px">
+    <div style="color:var(--muted,#667);font-size:13px;margin-bottom:12px">
+      Teach Jasper a gate: "don't treat X as ready to act on until Y has been seen for the same project or supplier."
+      For example, a signature request shouldn't be flagged ready to sign until an approved purchase order has come
+      through for that same deal. Jasper only ever says <b>"no confirmation seen yet"</b> — never that something
+      hasn't happened — since it can only see what's actually arrived in your mail.
+    </div>
+
+    <div id="ar-rules-list" style="margin-bottom:14px">Loading…</div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:8px 12px;align-items:end;font-size:13px">
+      <label>
+        <span style="display:block;font-size:12px;color:var(--muted,#667);margin-bottom:4px">When this happens…</span>
+        <select id="ar-trigger" style="width:100%;border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:7px;padding:6px 8px;font:600 13px sans-serif;color:inherit"></select>
+      </label>
+      <label>
+        <span style="display:block;font-size:12px;color:var(--muted,#667);margin-bottom:4px">…require this first</span>
+        <select id="ar-requires" style="width:100%;border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:7px;padding:6px 8px;font:600 13px sans-serif;color:inherit"></select>
+      </label>
+      <label>
+        <span style="display:block;font-size:12px;color:var(--muted,#667);margin-bottom:4px">Match on</span>
+        <select id="ar-match-on" style="border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:7px;padding:6px 8px;font:600 13px sans-serif;color:inherit">
+          <option value="project">Project</option>
+          <option value="supplier">Supplier</option>
+        </select>
+      </label>
+      <label style="grid-column:1 / span 2">
+        <span style="display:block;font-size:12px;color:var(--muted,#667);margin-bottom:4px">Explain the requirement (shown in the warning)</span>
+        <input id="ar-reason" placeholder="e.g. an approved Ariba PO for this project" style="width:100%;border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:7px;padding:6px 8px;font:500 13px sans-serif;color:inherit">
+      </label>
+      <button id="ar-add" style="border:1px solid var(--border,#ddd);background:var(--accent,#0f766e);color:#fff;font:600 13px sans-serif;padding:9px 16px;border-radius:9px;cursor:pointer">Add rule</button>
+    </div>
+    <span id="ar-fb" style="font-size:12px;color:var(--muted,#888);display:block;margin-top:8px"></span>
+  </div>
+
   <!-- ── Server · Settings #6 ──────────────────────────────────────────── -->
   <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:26px 0 10px">Server</div>
   <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px">
@@ -373,6 +410,60 @@
       if(r.ok){ prlForgetFb.textContent = '✓ cleared '+d.cleared; setTimeout(()=>prlForgetFb.textContent='',2500); prlLoad(); }
       else { prlForgetFb.textContent = 'error'; }
     }catch(e){ prlForgetFb.textContent = 'error'; }
+  });
+
+  // ── Aristotle: prerequisite rules ──────────────────────────────────────
+  const arList = document.getElementById('ar-rules-list');
+  const arTrigger = document.getElementById('ar-trigger');
+  const arRequires = document.getElementById('ar-requires');
+  const arMatchOn = document.getElementById('ar-match-on');
+  const arReason = document.getElementById('ar-reason');
+  const arFb = document.getElementById('ar-fb');
+
+  function arRenderRules(rules){
+    if(!rules.length){ arList.innerHTML = '<div style="color:var(--muted,#667);font-size:13px">No rules yet.</div>'; return; }
+    arList.innerHTML = rules.map(r => `
+      <div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border,#eee);font-size:13px">
+        <div style="flex:1">
+          <div><code>${esc(r.trigger_signal_type)}</code> requires <code>${esc(r.requires_signal_type)}</code> (same ${esc(r.match_on)})</div>
+          ${r.reason ? `<div style="color:var(--muted,#667);font-size:12px;margin-top:2px">${esc(r.reason)}</div>` : ''}
+        </div>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+          <input type="checkbox" ${r.active ? 'checked' : ''} data-ar-toggle="${r.id}" style="width:15px;height:15px">
+          <span style="font-size:12px;color:var(--muted,#667)">active</span>
+        </label>
+        <button data-ar-delete="${r.id}" style="border:1px solid var(--border,#ddd);background:none;color:inherit;font:600 12px sans-serif;padding:5px 10px;border-radius:7px;cursor:pointer">Delete</button>
+      </div>`).join('');
+    arList.querySelectorAll('[data-ar-toggle]').forEach(cb => cb.addEventListener('change', async () => {
+      await fetch(`/api/settings/prerequisite-rules/${cb.getAttribute('data-ar-toggle')}/active`,
+        {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({active: cb.checked})});
+    }));
+    arList.querySelectorAll('[data-ar-delete]').forEach(btn => btn.addEventListener('click', async () => {
+      if(!confirm('Delete this prerequisite rule?')) return;
+      await fetch(`/api/settings/prerequisite-rules/${btn.getAttribute('data-ar-delete')}`, {method:'DELETE'});
+      arLoad();
+    }));
+  }
+  function arLoad(){
+    return fetch('/api/settings/prerequisite-rules').then(r=>r.json()).then(d=>{
+      const opts = d.known_signal_types.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('');
+      arTrigger.innerHTML = opts;
+      arRequires.innerHTML = opts;
+      arRenderRules(d.rules);
+    }).catch(()=>{ arList.textContent = 'Could not load.'; });
+  }
+  arLoad();
+  document.getElementById('ar-add').addEventListener('click', async ()=>{
+    if(arTrigger.value === arRequires.value){ arFb.textContent = 'trigger and requirement must differ'; return; }
+    arFb.textContent = 'adding…';
+    try{
+      const r = await fetch('/api/settings/prerequisite-rules',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({trigger_signal_type: arTrigger.value, requires_signal_type: arRequires.value,
+          match_on: arMatchOn.value, reason: arReason.value})});
+      const d = await r.json();
+      if(r.ok){ arFb.textContent = '✓ added'; arReason.value=''; setTimeout(()=>arFb.textContent='',2000); arLoad(); }
+      else { arFb.textContent = d.detail || 'error'; }
+    }catch(e){ arFb.textContent = 'error'; }
   });
 
   // ── Server restart ────────────────────────────────────────────────────

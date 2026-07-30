@@ -48,6 +48,7 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import workgraph_store as ws
 import workgraph_lessons
+import workgraph_aristotle
 
 DAY = 86400.0
 
@@ -117,7 +118,7 @@ def _extract_item_value(item: dict) -> float:
     return best
 
 
-def _extract_value_amount(issue_id: str) -> float:
+def _extract_value_amount(raw_items: list[dict]) -> float:
     """Best-effort deterministic dollar-value extraction from this issue's own
     thread text (subject + body_preview of every linked raw_item). Takes the
     MAX figure found, on the theory that a deal's own value is usually the
@@ -125,7 +126,7 @@ def _extract_value_amount(issue_id: str) -> float:
     large figure mentioned in passing gets picked up too — acceptable because
     the resulting signal is capped at a modest weight, not trusted outright."""
     best = 0.0
-    for item in ws.get_raw_items_for_issue(issue_id):
+    for item in raw_items:
         best = max(best, _extract_item_value(item))
     return best
 
@@ -176,10 +177,12 @@ def score_issue(issue: dict, now: float, weights: dict = DEFAULT_WEIGHTS) -> tup
     if issue["state"] in ("done", "noise-archived"):
         return 0.0, "closed", None
 
+    raw_items = ws.get_raw_items_for_issue(issue["id"])
+
     your_step = _is_your_step(issue["state"])
     staleness = _staleness_urgency(issue["updated_at"], now)
     due = _due_urgency(issue.get("due"), now)
-    value_amount = _extract_value_amount(issue["id"])
+    value_amount = _extract_value_amount(raw_items)
     value = _value_urgency(value_amount)
 
     base_score = (weights["is_your_step"] * your_step
@@ -194,7 +197,13 @@ def score_issue(issue: dict, now: float, weights: dict = DEFAULT_WEIGHTS) -> tup
     score = workgraph_lessons.apply_precedent_boost(base_score, lesson)
 
     days_quiet = int(max(0.0, (now - issue["updated_at"]) / DAY))
-    reasons = []
+
+    # Aristotle (task #51) - a taught prerequisite check. Prepended, not
+    # appended: this needs to be the first thing Marc reads, not buried after
+    # staleness/value reasons. Only ever "no confirmation seen yet", never
+    # "this hasn't happened" - see workgraph_aristotle.py's own docstring.
+    prereq = workgraph_aristotle.check_prerequisites(issue["id"], raw_items)
+    reasons = [prereq["warning"]] if prereq else []
     if issue["state"] == "active":
         reasons.append("your move")
     elif issue["state"] == "blocked":

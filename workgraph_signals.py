@@ -120,6 +120,14 @@ def domain_matches(from_actor: str, target_domain: str) -> bool:
     return sender_domain == target_domain or sender_domain.endswith("." + target_domain)
 
 
+def known_signal_types() -> list[str]:
+    """Every signal_type this module can produce, in rule-list order - used
+    by workgraph_aristotle.py's Settings UI to populate rule dropdowns so
+    Marc picks from real, confirmed values rather than typing a signal_type
+    string freehand (task #51)."""
+    return [rule[0] for rule in _RULES]
+
+
 def classify_signal(*, subject: str, from_actor: str) -> Optional[dict]:
     """Returns {signal_type, treatment, pr_number} for a recognized automated
     signal email, or None when nothing matches (the email is NOT one of these

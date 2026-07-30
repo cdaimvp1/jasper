@@ -38,6 +38,7 @@ import workgraph_projects
 import outlook_com_ingest
 import retention
 import health_check
+import personal_patterns
 
 from paths import DATA_DIR
 
@@ -354,6 +355,14 @@ def run() -> dict:
     except Exception as e:
         health_check_result = {"error": str(e)}
 
+    # 9. Personal Response Learning, app-chat phase (task #45) - same once/day
+    # gate, same never-block guard. Off by default (two config toggles inside
+    # run_daily_if_due itself) - a no-op on every cycle until Marc turns it on.
+    try:
+        personal_learning_result = personal_patterns.run_daily_if_due()
+    except Exception as e:
+        personal_learning_result = {"error": str(e)}
+
     summary = {
         "mail": mail_result,
         "classify_after_mail": classify_result_1,
@@ -366,6 +375,7 @@ def run() -> dict:
         "synthesis": synthesis_result,
         "retention": retention_result,
         "health_check": health_check_result,
+        "personal_learning": personal_learning_result,
     }
     _log(f"REFRESH ok mail_inserted={mail_result.get('inserted', '?')} "
         f"relay_ok={relay_result.get('ok')} relay_calendar_advanced={relay_result.get('cursor_advanced')} "
@@ -375,7 +385,8 @@ def run() -> dict:
         f"synthesis_ok={synthesis_result.get('ok')} synthesis_skipped={synthesis_result.get('skipped', False)} "
         f"synthesis_deferred={synthesis_result.get('deferred', 0)} synthesis_skipped_immaterial={synthesis_result.get('skipped_immaterial', 0)} "
         f"retention_ran={retention_result is not None and 'error' not in retention_result} "
-        f"health_check_ok={health_check_result.get('ok') if health_check_result else 'not-due'}")
+        f"health_check_ok={health_check_result.get('ok') if health_check_result else 'not-due'} "
+        f"personal_learning_ran={personal_learning_result is not None and 'error' not in personal_learning_result}")
     return summary
 
 

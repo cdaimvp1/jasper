@@ -501,6 +501,26 @@ def init_workgraph() -> None:
                 conn.execute("ALTER TABLE raw_items ADD COLUMN entry_id TEXT")
             except sqlite3.OperationalError:
                 pass
+
+            # Personal Response Learning (task #45) - deliberately its OWN
+            # table, not folded into lessons/signal_treatment_overrides: this
+            # is behavioral data about Marc himself, not classification
+            # precedent, and needs to be independently purgeable (Settings'
+            # "Forget what's been learned") without touching anything else.
+            # Off by default - see config.get("personal_learning", ...) and
+            # personal_patterns.py's module docstring for the full gate.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS response_patterns (
+                    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_surface TEXT NOT NULL,   -- app_chat | sent_mail | sent_teams
+                    pattern_key    TEXT NOT NULL,   -- normalized keyword/phrase, e.g. "ariba"
+                    example_text   TEXT,            -- most recent matching text ("cited as precedent")
+                    hit_count      INTEGER NOT NULL DEFAULT 0,
+                    first_seen_ts  REAL NOT NULL,
+                    last_seen_ts   REAL NOT NULL,
+                    UNIQUE(source_surface, pattern_key)
+                )
+            """)
         finally:
             conn.close()
 
@@ -1879,6 +1899,76 @@ def delete_old_socrates_log(cutoff_ts: float) -> int:
         conn = _connect()
         try:
             cur = conn.execute("DELETE FROM socrates_retrieval_log WHERE asked_ts < ?", (cutoff_ts,))
+            return cur.rowcount
+        finally:
+            conn.close()
+
+
+def get_socrates_log_since(since_ts: float) -> list[dict]:
+    """Distinct (asked_ts, asker, question) rows strictly after since_ts - one
+    row PER TIER is logged per real question (see append_socrates_log's own
+    comment), so this collapses that back to one row per actual question for
+    personal_patterns.py's mining pass, which only cares about the question
+    text/timing, not which tier answered it."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                """SELECT DISTINCT asked_ts, asker, question FROM socrates_retrieval_log
+                   WHERE asked_ts > ? ORDER BY asked_ts ASC""",
+                (since_ts,),
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+# --- response_patterns (Personal Response Learning, task #45) ---------------
+
+def upsert_response_pattern(source_surface: str, pattern_key: str, example_text: str, ts: float) -> None:
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                """INSERT INTO response_patterns
+                   (source_surface, pattern_key, example_text, hit_count, first_seen_ts, last_seen_ts)
+                   VALUES (?, ?, ?, 1, ?, ?)
+                   ON CONFLICT(source_surface, pattern_key) DO UPDATE SET
+                     hit_count = hit_count + 1,
+                     example_text = excluded.example_text,
+                     last_seen_ts = excluded.last_seen_ts""",
+                (source_surface, pattern_key, example_text, ts, ts),
+            )
+        finally:
+            conn.close()
+
+
+def list_response_patterns(source_surface: Optional[str] = None) -> list[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            if source_surface:
+                rows = conn.execute(
+                    "SELECT * FROM response_patterns WHERE source_surface = ? ORDER BY hit_count DESC",
+                    (source_surface,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM response_patterns ORDER BY hit_count DESC"
+                ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def clear_response_patterns() -> int:
+    """Settings' "Forget what's been learned" button - clears every surface's
+    accumulated patterns at once (v1 has no per-surface forget; the whole
+    table is small and this is meant to be a full, legible reset)."""
+    with _lock:
+        conn = _connect()
+        try:
+            cur = conn.execute("DELETE FROM response_patterns")
             return cur.rowcount
         finally:
             conn.close()

@@ -119,6 +119,47 @@
     </div>
   </div>
 
+  <!-- ── Personal Response Learning (added 2026-07-29, task #45) ───────── -->
+  <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:26px 0 10px">Personal response learning</div>
+  <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px">
+
+    <label style="display:flex;align-items:flex-start;gap:8px;margin-bottom:14px;cursor:pointer">
+      <input type="checkbox" id="prl-enabled" style="width:16px;height:16px;margin-top:2px">
+      <span style="font-size:13px;line-height:1.55">
+        <b>Personal Response Learning</b> — off by default. When this is on, Jasper studies patterns in how <i>you</i>
+        respond to things: the phrasing you tend to use, which systems or people you point a worker toward for a given
+        kind of question, and what you consistently ask to have done — and uses that to draft replies that sound more
+        like you, and to suggest "you usually…" next steps. It only looks at messages <i>you</i> send — never anyone
+        else's. Turning this off stops new observation immediately, but doesn't erase what's already been learned on
+        its own — use "Forget what's been learned" below for that.
+      </span>
+    </label>
+
+    <div style="display:flex;flex-direction:column;gap:10px;padding-left:24px;margin-bottom:14px">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+        <input type="checkbox" id="prl-app-chat" style="width:15px;height:15px">
+        <span style="font-size:13px">In-app chat with workers — learn from messages you send to Tia, relay, curator, and bridge in Back Office.</span>
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+        <input type="checkbox" id="prl-sent-mail" style="width:15px;height:15px" disabled>
+        <span style="font-size:13px;color:var(--muted,#667)">Sent email — learn from mail you send, scanned the same read-only way your inbox already is. <i>(not built yet)</i></span>
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+        <input type="checkbox" id="prl-sent-teams" style="width:15px;height:15px" disabled>
+        <span style="font-size:13px;color:var(--muted,#667)">Sent Teams messages — learn from your own messages inside chats Jasper already ingests. <i>(not built yet)</i></span>
+      </label>
+    </div>
+
+    <div id="prl-stats" style="font-size:12px;color:var(--muted,#667);margin-bottom:12px">Loading…</div>
+
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <button id="prl-save" style="border:1px solid var(--border,#ddd);background:var(--accent,#0f766e);color:#fff;font:600 13px sans-serif;padding:9px 16px;border-radius:9px;cursor:pointer">Save</button>
+      <span id="prl-fb" style="font-size:12px;color:var(--muted,#888)"></span>
+      <button id="prl-forget" style="border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);color:inherit;font:600 13px sans-serif;padding:9px 16px;border-radius:9px;cursor:pointer;margin-left:auto">Forget what's been learned</button>
+      <span id="prl-forget-fb" style="font-size:12px;color:var(--muted,#888)"></span>
+    </div>
+  </div>
+
   <!-- ── Server · Settings #6 ──────────────────────────────────────────── -->
   <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:26px 0 10px">Server</div>
   <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px">
@@ -290,6 +331,43 @@
       if(r.ok){ retFb.textContent='✓ saved'; setTimeout(()=>retFb.textContent='',2000); }
       else { retFb.textContent = d.detail || 'error'; }
     }catch(e){ retFb.textContent='error'; }
+  });
+
+  // ── Personal Response Learning ─────────────────────────────────────────
+  const prlEls = {
+    enabled: document.getElementById('prl-enabled'),
+    appChat: document.getElementById('prl-app-chat'),
+  };
+  const prlStats = document.getElementById('prl-stats');
+  const prlFb = document.getElementById('prl-fb');
+  const prlForgetFb = document.getElementById('prl-forget-fb');
+  function prlLoad(){
+    return fetch('/api/settings/personal-learning').then(r=>r.json()).then(d=>{
+      prlEls.enabled.checked = !!d.enabled;
+      prlEls.appChat.checked = !!d.surfaces.app_chat;
+      prlStats.textContent = d.patterns_learned + ' pattern' + (d.patterns_learned===1?'':'s') + ' learned so far'
+        + (d.last_run ? (' · last ran ' + d.last_run) : ' · never run yet');
+    }).catch(()=>{ prlStats.textContent = 'Could not load.'; });
+  }
+  prlLoad();
+  document.getElementById('prl-save').addEventListener('click', async ()=>{
+    prlFb.textContent = 'saving…';
+    try{
+      const r = await fetch('/api/settings/personal-learning',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({enabled: prlEls.enabled.checked, surfaces: {app_chat: prlEls.appChat.checked}})});
+      if(r.ok){ prlFb.textContent='✓ saved'; setTimeout(()=>prlFb.textContent='',2000); prlLoad(); }
+      else { const d = await r.json(); prlFb.textContent = d.detail || 'error'; }
+    }catch(e){ prlFb.textContent='error'; }
+  });
+  document.getElementById('prl-forget').addEventListener('click', async ()=>{
+    if(!confirm("Forget everything Jasper has learned about how you respond? This can't be undone (it will simply start learning again from here).")) return;
+    prlForgetFb.textContent = 'clearing…';
+    try{
+      const r = await fetch('/api/settings/personal-learning/forget',{method:'POST'});
+      const d = await r.json();
+      if(r.ok){ prlForgetFb.textContent = '✓ cleared '+d.cleared; setTimeout(()=>prlForgetFb.textContent='',2500); prlLoad(); }
+      else { prlForgetFb.textContent = 'error'; }
+    }catch(e){ prlForgetFb.textContent = 'error'; }
   });
 
   // ── Server restart ────────────────────────────────────────────────────

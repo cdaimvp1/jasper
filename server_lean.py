@@ -1947,6 +1947,61 @@ async def api_settings_retention_set(body: RetentionSettingsBody):
     return JSONResponse({"ok": True})
 
 
+class PersonalLearningSurfacesBody(BaseModel):
+    app_chat: Optional[bool] = None
+    sent_mail: Optional[bool] = None
+    sent_teams: Optional[bool] = None
+
+
+class PersonalLearningSettingsBody(BaseModel):
+    enabled: Optional[bool] = None
+    surfaces: Optional[PersonalLearningSurfacesBody] = None
+
+
+@app.get("/api/settings/personal-learning")
+async def api_settings_personal_learning_get():
+    """Personal Response Learning Settings section (task #45) - off by
+    default. patterns_learned/last_run make the toggle's real effect visible
+    rather than a black box; "Forget what's been learned" (the POST /forget
+    route below) is the explicit, reversible undo."""
+    surfaces = config.get("personal_learning", "surfaces") or {}
+    return JSONResponse({
+        "enabled": bool(config.get("personal_learning", "enabled")),
+        "surfaces": {
+            "app_chat": bool(surfaces.get("app_chat")) if isinstance(surfaces, dict) else False,
+            "sent_mail": bool(surfaces.get("sent_mail")) if isinstance(surfaces, dict) else False,
+            "sent_teams": bool(surfaces.get("sent_teams")) if isinstance(surfaces, dict) else False,
+        },
+        "patterns_learned": len(wg.list_response_patterns()),
+        "last_run": wg.get_cursor("personal_learning", "last_run_date"),
+    })
+
+
+@app.post("/api/settings/personal-learning")
+async def api_settings_personal_learning_set(body: PersonalLearningSettingsBody):
+    if body.enabled is not None:
+        config.set_value(body.enabled, "personal_learning", "enabled")
+    if body.surfaces is not None:
+        existing = config.get("personal_learning", "surfaces") or {}
+        merged = dict(existing) if isinstance(existing, dict) else {}
+        for key in ("app_chat", "sent_mail", "sent_teams"):
+            val = getattr(body.surfaces, key)
+            if val is not None:
+                merged[key] = val
+        config.set_value(merged, "personal_learning", "surfaces")
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/settings/personal-learning/forget")
+async def api_settings_personal_learning_forget():
+    """Explicit, reversible-by-nature-of-being-obvious undo: clears every
+    accumulated pattern. Does NOT touch the enabled/surfaces toggles - turning
+    learning off and forgetting what's been learned are two separate actions,
+    on purpose (matching the copy already shown in Settings)."""
+    cleared = wg.clear_response_patterns()
+    return JSONResponse({"ok": True, "cleared": cleared})
+
+
 @app.post("/api/cockpit/settings")
 async def api_cockpit_settings_set(body: CockpitSettingsBody):
     if body.chat_history_window < 5 or body.chat_history_window > 200:

@@ -50,3 +50,50 @@ def test_get_raw_items_by_ids_empty_list_is_safe(ws_db):
 def test_get_raw_items_by_ids_missing_id_omitted(ws_db):
     result = ws_db.get_raw_items_by_ids([999999])
     assert result == {}
+
+
+def test_upsert_response_pattern_increments_hit_count_on_repeat(ws_db):
+    ws_db.upsert_response_pattern("app_chat", "ariba", "first mention", 100.0)
+    ws_db.upsert_response_pattern("app_chat", "ariba", "second mention", 200.0)
+    rows = ws_db.list_response_patterns("app_chat")
+    assert len(rows) == 1
+    assert rows[0]["hit_count"] == 2
+    assert rows[0]["example_text"] == "second mention"
+    assert rows[0]["last_seen_ts"] == 200.0
+    assert rows[0]["first_seen_ts"] == 100.0  # set once on insert, never overwritten
+
+
+def test_upsert_response_pattern_separate_surfaces_dont_collide(ws_db):
+    ws_db.upsert_response_pattern("app_chat", "ariba", "x", 1.0)
+    ws_db.upsert_response_pattern("sent_mail", "ariba", "y", 1.0)
+    assert len(ws_db.list_response_patterns()) == 2
+    assert len(ws_db.list_response_patterns("app_chat")) == 1
+
+
+def test_clear_response_patterns_removes_everything(ws_db):
+    ws_db.upsert_response_pattern("app_chat", "ariba", "x", 1.0)
+    ws_db.upsert_response_pattern("app_chat", "sap", "y", 1.0)
+    cleared = ws_db.clear_response_patterns()
+    assert cleared == 2
+    assert ws_db.list_response_patterns() == []
+
+
+def test_get_socrates_log_since_dedupes_multi_tier_rows(ws_db):
+    """append_socrates_log logs one row PER TIER for a single real question -
+    get_socrates_log_since must collapse that back to one row per question."""
+    ws_db.append_socrates_log(asked_ts=100.0, asker="marc", question="q1", signature="s1",
+                               tier="recall", band="high", contributed=True, outcome="answered")
+    ws_db.append_socrates_log(asked_ts=100.0, asker="marc", question="q1", signature="s1",
+                               tier="materialized", band="high", contributed=False, outcome="answered")
+    rows = ws_db.get_socrates_log_since(0)
+    assert len(rows) == 1
+    assert rows[0]["question"] == "q1"
+
+
+def test_get_socrates_log_since_excludes_at_or_before_cutoff(ws_db):
+    ws_db.append_socrates_log(asked_ts=100.0, asker="marc", question="old", signature="s",
+                               tier="recall", band="high", contributed=True, outcome="answered")
+    ws_db.append_socrates_log(asked_ts=200.0, asker="marc", question="new", signature="s",
+                               tier="recall", band="high", contributed=True, outcome="answered")
+    rows = ws_db.get_socrates_log_since(100.0)
+    assert [r["question"] for r in rows] == ["new"]

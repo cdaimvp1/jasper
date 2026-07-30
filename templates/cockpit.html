@@ -7797,7 +7797,7 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
     projects: { label: "Projects" },
   };
   const PCC_LANE_ORDER = ["all", "issues", "waiting", "meetings", "comms", "handover", "projects"];
-  const PCC_SORT_META = { priority: "Priority", newest: "Newest", stale: "Oldest", deadline: "Deadline" };
+  const PCC_SORT_META = { priority: "Priority", newest: "Newest", stale: "Oldest", deadline: "Deadline", confidence: "Confidence" };
   const MQ_ICON_DOT = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/></svg>';
   const MQ_ICON_CLOCK = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>';
   const MQ_ICON_ALERT = '<svg viewBox="0 0 24 24"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 3.9L2.5 17a2 2 0 001.7 3h15.6a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/></svg>';
@@ -8000,6 +8000,13 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
         const bDays = b.due_date_info ? b.due_date_info.days_out : Infinity;
         return aDays - bDays;
       });
+    }
+    if (pccSortMode === "confidence") {
+      // task #78: lowest-confidence first - these are exactly the ones
+      // that most need a human read rather than trusting the classifier,
+      // so "sort by confidence" means "show me what needs review first."
+      const rank = { L: 0, M: 1, H: 2 };
+      return list.slice().sort((a, b) => (rank[a.confidence_tier] ?? 1) - (rank[b.confidence_tier] ?? 1));
     }
     return list;  // "priority": server order (priority_score DESC) - leave as-is
   }

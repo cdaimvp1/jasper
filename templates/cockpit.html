@@ -279,6 +279,10 @@
 .pcc-dd-btn-lane{min-width:92px;justify-content:space-between}
 .pcc-dd-chev{width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:2;flex:none}
 .pcc-dd-menu{display:none;position:absolute;top:calc(100% + 4px);left:0;z-index:25;min-width:190px;background:var(--surface);border:1px solid var(--line2);box-shadow:var(--shadow-lg,0 8px 24px rgba(0,0,0,.12));padding:4px}
+.pcc-export-menu{padding:10px;right:0;left:auto}
+.pcc-export-field{display:block;font-size:11.5px;color:var(--mut2);margin-bottom:8px}
+.pcc-export-field span{display:block;margin-bottom:3px;font-weight:600}
+.pcc-export-field input{width:100%;box-sizing:border-box;border:1px solid var(--line2);background:var(--bg);border-radius:4px;padding:5px 7px;font:600 12px var(--sans);color:inherit}
 .pcc-dd-menu.open{display:block}
 .pcc-dd-item{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:7px 9px;font:600 12.5px var(--sans);color:var(--ink);cursor:pointer;white-space:nowrap}
 .pcc-dd-item:hover{background:var(--line2)}
@@ -4209,6 +4213,18 @@ body.ownerlock #ownernote{display:block}
                     <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6"/><rect x="3" y="14" width="18" height="6"/></svg>
                   </button>
                 </div>
+                <!-- task #68: CSV export of a date-ranged issue list -->
+                <div class="pcc-dd-wrap" id="pccExportDDWrap">
+                  <button type="button" class="pcc-dd-btn" id="pccExportDD" title="Export a date range to CSV" aria-haspopup="true" aria-expanded="false">
+                    <svg viewBox="0 0 24 24" width="14" height="14" style="stroke:currentColor;fill:none;stroke-width:2"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>
+                    <span>Export</span>
+                  </button>
+                  <div class="pcc-dd-menu pcc-export-menu" id="pccExportMenu" role="group" aria-label="Export date range">
+                    <label class="pcc-export-field"><span>From</span><input type="date" id="pccExportStart"></label>
+                    <label class="pcc-export-field"><span>To</span><input type="date" id="pccExportEnd"></label>
+                    <button type="button" class="mqb primary" id="pccExportGo" style="width:100%;margin-top:8px;justify-content:center">Download CSV</button>
+                  </div>
+                </div>
               </div>
             </div>
             <div class="pcc-bulk-bar" id="pccBulkBar" style="display:none">
@@ -8027,6 +8043,28 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
   const pccSortDD = document.getElementById("pccSortDD");
   if (pccSortDD) pccSortDD.addEventListener("click", (e) => { e.stopPropagation(); pccToggleDropdown("pccSortMenu"); });
   pccRenderSortMenu();
+
+  // task #68: CSV export of a date-ranged issue list
+  const pccExportDD = document.getElementById("pccExportDD");
+  if (pccExportDD) pccExportDD.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const startEl = document.getElementById("pccExportStart"), endEl = document.getElementById("pccExportEnd");
+    if (startEl && !startEl.value && endEl && !endEl.value) {
+      // Default to the last 30 days - only on first open, never overwriting a choice already made.
+      const today = new Date(), thirtyAgo = new Date(today.getTime() - 30 * 86400000);
+      endEl.value = today.toISOString().slice(0, 10);
+      startEl.value = thirtyAgo.toISOString().slice(0, 10);
+    }
+    pccToggleDropdown("pccExportMenu");
+  });
+  const pccExportGo = document.getElementById("pccExportGo");
+  if (pccExportGo) pccExportGo.addEventListener("click", () => {
+    const start = document.getElementById("pccExportStart").value;
+    const end = document.getElementById("pccExportEnd").value;
+    if (!start || !end) return;
+    window.location.href = `/api/workgraph/issues/export.csv?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`;
+    pccCloseDropdowns();
+  });
 
   function pccUpdateCounts() {
     pccRenderLaneMenu();

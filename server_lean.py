@@ -36,12 +36,12 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, Request, HTTPException, UploadFile, File, Form
-from fastapi.responses import JSONResponse, HTMLResponse, FileResponse
+from fastapi.responses import JSONResponse, HTMLResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, ConfigDict, Field
 from markupsafe import Markup, escape
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import config
 import team_room
@@ -72,6 +72,7 @@ import workgraph_socrates
 import workgraph_deadlines
 import workgraph_signal_trends
 import workgraph_aristotle
+import workgraph_export
 
 
 PORT = int(os.environ.get("TEAM_PORT", "8700"))  # born-local default (Tia's live-review catch, 2026-07-23):
@@ -1106,6 +1107,32 @@ async def api_workgraph_issues(state: Optional[str] = None, limit: int = 200):
     issues = wg.list_issues(states=states, limit=min(max(limit, 1), 1000))
     workgraph_lessons.attach_learned(issues)
     return JSONResponse({"issues": sanitize_surrogates(issues)})
+
+
+@app.get("/api/workgraph/issues/export.csv")
+async def api_export_issues_csv(start: str, end: str, state: Optional[str] = None):
+    """Task #68: CSV export of issues whose updated_at falls within
+    [start, end] (both YYYY-MM-DD, UTC, inclusive on both ends - `end` is
+    treated as through end-of-day). `state` is an optional comma-separated
+    filter, same convention as GET /api/workgraph/issues; omitted means
+    every state (workgraph_export.issues_csv's own "no filter" default).
+    MUST be registered before /api/workgraph/issues/{issue_id} below - a
+    path-param route registered first would otherwise greedily match
+    "export.csv" as an issue_id (confirmed live: this 404'd with "no such
+    issue: export.csv" until moved here)."""
+    try:
+        start_ts = datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp()
+        end_ts = (datetime.strptime(end, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                  + timedelta(days=1, seconds=-1)).timestamp()
+    except ValueError:
+        raise HTTPException(400, "start/end must be YYYY-MM-DD")
+    if start_ts > end_ts:
+        raise HTTPException(400, "start must be at or before end")
+    states = [s.strip() for s in state.split(",")] if state else None
+    csv_text = workgraph_export.issues_csv(start_ts, end_ts, states=states)
+    filename = f"jasper-issues-{start}-to-{end}.csv"
+    return Response(content=csv_text, media_type="text/csv",
+                     headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
 @app.get("/api/workgraph/issues/{issue_id}")

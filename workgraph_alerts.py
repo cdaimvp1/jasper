@@ -5,12 +5,17 @@ workgraph_nba.py).
 
 Not a generic notification firehose — a short, curated surface for things
 that need Marc's attention beyond what the issue list itself already shows.
-Four concrete kinds, each with its own pure `_evaluate_*` helper:
+Five concrete kinds, each with its own pure `_evaluate_*` helper:
 
-  stale             — a waiting/blocked issue gone quiet too long.
-  high_priority_ask — a newly-classified ACTIONABLE-ASK on a high-priority issue.
-  anomaly           — an off-channel-style anomaly flagged during classification.
-  stuck_action      — a pending_actions row that never resolved.
+  stale               — a waiting/blocked issue gone quiet too long.
+  high_priority_ask   — a newly-classified ACTIONABLE-ASK on a high-priority issue.
+  anomaly             — an off-channel-style anomaly flagged during classification.
+  stuck_action        — a pending_actions row that never resolved.
+  unmet_prerequisite  — an Aristotle prerequisite (task #51) still unconfirmed
+                         (task #55). Previously this only ever showed up buried in
+                         nba_reason, seen only on the rare low-confidence "abstain"
+                         card - this makes it visible for every issue, regardless
+                         of confidence tier.
 
 Idempotent by construction: every alert kind is deduped against the set of
 currently-undismissed alerts before `run()` creates anything, keyed by
@@ -86,6 +91,13 @@ def _evaluate_stuck_action(pending: dict, now: float, thresholds: dict = DEFAULT
     return "critical", summary
 
 
+def _evaluate_unmet_prerequisite(issue: dict):
+    """Pure. Always fires (caller already filtered to has_unmet_prerequisite=1).
+    Re-uses the exact nba_reason text already computed by workgraph_nba.py -
+    no second call into workgraph_aristotle.check_prerequisites()."""
+    return "warn", issue.get("nba_reason") or f"Unmet prerequisite — {issue['title']}"
+
+
 def run(now: float | None = None, thresholds: dict = DEFAULT_THRESHOLDS) -> dict:
     """Scan all 4 conditions and create any new, non-duplicate alerts. Called
     right after workgraph_nba.recompute_all() everywhere that's called, so
@@ -98,7 +110,7 @@ def run(now: float | None = None, thresholds: dict = DEFAULT_THRESHOLDS) -> dict
     existing_issue_kind = {(a["issue_id"], a["kind"]) for a in existing if a["issue_id"]}
     existing_source_ref = {(a["kind"], a["source_ref"]) for a in existing if a["source_ref"]}
 
-    by_kind = {"stale": 0, "high_priority_ask": 0, "anomaly": 0, "stuck_action": 0}
+    by_kind = {"stale": 0, "high_priority_ask": 0, "anomaly": 0, "stuck_action": 0, "unmet_prerequisite": 0}
 
     # 1. Stale waiting/blocked issues. Evidence + state history fetched ONCE for
     # the whole batch (fixed 2026-07-29: this used to be 2 queries per issue
@@ -163,6 +175,17 @@ def run(now: float | None = None, thresholds: dict = DEFAULT_THRESHOLDS) -> dict
                          summary=summary, source_ref=source_ref)
         existing_source_ref.add(("stuck_action", source_ref))
         by_kind["stuck_action"] += 1
+
+    # 5. Unmet Aristotle prerequisites (task #55) - dedup per issue, same as
+    #    high_priority_ask (one alert is enough even if it stays unmet across
+    #    several ticks in a row).
+    for issue in ws.list_issues_with_unmet_prerequisite():
+        if (issue["id"], "unmet_prerequisite") in existing_issue_kind:
+            continue
+        severity, summary = _evaluate_unmet_prerequisite(issue)
+        ws.create_alert(issue_id=issue["id"], kind="unmet_prerequisite", severity=severity, summary=summary)
+        existing_issue_kind.add((issue["id"], "unmet_prerequisite"))
+        by_kind["unmet_prerequisite"] += 1
 
     return {"created": sum(by_kind.values()), "by_kind": by_kind}
 

@@ -198,7 +198,7 @@ def init_workgraph() -> None:
                 CREATE TABLE IF NOT EXISTS alerts (
                     id           INTEGER PRIMARY KEY AUTOINCREMENT,
                     issue_id     TEXT,
-                    kind         TEXT NOT NULL CHECK (kind IN ('stale','high_priority_ask','anomaly','stuck_action')),
+                    kind         TEXT NOT NULL CHECK (kind IN ('stale','high_priority_ask','anomaly','stuck_action','unmet_prerequisite')),
                     severity     TEXT NOT NULL CHECK (severity IN ('info','warn','critical')),
                     summary      TEXT NOT NULL,
                     source_ref   TEXT,
@@ -207,6 +207,38 @@ def init_workgraph() -> None:
                     dismissed_ts REAL
                 )
             """)
+            # SQLite has no ALTER TABLE for widening a CHECK constraint - an
+            # alerts table created before task #55 added 'unmet_prerequisite'
+            # still enforces the OLD constraint even though the CREATE TABLE
+            # above is a no-op against it (IF NOT EXISTS). Detect that exact
+            # case and rebuild, migrating every existing row - the same
+            # "detect real schema drift, don't just assume" discipline used
+            # everywhere else in this codebase.
+            existing_sql = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='alerts'"
+            ).fetchone()
+            if existing_sql and "unmet_prerequisite" not in (existing_sql["sql"] or ""):
+                conn.execute("ALTER TABLE alerts RENAME TO alerts_pre_task55")
+                conn.execute("""
+                    CREATE TABLE alerts (
+                        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                        issue_id     TEXT,
+                        kind         TEXT NOT NULL CHECK (kind IN ('stale','high_priority_ask','anomaly','stuck_action','unmet_prerequisite')),
+                        severity     TEXT NOT NULL CHECK (severity IN ('info','warn','critical')),
+                        summary      TEXT NOT NULL,
+                        source_ref   TEXT,
+                        created_ts   REAL NOT NULL,
+                        dismissed    INTEGER NOT NULL DEFAULT 0,
+                        dismissed_ts REAL
+                    )
+                """)
+                conn.execute("""
+                    INSERT INTO alerts (id, issue_id, kind, severity, summary, source_ref,
+                                         created_ts, dismissed, dismissed_ts)
+                    SELECT id, issue_id, kind, severity, summary, source_ref,
+                           created_ts, dismissed, dismissed_ts FROM alerts_pre_task55
+                """)
+                conn.execute("DROP TABLE alerts_pre_task55")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_dismissed ON alerts(dismissed, created_ts DESC)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_issue_kind ON alerts(issue_id, kind)")
 
@@ -440,6 +472,15 @@ def init_workgraph() -> None:
                 # at read time (see workgraph_lessons.attach_learned). Set by
                 # workgraph_nba.recompute_all alongside priority_score/nba_reason.
                 conn.execute("ALTER TABLE issues ADD COLUMN lesson_id_cited INTEGER REFERENCES lessons(id)")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                # Set by workgraph_nba.recompute_all() alongside priority_score/
+                # nba_reason - lets workgraph_alerts.py (task #55) cheaply query
+                # "which issues have an unmet Aristotle prerequisite right now"
+                # without recomputing workgraph_aristotle.check_prerequisites()
+                # a second time for every issue on every alert scan.
+                conn.execute("ALTER TABLE issues ADD COLUMN has_unmet_prerequisite INTEGER NOT NULL DEFAULT 0")
             except sqlite3.OperationalError:
                 pass  # already added by a prior init_workgraph() call
 
@@ -981,6 +1022,23 @@ def list_issues(states: Optional[list[str]] = None, limit: int = 200) -> list[di
         d["preview"] = d.get("synth_summary")
         out.append(d)
     return out
+
+
+def list_issues_with_unmet_prerequisite() -> list[dict]:
+    """Open issues where workgraph_nba.recompute_all() last found an active
+    Aristotle warning (task #55) - cheap enough for workgraph_alerts.py's
+    scan to call every tick, since it's a plain indexed-ish column read, not
+    a recomputation of check_prerequisites() itself."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                """SELECT * FROM issues WHERE has_unmet_prerequisite = 1
+                   AND state NOT IN ('done','noise-archived')"""
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
 
 
 def next_task_id(issue_id: str) -> str:

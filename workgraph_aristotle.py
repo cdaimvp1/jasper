@@ -82,9 +82,17 @@ def _prerequisite_satisfied(issue_id: str, rule: dict) -> bool:
     return False
 
 
+# Fixed, owned string - never derived from user input - so checking a
+# reason string's prefix (workgraph_nba.recompute_all(), task #55, to know
+# whether to persist has_unmet_prerequisite without recomputing this whole
+# check a second time) is a safe, deliberate coupling point, not fragile
+# string-sniffing of arbitrary text.
+WARNING_PREFIX = "No confirmation seen yet of "
+
+
 def _build_warning(rule: dict) -> str:
     what = rule.get("reason") or f'evidence of "{rule["requires_signal_type"]}"'
-    return f"No confirmation seen yet of {what} — verify before proceeding"
+    return f"{WARNING_PREFIX}{what} — verify before proceeding"
 
 
 def _group_keys_for_issue(issue_id: str, match_on: str) -> list[str]:

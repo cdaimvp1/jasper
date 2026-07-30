@@ -117,6 +117,59 @@ def test_get_active_prerequisite_rules_for_trigger_empty_for_unknown_type(ws_db)
     assert ws_db.get_active_prerequisite_rules_for_trigger("nonexistent_signal") == []
 
 
+def test_list_issues_with_unmet_prerequisite(ws_db):
+    issue_a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    issue_b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
+    issue_c = ws_db.create_issue_with_new_id(title="C", state="done", category="other")
+    ws_db.update_issue(issue_a, has_unmet_prerequisite=1)
+    ws_db.update_issue(issue_c, has_unmet_prerequisite=1)
+
+    results = {i["id"] for i in ws_db.list_issues_with_unmet_prerequisite()}
+
+    assert results == {issue_a}  # issue_b never flagged, issue_c excluded (done)
+
+
+def test_alerts_table_accepts_unmet_prerequisite_kind(ws_db):
+    """Confirms the CHECK constraint migration in init_workgraph() actually
+    took effect - not just that CREATE TABLE IF NOT EXISTS silently no-opped
+    against an old constraint."""
+    alert_id = ws_db.create_alert(issue_id=None, kind="unmet_prerequisite", severity="warn", summary="x")
+    assert alert_id is not None
+    alerts = ws_db.list_alerts(dismissed=False)
+    assert any(a["kind"] == "unmet_prerequisite" for a in alerts)
+
+
+def test_alerts_migration_preserves_existing_rows_from_old_schema(ws_db):
+    """Simulates a real pre-task-#55 database: an alerts table with the OLD,
+    narrower CHECK constraint and a real row already in it. Calling
+    init_workgraph() again must migrate the constraint AND keep that row."""
+    conn = ws_db._connect()
+    conn.execute("DROP TABLE alerts")
+    conn.execute("""
+        CREATE TABLE alerts (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            issue_id     TEXT,
+            kind         TEXT NOT NULL CHECK (kind IN ('stale','high_priority_ask','anomaly','stuck_action')),
+            severity     TEXT NOT NULL CHECK (severity IN ('info','warn','critical')),
+            summary      TEXT NOT NULL,
+            source_ref   TEXT,
+            created_ts   REAL NOT NULL,
+            dismissed    INTEGER NOT NULL DEFAULT 0,
+            dismissed_ts REAL
+        )
+    """)
+    conn.execute(
+        "INSERT INTO alerts (issue_id, kind, severity, summary, created_ts) VALUES (NULL, 'stale', 'warn', 'pre-existing alert', 1.0)"
+    )
+
+    ws_db.init_workgraph()  # re-run the migration
+
+    alerts = ws_db.list_alerts(dismissed=False)
+    assert any(a["summary"] == "pre-existing alert" for a in alerts)
+    new_id = ws_db.create_alert(issue_id=None, kind="unmet_prerequisite", severity="warn", summary="new one")
+    assert new_id is not None
+
+
 def test_list_distinct_signal_types_in_use(ws_db):
     ws_db.insert_raw_item(source="outlook_mail", stable_key="a", thread_key="a", dedupe_key="a",
                           occurred_ts=1.0, subject="s", from_actor="x@example.com", participants_json="[]")

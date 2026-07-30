@@ -110,6 +110,34 @@ def test_score_issue_prepends_aristotle_warning_when_unsatisfied(ws_db):
     assert "your move" in reason  # still appended after the warning, not replaced
 
 
+def test_recompute_all_persists_has_unmet_prerequisite(ws_db):
+    issue_id = ws_db.create_issue_with_new_id(title="Sign this", state="active", category="other")
+    row_id = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key="k3", thread_key="k3", dedupe_key="k3",
+        occurred_ts=time.time(), subject="Signature requested", from_actor="a@example.com",
+        participants_json="[]", body_preview="please sign",
+    )
+    ws_db.link_raw_item_to_issue(row_id, issue_id)
+    conn = ws_db._connect()
+    conn.execute("UPDATE raw_items SET signal_type = ? WHERE id = ?", ("signature_requested_docusign", row_id))
+    ws_db.create_prerequisite_rule(
+        trigger_signal_type="signature_requested_docusign", requires_signal_type="ariba_pr_fully_approved",
+        match_on="project", reason="an approved PO", created_by="marc",
+    )
+
+    nba.recompute_all()
+
+    issue = ws_db.get_issue(issue_id)
+    assert issue["has_unmet_prerequisite"] == 1
+
+
+def test_recompute_all_leaves_has_unmet_prerequisite_zero_when_no_rule_triggers(ws_db):
+    issue_id = ws_db.create_issue_with_new_id(title="Normal", state="active", category="other")
+    nba.recompute_all()
+    issue = ws_db.get_issue(issue_id)
+    assert issue["has_unmet_prerequisite"] == 0
+
+
 def test_score_issue_no_warning_when_no_rule_triggers(ws_db):
     issue_id = ws_db.create_issue_with_new_id(title="Normal issue", state="active", category="other")
     row_id = ws_db.insert_raw_item(

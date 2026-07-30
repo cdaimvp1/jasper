@@ -53,3 +53,36 @@ def test_stale_alert_generated_end_to_end(ws_db, bus_db):
     assert result["by_kind"]["stale"] == 1
     alerts = ws_db.list_alerts(dismissed=False)
     assert any(a["issue_id"] == iid and a["kind"] == "stale" for a in alerts)
+
+
+def test_unmet_prerequisite_alert_generated_end_to_end(ws_db, bus_db):
+    """Full run() - an issue workgraph_nba.py already flagged with
+    has_unmet_prerequisite=1 (task #55) must produce a real, visible alert,
+    reusing the exact nba_reason text rather than recomputing anything."""
+    iid = ws_db.create_issue_with_new_id(title="Sign this", state="active", category="other")
+    ws_db.update_issue(iid, has_unmet_prerequisite=1,
+                        nba_reason="No confirmation seen yet of an approved PO — verify before proceeding")
+
+    result = wa.run(now=time.time())
+
+    assert result["by_kind"]["unmet_prerequisite"] == 1
+    alerts = ws_db.list_alerts(dismissed=False)
+    match = next(a for a in alerts if a["issue_id"] == iid and a["kind"] == "unmet_prerequisite")
+    assert match["summary"] == "No confirmation seen yet of an approved PO — verify before proceeding"
+
+
+def test_unmet_prerequisite_alert_deduped_across_runs(ws_db, bus_db):
+    iid = ws_db.create_issue_with_new_id(title="Sign this", state="active", category="other")
+    ws_db.update_issue(iid, has_unmet_prerequisite=1, nba_reason="No confirmation seen yet of X")
+
+    first = wa.run(now=time.time())
+    second = wa.run(now=time.time())
+
+    assert first["by_kind"]["unmet_prerequisite"] == 1
+    assert second["by_kind"]["unmet_prerequisite"] == 0  # already alerted, not re-created
+
+
+def test_unmet_prerequisite_alert_not_generated_when_flag_is_zero(ws_db, bus_db):
+    ws_db.create_issue_with_new_id(title="Fine", state="active", category="other")
+    result = wa.run(now=time.time())
+    assert result["by_kind"]["unmet_prerequisite"] == 0

@@ -238,8 +238,13 @@ def recompute_all(now: float | None = None) -> dict:
     for issue in issues:
         score, reason, lesson_id = score_issue(issue, now)
         action_kind = "review" if issue["state"] == "active" else "wait"
+        # task #55: reason's prefix is a fixed, owned string (workgraph_
+        # aristotle.WARNING_PREFIX) - checking it here avoids recomputing
+        # check_prerequisites() a second time just to get this boolean.
+        has_unmet_prerequisite = reason.startswith(workgraph_aristotle.WARNING_PREFIX)
         ws.update_issue(issue["id"], priority_score=score, nba_reason=reason,
-                         nba_action_kind=action_kind, lesson_id_cited=lesson_id)
+                         nba_action_kind=action_kind, lesson_id_cited=lesson_id,
+                         has_unmet_prerequisite=1 if has_unmet_prerequisite else 0)
         updated += 1
     return {"scored": updated, "as_of": now}
 

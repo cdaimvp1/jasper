@@ -201,3 +201,33 @@ def test_attach_supplier_precedent_ignores_system_sender_only_party(ws_db):
     wsup.attach_supplier_precedent(issue)
 
     assert issue["supplier_precedent"] is None
+
+
+def test_attach_supplier_precedent_deterministic_tie_break_by_first_seen(ws_db):
+    """Hardening pass #2: list_parties_for_issue has no ORDER BY, so
+    picking the first match from an unordered result was non-
+    deterministic when an issue has more than one identifiable external
+    company. first_seen_ts ascending (earliest-known contact) is a real,
+    stable tie-break."""
+    now = time.time()
+    earlier_closed = _closed_issue(ws_db, "p_early", "EarlierCo", now - 20 * 86400, now - 10 * 86400)
+    _closed_issue(ws_db, "p_late", "LaterCo", now - 5 * 86400, now - 1 * 86400)
+
+    iid = ws_db.create_issue_with_new_id(title="Multi-party open issue", state="active", category="other")
+    ws_db.upsert_party(id="later_party", primary_email="later@later.com", display_name="later",
+                        affiliation="external", affiliation_confidence="H",
+                        affiliation_source="domain", company="LaterCo")
+    ws_db.link_party_to_issue(iid, "later_party")
+    ws_db.upsert_party(id="earlier_party", primary_email="earlier@earlier.com", display_name="earlier",
+                        affiliation="external", affiliation_confidence="H",
+                        affiliation_source="domain", company="EarlierCo")
+    ws_db.link_party_to_issue(iid, "earlier_party")
+    conn = ws_db._connect()
+    conn.execute("UPDATE parties SET first_seen_ts = ? WHERE id = ?", (200.0, "later_party"))
+    conn.execute("UPDATE parties SET first_seen_ts = ? WHERE id = ?", (100.0, "earlier_party"))
+    conn.close()
+
+    issue = ws_db.get_issue(iid)
+    wsup.attach_supplier_precedent(issue)
+
+    assert issue["supplier_precedent"]["issue_id"] == earlier_closed

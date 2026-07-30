@@ -89,12 +89,21 @@ def attach_supplier_precedent(issue: dict) -> dict:
     None) - the most recently closed issue with the SAME real external
     supplier company, excluding this issue itself. A system-sender-only
     party (e.g. Ariba's no-reply) never has a `company` set, so it's
-    naturally excluded rather than needing a separate check here."""
-    company = None
-    for party in ws.list_parties_for_issue(issue["id"]):
-        if party.get("affiliation") == "external" and party.get("company"):
-            company = party["company"]
-            break
+    naturally excluded rather than needing a separate check here.
+
+    Fixed 2026-07-30 (hardening pass #2): workgraph_store.
+    list_parties_for_issue has no ORDER BY, so taking the first match
+    from an unordered JOIN result was non-deterministic whenever an issue
+    has more than one identifiable external company - two otherwise-
+    identical requests could get a different supplier's precedent.
+    first_seen_ts ascending (the earliest-known contact on this issue) is
+    a real, stable tie-break, not an arbitrary one."""
+    candidates = [
+        p for p in ws.list_parties_for_issue(issue["id"])
+        if p.get("affiliation") == "external" and p.get("company")
+    ]
+    candidates.sort(key=lambda p: p.get("first_seen_ts") or 0)
+    company = candidates[0]["company"] if candidates else None
     issue["supplier_precedent"] = (
         last_closed_issue_for_company(company, exclude_issue_id=issue["id"]) if company else None
     )

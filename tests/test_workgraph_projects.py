@@ -200,3 +200,139 @@ def test_weak_signal_candidates_exclude_disjoint_reference_pair(ws_db):
     candidates = wp._weak_signal_candidates(issue_a)
 
     assert all(c["id"] != b for c in candidates)
+
+
+# --- hardening pass #2 fixes ----------------------------------------------
+
+def _link_party(ws_db, issue_id, party_id, email, *, company=None, first_seen_ts=None):
+    ws_db.upsert_party(id=party_id, primary_email=email, display_name=party_id,
+                        affiliation="external", affiliation_confidence="H",
+                        affiliation_source="domain", company=company)
+    ws_db.link_party_to_issue(issue_id, party_id)
+    if first_seen_ts is not None:
+        conn = ws_db._connect()
+        conn.execute("UPDATE parties SET first_seen_ts = ? WHERE id = ?", (first_seen_ts, party_id))
+        conn.close()
+
+
+def test_shared_topic_key_searches_beyond_default_200_limit(ws_db, monkeypatch):
+    """Regression for hardening pass #2: ws.list_issues' 200-row default
+    silently capped this search on the real, larger dataset."""
+    seen_limits = []
+    real_list_issues = ws_db.list_issues
+
+    def spy(*args, **kwargs):
+        seen_limits.append(kwargs.get("limit"))
+        return real_list_issues(*args, **kwargs)
+
+    monkeypatch.setattr(ws_db, "list_issues", spy)
+    iid = _issue(ws_db, "A reasonably long and distinctive subject core here")
+    _link_party(ws_db, iid, "p1", "rep@acme.com")
+
+    wp._shared_topic_key(ws_db.get_issue(iid))
+
+    assert seen_limits and all((limit or 0) > 200 for limit in seen_limits)
+
+
+def test_weak_signal_candidates_searches_beyond_default_200_limit(ws_db, monkeypatch):
+    seen_limits = []
+    real_list_issues = ws_db.list_issues
+
+    def spy(*args, **kwargs):
+        seen_limits.append(kwargs.get("limit"))
+        return real_list_issues(*args, **kwargs)
+
+    monkeypatch.setattr(ws_db, "list_issues", spy)
+    iid = _issue(ws_db, "Some contract issue")
+    conn = ws_db._connect()
+    conn.execute("UPDATE issues SET category = 'contract' WHERE id = ?", (iid,))
+    conn.close()
+
+    wp._weak_signal_candidates(ws_db.get_issue(iid))
+
+    assert seen_limits and all((limit or 0) > 200 for limit in seen_limits)
+
+
+def test_weak_signal_candidates_exclude_issue_already_in_any_project(ws_db):
+    """Hardening pass #2: a candidate that already belongs to a DIFFERENT
+    real project used to slip through (only the "already the exact same
+    project" case was excluded) - this is what let a later confirm
+    silently detach it via merge_issues. Now excluded at generation time
+    regardless of which project it's already in."""
+    now = time.time()
+    other_project = ws_db.create_project_with_new_id(name="Existing project", category="contract")
+    already_grouped = _issue(ws_db, "Already elsewhere", opened_at=now)
+    ws_db.assign_issue_to_project(already_grouped, other_project)
+    conn = ws_db._connect()
+    conn.execute("UPDATE issues SET category = 'contract' WHERE id = ?", (already_grouped,))
+    conn.close()
+
+    ungrouped = _issue(ws_db, "Ungrouped contract issue", opened_at=now)
+    conn = ws_db._connect()
+    conn.execute("UPDATE issues SET category = 'contract' WHERE id = ?", (ungrouped,))
+    conn.close()
+
+    candidates = wp._weak_signal_candidates(ws_db.get_issue(ungrouped))
+
+    assert all(c["id"] != already_grouped for c in candidates)
+
+
+def test_merge_issues_creates_new_project_when_neither_has_one(ws_db):
+    a = _issue(ws_db, "A")
+    b = _issue(ws_db, "B")
+    project_id = wp.merge_issues(a, b, reason_label="test")
+    assert ws_db.get_issue(a)["project_id"] == project_id
+    assert ws_db.get_issue(b)["project_id"] == project_id
+
+
+def test_merge_issues_joins_the_existing_project_when_one_side_has_one(ws_db):
+    a = _issue(ws_db, "A")
+    existing = ws_db.create_project_with_new_id(name="Existing", category="other")
+    ws_db.assign_issue_to_project(a, existing)
+    b = _issue(ws_db, "B")
+
+    project_id = wp.merge_issues(a, b, reason_label="test")
+
+    assert project_id == existing
+    assert ws_db.get_issue(b)["project_id"] == existing
+
+
+def test_merge_issues_collision_moves_every_member_and_archives_the_loser(ws_db):
+    """The real bug hardening pass #2 found: merge_issues used to only
+    ever consult issue_a's project, silently detaching issue_b out of
+    whatever project IT was already in with no trace and no cleanup.
+    Now: every member of the losing project moves to the winner, and the
+    emptied loser is archived, not left active and misleading."""
+    proj_a = ws_db.create_project_with_new_id(name="Project A", category="other")
+    a = _issue(ws_db, "A")
+    ws_db.assign_issue_to_project(a, proj_a)
+
+    proj_b = ws_db.create_project_with_new_id(name="Project B", category="other")
+    b = _issue(ws_db, "B")
+    ws_db.assign_issue_to_project(b, proj_b)
+    other_member_of_b = _issue(ws_db, "Other member of B's project")
+    ws_db.assign_issue_to_project(other_member_of_b, proj_b)
+
+    winner = wp.merge_issues(a, b, reason_label="test collision")
+
+    assert winner == proj_a
+    assert ws_db.get_issue(a)["project_id"] == proj_a
+    assert ws_db.get_issue(b)["project_id"] == proj_a
+    assert ws_db.get_issue(other_member_of_b)["project_id"] == proj_a, \
+        "the OTHER member of the losing project must move too, not just b"
+    assert ws_db.get_project(proj_b)["status"] == "archived"
+
+
+def test_project_name_for_deterministic_tie_break_by_first_seen(ws_db):
+    """Hardening pass #2: list_parties_for_issue has no ORDER BY, so
+    picking a bare first match was non-deterministic when an issue has
+    more than one identifiable external company. first_seen_ts ascending
+    is a real, stable tie-break."""
+    iid = _issue(ws_db, "Multi-party issue")
+    _link_party(ws_db, iid, "later", "later@later.com", company="LaterCo", first_seen_ts=200.0)
+    _link_party(ws_db, iid, "earlier", "earlier@earlier.com", company="EarlierCo", first_seen_ts=100.0)
+    parties = ws_db.list_parties_for_issue(iid)
+
+    name = wp._project_name_for(ws_db.get_issue(iid), "other", parties)
+
+    assert name.startswith("EarlierCo")

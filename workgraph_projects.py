@@ -92,6 +92,16 @@ def _project_name_for(issue: dict, category: str, parties: list) -> str:
     external = [p for p in parties if p.get("affiliation") == "external" and p.get("company")
                 and not workgraph_signals._SYSTEM_SENDER.match(p.get("primary_email") or "")]
     if external:
+        # Fixed 2026-07-30 (hardening pass #2): workgraph_store.
+        # list_parties_for_issue has no ORDER BY, so picking a bare [0]
+        # from an unordered JOIN result was non-deterministic whenever an
+        # issue has more than one identifiable external company (a vendor
+        # cc'ing outside counsel, a three-way negotiation) - two
+        # otherwise-identical runs could name the same project after a
+        # different company. first_seen_ts ascending is a real, stable
+        # tie-break (the earliest-known contact on this issue), not an
+        # arbitrary one.
+        external.sort(key=lambda p: p.get("first_seen_ts") or 0)
         return f"{external[0]['company']} — {category}"
     return f"{issue['title'][:50]} — {category}"
 
@@ -191,7 +201,13 @@ def _shared_topic_key(issue: dict):
     # absence of confirming evidence - veto the match rather than let a
     # long shared phrase override it.
     my_companies = _external_companies_for_issue(issue["id"])
-    for other in ws.list_issues():
+    # Fixed 2026-07-30 (hardening pass #2): no limit override here used to
+    # mean workgraph_store.list_issues' own default (200) silently capped
+    # the search - the real install is already past that count, so issues
+    # outside the top 200 by priority/recency were invisible to this check
+    # with no error or log. Every other module added this session that
+    # needs "every issue" passes an explicit high limit; this one hadn't.
+    for other in ws.list_issues(states=None, limit=10000):
         if other["id"] == issue["id"]:
             continue
         if issue.get("project_id") and issue.get("project_id") == other.get("project_id"):
@@ -243,15 +259,32 @@ def _weak_signal_candidates(issue: dict) -> list:
     this is called) - a real but softer hint worth asking about, not acting
     on unprompted. Same disjoint-PR/PO veto as the strong-signal path -
     even a SUGGESTED merge shouldn't propose combining two issues that
-    already look like different purchase requisitions."""
+    already look like different purchase requisitions.
+
+    Fixed 2026-07-30 (hardening pass #2): also excludes a candidate that
+    already belongs to a DIFFERENT real project, not just the redundant
+    "already the same project" case - proposing (and later confirming) a
+    merge across two already-established, different projects is exactly
+    what let merge_issues silently detach an issue from one project into
+    another with no warning. That case now never becomes a suggestion in
+    the first place; see merge_issues' own defense-in-depth fix for the
+    case where a strong-signal match still reaches it directly."""
     category = issue.get("category")
     if not category or category == "other":
         return []
     out = []
-    for other in ws.list_issues():
+    # Same limit fix as _shared_topic_key above - ws.list_issues' 200-row
+    # default was silently capping this search on the real, larger dataset.
+    for other in ws.list_issues(states=None, limit=10000):
         if other["id"] == issue["id"] or other.get("category") != category:
             continue
-        if other.get("project_id") and issue.get("project_id") == other.get("project_id"):
+        if other.get("project_id"):
+            # Already belongs to a project - either the same one as `issue`
+            # (pointless to suggest, the original behavior) or a genuinely
+            # DIFFERENT one (dangerous to suggest - see the fix note above).
+            # Either way, skip: an issue with no project of its own is a
+            # fine target to grow an EXISTING project into, but an issue
+            # that already has a home is never proposed as a merge target.
             continue
         if _vetoed_by_reference_mismatch(issue["id"], other["id"]):
             continue
@@ -266,17 +299,45 @@ def merge_issues(issue_id_a: str, issue_id_b: str, *, reason_label: str) -> str:
     whichever of the two already has a project, or creates a new one.
     Shared by the deterministic strong-signal path and by a confirmed
     project-suggestion (Marc's own call, or curator's LLM judgment on the
-    weak-signal residue). Returns the resulting project_id."""
+    weak-signal residue). Returns the resulting project_id.
+
+    Fixed 2026-07-30 (hardening pass #2): previously only ever consulted
+    issue_a's project_id, falling back to issue_b's only if issue_a had
+    none - if BOTH already belonged to a project and they were DIFFERENT
+    real projects, issue_b (and only issue_b) got silently reassigned out
+    of its existing project with no warning, no merge of that project's
+    OTHER members, and no cleanup of the now-partially-emptied loser.
+    _weak_signal_candidates now refuses to propose a merge against an
+    issue that already has a project at all (closing the common path
+    that reaches this), but the deterministic strong-signal path can
+    still land here directly, so this handles the collision correctly
+    rather than assuming it can't happen: every member of the LOSING
+    project moves to the winning one, and the emptied loser is archived
+    (workgraph_store.set_project_status - the exact mechanism task #81's
+    one-off remediation used, now actually wired into the ongoing path
+    instead of only ever being called by a test)."""
     issue_a = ws.get_issue(issue_id_a)
     issue_b = ws.get_issue(issue_id_b)
-    if issue_a.get("project_id"):
-        project_id = issue_a["project_id"]
-    elif issue_b.get("project_id"):
-        project_id = issue_b["project_id"]
+    project_a = issue_a.get("project_id")
+    project_b = issue_b.get("project_id")
+
+    if project_a and project_b and project_a != project_b:
+        winner, loser = project_a, project_b
+        for member in ws.list_issues_for_project(loser):
+            if member["id"] in (issue_id_a, issue_id_b):
+                continue  # reassigned explicitly below either way
+            ws.assign_issue_to_project(member["id"], winner, reason=f"{reason_label}: project {loser} merged into {winner}")
+        ws.set_project_status(loser, "archived")
+        project_id = winner
+    elif project_a:
+        project_id = project_a
+    elif project_b:
+        project_id = project_b
     else:
         parties = ws.list_parties_for_issue(issue_id_a)
         category = issue_a.get("category")
         project_id = ws.create_project_with_new_id(name=_project_name_for(issue_a, category, parties), category=category)
+
     ws.assign_issue_to_project(issue_id_a, project_id, reason=f"{reason_label} with {issue_id_b}")
     ws.assign_issue_to_project(issue_id_b, project_id, reason=f"{reason_label} with {issue_id_a}")
     return project_id

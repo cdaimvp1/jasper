@@ -57,3 +57,46 @@ def test_open_email_raises_with_exit_code_when_stderr_empty(monkeypatch):
     monkeypatch.setattr(subprocess, "run", fake_run)
     with pytest.raises(RuntimeError, match="exit code 1"):
         oa.open_email("some-entry-id")
+
+
+def test_draft_reply_requires_entry_id():
+    with pytest.raises(ValueError):
+        oa.draft_reply("")
+
+
+def test_draft_reply_calls_script_without_reply_all_by_default(monkeypatch):
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        return _FakeCompletedProcess(returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = oa.draft_reply("entryid-ABC")
+
+    assert result == {"ok": True}
+    assert "entryid-ABC" in captured["args"]
+    assert str(oa._DRAFT_REPLY_SCRIPT) in captured["args"]
+    assert "-ReplyAll" not in captured["args"]
+
+
+def test_draft_reply_all_passes_reply_all_flag(monkeypatch):
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        return _FakeCompletedProcess(returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    oa.draft_reply("entryid-ABC", reply_all=True)
+
+    assert "-ReplyAll" in captured["args"]
+
+
+def test_draft_reply_raises_runtime_error_on_failure(monkeypatch):
+    def fake_run(args, **kwargs):
+        return _FakeCompletedProcess(returncode=2, stderr="stale entry id")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match="stale entry id"):
+        oa.draft_reply("stale-id")

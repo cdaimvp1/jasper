@@ -1157,6 +1157,30 @@ async def api_action_open_email(body: OpenEmailBody):
     return JSONResponse(result)
 
 
+class DraftReplyBody(BaseModel):
+    raw_item_id: int
+    reply_all: bool = False
+
+
+@app.post("/api/action/draft-reply")
+async def api_action_draft_reply(body: DraftReplyBody):
+    """Task #47 - creates a REAL Outlook draft reply to the exact source
+    email (outlook_actions.draft_reply: Reply()/ReplyAll() + Display(), never
+    Send()). Same asyncio.to_thread guard as open-email above, same reason -
+    this blocks for a full COM round-trip on a single-worker server."""
+    raw_item = wg.get_raw_item(body.raw_item_id)
+    if raw_item is None:
+        raise HTTPException(404, f"no such raw_item: {body.raw_item_id}")
+    entry_id = raw_item.get("entry_id")
+    if not entry_id:
+        raise HTTPException(400, "this item has no stored EntryID (ingested before task #43, or not a mail item)")
+    try:
+        result = await asyncio.to_thread(outlook_actions.draft_reply, entry_id, body.reply_all)
+    except RuntimeError as e:
+        raise HTTPException(500, str(e))
+    return JSONResponse(result)
+
+
 class TaskCreateBody(BaseModel):
     label: str
     action: Optional[str] = None

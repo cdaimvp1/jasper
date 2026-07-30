@@ -1,7 +1,10 @@
-"""Regression tests for deep_links.py (task #44) - Teams chat deep links built
-from a teams_chat raw_item's thread_key (== the real chat_id, confirmed
+"""Regression tests for deep_links.py - Teams chat deep links (task #44,
+built from a teams_chat raw_item's thread_key == the real chat_id, confirmed
 against production data: ingest/normalize.py's _process_teams_chat already
-sets thread_key = chat_id verbatim, no parsing needed here)."""
+sets thread_key = chat_id verbatim, no parsing needed here), open-email
+(task #46) and draft-reply (task #47) actions for outlook_mail rows.
+evidence["deep_links"] is a LIST (task #47's refactor) since a single email
+can carry more than one action (open + draft reply) at once."""
 import deep_links
 
 
@@ -24,6 +27,20 @@ def test_teams_chat_link_none_for_empty_chat_id():
     assert deep_links.teams_chat_link(None) is None
 
 
+def test_draft_reply_action_none_for_non_mail_source():
+    assert deep_links.draft_reply_action({"source": "teams_chat", "id": 1, "entry_id": "x"}) is None
+
+
+def test_draft_reply_action_none_without_entry_id():
+    assert deep_links.draft_reply_action({"source": "outlook_mail", "id": 1, "entry_id": None}) is None
+
+
+def test_draft_reply_action_shape():
+    action = deep_links.draft_reply_action({"source": "outlook_mail", "id": 42, "entry_id": "e1"})
+    assert action == {"kind": "action", "endpoint": "/api/action/draft-reply",
+                       "raw_item_id": 42, "label": "Draft reply"}
+
+
 def test_attach_deep_links_teams_evidence_gets_link(ws_db):
     row_id = ws_db.insert_raw_item(
         source="teams_chat", stable_key="19:xyz@thread.v2:msg1", thread_key="19:xyz@thread.v2",
@@ -37,14 +54,15 @@ def test_attach_deep_links_teams_evidence_gets_link(ws_db):
 
     out = deep_links.attach_deep_links(evidence)
 
-    assert out[0]["deep_link"]["url"].startswith("https://teams.microsoft.com/l/chat/19%3Axyz")
-    assert out[0]["deep_link"]["label"] == "Open Teams chat"
+    assert len(out[0]["deep_links"]) == 1
+    assert out[0]["deep_links"][0]["url"].startswith("https://teams.microsoft.com/l/chat/19%3Axyz")
+    assert out[0]["deep_links"][0]["label"] == "Open Teams chat"
 
 
-def test_attach_deep_links_mail_without_entry_id_gets_no_link(ws_db):
+def test_attach_deep_links_mail_without_entry_id_gets_no_links(ws_db):
     """Rows ingested before task #43 (or where the PS scan couldn't read
-    EntryID for some reason) have no entry_id - nothing to open by, so no
-    button rather than a broken one."""
+    EntryID for some reason) have no entry_id - nothing to open/draft by, so
+    no buttons rather than broken ones."""
     row_id = ws_db.insert_raw_item(
         source="outlook_mail", stable_key="conv-1", thread_key="conv-1",
         dedupe_key="dk-mail-1", occurred_ts=1_800_000_000.0, subject="Hi",
@@ -54,10 +72,10 @@ def test_attach_deep_links_mail_without_entry_id_gets_no_link(ws_db):
 
     out = deep_links.attach_deep_links(evidence)
 
-    assert out[0]["deep_link"] is None
+    assert out[0]["deep_links"] == []
 
 
-def test_attach_deep_links_mail_with_entry_id_gets_open_action(ws_db):
+def test_attach_deep_links_mail_with_entry_id_gets_both_actions(ws_db):
     row_id = ws_db.insert_raw_item(
         source="outlook_mail", stable_key="conv-2", thread_key="conv-2",
         dedupe_key="dk-mail-2", occurred_ts=1_800_000_000.0, subject="Hi again",
@@ -68,13 +86,12 @@ def test_attach_deep_links_mail_with_entry_id_gets_open_action(ws_db):
 
     out = deep_links.attach_deep_links(evidence)
 
-    assert out[0]["deep_link"] == {
-        "kind": "action", "endpoint": "/api/action/open-email",
-        "raw_item_id": row_id, "label": "Open email",
-    }
+    links = out[0]["deep_links"]
+    assert {l["label"] for l in links} == {"Open email", "Draft reply"}
+    assert all(l["kind"] == "action" and l["raw_item_id"] == row_id for l in links)
 
 
-def test_attach_deep_links_calendar_source_gets_no_link(ws_db):
+def test_attach_deep_links_calendar_source_gets_no_links(ws_db):
     row_id = ws_db.insert_raw_item(
         source="calendar", stable_key="ev-1", thread_key="ev-1",
         dedupe_key="dk-cal-1", occurred_ts=1_800_000_000.0, subject="Sync",
@@ -84,13 +101,13 @@ def test_attach_deep_links_calendar_source_gets_no_link(ws_db):
 
     out = deep_links.attach_deep_links(evidence)
 
-    assert out[0]["deep_link"] is None
+    assert out[0]["deep_links"] == []
 
 
 def test_attach_deep_links_missing_raw_item_id_is_safe(ws_db):
     evidence = [{"raw_item_id": None, "type": "worker_action", "summary": "x", "ts": 1.0}]
     out = deep_links.attach_deep_links(evidence)
-    assert out[0]["deep_link"] is None
+    assert out[0]["deep_links"] == []
 
 
 def test_attach_deep_links_empty_list():

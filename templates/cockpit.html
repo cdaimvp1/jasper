@@ -8038,16 +8038,18 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
   }
   pccRenderLaneMenu();
 
-  // task #44/#46: "url" kind (Teams) renders a plain link; "action" kind
-  // (open the exact email - no reliable client-side URL for a specific
-  // Outlook desktop item) renders a button that calls the server, which
-  // shells out to Outlook COM (outlook_actions.py).
-  function pccDeepLinkHtml(deepLink) {
-    if (!deepLink) return "";
-    if (deepLink.kind === "action") {
-      return `<button type="button" class="pcc-tl-deeplink pcc-tl-deeplink-btn" data-open-action="${pccEsc(deepLink.endpoint)}" data-raw-item-id="${pccEsc(deepLink.raw_item_id)}">${pccEsc(deepLink.label)} &#8594;</button>`;
-    }
-    return `<a class="pcc-tl-deeplink" href="${pccEsc(deepLink.url)}" target="_blank" rel="noopener">${pccEsc(deepLink.label)} &#8594;</a>`;
+  // task #44/#46/#47: "url" kind (Teams) renders a plain link; "action" kind
+  // (open/draft-reply the exact email - no reliable client-side URL for a
+  // specific Outlook desktop item) renders a button that calls the server,
+  // which shells out to Outlook COM (outlook_actions.py). One evidence row
+  // can carry more than one action (e.g. both open-email and draft-reply for
+  // the same message), so this renders the whole list.
+  function pccDeepLinkHtml(deepLinks) {
+    if (!deepLinks || !deepLinks.length) return "";
+    return deepLinks.map(link => link.kind === "action"
+      ? `<button type="button" class="pcc-tl-deeplink pcc-tl-deeplink-btn" data-open-action="${pccEsc(link.endpoint)}" data-raw-item-id="${pccEsc(link.raw_item_id)}">${pccEsc(link.label)} &#8594;</button>`
+      : `<a class="pcc-tl-deeplink" href="${pccEsc(link.url)}" target="_blank" rel="noopener">${pccEsc(link.label)} &#8594;</a>`
+    ).join("");
   }
 
   function pccBuildTimeline(evidence, stateHistory) {
@@ -8056,9 +8058,10 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
       // carried through so Progress can pair an event with its recommendation
       // and name the attachment that produced it
       recommendation: e.recommendation, attachment: e.attachment,
-      // task #44: {url,label} when the source can be opened directly (a Teams
-      // chat today, more sources coming) - null when there's nothing to link to.
-      deepLink: e.deep_link || null,
+      // task #44/#46/#47: zero or more {kind,label,...} rows - a Teams chat
+      // link, or open-email/draft-reply actions for a mail item. Empty when
+      // there's nothing to link to.
+      deepLinks: e.deep_links || [],
     }));
     const stItems = (stateHistory || []).map(h => ({
       kind: "state",
@@ -8139,7 +8142,7 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
           </div>
           <span class="pcc-tl-sum">${pccEsc(item.summary)}</span>
           ${item.attachment ? `<span class="pcc-tl-att">${pccEsc(item.attachment)}</span>` : ""}
-          ${pccDeepLinkHtml(item.deepLink)}
+          ${pccDeepLinkHtml(item.deepLinks)}
         </div>
         ${recHtml}
       </div>`;

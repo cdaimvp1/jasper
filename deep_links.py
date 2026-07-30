@@ -25,9 +25,14 @@ reliable client-side URL that opens one specific Outlook desktop item, so
 this is a server-side action (POST /api/action/open-email, see
 outlook_actions.py) rather than a plain href — hence the "kind" field below:
 "url" rows render as a plain link, "action" rows render as a button that
-calls the endpoint. Requires the raw_item's entry_id (task #43) - rows
-ingested before that change, or with a source this doesn't cover, get no
-button rather than a broken one.
+calls the endpoint.
+
+v3 (task #47): a second action, "draft reply" (POST /api/action/draft-reply),
+can apply to the SAME email as "open email" — one evidence row can now carry
+more than one action, so this returns a LIST (evidence["deep_links"], plural)
+rather than the single "deep_link" v1/v2 shipped with. Both require the
+raw_item's entry_id (task #43) - rows ingested before that change, or with a
+source none of this covers, get an empty list rather than a broken button.
 """
 from __future__ import annotations
 
@@ -53,25 +58,35 @@ def open_email_action(raw_item: dict) -> Optional[dict]:
             "raw_item_id": raw_item["id"], "label": "Open email"}
 
 
-def _link_for_raw_item(raw_item: dict) -> Optional[dict]:
+def draft_reply_action(raw_item: dict) -> Optional[dict]:
+    if raw_item.get("source") != "outlook_mail":
+        return None
+    if not raw_item.get("entry_id"):
+        return None
+    return {"kind": "action", "endpoint": "/api/action/draft-reply",
+            "raw_item_id": raw_item["id"], "label": "Draft reply"}
+
+
+def _links_for_raw_item(raw_item: dict) -> list[dict]:
     source = raw_item.get("source")
     if source == "teams_chat":
-        return teams_chat_link(raw_item.get("thread_key"))
+        link = teams_chat_link(raw_item.get("thread_key"))
+        return [link] if link else []
     if source == "outlook_mail":
-        return open_email_action(raw_item)
-    return None
+        return [a for a in (open_email_action(raw_item), draft_reply_action(raw_item)) if a]
+    return []
 
 
 def attach_deep_links(evidence: list[dict]) -> list[dict]:
-    """Mutates and returns `evidence`: adds a "deep_link" key to each row -
-    either None, a {"kind":"url",...} row (client-side link), or a
-    {"kind":"action",...} row (a button that calls a server endpoint).
-    Batches the raw_item lookup - one query for the whole evidence list via
-    get_raw_items_by_ids, not one query per row (same N+1 fix already applied
-    to list_evidence_for_issues this session)."""
+    """Mutates and returns `evidence`: adds a "deep_links" key to each row -
+    a list (possibly empty), each entry either a {"kind":"url",...} row
+    (client-side link) or a {"kind":"action",...} row (a button that calls a
+    server endpoint). Batches the raw_item lookup - one query for the whole
+    evidence list via get_raw_items_by_ids, not one query per row (same N+1
+    fix already applied to list_evidence_for_issues this session)."""
     raw_item_ids = [ev["raw_item_id"] for ev in evidence if ev.get("raw_item_id") is not None]
     raw_items_by_id = ws.get_raw_items_by_ids(raw_item_ids)
     for ev in evidence:
         raw_item = raw_items_by_id.get(ev.get("raw_item_id"))
-        ev["deep_link"] = _link_for_raw_item(raw_item) if raw_item else None
+        ev["deep_links"] = _links_for_raw_item(raw_item) if raw_item else []
     return evidence

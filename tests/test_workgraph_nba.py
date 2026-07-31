@@ -350,7 +350,26 @@ def test_candidate_actions_ranked_by_score_descending():
     result = nba.candidate_actions(issue, evidence, synthesis)
     scores = [c["score"] for c in result]
     assert scores == sorted(scores, reverse=True)
-    assert result[0]["source_surface"] == "nba"
+    assert result[0]["source_surface"] == "synthesis"
+
+
+def test_candidate_actions_synthesis_never_outranked_by_high_priority_generic():
+    # Real regression (2026-07-31, Marc's direct report against marc-185):
+    # a $111.7M issue's generic "Draft a reply / your move" was outranking
+    # curator's own specific, content-derived "Confirm the Nintex DocGen
+    # notice is legitimate" - a reasoned candidate must never lose to a
+    # template just because the issue's priority_score is high.
+    issue = {"nba_reason": "your move · $111.7M", "state": "active", "priority_score": 0.99}
+    synthesis = {"suggested_actions": [
+        {"label": "Approve/reject PR1111865 (SAP RISE Private Cloud)", "rationale": "largest pending approval"},
+        {"label": "Confirm the Nintex DocGen notice is legitimate", "rationale": "external phishing banner"},
+    ]}
+    result = nba.candidate_actions(issue, [], synthesis)
+    assert result[0]["source_surface"] == "synthesis"
+    assert result[0]["label"] == "Approve/reject PR1111865 (SAP RISE Private Cloud)"
+    assert result[1]["source_surface"] == "synthesis"
+    nba_candidate = next(c for c in result if c["source_surface"] == "nba")
+    assert nba_candidate["score"] < result[1]["score"]
 
 
 def test_candidate_actions_capped_at_four():

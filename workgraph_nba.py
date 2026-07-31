@@ -315,14 +315,35 @@ def candidate_actions(issue: dict, evidence: list[dict], synthesis: Optional[dic
     losing information by forcing everything into 2 buckets. This
     function is purely additive instead - no schema change, no new
     clickable UI yet (that's Part E2), just making the 3 signals
-    comparable in one ranked place for the first time."""
+    comparable in one ranked place for the first time.
+
+    Scoring bands (fixed 2026-07-31, Marc's direct report): the 'nba' and
+    'evidence_row' surfaces are BOTH mechanical templates - a fixed label
+    keyed off issue state or a shallow rule ("has an attachment" ->
+    "review it") - neither reads or reasons about what the message
+    actually asks for. 'synthesis' candidates are the one surface curator
+    actually read and reasoned about the specific content to produce
+    (SYNTHESIS_ROUTINE.md's suggested_actions). The original scores (nba=
+    priority_score, evidence_row=0.5, synthesis=0.45 flat) put the LEAST
+    specific candidate on top almost every time, since priority_score and
+    0.5 usually beat 0.45 - confirmed live on marc-185, where "Draft a
+    reply / your move" outranked "Confirm the Nintex DocGen notice is
+    legitimate" and "Approve/reject PR1111865...". A reasoned candidate
+    must outrank a template one whenever both exist, not the reverse."""
     candidates = []
+
+    # Generic-template ceiling: neither templated surface may outscore a
+    # real synthesis candidate, no matter how high this issue's own
+    # priority_score is.
+    _GENERIC_CEILING = 0.6
+    _SYNTHESIS_BAND = 0.9
 
     if issue.get("nba_reason"):
         kind = "nudge" if issue.get("state") == "waiting" else "draft_reply"
         candidates.append({
             "kind": kind, "label": "Nudge" if kind == "nudge" else "Draft a reply",
-            "rationale": issue["nba_reason"], "score": issue.get("priority_score") or 0.5,
+            "rationale": issue["nba_reason"],
+            "score": min(issue.get("priority_score") or 0.5, _GENERIC_CEILING),
             "source_surface": "nba",
         })
 
@@ -334,19 +355,22 @@ def candidate_actions(issue: dict, evidence: list[dict], synthesis: Optional[dic
         seen_kinds.add(rec["kind"])
         candidates.append({
             "kind": rec["kind"], "label": rec.get("label") or rec["kind"],
-            "rationale": rec.get("rationale") or "", "score": 0.5, "source_surface": "evidence_row",
+            "rationale": rec.get("rationale") or "",
+            "score": min(0.5, _GENERIC_CEILING), "source_surface": "evidence_row",
         })
 
     if synthesis:
         seen_labels = {c["label"] for c in candidates}
-        for a in (synthesis.get("suggested_actions") or []):
+        for idx, a in enumerate(synthesis.get("suggested_actions") or []):
             label = a.get("label") or ""
             if not label or label in seen_labels:
                 continue
             seen_labels.add(label)
             candidates.append({
                 "kind": "custom", "label": label, "rationale": a.get("rationale") or "",
-                "score": 0.45, "source_surface": "synthesis",
+                # idx-ordered within the band so curator's own authored
+                # order survives ties, never below _GENERIC_CEILING.
+                "score": _SYNTHESIS_BAND - (idx * 0.01), "source_surface": "synthesis",
             })
 
     if not candidates:

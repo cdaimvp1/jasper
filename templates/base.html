@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{% block title %}Team{% endblock %}</title>
+  <title>{% block title %}Jasper{% endblock %}</title>
   <!-- Fixed 2026-07-29: no manifest/icon links existed anywhere in this file, which is
        almost certainly why Edge's "Install as app" guessed at an icon instead of using
        Marc's. adaptive.svg carries an embedded prefers-color-scheme rule so the browser
@@ -22,7 +22,7 @@
 <body data-theme="light">
   <header class="topbar">
     <div class="topbar-left">
-      <span class="topbar-logo" title="team_dashboard">◈</span>
+      <span class="topbar-logo" title="Jasper">JASPER</span>
       <nav class="topbar-nav">
         <a href="/" class="nav-link {% if active_page == 'dashboard' %}active{% endif %}">Dashboard</a>
         <a href="/team_room" class="nav-link {% if active_page == 'team_room' %}active{% endif %}">Team Room</a>
@@ -57,7 +57,7 @@
   </main>
 
   <footer class="footer">
-    <span>◈ FAITH/ARIA</span>
+    <span>JASPER</span>
     <span>{{ now_iso }}</span>
   </footer>
 

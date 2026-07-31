@@ -4141,60 +4141,19 @@ body.ownerlock #ownernote{display:block}
         </div>
       </aside>
       <div class="cp-home-main">
-      <!-- task #65: Value-at-risk rollup banner. Reuses workgraph_nba's own
-           deterministic dollar-value extraction (the same figure each
-           issue's own priority reason already cites) - summed across every
-           open issue. Deliberately phrased as "found in open threads," not
-           "at risk" as a certain claim, and collapsed by default (a single
-           glance-value line, not another list demanding attention) - the
-           known failure mode (an unrelated large number quoted in passing)
-           carries over unchanged from workgraph_nba.py's own per-issue use
-           of this same extraction. -->
-      <div class="card pcc-var-card" id="pccVarCard" style="display:none">
-        <details>
-          <summary class="pcc-var-summary">
-            <span class="pcc-var-total" id="pccVarTotal"></span>
-            <span class="pcc-var-label">found across <span id="pccVarCount"></span> open threads</span>
-            <span class="pcc-var-caveat">best-effort figure, not certified — click to see which threads</span>
-          </summary>
-          <div class="pcc-var-body" id="pccVarTop"></div>
-        </details>
-      </div>
-      <!-- task #73: Commitments Tracker. Named that, not "What I Owe" -
-           the underlying extraction (raw_item_extractions.commitments)
-           doesn't attribute WHO made each commitment, and real data
-           checked before building this showed a keyword guess for "Marc's
-           own" would be unreliable (same lesson as the Ariba expiration-
-           date signal, task #61/#72). Surfaces every real commitment
-           verbatim; Marc's own reading decides whose it is. -->
-      <div class="card pcc-var-card" id="pccCommitCard" style="display:none">
-        <details>
-          <summary class="pcc-var-summary">
-            <span class="pcc-var-total" id="pccCommitCount"></span>
-            <span class="pcc-var-label">commitments mentioned in open threads</span>
-            <span class="pcc-var-caveat">not attributed to you specifically — read to judge whose</span>
-          </summary>
-          <div class="pcc-var-body" id="pccCommitList"></div>
-        </details>
-      </div>
-      <!-- enhancement #2: Asks & Decisions Tracker + Key Facts panel. Same
-           rationale as Commitments above - curator already extracts all
-           three on every wake; grepping the whole codebase found none of
-           them ever displayed anywhere (asks/decisions only ever checked
-           for truthiness in workgraph_synthesis.py's staleness logic,
-           key_facts read nowhere at all). Grouped into one card (not three
-           separate ones) to avoid stacking yet another collapsed card
-           above the inbox. -->
-      <div class="card pcc-var-card" id="pccAsksCard" style="display:none">
-        <details>
-          <summary class="pcc-var-summary">
-            <span class="pcc-var-total" id="pccAsksCount"></span>
-            <span class="pcc-var-label">asks, decisions &amp; key facts across open threads</span>
-            <span class="pcc-var-caveat">real extracted judgment — newly surfaced, not new analysis</span>
-          </summary>
-          <div class="pcc-var-body" id="pccAsksBody"></div>
-        </details>
-      </div>
+      <!-- Removed 2026-07-30 per Marc's explicit request: the Value-at-risk,
+           Commitments, and Asks/Decisions/Key-Facts rollup cards that used
+           to sit here. Real production data check confirmed his concern -
+           the value-at-risk total conflated full multi-year contract values
+           (e.g. a 2026-2033 SAP agreement) with current-year exposure, plus
+           a genuine (smaller) duplicate-counting bug where the same PR
+           number split across un-merged issues got summed more than once.
+           Not helpful as a top-of-page rollup; see [[jasper-claudeskills-
+           integration]]/pending research for the real fix Marc actually
+           wants (better project/thread connection, not a bigger banner).
+           The underlying data/endpoints (workgraph_nba.value_at_risk_rollup,
+           workgraph_commitments, workgraph_asks_decisions/key_facts) are
+           untouched - only this front-page presentation is gone. -->
       <div id="pccBoardWrap">
         <div class="pcc-board" id="pccBoard">
           <div class="card pcc-list-card">
@@ -8880,9 +8839,13 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
       pccSetLane("all");
       pccLoadIssues();
       setInterval(pccLoadIssues, 20000);
-      pccLoadValueAtRisk();
-      pccLoadCommitments();
-      pccLoadAsksDecisions();
+      // Removed 2026-07-30: the Value-at-risk/Commitments/Asks-Decisions
+      // rollup cards these fed are gone (see the removal comment above
+      // cp-home-main) - no need to fetch data for a card that no longer
+      // renders. pccLoadValueAtRisk/pccLoadCommitments/pccLoadAsksDecisions
+      // are left defined (dead code) rather than hunted down and deleted,
+      // since their null-guarded `if (!card) return` makes them inert if
+      // ever called again, and their backing endpoints are untouched.
     }
   }
   window.pccShowView = pccShowView;  // exposed for the left-rail nav script (separate scope)

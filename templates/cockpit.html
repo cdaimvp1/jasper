@@ -4252,6 +4252,7 @@ body.ownerlock #ownernote{display:block}
       <div class="pcc-board" id="pjProjectsBoard">
         <div class="card pcc-list-card">
           <div class="ch"><h3>Projects</h3><span class="ph">Auto-grouped by shared external contact</span></div>
+          <input type="search" id="pjSearch" class="pcc-search" placeholder="Search projects (name, id, category)…" aria-label="Search projects" style="margin:0 12px 8px">
           <div class="pcc-list" id="pjProjectList"><div class="pcc-empty">Loading…</div></div>
         </div>
         <div class="card pcc-detail-card">
@@ -7794,6 +7795,24 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
   const MQ_ICON_CLOCK = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>';
   const MQ_ICON_ALERT = '<svg viewBox="0 0 24 24"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 3.9L2.5 17a2 2 0 001.7 3h15.6a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/></svg>';
 
+  let pccProjectNamesLoaded = false;
+  async function pccLoadProjectNames() {
+    // Fixed 2026-07-31: project name/id was needed for search (see
+    // pccMatchesFilters) but the Inbox view never loaded the project
+    // list on its own - it depended on the separate Handover/Projects
+    // views having already fetched theirs first, which isn't guaranteed.
+    // Self-contained fetch, once, independent of those other views.
+    if (pccProjectNamesLoaded) return;
+    try {
+      const r = await fetch("/api/workgraph/projects", { cache: "no-store" });
+      if (!r.ok) return;
+      const d = await r.json();
+      pccProjectNameById = {};
+      (d.projects || []).forEach(p => { pccProjectNameById[p.id] = p.name; });
+      pccProjectNamesLoaded = true;
+    } catch (e) { /* search just won't match on project name/id until the next successful load */ }
+  }
+
   let pccIssues = [];               // active + waiting + blocked, server-sorted by priority_score
   const pccDetailCache = {};        // issue_id -> full /api/workgraph/issues/{id} response
   let pccLane = "all";
@@ -7801,6 +7820,8 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
   let pccSelectedId = null;
   let pccInited = false;
   let pccSearchQuery = "";
+  let pccProjectNameById = {};      // project_id -> name, loaded once (search needs it - see pccLoadProjectNames)
+  let pccProjectHaystackById = {};  // project_id -> combined searchable text of every member issue (recomputed alongside pccIssues)
   const pccSelectedIds = new Set();  // task #63 (bulk triage) - checkbox selection, separate from pccSelectedId (detail-pane focus)
   const pccIconFilterState = new Set();  // subset of "priority" | "lowconf" | "pending"
 
@@ -7858,6 +7879,19 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
       return;
     }
     pccIssues = d.issues || [];
+    // Fixed 2026-07-31 (Marc's direct report): search only ever matched
+    // THIS issue's own title/preview/companies - a term only mentioned in
+    // a related sibling issue in the same project found nothing. Builds a
+    // project_id -> combined text index from the SAME already-loaded
+    // issue list (no extra fetch) so pccMatchesFilters can check "does
+    // ANY issue in this issue's project match," not just this one issue.
+    pccProjectHaystackById = {};
+    pccIssues.forEach(iss => {
+      if (!iss.project_id) return;
+      const bit = `${iss.display_title || iss.title || ""} ${iss.preview || ""}`;
+      pccProjectHaystackById[iss.project_id] = (pccProjectHaystackById[iss.project_id] || "") + " " + bit;
+    });
+    pccLoadProjectNames();
     // Meetings/Comms are derived from real evidence types (calendar vs email/teams),
     // not a first-class issue category the API exposes — so we prefetch detail for
     // the (small, real) open set to bucket by evidence type. Also warms the detail
@@ -8194,7 +8228,17 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
 
   function pccMatchesFilters(iss) {
     if (pccSearchQuery) {
-      const hay = `${iss.display_title || iss.title} ${pccDescriptionFor(iss)} ${iss.external_companies || ""}`.toLowerCase();
+      // Fixed 2026-07-31 (Marc's direct report): search used to only
+      // check THIS issue's own title/preview/companies - now also
+      // matches the issue's real project id/name, and (per "search
+      // should cover the entire contents of a project") the combined
+      // title/preview text of every OTHER issue in the same project, so
+      // a term only mentioned in a related sibling issue still surfaces
+      // this one.
+      const projectId = iss.project_id || "";
+      const projectName = pccProjectNameById[projectId] || "";
+      const siblingText = pccProjectHaystackById[projectId] || "";
+      const hay = `${iss.display_title || iss.title} ${pccDescriptionFor(iss)} ${iss.external_companies || ""} ${projectId} ${projectName} ${siblingText}`.toLowerCase();
       if (!hay.includes(pccSearchQuery)) return false;
     }
     if (pccIconFilterState.has("priority") && iss.priority !== "high") return false;
@@ -9487,17 +9531,28 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
     document.getElementById("pjCtProjects").textContent = pjProjects.length || "";
     pjRenderProjectList();
   }
+  const pjSearchInput = document.getElementById("pjSearch");
+  if (pjSearchInput) {
+    pjSearchInput.addEventListener("input", () => { pjSearchQuery = pjSearchInput.value.trim().toLowerCase(); pjRenderProjectList(); });
+  }
 
+  let pjSearchQuery = "";
   function pjRenderProjectList() {
     const el = document.getElementById("pjProjectList");
-    if (!pjProjects.length) { el.innerHTML = '<div class="pcc-empty">No projects yet.</div>'; return; }
-    el.innerHTML = pjProjects.map(p => {
+    // Fixed 2026-07-31 (Marc's direct report): project id (e.g. "proj-013")
+    // was never shown as text anywhere, and there was no way to search by
+    // it - it only ever existed as an internal click-routing attribute.
+    const visible = pjSearchQuery
+      ? pjProjects.filter(p => `${p.id} ${p.name} ${p.category || ""}`.toLowerCase().includes(pjSearchQuery))
+      : pjProjects;
+    if (!visible.length) { el.innerHTML = `<div class="pcc-empty">${pjProjects.length ? "No projects match." : "No projects yet."}</div>`; return; }
+    el.innerHTML = visible.map(p => {
       const active = p.id === pjSelectedProjectId ? " is-active" : "";
       return `<button type="button" class="mqwrow${active}" data-id="${pjEsc(p.id)}">
         <div class="mqwic issue">${PJ_ICON_DOT}</div>
         <div class="mqwmid">
           <div class="mqwt" title="${pjEsc(p.name)}">${pjEsc(p.name)}</div>
-          <div class="mqwmeta">${pjEsc(p.category || "other")} · ${pjEsc(p.status)}</div>
+          <div class="mqwmeta"><span class="pcc-deadline-badge" style="background:var(--bg);color:var(--mut2)">${pjEsc(p.id)}</span> ${pjEsc(p.category || "other")} · ${pjEsc(p.status)}</div>
         </div>
       </button>`;
     }).join("");
@@ -9627,6 +9682,7 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
         <div class="pcc-detail-hd-main">
           <div class="pcc-detail-meta">
             <span class="pcc-status-badge ${pjStatusCls}">${pjEsc(project.status)}</span>
+            <span class="pcc-deadline-badge" style="background:var(--bg);color:var(--mut2)">${pjEsc(project.id)}</span>
             <span class="pcc-meta-line">${pjEsc(project.category || "other")} &middot; ${issues.length} issue${issues.length === 1 ? "" : "s"}</span>
           </div>
           <div class="pcc-detail-title">${pjEsc((synth && synth.derived_title) || project.name)}</div>

@@ -26,10 +26,12 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import json
 import time
 import hashlib
 import sqlite3
+import subprocess
 import threading
 import asyncio
 from pathlib import Path
@@ -2196,6 +2198,40 @@ async def api_worker_status_set(worker_id: str, body: WorkerStatusBody):
     best-effort, worker-written, per its routine doc's status-report step."""
     wg.set_worker_status(worker_id, state=body.state, current_task=body.current_task, detail=body.detail)
     return JSONResponse({"ok": True})
+
+
+@app.post("/api/workers/{worker_id}/wake")
+async def api_worker_wake(worker_id: str):
+    """The one-click "wake" button (2026-07-31, Marc's direct request, in
+    place of any auto-spawn): launches setup/conductor_runbook.md's own
+    documented manual wake step (symphony_wake.ps1 <worker>) - the exact
+    same action a human would run in a terminal, just without having to
+    open one. Deliberately NOT automatic anywhere in this codebase - a
+    live worker session is a real, acting, real-cost agent, and this
+    cohort's whole governance model (conductor_runbook.md's "propose then
+    wait for approval") assumes a human decides when one starts. This
+    endpoint IS that human decision, expressed as a button click.
+
+    Launched in a NEW, VISIBLE console window (CREATE_NEW_CONSOLE) - never
+    hidden/detached like poller_autostart's background poller relaunch.
+    The whole point is a supervisable session Marc can see and talk to,
+    not one more silent background process."""
+    known = set(_all_member_ids())
+    if worker_id not in known:
+        raise HTTPException(404, f"no such worker: {worker_id}")
+    if sys.platform != "win32":
+        raise HTTPException(501, "wake is only implemented for the Windows install this body runs on")
+    wake_script = paths.HERE / "symphony_wake.ps1"
+    if not wake_script.exists():
+        raise HTTPException(500, f"wake script not found at {wake_script}")
+    try:
+        subprocess.Popen(
+            ["powershell.exe", "-NoExit", "-File", str(wake_script), worker_id],
+            creationflags=subprocess.CREATE_NEW_CONSOLE,
+        )
+    except OSError as e:
+        raise HTTPException(500, f"failed to launch wake console: {e}")
+    return JSONResponse({"ok": True, "worker": worker_id})
 
 
 @app.get("/api/cockpit/chat/{worker_id}")

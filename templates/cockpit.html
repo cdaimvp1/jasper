@@ -3954,6 +3954,22 @@ body.ownerlock #ownernote{display:block}
 .cp-chat-filter-btn.on{color:var(--w-hue,var(--lk-ink))}
 .cp-chat-filter-btn.on::after{content:"";position:absolute;left:10px;right:10px;bottom:0;
   height:2px;background:var(--w-hue,var(--lk-pri));border-radius:2px 2px 0 0}
+
+/* 2026-07-31: liveness indicator + wake button - see Marc's real report that
+   "@Tia are you listening" got no answer because nothing running was ever
+   listening as Tia, not because the chat routed wrong. Same semantic-status
+   colors already used for gated/deadline badges elsewhere (teal=live,
+   amber=idle a while, pink/red=no recent activity at all). */
+.cp-chat-filter-wrap{display:inline-flex;align-items:center;gap:3px}
+.cp-liveness-dot{width:7px;height:7px;border-radius:50%;flex:none;cursor:default}
+.cp-liveness-live{background:var(--teal-d)}
+.cp-liveness-idle{background:var(--amber-d)}
+.cp-liveness-stale{background:var(--red-d)}
+.cp-wake-btn{font:700 10px var(--mono,monospace);text-transform:uppercase;letter-spacing:.03em;
+  border:1px solid var(--lk-line);background:var(--lk-panel);color:var(--lk-mut);
+  border-radius:20px;padding:1px 7px;cursor:pointer;line-height:1.5}
+.cp-wake-btn:hover{background:var(--lk-surface);color:var(--lk-ink)}
+.cp-wake-btn:disabled{opacity:.5;cursor:default}
 </style>
 </head>
 <body>
@@ -9386,14 +9402,78 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
     return `${date} ${time}`;
   }
 
+  // 2026-07-31: liveness indicator (Marc's real report - "@Tia are you
+  // listening" got no answer because nothing was running as Tia, not
+  // because the chat routed wrong). last_activity is this worker's own
+  // most recent real status write (a poller heartbeat or a self-reported
+  // status) - a DB timestamp, not live proof of a running process, but
+  // the best signal this app can read without shelling out to inspect
+  // processes on every render. Thresholds calibrated against the real
+  // incident: relay/curator's genuine live sessions report roughly every
+  // few seconds; Tia's session, already ended, still showed ~3h stale -
+  // a 6h cutoff would have missed exactly that case, so "stale" starts
+  // at 1h. "live" (heartbeat in the last 15 min), "idle" (15m-1h,
+  // plausibly mid-session between turns), "stale" (1h+ or no timestamp -
+  // the case that actually matters, since it's what "no one is
+  // listening" looks like from the outside).
+  function livenessBucket(w) {
+    const raw = w.last_activity;
+    if (!raw) return { bucket: "stale", label: "no activity on record" };
+    const d = new Date(String(raw).replace(" ", "T"));
+    if (isNaN(d.getTime())) return { bucket: "stale", label: "no activity on record" };
+    const ageMin = (Date.now() - d.getTime()) / 60000;
+    if (ageMin < 0) return { bucket: "live", label: "active just now" };
+    let ageLabel;
+    if (ageMin < 1) ageLabel = "just now";
+    else if (ageMin < 60) ageLabel = `${Math.round(ageMin)}m ago`;
+    else if (ageMin < 1440) ageLabel = `${Math.round(ageMin / 60)}h ago`;
+    else ageLabel = `${Math.round(ageMin / 1440)}d ago`;
+    if (ageMin < 15) return { bucket: "live", label: `active ${ageLabel}` };
+    if (ageMin < 60) return { bucket: "idle", label: `last activity ${ageLabel}` };
+    return { bucket: "stale", label: `last activity ${ageLabel} - likely not listening right now` };
+  }
+
+  async function wakeWorker(slug, displayName, btn) {
+    if (!confirm(`Start a real Claude Code session as ${displayName}? This opens a live, acting agent in a new window - not a quick check, an actual worker coming online.`)) return;
+    btn.disabled = true;
+    const originalText = btn.textContent;
+    btn.textContent = "Waking…";
+    try {
+      const r = await fetch(`/api/workers/${encodeURIComponent(slug)}/wake`, { method: "POST" });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        alert(`Couldn't wake ${displayName}: ` + (err.detail || r.status));
+        btn.disabled = false; btn.textContent = originalText;
+        return;
+      }
+      btn.textContent = "Waking…(check the new window)";
+      setTimeout(loadWorkers, 4000);
+    } catch (e) {
+      alert(`Couldn't wake ${displayName}: ` + e.message);
+      btn.disabled = false; btn.textContent = originalText;
+    }
+  }
+
   function renderFilters() {
     const chips = [{ worker: "all", display_name: "All" }].concat(workers);
     filtersEl.innerHTML = chips.map(w => {
       const cls = w.worker === "all" ? "" : `cp-chat-w-${w.worker}`;
-      return `<button type="button" class="cp-chat-filter-btn ${cls} ${activeFilter === w.worker ? "on" : ""}" data-worker="${esc(w.worker)}">${esc(w.display_name)}</button>`;
+      const btnHtml = `<button type="button" class="cp-chat-filter-btn ${cls} ${activeFilter === w.worker ? "on" : ""}" data-worker="${esc(w.worker)}">${esc(w.display_name)}</button>`;
+      if (w.worker === "all") return btnHtml;
+      const live = livenessBucket(w);
+      const wakeHtml = live.bucket === "stale"
+        ? `<button type="button" class="cp-wake-btn" data-wake="${esc(w.worker)}" data-wake-name="${esc(w.display_name)}" title="Start a real session as ${esc(w.display_name)}">Wake</button>`
+        : "";
+      return `<span class="cp-chat-filter-wrap">${btnHtml}<span class="cp-liveness-dot cp-liveness-${live.bucket}" title="${esc(w.display_name)}: ${esc(live.label)}"></span>${wakeHtml}</span>`;
     }).join("");
     filtersEl.querySelectorAll(".cp-chat-filter-btn").forEach(btn => {
       btn.addEventListener("click", () => { activeFilter = btn.getAttribute("data-worker"); renderThread(); renderFilters(); });
+    });
+    filtersEl.querySelectorAll(".cp-wake-btn").forEach(btn => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        wakeWorker(btn.getAttribute("data-wake"), btn.getAttribute("data-wake-name"), btn);
+      });
     });
   }
 

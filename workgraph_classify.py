@@ -169,12 +169,40 @@ def strip_subject_prefix(subject: str) -> str:
     return s.strip()
 
 
-def classify_item(*, subject: str, body_preview: str, from_actor: str) -> dict:
+def _parse_participants(item: dict) -> Optional[list]:
+    """raw_items.participants is stored as a JSON-encoded string
+    (insert_raw_item's participants_json) - classify_item wants the real
+    list. Fails open to None (never a guess) on malformed/missing JSON."""
+    raw = item.get("participants")
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, list) else None
+
+
+def classify_item(*, subject: str, body_preview: str, from_actor: str,
+                   source: Optional[str] = None, organizer: Optional[str] = None,
+                   participants: Optional[list] = None) -> dict:
     """Pure (well - one settings-table read inside workgraph_signals, fail-
     open to its hardcoded default on any error). Returns
     direction/topic/sentiment/anomaly/item_class/signal_type/pr_number/
     pr_number_base, each inferred field flagged, plus an overall confidence
     tier (H/M/L).
+
+    source/organizer/participants (2026-07-31, meeting-grouping design
+    pass): optional, calendar-specific - when source=="calendar" and the
+    event is a personal/solo block or an out-of-office announcement (see
+    workgraph_signals.is_personal_calendar_block/is_ooo_subject), item_class
+    is confidently NOISE (class_confident=True) rather than falling through
+    to the generic cue-based path below and becoming a trackable Issue -
+    Marc's own call: neither shape is a project. The overall confidence
+    tier can still land at M/L if direction/topic/sentiment weren't
+    explicitly cued (irrelevant for a NOISE item that's never promoted to
+    an Issue either way). Every existing caller passes none of these three
+    and is completely unaffected.
 
     A recognized automated signal (Ariba PR approval, Adobe Sign/DocuSign,
     ContractPodAI - see workgraph_signals.py) is checked FIRST and, when
@@ -236,13 +264,23 @@ def classify_item(*, subject: str, body_preview: str, from_actor: str) -> dict:
     is_noise = bool(NOISE_CUE.search(text))
     is_actionable = bool(ACTIONABLE_CUE.search(text))
     is_closure = bool(CLOSURE_CUE.search(text))
+    is_calendar_personal_or_ooo = source == "calendar" and (
+        workgraph_signals.is_ooo_subject(subject)
+        or workgraph_signals.is_personal_calendar_block(organizer=organizer, participants=participants)
+    )
 
-    # item_class precedence: a recognized signal template > noise cue >
-    # machine-signal closure > actionable > closure > default. A signal match
-    # is a confirmed, real-data-checked template (see workgraph_signals.py),
-    # so it wins over the generic keyword cues below rather than being just
-    # one more heuristic in the mix.
-    if signal:
+    # item_class precedence: a personal/OOO calendar block > a recognized
+    # signal template > noise cue > machine-signal closure > actionable >
+    # closure > default. The calendar check wins over everything - a solo
+    # HOLD block or an OOO broadcast is never a real ask no matter what its
+    # text happens to contain. A signal match is a confirmed, real-data-
+    # checked template (see workgraph_signals.py), so it wins over the
+    # generic keyword cues below rather than being just one more heuristic
+    # in the mix.
+    if is_calendar_personal_or_ooo:
+        item_class = "NOISE"
+        class_confident = True
+    elif signal:
         item_class = _SIGNAL_TREATMENT_TO_ITEM_CLASS[signal["treatment"]]
         class_confident = True
     elif is_noise:
@@ -317,6 +355,8 @@ def run_classification(limit: int = 500) -> dict:
             subject=item.get("subject") or "",
             body_preview=item.get("body_preview") or "",
             from_actor=item.get("from_actor") or "",
+            source=item.get("source"), organizer=item.get("from_actor"),
+            participants=_parse_participants(item),
         )
         ws.classify_raw_item(
             item["id"],
@@ -587,6 +627,8 @@ def backfill_reclassify() -> dict:
         result = classify_item(
             subject=item.get("subject") or "", body_preview=item.get("body_preview") or "",
             from_actor=item.get("from_actor") or "",
+            source=item.get("source"), organizer=item.get("from_actor"),
+            participants=_parse_participants(item),
         )
         # Fixed 2026-07-29: this used to only COMPARE topic/item_class/
         # signal_type, then WRITE direction/sentiment/anomaly_flag straight

@@ -59,3 +59,43 @@ def test_classify_signal_includes_reference_base():
     assert result is not None
     assert result["pr_number"] == "PR416079-V33"
     assert result["pr_number_base"] == "PR416079"
+
+
+# --- is_personal_calendar_block / is_ooo_subject (personal/OOO filter) ---
+
+def test_is_personal_calendar_block_true_when_only_participant_is_organizer():
+    """Real confirmed shape: HOLD/Focus Time/School Drop off/Pick up all
+    have the organizer as the only real participant."""
+    assert sig.is_personal_calendar_block(organizer="lane_marc@lilly.com", participants=["lane_marc@lilly.com"]) is True
+
+
+def test_is_personal_calendar_block_true_when_no_participants_at_all():
+    assert sig.is_personal_calendar_block(organizer="lane_marc@lilly.com", participants=[]) is True
+    assert sig.is_personal_calendar_block(organizer="lane_marc@lilly.com", participants=None) is True
+
+
+def test_is_personal_calendar_block_false_with_a_real_other_attendee():
+    assert sig.is_personal_calendar_block(
+        organizer="lane_marc@lilly.com", participants=["lane_marc@lilly.com", "rep@acme.com"]
+    ) is False
+
+
+def test_is_personal_calendar_block_false_with_no_organizer():
+    assert sig.is_personal_calendar_block(organizer=None, participants=[]) is False
+
+
+def test_is_personal_calendar_block_case_insensitive():
+    assert sig.is_personal_calendar_block(organizer="Lane_Marc@Lilly.com", participants=["lane_marc@lilly.com"]) is True
+
+
+def test_is_ooo_subject_matches_real_confirmed_examples():
+    assert sig.is_ooo_subject("Lane - OOO") is True
+    assert sig.is_ooo_subject("Dima OOO Paternity Leave") is True
+
+
+def test_is_ooo_subject_false_for_ordinary_meeting():
+    assert sig.is_ooo_subject("C5 Contracts Weekly Touchbase") is False
+
+
+def test_is_ooo_subject_false_for_none():
+    assert sig.is_ooo_subject(None) is False

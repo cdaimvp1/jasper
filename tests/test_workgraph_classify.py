@@ -27,6 +27,73 @@ def test_termination_matches_contract_topic_stem():
     assert result["topic_inferred"] is False
 
 
+# --- calendar personal/OOO block filter (2026-07-31) ----------------------
+
+def test_classify_item_calendar_personal_block_is_noise():
+    """Real confirmed shape: HOLD/Focus Time/School Drop off/Pick up all
+    have the organizer as the only real participant."""
+    result = wc.classify_item(
+        subject="HOLD", body_preview="", from_actor="lane_marc@lilly.com",
+        source="calendar", organizer="lane_marc@lilly.com", participants=["lane_marc@lilly.com"],
+    )
+    assert result["item_class"] == "NOISE"
+
+
+def test_classify_item_calendar_ooo_broadcast_is_noise_despite_many_attendees():
+    """Real confirmed shape: an OOO announcement can be broadcast to a
+    large distribution list - attendee-count alone wouldn't catch this,
+    only the subject match does."""
+    result = wc.classify_item(
+        subject="Dima OOO Paternity Leave", body_preview="", from_actor="keane_dima@lilly.com",
+        source="calendar", organizer="keane_dima@lilly.com",
+        participants=["keane_dima@lilly.com", "lane_marc@lilly.com", "someone.else@lilly.com"],
+    )
+    assert result["item_class"] == "NOISE"
+
+
+def test_classify_item_calendar_real_meeting_not_treated_as_noise():
+    """A real recurring business meeting (multiple real attendees, no OOO
+    wording) must NOT be swept up by the personal/OOO filter."""
+    result = wc.classify_item(
+        subject="C5 Contracts Weekly Touchbase", body_preview="", from_actor="cori.mccorkle@lilly.com",
+        source="calendar", organizer="cori.mccorkle@lilly.com",
+        participants=["cori.mccorkle@lilly.com", "lane_marc@lilly.com"],
+    )
+    assert result["item_class"] != "NOISE"
+
+
+def test_classify_item_personal_block_check_only_applies_to_calendar_source():
+    """The same organizer/participants shape on a NON-calendar source (e.g.
+    a real 1:1 email thread) must not be swept up - this filter is
+    calendar-specific."""
+    result = wc.classify_item(
+        subject="Quick question", body_preview="just checking in", from_actor="lane_marc@lilly.com",
+        source="outlook_mail", organizer="lane_marc@lilly.com", participants=["lane_marc@lilly.com"],
+    )
+    assert result["item_class"] != "NOISE"
+
+
+def test_classify_item_without_calendar_params_is_unaffected():
+    """Every pre-existing caller passes none of source/organizer/
+    participants - the calendar check can never fire without a source, so
+    a subject like "HOLD" (which would be caught if source="calendar" were
+    passed) falls through to the ordinary generic path instead of NOISE."""
+    result = wc.classify_item(subject="HOLD", body_preview="", from_actor="lane_marc@lilly.com")
+    assert result["item_class"] != "NOISE"
+
+
+def test_parse_participants_handles_valid_json_list():
+    assert wc._parse_participants({"participants": '["a@x.com", "b@x.com"]'}) == ["a@x.com", "b@x.com"]
+
+
+def test_parse_participants_returns_none_for_malformed_json():
+    assert wc._parse_participants({"participants": "not json"}) is None
+
+
+def test_parse_participants_returns_none_when_missing():
+    assert wc._parse_participants({}) is None
+
+
 def test_confidence_tier_h_is_reachable():
     """A fully-explicit item (real direction cue, real topic cue, real
     sentiment cue, confident class) must be able to reach tier H - before
@@ -275,6 +342,25 @@ def test_cluster_and_link_creates_new_issue_when_no_reference_match(ws_db):
     assert result["issues_created"] == 1
     assert result["attached_via_reference"] == 0
     assert result["would_attach_via_reference"] == 0
+
+
+def test_personal_calendar_block_never_becomes_an_issue_end_to_end(ws_db):
+    """Real end-to-end reproduction: a HOLD block, classified for real
+    (through run_classification, which now passes source/organizer/
+    participants), must be skipped as NOISE by cluster_and_link() - never
+    promoted to a trackable Issue."""
+    ws_db.insert_raw_item(
+        source="calendar", stable_key="evt-hold", thread_key="evt-hold", dedupe_key="dk-hold",
+        occurred_ts=time.time(), subject="HOLD", from_actor="lane_marc@lilly.com",
+        participants_json='["lane_marc@lilly.com"]',
+    )
+
+    wc.run_classification()
+    result = wc.cluster_and_link()
+
+    assert result["issues_created"] == 0
+    assert result["noise_skipped"] == 1
+    assert ws_db.list_issues(states=None, limit=10) == []
 
 
 def test_cluster_and_link_shadow_logs_but_does_not_attach_when_flag_off(ws_db, monkeypatch, tmp_path):

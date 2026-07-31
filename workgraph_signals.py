@@ -68,6 +68,38 @@ def reference_base(full: Optional[str]) -> Optional[str]:
         return full
     return _VERSION_SUFFIX_RE.sub("", full.upper())
 
+
+# 2026-07-31 (meeting-grouping/related-project identity pass): confirmed
+# against real captured Graph calendar payloads - a personal/solo block
+# (HOLD, Focus Time, School Drop off, School Pick up, a self-scheduled
+# "Lane - OOO") always has the organizer as the ONLY real participant (or
+# none at all - never a meeting with anyone else). An out-of-office
+# announcement can instead be broadcast to a large distribution list (real
+# example: "Dima OOO Paternity Leave" sent to 34 recipients including
+# Marc) - attendee-count alone would never catch that one, so it needs its
+# own title match. Marc's own call: for this system's purposes, neither
+# shape is a project - they should never become a trackable Issue.
+OOO_SUBJECT_RE = re.compile(r"\b(?:ooo|out[\s-]of[\s-]office|paternity leave|maternity leave|vacation|pto)\b", re.I)
+
+
+def is_personal_calendar_block(*, organizer: Optional[str], participants: Optional[list]) -> bool:
+    """True when the organizer is the ONLY real participant (or there are
+    none) - a solo calendar hold, never a meeting with anyone else. False
+    (never a guess) when there's no organizer to compare against."""
+    if not organizer:
+        return False
+    others = {p.strip().lower() for p in (participants or []) if p and p.strip().lower() != organizer.strip().lower()}
+    return not others
+
+
+def is_ooo_subject(subject: Optional[str]) -> bool:
+    """True for a real out-of-office/leave announcement, regardless of
+    attendee count - see OOO_SUBJECT_RE's own comment for the real example
+    (a large-distribution-list OOO notice) is_personal_calendar_block alone
+    would never catch."""
+    return bool(subject) and bool(OOO_SUBJECT_RE.search(subject))
+
+
 # (signal_type, sender-substring-or-None, subject regex, default treatment).
 # Order matters - first match wins; within one sender family, the most
 # specific/least-ambiguous pattern comes first (e.g. "fully approved" before

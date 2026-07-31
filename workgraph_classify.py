@@ -378,7 +378,7 @@ def backfill_derived_titles() -> dict:
     return {"checked": len(issue_ids), "updated": updated}
 
 
-def recompute_issue_state(issue_id: str) -> Optional[str]:
+def recompute_issue_state(issue_id: str, *, new_item_is_actionable: bool = True) -> Optional[str]:
     """Derive an issue's state from its WHOLE evidence thread, not whichever
     item happened to arrive first (the bug this fixes: an issue opened by an
     FYI note froze in 'waiting' forever, even once a real actionable ask
@@ -390,7 +390,27 @@ def recompute_issue_state(issue_id: str) -> Optional[str]:
 
     Does not touch 'done'/'noise-archived' unless a genuinely new
     ACTIONABLE-ASK item justifies reopening - a human's manual close/archive
-    is otherwise left alone, not silently reverted by routine re-classification."""
+    is otherwise left alone, not silently reverted by routine re-classification.
+
+    Fixed 2026-07-31 (real adversarial review): the docstring above already
+    said this, but the code didn't check it - target was always re-derived
+    from the FULL history, so ANY old, already-resolved ACTIONABLE-ASK
+    (even one the human's manual close was based on) kept target == "active"
+    forever, and the very next unrelated item (an ordinary FYI reply) would
+    re-trigger this function and silently flip a "done" issue back to
+    "active" - confirmed reproducible via the resolved-issue+later-FYI case.
+
+    new_item_is_actionable=False is passed by cluster_and_link() when the
+    SPECIFIC item that just triggered this call for THIS issue is itself
+    NOT an ACTIONABLE-ASK - the exact "old ask still in history, new item
+    is just an FYI" shape. Defaults to True (today's full-history-
+    derivation behavior, unchanged) for callers with no specific new-item
+    context: backfill_reclassify's ruleset-change re-derivation and the
+    manual bulk-recompute path both legitimately want to reconsider a
+    closed issue even without a brand-new item (a ruleset improvement
+    retroactively revealing a real unresolved ask, or an explicit "recompute
+    everything" request, are real reasons - unlike routine new mail
+    arriving on an already-resolved thread)."""
     items = ws.get_raw_items_for_issue(issue_id)
     classes = {i["item_class"] for i in items if i.get("classified")}
     if "ACTIONABLE-ASK" in classes:
@@ -404,8 +424,8 @@ def recompute_issue_state(issue_id: str) -> Optional[str]:
     if issue is None:
         return None
     current = issue["state"]
-    if current in ("done", "noise-archived") and target != "active":
-        return current  # respect a manual close/archive unless truly reopened by a new ask
+    if current in ("done", "noise-archived") and (target != "active" or not new_item_is_actionable):
+        return current  # respect a manual close/archive unless a genuinely new ask justifies reopening
     if current != target:
         ws.update_issue(issue_id, state=target)
     return target
@@ -444,6 +464,11 @@ def cluster_and_link(limit: int = 500) -> dict:
     attached_via_reference = 0
     would_attach_via_reference = 0
     touched_issues = set()
+    # 2026-07-31: tracks which touched issues had a genuinely NEW
+    # ACTIONABLE-ASK item land this run (vs. just an FYI/waiting reply) -
+    # see recompute_issue_state's own docstring for why this must be
+    # per-issue, not "any historical item anywhere."
+    newly_actionable_issues = set()
 
     for item in with_pending:
         if item["item_class"] == "NOISE":
@@ -498,6 +523,8 @@ def cluster_and_link(limit: int = 500) -> dict:
         )
         linked += 1
         touched_issues.add(issue_id)
+        if item["item_class"] == "ACTIONABLE-ASK":
+            newly_actionable_issues.add(issue_id)
 
         # A new issue opened by a genuine ask gets one starter task, with an
         # owner resolved from any matching ownership_rules - left unknown
@@ -508,7 +535,7 @@ def cluster_and_link(limit: int = 500) -> dict:
             ws.create_task(issue_id=issue_id, label=strip_subject_prefix(item.get("subject") or "(no subject)"), owner=owner)
 
     for issue_id in touched_issues:
-        recompute_issue_state(issue_id)
+        recompute_issue_state(issue_id, new_item_is_actionable=issue_id in newly_actionable_issues)
 
     party_result = workgraph_parties.run(list(touched_issues))
     project_result = workgraph_projects.run(list(touched_issues))

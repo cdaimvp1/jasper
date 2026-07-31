@@ -163,6 +163,112 @@ def _isolate_config(ws_db, monkeypatch, tmp_path):
     return config
 
 
+# --- recompute_issue_state (2026-07-31, meeting-grouping design pass) ----
+
+def test_recompute_issue_state_new_item_not_actionable_respects_manual_close(ws_db):
+    """The real bug: an OLD actionable ask (already resolved, which is why
+    a human closed the issue) used to keep target='active' forever, so ANY
+    later item re-triggering this function - even an unrelated FYI reply -
+    would silently reopen a manually-closed issue. new_item_is_actionable
+    lets the caller say "the item that just arrived isn't itself an ask" -
+    the full history must not override that."""
+    iid = ws_db.create_issue_with_new_id(title="Old ask", state="done", category="other")
+    rid = ws_db.insert_raw_item(source="outlook_mail", stable_key="k1", thread_key="k1", dedupe_key="k1",
+                                 occurred_ts=time.time(), subject="please approve", from_actor="a@example.com",
+                                 participants_json="[]")
+    ws_db.classify_raw_item(rid, item_class="ACTIONABLE-ASK", direction="inbound", direction_inferred=False,
+                             topic="other", topic_inferred=True, sentiment="neutral", sentiment_inferred=True,
+                             anomaly_flag=False)
+    ws_db.link_raw_item_to_issue(rid, iid)
+
+    result = wc.recompute_issue_state(iid, new_item_is_actionable=False)
+
+    assert result == "done"
+    assert ws_db.get_issue(iid)["state"] == "done"
+
+
+def test_recompute_issue_state_default_still_reopens_from_full_history(ws_db):
+    """Callers with no specific new-item context (backfill_reclassify's
+    ruleset-change re-derivation, the manual bulk-recompute path) keep
+    today's full-history behavior on purpose - a ruleset improvement
+    retroactively revealing a real unresolved ask is a legitimate reason to
+    reconsider a closed issue, unlike routine new mail arriving."""
+    iid = ws_db.create_issue_with_new_id(title="Old ask", state="done", category="other")
+    rid = ws_db.insert_raw_item(source="outlook_mail", stable_key="k2", thread_key="k2", dedupe_key="k2",
+                                 occurred_ts=time.time(), subject="please approve", from_actor="a@example.com",
+                                 participants_json="[]")
+    ws_db.classify_raw_item(rid, item_class="ACTIONABLE-ASK", direction="inbound", direction_inferred=False,
+                             topic="other", topic_inferred=True, sentiment="neutral", sentiment_inferred=True,
+                             anomaly_flag=False)
+    ws_db.link_raw_item_to_issue(rid, iid)
+
+    result = wc.recompute_issue_state(iid)  # default new_item_is_actionable=True
+
+    assert result == "active"
+    assert ws_db.get_issue(iid)["state"] == "active"
+
+
+def test_recompute_issue_state_open_issue_unaffected_by_new_item_is_actionable(ws_db):
+    """The gate only applies to done/noise-archived - an already-open issue
+    still gets the full, real recomputation regardless."""
+    iid = ws_db.create_issue_with_new_id(title="Waiting", state="waiting", category="other")
+    rid = ws_db.insert_raw_item(source="outlook_mail", stable_key="k3", thread_key="k3", dedupe_key="k3",
+                                 occurred_ts=time.time(), subject="please approve", from_actor="a@example.com",
+                                 participants_json="[]")
+    ws_db.classify_raw_item(rid, item_class="ACTIONABLE-ASK", direction="inbound", direction_inferred=False,
+                             topic="other", topic_inferred=True, sentiment="neutral", sentiment_inferred=True,
+                             anomaly_flag=False)
+    ws_db.link_raw_item_to_issue(rid, iid)
+
+    result = wc.recompute_issue_state(iid, new_item_is_actionable=False)
+
+    assert result == "active"
+    assert ws_db.get_issue(iid)["state"] == "active"
+
+
+def test_cluster_and_link_new_fyi_reply_does_not_reopen_a_done_issue(ws_db):
+    """End-to-end reproduction of the real bug: an issue with a resolved
+    ask is manually marked done, then a brand-new, genuinely unrelated FYI
+    reply lands on the SAME thread - must NOT silently reopen it."""
+    _pending_item(ws_db, "ck-reopen", "please approve the SOW", item_class="ACTIONABLE-ASK")
+    wc.cluster_and_link()
+    issues = ws_db.list_issues(states=None, limit=10)
+    iid = issues[0]["id"]
+    ws_db.update_issue(iid, state="done")
+
+    rid = ws_db.insert_raw_item(source="outlook_mail", stable_key="ck-reopen", thread_key="ck-reopen", dedupe_key="ck-reopen-2",
+                                 occurred_ts=time.time(), subject="FYI, fully approved and filed",
+                                 from_actor="b@example.com", participants_json="[]")
+    ws_db.classify_raw_item(rid, item_class="FYI-EVIDENCE", direction="inbound", direction_inferred=False,
+                             topic="other", topic_inferred=True, sentiment="neutral", sentiment_inferred=True,
+                             anomaly_flag=False)
+
+    wc.cluster_and_link()
+
+    assert ws_db.get_issue(iid)["state"] == "done"
+
+
+def test_cluster_and_link_new_actionable_reply_does_reopen_a_done_issue(ws_db):
+    """The other half: a GENUINELY new ask on the same thread must still
+    reopen the issue - this isn't a blanket freeze, only a targeted fix."""
+    _pending_item(ws_db, "ck-reopen2", "please approve the SOW", item_class="ACTIONABLE-ASK")
+    wc.cluster_and_link()
+    issues = ws_db.list_issues(states=None, limit=10)
+    iid = issues[0]["id"]
+    ws_db.update_issue(iid, state="done")
+
+    rid = ws_db.insert_raw_item(source="outlook_mail", stable_key="ck-reopen2", thread_key="ck-reopen2", dedupe_key="ck-reopen2-2",
+                                 occurred_ts=time.time(), subject="Actually, one more approval needed on this",
+                                 from_actor="b@example.com", participants_json="[]")
+    ws_db.classify_raw_item(rid, item_class="ACTIONABLE-ASK", direction="inbound", direction_inferred=False,
+                             topic="other", topic_inferred=True, sentiment="neutral", sentiment_inferred=True,
+                             anomaly_flag=False)
+
+    wc.cluster_and_link()
+
+    assert ws_db.get_issue(iid)["state"] == "active"
+
+
 def test_cluster_and_link_creates_new_issue_when_no_reference_match(ws_db):
     _pending_item(ws_db, "ck1", "A brand new ask with nothing structured in it")
     result = wc.cluster_and_link()

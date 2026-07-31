@@ -1578,6 +1578,10 @@ async def api_project_suggestions_list(limit: int = MAX_GROUPING_SUGGESTIONS_PER
 
 class ProjectSuggestionResolveBody(BaseModel):
     status: str  # confirmed | rejected
+    # 2026-07-31: only meaningful when confirming a 'link'-kind suggestion -
+    # lets a human upgrade past the default 'related' when they already
+    # know the specific relationship (e.g. 'enables'). Ignored for merge.
+    link_type: str = "related"
 
 
 @app.post("/api/workgraph/project-suggestions/{suggestion_id}/resolve")
@@ -1592,7 +1596,7 @@ async def api_project_suggestion_resolve(suggestion_id: int, body: ProjectSugges
     if wg.get_project_suggestion(suggestion_id) is None:
         raise HTTPException(404, f"no such suggestion: {suggestion_id}")
     if body.status == "confirmed":
-        result = workgraph_projects.confirm_suggestion(suggestion_id)
+        result = workgraph_projects.confirm_suggestion(suggestion_id, link_type=body.link_type)
     else:
         result = workgraph_projects.reject_suggestion(suggestion_id)
     return JSONResponse({"ok": True, "result": result})

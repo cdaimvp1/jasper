@@ -816,3 +816,85 @@ def test_list_shadow_grouping_log_disagreements_only_filters_to_mismatches(ws_db
     assert len(all_rows) == 2
     assert len(disagreements) == 1
     assert disagreements[0]["live_action"] == "suggested"
+
+
+# --- suggestion_kind / project_links (related-vs-same-project, 2026-07-31) -
+
+def test_create_project_suggestion_defaults_to_merge_kind(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
+    sid = ws_db.create_project_suggestion(issue_id_a=a, issue_id_b=b, reason="test")
+    sugg = ws_db.get_project_suggestion(sid)
+    assert sugg["suggestion_kind"] == "merge"
+
+
+def test_create_project_suggestion_link_kind(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
+    sid = ws_db.create_project_suggestion(issue_id_a=a, issue_id_b=b, reason="test", suggestion_kind="link")
+    sugg = ws_db.get_project_suggestion(sid)
+    assert sugg["suggestion_kind"] == "link"
+
+
+def test_create_project_suggestion_rejects_invalid_kind(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
+    with pytest.raises(ValueError):
+        ws_db.create_project_suggestion(issue_id_a=a, issue_id_b=b, reason="test", suggestion_kind="bogus")
+
+
+def test_create_project_suggestion_dedup_is_scoped_to_same_kind(ws_db):
+    """A pending 'merge' suggestion for a pair must NOT be reused for a
+    'link' suggestion on the same pair - they're different questions."""
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
+    merge_id = ws_db.create_project_suggestion(issue_id_a=a, issue_id_b=b, reason="merge reason", suggestion_kind="merge")
+    link_id = ws_db.create_project_suggestion(issue_id_a=a, issue_id_b=b, reason="link reason", suggestion_kind="link")
+    assert merge_id != link_id
+    assert len(ws_db.list_project_suggestions(status="pending")) == 2
+
+
+def test_create_project_suggestion_same_kind_dedups(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
+    first = ws_db.create_project_suggestion(issue_id_a=a, issue_id_b=b, reason="r1", suggestion_kind="link")
+    second = ws_db.create_project_suggestion(issue_id_a=b, issue_id_b=a, reason="r2", suggestion_kind="link")
+    assert first == second
+    assert len(ws_db.list_project_suggestions(status="pending")) == 1
+
+
+def test_create_project_link_persists_and_is_idempotent(ws_db):
+    p1 = ws_db.create_project_with_new_id(name="P1", category="other")
+    p2 = ws_db.create_project_with_new_id(name="P2", category="other")
+    first = ws_db.create_project_link(from_project_id=p1, to_project_id=p2, link_type="related",
+                                       reason="same vendor, adjacent topics", created_by="marc")
+    second = ws_db.create_project_link(from_project_id=p1, to_project_id=p2, link_type="related",
+                                        reason="duplicate call", created_by="marc")
+    assert first == second
+    links = ws_db.list_project_links_for_project(p1)
+    assert len(links) == 1
+    assert links[0]["link_type"] == "related"
+    assert links[0]["reason"] == "same vendor, adjacent topics"
+
+
+def test_create_project_link_different_type_is_not_deduped(ws_db):
+    p1 = ws_db.create_project_with_new_id(name="P1", category="other")
+    p2 = ws_db.create_project_with_new_id(name="P2", category="other")
+    ws_db.create_project_link(from_project_id=p1, to_project_id=p2, link_type="related", reason="r1")
+    ws_db.create_project_link(from_project_id=p1, to_project_id=p2, link_type="enables", reason="r2")
+    assert len(ws_db.list_project_links_for_project(p1)) == 2
+
+
+def test_list_project_links_for_project_finds_links_from_either_direction(ws_db):
+    p1 = ws_db.create_project_with_new_id(name="P1", category="other")
+    p2 = ws_db.create_project_with_new_id(name="P2", category="other")
+    ws_db.create_project_link(from_project_id=p1, to_project_id=p2, link_type="enables", reason="r")
+    assert len(ws_db.list_project_links_for_project(p1)) == 1
+    assert len(ws_db.list_project_links_for_project(p2)) == 1
+
+
+def test_create_project_link_rejects_invalid_link_type(ws_db):
+    p1 = ws_db.create_project_with_new_id(name="P1", category="other")
+    p2 = ws_db.create_project_with_new_id(name="P2", category="other")
+    with pytest.raises(sqlite3.IntegrityError):
+        ws_db.create_project_link(from_project_id=p1, to_project_id=p2, link_type="bogus", reason="r")

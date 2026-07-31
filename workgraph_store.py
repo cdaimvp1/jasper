@@ -383,6 +383,48 @@ def init_workgraph() -> None:
                 )
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_project_suggestions_status ON pending_project_suggestions(status)")
+            try:
+                # 2026-07-31 (meeting-grouping/related-project identity pass):
+                # every suggestion used to mean "propose a same-project
+                # merge" - no way to represent "these are connected but
+                # should stay separate projects" (Marc's real example:
+                # exiting an IQVIA contract via H1, vs. negotiating a NEW
+                # direct H1 deal - causally related, should very likely stay
+                # separate). 'link' suggestions (see project_links below)
+                # and 'merge_projects' (step 5 - a collision between two
+                # ALREADY-established projects) reuse this same queue rather
+                # than forking a second review surface/routine doc. No CHECK
+                # constraint here (no precedent in this file for ALTER TABLE
+                # ADD COLUMN ... CHECK) - valid values enforced in Python at
+                # create_project_suggestion, same pattern set_project_status
+                # already uses for its own status argument.
+                conn.execute("ALTER TABLE pending_project_suggestions ADD COLUMN suggestion_kind TEXT NOT NULL DEFAULT 'merge'")
+            except sqlite3.OperationalError:
+                pass
+
+            # 2026-07-31: durable relationships between two DIFFERENT real
+            # projects that should NOT become one project - e.g. "same
+            # vendor team, adjacent topics" (two distinct recurring PwC
+            # meeting series) or "one enables the other" (H1 helping exit an
+            # old contract so a new H1 deal can proceed). Project-level, not
+            # issue-level: these are relationships between established
+            # bodies of work, matching how the cockpit already renders
+            # projects - an issue-level link would go stale the moment
+            # issue-to-project membership shifts.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS project_links (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    from_project_id TEXT NOT NULL REFERENCES projects(id),
+                    to_project_id   TEXT NOT NULL REFERENCES projects(id),
+                    link_type       TEXT NOT NULL CHECK (link_type IN
+                                        ('related','enables','blocks','depends_on','same_supplier','follow_on')),
+                    reason          TEXT NOT NULL,
+                    created_ts      REAL NOT NULL,
+                    created_by      TEXT
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_project_links_from ON project_links(from_project_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_project_links_to ON project_links(to_project_id)")
 
             # capability_suggestions - a NOTE any worker can log when it
             # notices a real gap during normal work ("I keep seeing X pattern
@@ -2506,26 +2548,81 @@ def merge_issues_txn(issue_id_a: str, issue_id_b: str, *, reason_label: str,
 
 # --- pending_project_suggestions -------------------------------------------
 
-def create_project_suggestion(*, issue_id_a: str, issue_id_b: str, reason: str) -> int:
+_SUGGESTION_KINDS = ("merge", "link", "merge_projects")
+
+
+def create_project_suggestion(*, issue_id_a: str, issue_id_b: str, reason: str,
+                               suggestion_kind: str = "merge") -> int:
+    """suggestion_kind added 2026-07-31 - see pending_project_suggestions'
+    own schema comment. Dedupe is scoped to the SAME kind: a pending 'merge'
+    suggestion for this pair must not be reused for a 'link' suggestion (or
+    vice versa) - they're different questions about the same pair, not
+    interchangeable rows."""
+    if suggestion_kind not in _SUGGESTION_KINDS:
+        raise ValueError(f"invalid suggestion_kind: {suggestion_kind!r}")
     with _lock:
         conn = _connect()
         try:
             existing = conn.execute(
                 """SELECT id FROM pending_project_suggestions
-                   WHERE status = 'pending' AND
+                   WHERE status = 'pending' AND suggestion_kind = ? AND
                        ((issue_id_a = ? AND issue_id_b = ?) OR (issue_id_a = ? AND issue_id_b = ?))""",
-                (issue_id_a, issue_id_b, issue_id_b, issue_id_a),
+                (suggestion_kind, issue_id_a, issue_id_b, issue_id_b, issue_id_a),
             ).fetchone()
             if existing:
                 return existing["id"]
             cur = conn.execute(
-                """INSERT INTO pending_project_suggestions (issue_id_a, issue_id_b, reason, created_ts)
-                   VALUES (?, ?, ?, ?)""",
-                (issue_id_a, issue_id_b, reason, time.time()),
+                """INSERT INTO pending_project_suggestions (issue_id_a, issue_id_b, reason, created_ts, suggestion_kind)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (issue_id_a, issue_id_b, reason, time.time(), suggestion_kind),
             )
             return cur.lastrowid
         finally:
             conn.close()
+
+
+def create_project_link(*, from_project_id: str, to_project_id: str, link_type: str,
+                         reason: str, created_by: Optional[str] = None) -> int:
+    """Idempotent - reuses an existing link with the same (from, to, type)
+    rather than creating a duplicate, same check-then-insert shape as
+    create_project_suggestion. Direction is stored in creation order for
+    symmetric types (e.g. 'related') and is meaningful for directional
+    types (e.g. 'enables') - callers decide which project is from/to."""
+    with _lock:
+        conn = _connect()
+        try:
+            existing = conn.execute(
+                """SELECT id FROM project_links
+                   WHERE from_project_id = ? AND to_project_id = ? AND link_type = ?""",
+                (from_project_id, to_project_id, link_type),
+            ).fetchone()
+            if existing:
+                return existing["id"]
+            cur = conn.execute(
+                """INSERT INTO project_links (from_project_id, to_project_id, link_type, reason, created_ts, created_by)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (from_project_id, to_project_id, link_type, reason, time.time(), created_by),
+            )
+            return cur.lastrowid
+        finally:
+            conn.close()
+
+
+def list_project_links_for_project(project_id: str) -> list[dict]:
+    """Every link touching this project, either direction - a project
+    detail view shouldn't have to know whether it was the 'from' or 'to'
+    side when the link was created."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                """SELECT * FROM project_links WHERE from_project_id = ? OR to_project_id = ?
+                   ORDER BY created_ts DESC""",
+                (project_id, project_id),
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
 
 
 def list_project_suggestions(status: str = "pending") -> list[dict]:

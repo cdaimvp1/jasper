@@ -295,6 +295,32 @@ def _shared_topic_key(issue: dict):
     return None
 
 
+def _topic_keys_match(issue_id: str, sibling_id: str) -> bool:
+    """Pairwise topic-key overlap between two SPECIFIC issues - unlike
+    _shared_topic_key (which SEARCHES the whole corpus for a candidate),
+    this just answers the yes/no question for an already-found pair.
+
+    2026-07-31 (related-vs-same-project verdict): the merge-vs-link
+    discriminator for a party/company match. Real cases this decides
+    correctly: marc-166 ("Dragonfly 2.0 SOW's") and marc-063 ("H1/Lilly SOW
+    Review") share an external party (H1) but their topic keys don't
+    meaningfully overlap - correctly routes to link, not merge. Uses the
+    SAME SequenceMatcher longest-match check _shared_topic_key already
+    uses, not category (issue.category is 39% 'other' in real data and too
+    coarse a taxonomy to reliably distinguish two transaction types with
+    the same counterparty)."""
+    issue = ws.get_issue(issue_id)
+    sibling = ws.get_issue(sibling_id)
+    if not issue or not sibling:
+        return False
+    key_a = ws.normalize_topic_key(issue.get("title") or "")
+    key_b = ws.normalize_topic_key(sibling.get("title") or "")
+    if len(key_a) < MIN_TOPIC_KEY_LEN or len(key_b) < MIN_TOPIC_KEY_LEN:
+        return False
+    match = SequenceMatcher(None, key_a, key_b).find_longest_match(0, len(key_a), 0, len(key_b))
+    return match.size >= MIN_TOPIC_KEY_LEN
+
+
 def _strong_signal_match(issue_id: str, issue: dict):
     """First strong deterministic signal found, checked in order of
     confidence: matching reference ID (Part A1, 2026-07-30 - a real
@@ -317,25 +343,40 @@ def _strong_signal_match(issue_id: str, issue: dict):
     routes those three through the same precedent-check + suggestion path
     as weak signals instead of merging on them directly. Kept as one
     function (rather than splitting into "auto" vs "suggest" checks)
-    because the ordering/veto logic is shared and must stay in sync. Returns
-    (kind, detail, sibling_issue_id) or None."""
+    because the ordering/veto logic is shared and must stay in sync.
+
+    Extended 2026-07-31 (related-vs-same-project verdict) with a 4th
+    element, verdict ("merge" or "link"), for the party/company/topic
+    kinds - reference stays unconditionally "merge" (a real structured
+    identifier IS the same transaction, no discriminator needed):
+    - "party": merge if the two issues' topic keys ALSO overlap (same
+      literal thread, just also sharing a contact); link otherwise (same
+      contact, different transaction - the marc-166/marc-063 shape).
+    - "company": always link (same_supplier) - a shared company with
+      DIFFERENT people never proves the same transaction (the two-distinct-
+      PwC-meeting-series shape).
+    - "topic": always merge (unchanged) - _shared_topic_key already
+      internally vetoes a disjoint-company candidate, so reaching this
+      kind at all means companies are absent or non-contradicting.
+    Returns (kind, detail, sibling_issue_id, verdict) or None."""
     m = _shared_reference_id(issue_id)
     if m:
         ref, sibling_id = m
-        return "reference", ref, sibling_id
+        return "reference", ref, sibling_id, "merge"
     m = _shared_external_party(issue_id)
     if m:
         party_id, sibling_id = m
         if not _vetoed_by_reference_mismatch(issue_id, sibling_id):
-            return "party", party_id, sibling_id
+            verdict = "merge" if _topic_keys_match(issue_id, sibling_id) else "link"
+            return "party", party_id, sibling_id, verdict
     m = _shared_external_company(issue_id)
     if m:
         company, sibling_id = m
         if not _vetoed_by_reference_mismatch(issue_id, sibling_id):
-            return "company", company, sibling_id
+            return "company", company, sibling_id, "link"
     sibling_id = _shared_topic_key(issue)
     if sibling_id and not _vetoed_by_reference_mismatch(issue_id, sibling_id):
-        return "topic", ws.normalize_topic_key(issue.get("title") or ""), sibling_id
+        return "topic", ws.normalize_topic_key(issue.get("title") or ""), sibling_id, "merge"
     return None
 
 
@@ -587,7 +628,39 @@ def merge_issues(issue_id_a: str, issue_id_b: str, *, reason_label: str) -> str:
     )
 
 
-def confirm_suggestion(suggestion_id: int) -> dict:
+def _confirm_link_suggestion(sugg: dict, suggestion_id: int, link_type: str = "related") -> dict:
+    """Confirming a 'link' suggestion creates a project_links row between
+    whichever two projects the two issues actually belong to - a link is
+    inherently a project-to-project relationship, never an issue-to-issue
+    one (see project_links' own schema comment on why). Creates a
+    standalone project for either side that doesn't have one yet, rather
+    than requiring both issues to already be grouped before a link can
+    exist. Defaults link_type to 'related' - the vaguest correct value;
+    _strong_signal_match's own docstring explains why a causal type
+    (enables/depends_on/etc.) can't be mechanically inferred and must stay
+    a human's call, not guessed here."""
+    issue_a = ws.get_issue(sugg["issue_id_a"])
+    issue_b = ws.get_issue(sugg["issue_id_b"])
+    project_a = issue_a.get("project_id") if issue_a else None
+    project_b = issue_b.get("project_id") if issue_b else None
+    if not project_a and issue_a:
+        parties = ws.list_parties_for_issue(sugg["issue_id_a"])
+        project_a = ws.create_project_with_new_id(
+            name=_project_name_for(issue_a, issue_a.get("category"), parties), category=issue_a.get("category"))
+        ws.assign_issue_to_project(sugg["issue_id_a"], project_a, reason="standalone project for a confirmed link")
+    if not project_b and issue_b:
+        parties = ws.list_parties_for_issue(sugg["issue_id_b"])
+        project_b = ws.create_project_with_new_id(
+            name=_project_name_for(issue_b, issue_b.get("category"), parties), category=issue_b.get("category"))
+        ws.assign_issue_to_project(sugg["issue_id_b"], project_b, reason="standalone project for a confirmed link")
+    link_id = ws.create_project_link(from_project_id=project_a, to_project_id=project_b,
+                                      link_type=link_type, reason=sugg["reason"], created_by="confirmed suggestion")
+    ws.resolve_project_suggestion(suggestion_id, "confirmed")
+    return {"action": "linked", "from_project_id": project_a, "to_project_id": project_b,
+            "link_type": link_type, "link_id": link_id}
+
+
+def confirm_suggestion(suggestion_id: int, *, link_type: str = "related") -> dict:
     """Confirming a suggestion now actually merges the two issues (the
     pre-existing gap Marc flagged: 'Confirm' used to just mark it reviewed
     with no real effect). Called both from a human clicking Confirm in the
@@ -597,10 +670,23 @@ def confirm_suggestion(suggestion_id: int) -> dict:
     decision already made - see workgraph_lessons.record_confirmed_or_rejected).
     A rejected/invalid lesson write (e.g. no real category+company signal on
     this pair) is a normal, silent no-op here, never a failure of the merge
-    itself."""
+    itself.
+
+    2026-07-31 (related-vs-same-project verdict): a 'link'-kind suggestion
+    confirms into a project_links row instead of a merge (link_type lets
+    the caller upgrade past the default 'related' if a human already knows
+    the specific relationship - e.g. 'enables'). Deliberately does NOT
+    record a Total Recall lesson for a link outcome - situation_key's
+    precedent bucket is about "same project or not," and recording a link
+    confirmation/rejection there would contaminate FUTURE merge-precedent
+    decisions for the same category+company with a different question's
+    answer (see create_project_suggestion's own docstring: link precedent
+    isn't trusted to auto-apply anything yet, on purpose)."""
     sugg = ws.get_project_suggestion(suggestion_id)
     if sugg is None:
         return {"action": "not_found"}
+    if sugg.get("suggestion_kind") == "link":
+        return _confirm_link_suggestion(sugg, suggestion_id, link_type=link_type)
     project_id = merge_issues(sugg["issue_id_a"], sugg["issue_id_b"], reason_label="confirmed suggestion")
     ws.resolve_project_suggestion(suggestion_id, "confirmed")
     workgraph_lessons.record_confirmed_or_rejected(issue_id_a=sugg["issue_id_a"], status="confirmed")
@@ -610,7 +696,9 @@ def confirm_suggestion(suggestion_id: int) -> dict:
 def reject_suggestion(suggestion_id: int) -> dict:
     sugg = ws.get_project_suggestion(suggestion_id)
     ws.resolve_project_suggestion(suggestion_id, "rejected")
-    if sugg is not None:
+    # 2026-07-31: only a 'merge' rejection feeds Total Recall precedent -
+    # same reasoning as confirm_suggestion's own docstring above.
+    if sugg is not None and sugg.get("suggestion_kind") == "merge":
         workgraph_lessons.record_confirmed_or_rejected(issue_id_a=sugg["issue_id_a"], status="rejected")
     return {"action": "rejected"}
 
@@ -677,7 +765,7 @@ def group_issue(issue_id: str) -> dict:
 
     match = _strong_signal_match(issue_id, issue)
     if match:
-        kind, detail, sibling_id = match
+        kind, detail, sibling_id, verdict = match
         reason_label = {
             "reference": f"strong signal: matching reference ID '{detail}'",
             "party": "strong signal: shared external party",
@@ -687,9 +775,27 @@ def group_issue(issue_id: str) -> dict:
         if kind == "reference":
             project_id = merge_issues(issue_id, sibling_id, reason_label=reason_label)
             return _finish("auto_merged", signal=kind, sibling_id=sibling_id, project_id=project_id)
-        # Narrowed 2026-07-31 (see _strong_signal_match's docstring): party/
-        # company/topic prove a relationship, not a project identity - never
-        # auto-merge on these alone. Route through the same repeated-
+
+        if verdict == "link":
+            # 2026-07-31 (related-vs-same-project verdict): a bare shared
+            # company (different people), or a shared party whose topic
+            # keys DON'T overlap, prove a relationship - not the same
+            # transaction (marc-166/marc-063: same H1 contact, exiting one
+            # contract vs. negotiating a different new one). Never auto-
+            # merge, and never auto-apply from precedent either (link
+            # precedent isn't trusted yet - see create_project_suggestion's
+            # own docstring) - always surface for a human to pick the real
+            # relationship type (default 'related', upgradable on confirm).
+            ws.create_project_suggestion(
+                issue_id_a=issue_id, issue_id_b=sibling_id,
+                reason=f"possibly related (not necessarily same project) - {reason_label}",
+                suggestion_kind="link",
+            )
+            return _finish("suggested", signal=kind, sibling_id=sibling_id, count=1, suggestion_kind="link")
+
+        # verdict == "merge" (party-with-topic-overlap, or topic-kind).
+        # Narrowed 2026-07-31 (see _strong_signal_match's docstring): still
+        # never auto-merge on these alone. Route through the same repeated-
         # confirmed-precedent check (a genuinely higher bar - multiple past
         # EXPLICIT human confirmations, not a single heuristic match) and
         # otherwise fall back to a suggestion instead of merging outright.

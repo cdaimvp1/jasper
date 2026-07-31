@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import time
 
+import workgraph_lessons
 import workgraph_projects as wp
 import workgraph_signals
 
@@ -207,11 +208,12 @@ def test_strong_signal_match_prefers_reference_over_party(ws_db):
     _raw_item(ws_db, b, "PR654321 approval needed again", "r8")
     _link_party(ws_db, b, "shared_party", "rep@acme.com", company="Acme")
 
-    kind, detail, sibling_id = wp._strong_signal_match(a, ws_db.get_issue(a))
+    kind, detail, sibling_id, verdict = wp._strong_signal_match(a, ws_db.get_issue(a))
 
     assert kind == "reference"
     assert detail == "PR654321"
     assert sibling_id == b
+    assert verdict == "merge"
 
 
 def test_group_issue_merges_via_reference_id_alone(ws_db):
@@ -306,6 +308,178 @@ def test_shared_real_company_without_reference_numbers_suggests_not_merges(ws_db
 
     assert result["action"] == "suggested"
     assert result["count"] == 1
+
+
+# --- related-vs-same-project verdict (2026-07-31) -------------------------
+
+def test_topic_keys_match_true_for_overlapping_titles(ws_db):
+    a = _issue(ws_db, "Requested approval for Veeva CRM press release")
+    b = _issue(ws_db, "MARC REVIEW REQUESTED: Veeva CRM press release quote")
+    assert wp._topic_keys_match(a, b) is True
+
+
+def test_topic_keys_match_false_for_unrelated_titles(ws_db):
+    """The real marc-166/marc-063 shape: same counterparty, different
+    transaction - titles don't meaningfully overlap."""
+    a = _issue(ws_db, "Dragonfly 2.0 SOW's")
+    b = _issue(ws_db, "H1/Lilly SOW Review")
+    assert wp._topic_keys_match(a, b) is False
+
+
+def test_topic_keys_match_false_when_titles_too_short(ws_db):
+    a = _issue(ws_db, "Hi there")
+    b = _issue(ws_db, "Hi there")
+    assert wp._topic_keys_match(a, b) is False
+
+
+def test_strong_signal_match_party_with_topic_overlap_verdicts_merge(ws_db):
+    a = _issue(ws_db, "Requested approval for Veeva CRM press release")
+    _link_party(ws_db, a, "shared_party", "rep@acme.com", company="Acme")
+    b = _issue(ws_db, "MARC REVIEW REQUESTED: Veeva CRM press release quote")
+    _link_party(ws_db, b, "shared_party", "rep@acme.com", company="Acme")
+
+    kind, detail, sibling_id, verdict = wp._strong_signal_match(a, ws_db.get_issue(a))
+
+    assert kind == "party"
+    assert verdict == "merge"
+
+
+def test_strong_signal_match_party_without_topic_overlap_verdicts_link(ws_db):
+    """The real marc-166/marc-063 case: same external party (H1), causally
+    connected (H1 helping exit one contract enables a new deal), but
+    genuinely different transactions - must NOT be treated as merge-
+    eligible."""
+    a = _issue(ws_db, "Dragonfly 2.0 SOW's")
+    _link_party(ws_db, a, "h1_contact", "rep@h1.com", company="H1")
+    b = _issue(ws_db, "H1/Lilly SOW Review")
+    _link_party(ws_db, b, "h1_contact", "rep@h1.com", company="H1")
+
+    kind, detail, sibling_id, verdict = wp._strong_signal_match(a, ws_db.get_issue(a))
+
+    assert kind == "party"
+    assert verdict == "link"
+
+
+def test_strong_signal_match_company_only_always_verdicts_link(ws_db):
+    """Different people at the same company - even with matching topic
+    text, a bare company match never proves the same transaction (the
+    two-distinct-PwC-meeting-series real shape)."""
+    a = _issue(ws_db, "PwC drop-in hours")
+    _link_party(ws_db, a, "pwc_rep1", "rep1@pwc.com", company="PwC")
+    b = _issue(ws_db, "PwC drop-in hours weekly session")
+    _link_party(ws_db, b, "pwc_rep2", "rep2@pwc.com", company="PwC")
+
+    kind, detail, sibling_id, verdict = wp._strong_signal_match(a, ws_db.get_issue(a))
+
+    assert kind == "company"
+    assert verdict == "link"
+
+
+def test_group_issue_party_without_topic_overlap_creates_link_suggestion(ws_db):
+    """End-to-end: group_issue() on the marc-166/marc-063 shape creates a
+    'link' suggestion, not a 'merge' suggestion - and never auto-merges."""
+    a = _issue(ws_db, "Dragonfly 2.0 SOW's")
+    _link_party(ws_db, a, "h1_contact", "rep@h1.com", company="H1")
+    b = _issue(ws_db, "H1/Lilly SOW Review")
+    _link_party(ws_db, b, "h1_contact", "rep@h1.com", company="H1")
+
+    result = wp.group_issue(a)
+
+    assert result["action"] == "suggested"
+    assert result["suggestion_kind"] == "link"
+    suggestions = ws_db.list_project_suggestions(status="pending")
+    assert len(suggestions) == 1
+    assert suggestions[0]["suggestion_kind"] == "link"
+
+
+def test_group_issue_party_with_topic_overlap_creates_merge_suggestion(ws_db):
+    a = _issue(ws_db, "Requested approval for Veeva CRM press release")
+    _link_party(ws_db, a, "shared_party", "rep@acme.com", company="Acme")
+    b = _issue(ws_db, "MARC REVIEW REQUESTED: Veeva CRM press release quote")
+    _link_party(ws_db, b, "shared_party", "rep@acme.com", company="Acme")
+
+    result = wp.group_issue(a)
+
+    assert result["action"] == "suggested"
+    assert "suggestion_kind" not in result  # unchanged default path, no explicit kind
+    suggestions = ws_db.list_project_suggestions(status="pending")
+    assert suggestions[0]["suggestion_kind"] == "merge"
+
+
+def test_confirm_suggestion_merge_kind_merges_the_issues(ws_db):
+    a = _issue(ws_db, "A")
+    b = _issue(ws_db, "B")
+    sid = ws_db.create_project_suggestion(issue_id_a=a, issue_id_b=b, reason="test", suggestion_kind="merge")
+
+    result = wp.confirm_suggestion(sid)
+
+    assert result["action"] == "merged"
+    assert ws_db.get_issue(a)["project_id"] == result["project_id"]
+    assert ws_db.get_issue(b)["project_id"] == result["project_id"]
+    assert ws_db.get_project_suggestion(sid)["status"] == "confirmed"
+
+
+def test_confirm_suggestion_link_kind_creates_project_link_not_a_merge(ws_db):
+    """The real point of this verdict tier: confirming must NOT merge the
+    two issues into one project - it creates a link between whichever
+    projects they end up in, standalone if neither had one yet."""
+    a = _issue(ws_db, "Dragonfly 2.0 SOW's")
+    b = _issue(ws_db, "H1/Lilly SOW Review")
+    sid = ws_db.create_project_suggestion(issue_id_a=a, issue_id_b=b, reason="possibly related", suggestion_kind="link")
+
+    result = wp.confirm_suggestion(sid)
+
+    assert result["action"] == "linked"
+    assert result["link_type"] == "related"
+    a_project = ws_db.get_issue(a)["project_id"]
+    b_project = ws_db.get_issue(b)["project_id"]
+    assert a_project is not None and b_project is not None
+    assert a_project != b_project  # NOT merged into the same project
+    links = ws_db.list_project_links_for_project(a_project)
+    assert len(links) == 1
+    assert links[0]["link_type"] == "related"
+
+
+def test_confirm_suggestion_link_kind_respects_upgraded_link_type(ws_db):
+    a = _issue(ws_db, "Dragonfly 2.0 SOW's")
+    b = _issue(ws_db, "H1/Lilly SOW Review")
+    sid = ws_db.create_project_suggestion(issue_id_a=a, issue_id_b=b, reason="H1 helping exit Dragonfly", suggestion_kind="link")
+
+    result = wp.confirm_suggestion(sid, link_type="enables")
+
+    assert result["link_type"] == "enables"
+
+
+def test_confirm_suggestion_link_kind_reuses_existing_projects(ws_db):
+    proj_a = ws_db.create_project_with_new_id(name="Existing A", category="other")
+    a = _issue(ws_db, "A")
+    ws_db.assign_issue_to_project(a, proj_a)
+    b = _issue(ws_db, "B")
+    sid = ws_db.create_project_suggestion(issue_id_a=a, issue_id_b=b, reason="test", suggestion_kind="link")
+
+    result = wp.confirm_suggestion(sid)
+
+    assert result["from_project_id"] == proj_a  # a's EXISTING project reused, not a new one
+    assert ws_db.get_issue(b)["project_id"] == result["to_project_id"]
+
+
+def test_reject_suggestion_link_kind_does_not_record_a_lesson(ws_db):
+    """A link-suggestion rejection must NOT feed Total Recall's merge
+    precedent bucket - that's a different question (same project or not)
+    than the one a link candidate is actually asking."""
+    a = _issue(ws_db, "A")
+    _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
+    conn = ws_db._connect()
+    conn.execute("UPDATE issues SET category = 'contract' WHERE id = ?", (a,))
+    conn.close()
+    b = _issue(ws_db, "B")
+    sid = ws_db.create_project_suggestion(issue_id_a=a, issue_id_b=b, reason="test", suggestion_kind="link")
+
+    wp.reject_suggestion(sid)
+
+    key = workgraph_lessons.situation_key_for_issue(ws_db.get_issue(a))
+    assert key is not None
+    assert ws_db.get_lesson_by_situation(key, "rejected") is None
 
 
 def test_weak_signal_candidates_exclude_disjoint_reference_pair(ws_db):

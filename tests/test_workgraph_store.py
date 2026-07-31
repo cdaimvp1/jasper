@@ -414,13 +414,39 @@ def test_alerts_migration_is_crash_safe(ws_db, monkeypatch):
 def test_merge_issues_txn_creates_new_project_when_neither_has_one(ws_db):
     a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
     b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
-    project_id = ws_db.merge_issues_txn(a, b, reason_label="test", new_project_name="New", new_project_category="other")
+    result = ws_db.merge_issues_txn(a, b, reason_label="test", new_project_name="New", new_project_category="other")
+    assert result["status"] == "merged"
+    project_id = result["project_id"]
     assert ws_db.get_issue(a)["project_id"] == project_id
     assert ws_db.get_issue(b)["project_id"] == project_id
     assert ws_db.get_project(project_id)["name"] == "New"
 
 
-def test_merge_issues_txn_collision_moves_every_member_and_archives_loser(ws_db):
+def test_merge_issues_txn_singleton_loser_still_auto_merges(ws_db):
+    """2026-07-31 (step 5): a loser project whose ONLY member is the issue
+    being merged itself (no other real members) is low-risk - nothing else
+    gets uprooted - and still auto-merges, unlike an established (2+
+    member) loser below."""
+    proj_a = ws_db.create_project_with_new_id(name="Project A", category="other")
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    ws_db.assign_issue_to_project(a, proj_a)
+
+    proj_b = ws_db.create_project_with_new_id(name="Project B", category="other")
+    b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
+    ws_db.assign_issue_to_project(b, proj_b)
+
+    result = ws_db.merge_issues_txn(a, b, reason_label="test singleton", new_project_name="unused", new_project_category="other")
+
+    assert result == {"status": "merged", "project_id": proj_a}
+    assert ws_db.get_issue(b)["project_id"] == proj_a
+    assert ws_db.get_project(proj_b)["status"] == "archived"
+
+
+def test_merge_issues_txn_established_loser_defers_to_reconciliation(ws_db):
+    """2026-07-31 (step 5, mandatory reconciliation): a loser project with
+    ANY real member beyond the issue being merged is an established
+    project with its own history - refuses to auto-collapse it, creates a
+    'merge_projects' pending suggestion instead of merging."""
     proj_a = ws_db.create_project_with_new_id(name="Project A", category="other")
     a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
     ws_db.assign_issue_to_project(a, proj_a)
@@ -431,25 +457,79 @@ def test_merge_issues_txn_collision_moves_every_member_and_archives_loser(ws_db)
     other = ws_db.create_issue_with_new_id(title="Other member of B", state="active", category="other")
     ws_db.assign_issue_to_project(other, proj_b)
 
-    winner = ws_db.merge_issues_txn(a, b, reason_label="test collision", new_project_name="unused", new_project_category="other")
+    result = ws_db.merge_issues_txn(a, b, reason_label="test collision", new_project_name="unused", new_project_category="other")
+
+    assert result["status"] == "deferred"
+    assert result["winner_project_id"] == proj_a
+    assert result["loser_project_id"] == proj_b
+    # NOTHING actually merged - other/b/proj_b all untouched.
+    assert ws_db.get_issue(other)["project_id"] == proj_b
+    assert ws_db.get_issue(b)["project_id"] == proj_b
+    assert ws_db.get_project(proj_b)["status"] != "archived"
+    sugg = ws_db.get_project_suggestion(result["suggestion_id"])
+    assert sugg["suggestion_kind"] == "merge_projects"
+    assert sugg["status"] == "pending"
+
+
+def test_would_collide_established_projects_none_when_no_collision(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
+    assert ws_db.would_collide_established_projects(a, b) is None
+
+
+def test_would_collide_established_projects_none_for_singleton_loser(ws_db):
+    proj_a = ws_db.create_project_with_new_id(name="Project A", category="other")
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    ws_db.assign_issue_to_project(a, proj_a)
+    proj_b = ws_db.create_project_with_new_id(name="Project B", category="other")
+    b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
+    ws_db.assign_issue_to_project(b, proj_b)
+    assert ws_db.would_collide_established_projects(a, b) is None
+
+
+def test_would_collide_established_projects_fires_for_established_loser(ws_db):
+    proj_a = ws_db.create_project_with_new_id(name="Project A", category="other")
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    ws_db.assign_issue_to_project(a, proj_a)
+    proj_b = ws_db.create_project_with_new_id(name="Project B", category="other")
+    b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
+    ws_db.assign_issue_to_project(b, proj_b)
+    other = ws_db.create_issue_with_new_id(title="Other", state="active", category="other")
+    ws_db.assign_issue_to_project(other, proj_b)
+
+    result = ws_db.would_collide_established_projects(a, b)
+
+    assert result == {"winner_project_id": proj_a, "loser_project_id": proj_b, "loser_members": [other]}
+
+
+def test_force_merge_projects_moves_members_and_archives_loser(ws_db):
+    proj_a = ws_db.create_project_with_new_id(name="Project A", category="other")
+    proj_b = ws_db.create_project_with_new_id(name="Project B", category="other")
+    b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
+    ws_db.assign_issue_to_project(b, proj_b)
+    other = ws_db.create_issue_with_new_id(title="Other", state="active", category="other")
+    ws_db.assign_issue_to_project(other, proj_b)
+
+    winner = ws_db.force_merge_projects(proj_a, proj_b, reason_label="confirmed reconciliation")
 
     assert winner == proj_a
+    assert ws_db.get_issue(b)["project_id"] == proj_a
     assert ws_db.get_issue(other)["project_id"] == proj_a
     assert ws_db.get_project(proj_b)["status"] == "archived"
 
 
 def test_merge_issues_txn_is_crash_safe(ws_db):
     """The real bug this fixes: merge_issues() used to run as several
-    independent autocommit connections (list_issues_for_project,
-    assign_issue_to_project x2-3, set_project_status) - a crash partway
-    through left the DB partially merged (e.g. the loser project archived
-    with some members still pointing at it, or the OTHER member of the
-    losing project reassigned but issue_a/issue_b themselves not yet
-    touched) with no recovery path. This simulates a genuine crash
-    (an exception that is NOT the caught sqlite3.OperationalError) firing
-    right after the losing project's OTHER member is reassigned, and proves
-    NOTHING was committed - not even that one UPDATE - because the whole
-    thing is one transaction."""
+    independent autocommit connections - a crash partway through left the
+    DB partially merged (e.g. one issue reassigned to the winner but not
+    the other) with no recovery path. Uses a singleton-loser pair (2026-
+    07-31: an established, 2+-member loser now defers to reconciliation
+    BEFORE ever opening a transaction - see would_collide_established_
+    projects - so it can no longer exercise this specific crash point;
+    the singleton case still reaches the real merge transaction). Crashes
+    right after b is reassigned to the winner, and proves NOTHING was
+    committed - not even that one UPDATE - because the whole thing is one
+    transaction."""
     proj_a = ws_db.create_project_with_new_id(name="Project A", category="other")
     a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
     ws_db.assign_issue_to_project(a, proj_a)
@@ -457,18 +537,16 @@ def test_merge_issues_txn_is_crash_safe(ws_db):
     proj_b = ws_db.create_project_with_new_id(name="Project B", category="other")
     b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
     ws_db.assign_issue_to_project(b, proj_b)
-    other = ws_db.create_issue_with_new_id(title="Other member of B", state="active", category="other")
-    ws_db.assign_issue_to_project(other, proj_b)
 
     real_connect = sqlite3.connect
     call_count = {"reassigns": 0}
 
     class _CrashingConnection(sqlite3.Connection):
         def execute(self, sql, *args, **kwargs):
-            if sql.startswith("UPDATE issues SET project_id") and args and args[0] and args[0][0] == proj_a:
+            if sql.startswith("UPDATE issues SET project_id") and args and args[0] and args[0][0] == proj_a and args[0][2] == b:
                 call_count["reassigns"] += 1
                 result = super().execute(sql, *args, **kwargs)
-                raise RuntimeError("simulated crash right after reassigning the other member")
+                raise RuntimeError("simulated crash right after reassigning b to the winner")
             return super().execute(sql, *args, **kwargs)
 
     def fake_sqlite_connect(*args, **kwargs):
@@ -483,12 +561,11 @@ def test_merge_issues_txn_is_crash_safe(ws_db):
         sqlite3.connect = real_connect
     assert call_count["reassigns"] == 1  # confirms the crash point was actually hit
 
-    # Nothing committed: proj_b still active, other still belongs to it,
-    # a/b untouched - exactly as if the merge had never been attempted.
+    # Nothing committed: proj_b still active, b/a untouched - exactly as if
+    # the merge had never been attempted.
     assert ws_db.get_project(proj_b)["status"] != "archived"
-    assert ws_db.get_issue(other)["project_id"] == proj_b
-    assert ws_db.get_issue(a)["project_id"] == proj_a
     assert ws_db.get_issue(b)["project_id"] == proj_b
+    assert ws_db.get_issue(a)["project_id"] == proj_a
 
 
 def test_merge_issues_txn_retries_on_lock_then_succeeds(ws_db, monkeypatch):
@@ -518,10 +595,11 @@ def test_merge_issues_txn_retries_on_lock_then_succeeds(ws_db, monkeypatch):
     monkeypatch.setattr("time.sleep", lambda *a: None)
     sqlite3.connect = fake_sqlite_connect
     try:
-        project_id = ws_db.merge_issues_txn(a, b, reason_label="test retry", new_project_name="New", new_project_category="other")
+        result = ws_db.merge_issues_txn(a, b, reason_label="test retry", new_project_name="New", new_project_category="other")
     finally:
         sqlite3.connect = real_connect
     assert call_count["begins"] == 3
+    project_id = result["project_id"]
     assert ws_db.get_issue(a)["project_id"] == project_id
     assert ws_db.get_issue(b)["project_id"] == project_id
 

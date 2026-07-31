@@ -586,12 +586,19 @@ def backtest_scored_model() -> dict:
     }
 
 
-def merge_issues(issue_id_a: str, issue_id_b: str, *, reason_label: str) -> str:
+def merge_issues(issue_id_a: str, issue_id_b: str, *, reason_label: str) -> dict:
     """The one place two issues actually become the same project - joins
     whichever of the two already has a project, or creates a new one.
     Shared by the deterministic strong-signal path and by a confirmed
     project-suggestion (Marc's own call, or curator's LLM judgment on the
-    weak-signal residue). Returns the resulting project_id.
+    weak-signal residue).
+
+    Returns {"status": "merged", "project_id": ...} - OR, since 2026-07-31
+    (step 5, mandatory reconciliation), {"status": "deferred",
+    "suggestion_id": ..., "winner_project_id": ..., "loser_project_id": ...}
+    when merging would collide two ALREADY-established projects (see
+    workgraph_store.merge_issues_txn's own docstring). Every caller must
+    check "status" - see group_issue()'s _merge_or_defer helper.
 
     Fixed 2026-07-30 (hardening pass #2): previously only ever consulted
     issue_a's project_id, falling back to issue_b's only if issue_a had
@@ -660,6 +667,30 @@ def _confirm_link_suggestion(sugg: dict, suggestion_id: int, link_type: str = "r
             "link_type": link_type, "link_id": link_id}
 
 
+def _confirm_merge_projects_suggestion(sugg: dict, suggestion_id: int) -> dict:
+    """Executes an explicitly-human-authorized project collision (step 5,
+    mandatory reconciliation) - re-fetches both issues' CURRENT project_id
+    (not the suggestion-creation-time snapshot; state may have changed
+    since - e.g. one side already reassigned by something else) before
+    doing the actual reassign-and-archive work. issue_id_a's project always
+    wins - same tie-break merge_issues_txn's own collision branch already
+    used before this gate existed."""
+    issue_a = ws.get_issue(sugg["issue_id_a"])
+    issue_b = ws.get_issue(sugg["issue_id_b"])
+    project_a = issue_a.get("project_id") if issue_a else None
+    project_b = issue_b.get("project_id") if issue_b else None
+    if not (project_a and project_b and project_a != project_b):
+        # State changed since this suggestion was created - nothing left
+        # to reconcile (e.g. one side was already merged/archived by
+        # something else). Resolve the row so it stops showing as pending
+        # rather than erroring on stale data.
+        ws.resolve_project_suggestion(suggestion_id, "confirmed")
+        return {"action": "no_op_state_changed"}
+    project_id = ws.force_merge_projects(project_a, project_b, reason_label="confirmed reconciliation")
+    ws.resolve_project_suggestion(suggestion_id, "confirmed")
+    return {"action": "merged", "project_id": project_id}
+
+
 def confirm_suggestion(suggestion_id: int, *, link_type: str = "related") -> dict:
     """Confirming a suggestion now actually merges the two issues (the
     pre-existing gap Marc flagged: 'Confirm' used to just mark it reviewed
@@ -681,16 +712,29 @@ def confirm_suggestion(suggestion_id: int, *, link_type: str = "related") -> dic
     confirmation/rejection there would contaminate FUTURE merge-precedent
     decisions for the same category+company with a different question's
     answer (see create_project_suggestion's own docstring: link precedent
-    isn't trusted to auto-apply anything yet, on purpose)."""
+    isn't trusted to auto-apply anything yet, on purpose).
+
+    2026-07-31 (step 5, mandatory reconciliation): a 'merge_projects'-kind
+    suggestion executes the explicitly-authorized collision (see
+    _confirm_merge_projects_suggestion). A confirmed plain 'merge' can ALSO
+    now come back deferred instead of merged - a real race where the pair
+    itself started colliding two established projects between suggestion-
+    creation and confirm time - surfaced as its own new reconciliation
+    suggestion rather than silently succeeding with a wrong id."""
     sugg = ws.get_project_suggestion(suggestion_id)
     if sugg is None:
         return {"action": "not_found"}
-    if sugg.get("suggestion_kind") == "link":
+    kind = sugg.get("suggestion_kind")
+    if kind == "link":
         return _confirm_link_suggestion(sugg, suggestion_id, link_type=link_type)
-    project_id = merge_issues(sugg["issue_id_a"], sugg["issue_id_b"], reason_label="confirmed suggestion")
+    if kind == "merge_projects":
+        return _confirm_merge_projects_suggestion(sugg, suggestion_id)
+    result = merge_issues(sugg["issue_id_a"], sugg["issue_id_b"], reason_label="confirmed suggestion")
     ws.resolve_project_suggestion(suggestion_id, "confirmed")
     workgraph_lessons.record_confirmed_or_rejected(issue_id_a=sugg["issue_id_a"], status="confirmed")
-    return {"action": "merged", "project_id": project_id}
+    if result["status"] == "deferred":
+        return {"action": "deferred_reconciliation", "suggestion_id": result["suggestion_id"]}
+    return {"action": "merged", "project_id": result["project_id"]}
 
 
 def reject_suggestion(suggestion_id: int) -> dict:
@@ -744,17 +788,30 @@ def group_issue(issue_id: str) -> dict:
             result["signal"] = signal
         return result
 
+    def _merge_or_defer(sibling_id: str, reason_label: str, signal: str) -> dict:
+        """2026-07-31 (step 5, mandatory reconciliation): merge_issues() can
+        now come back 'deferred' instead of actually merging, when doing so
+        would collide two ALREADY-established projects (2+ members on the
+        losing side) - see merge_issues_txn's own docstring. Every call
+        site that used to treat merge_issues()'s return as a bare
+        project_id funnels through here so none of them can forget to
+        check the new tagged result."""
+        result = merge_issues(issue_id, sibling_id, reason_label=reason_label)
+        if result["status"] == "deferred":
+            return _finish("deferred_reconciliation", signal=signal, sibling_id=sibling_id,
+                            suggestion_id=result["suggestion_id"], winner_project_id=result["winner_project_id"],
+                            loser_project_id=result["loser_project_id"])
+        return _finish("auto_merged", signal=signal, sibling_id=sibling_id, project_id=result["project_id"])
+
     if scored_model_enabled:
         if shadow_scored["verdict"] == "auto_merge":
             reason_label = f"scored signal ({','.join(shadow_scored['matched_signals'])}, score={shadow_scored['score']})"
-            project_id = merge_issues(issue_id, shadow_scored["sibling_id"], reason_label=reason_label)
-            return _finish("auto_merged", signal="scored", sibling_id=shadow_scored["sibling_id"], project_id=project_id)
+            return _merge_or_defer(shadow_scored["sibling_id"], reason_label, "scored")
         if shadow_scored["verdict"] == "suggest":
             precedent = workgraph_lessons.precedent_prefilter(issue)
             if precedent == "confirmed":
-                project_id = merge_issues(issue_id, shadow_scored["sibling_id"],
-                                           reason_label="auto-resolved by precedent (repeated confirmed pattern)")
-                return _finish("auto_merged", signal="precedent", sibling_id=shadow_scored["sibling_id"], project_id=project_id)
+                return _merge_or_defer(shadow_scored["sibling_id"],
+                                        "auto-resolved by precedent (repeated confirmed pattern)", "precedent")
             if precedent != "rejected":
                 ws.create_project_suggestion(
                     issue_id_a=issue_id, issue_id_b=shadow_scored["sibling_id"],
@@ -773,8 +830,7 @@ def group_issue(issue_id: str) -> dict:
             "topic": f"strong signal: matching subject core '{detail}'",
         }[kind]
         if kind == "reference":
-            project_id = merge_issues(issue_id, sibling_id, reason_label=reason_label)
-            return _finish("auto_merged", signal=kind, sibling_id=sibling_id, project_id=project_id)
+            return _merge_or_defer(sibling_id, reason_label, kind)
 
         if verdict == "link":
             # 2026-07-31 (related-vs-same-project verdict): a bare shared
@@ -801,9 +857,7 @@ def group_issue(issue_id: str) -> dict:
         # otherwise fall back to a suggestion instead of merging outright.
         precedent = workgraph_lessons.precedent_prefilter(issue)
         if precedent == "confirmed":
-            project_id = merge_issues(issue_id, sibling_id,
-                                       reason_label="auto-resolved by precedent (repeated confirmed pattern)")
-            return _finish("auto_merged", signal="precedent", sibling_id=sibling_id, project_id=project_id)
+            return _merge_or_defer(sibling_id, "auto-resolved by precedent (repeated confirmed pattern)", "precedent")
         if precedent != "rejected":
             ws.create_project_suggestion(issue_id_a=issue_id, issue_id_b=sibling_id, reason=reason_label)
             return _finish("suggested", signal=kind, sibling_id=sibling_id, count=1)
@@ -821,9 +875,7 @@ def group_issue(issue_id: str) -> dict:
     # behavior unchanged.
     precedent = workgraph_lessons.precedent_prefilter(issue)
     if precedent == "confirmed" and candidates:
-        project_id = merge_issues(issue_id, candidates[0]["id"],
-                                   reason_label="auto-resolved by precedent (repeated confirmed pattern)")
-        return _finish("auto_merged", signal="precedent", sibling_id=candidates[0]["id"], project_id=project_id)
+        return _merge_or_defer(candidates[0]["id"], "auto-resolved by precedent (repeated confirmed pattern)", "precedent")
 
     suggested = 0
     if precedent != "rejected":
@@ -847,12 +899,20 @@ def backfill_regroup_by_reference() -> dict:
     - documented idempotent, see its own docstring - for every currently-
     open issue that has at least one real reference ID. Only catches
     issues group_issue() itself would act on (i.e. not already assigned to
-    a project) - matches group_issue()'s own scope, not a new mechanism."""
+    a project) - matches group_issue()'s own scope, not a new mechanism.
+
+    2026-07-31 (step 5): a run against a corpus with a real existing
+    multi-project collision can now produce a 'deferred_reconciliation'
+    count instead of fully resolving every candidate it touches - this
+    function's premise ("only catches issues group_issue() itself would
+    act on") no longer means every touched issue ends up merged-or-
+    suggested; some now end up pending human reconciliation instead."""
     candidates = [
         i for i in ws.list_issues(states=["active", "waiting", "blocked"], limit=10000)
         if reference_ids_for_issue(i["id"])
     ]
-    results = {"checked": len(candidates), "auto_merged": 0, "already_grouped": 0, "no_match": 0, "suggested": 0}
+    results = {"checked": len(candidates), "auto_merged": 0, "already_grouped": 0, "no_match": 0,
+               "suggested": 0, "deferred_reconciliation": 0}
     for issue in candidates:
         action = group_issue(issue["id"])["action"]
         results[action] = results.get(action, 0) + 1
@@ -867,6 +927,11 @@ def run(issue_ids: list) -> dict:
         "suggested": sum(1 for r in results if r["action"] == "suggested"),
         "no_match": sum(1 for r in results if r["action"] == "no_match"),
         "already_grouped": sum(1 for r in results if r["action"] == "already_grouped"),
+        # 2026-07-31 (step 5): a real merge attempt can now be deferred to a
+        # 'merge_projects' reconciliation suggestion instead of completing -
+        # counted separately so it's visible, not silently absent from
+        # every other bucket above.
+        "deferred_reconciliation": sum(1 for r in results if r["action"] == "deferred_reconciliation"),
     }
 
 

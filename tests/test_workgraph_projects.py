@@ -578,7 +578,9 @@ def test_weak_signal_candidates_exclude_issue_already_in_any_project(ws_db):
 def test_merge_issues_creates_new_project_when_neither_has_one(ws_db):
     a = _issue(ws_db, "A")
     b = _issue(ws_db, "B")
-    project_id = wp.merge_issues(a, b, reason_label="test")
+    result = wp.merge_issues(a, b, reason_label="test")
+    assert result["status"] == "merged"
+    project_id = result["project_id"]
     assert ws_db.get_issue(a)["project_id"] == project_id
     assert ws_db.get_issue(b)["project_id"] == project_id
 
@@ -589,18 +591,36 @@ def test_merge_issues_joins_the_existing_project_when_one_side_has_one(ws_db):
     ws_db.assign_issue_to_project(a, existing)
     b = _issue(ws_db, "B")
 
-    project_id = wp.merge_issues(a, b, reason_label="test")
+    result = wp.merge_issues(a, b, reason_label="test")
 
-    assert project_id == existing
+    assert result == {"status": "merged", "project_id": existing}
     assert ws_db.get_issue(b)["project_id"] == existing
 
 
-def test_merge_issues_collision_moves_every_member_and_archives_the_loser(ws_db):
-    """The real bug hardening pass #2 found: merge_issues used to only
-    ever consult issue_a's project, silently detaching issue_b out of
-    whatever project IT was already in with no trace and no cleanup.
-    Now: every member of the losing project moves to the winner, and the
-    emptied loser is archived, not left active and misleading."""
+def test_merge_issues_singleton_loser_still_auto_merges(ws_db):
+    """2026-07-31 (step 5): a loser project whose only member is the issue
+    being merged itself stays low-risk and still auto-merges."""
+    proj_a = ws_db.create_project_with_new_id(name="Project A", category="other")
+    a = _issue(ws_db, "A")
+    ws_db.assign_issue_to_project(a, proj_a)
+
+    proj_b = ws_db.create_project_with_new_id(name="Project B", category="other")
+    b = _issue(ws_db, "B")
+    ws_db.assign_issue_to_project(b, proj_b)
+
+    result = wp.merge_issues(a, b, reason_label="test singleton")
+
+    assert result == {"status": "merged", "project_id": proj_a}
+    assert ws_db.get_issue(b)["project_id"] == proj_a
+    assert ws_db.get_project(proj_b)["status"] == "archived"
+
+
+def test_merge_issues_established_loser_defers_to_reconciliation(ws_db):
+    """2026-07-31 (step 5, mandatory reconciliation): merge_issues() used
+    to silently reassign every member of the losing project - now, when the
+    loser has any REAL member beyond the issue being merged, it refuses to
+    auto-collapse an established project and defers to a 'merge_projects'
+    suggestion instead."""
     proj_a = ws_db.create_project_with_new_id(name="Project A", category="other")
     a = _issue(ws_db, "A")
     ws_db.assign_issue_to_project(a, proj_a)
@@ -611,14 +631,18 @@ def test_merge_issues_collision_moves_every_member_and_archives_the_loser(ws_db)
     other_member_of_b = _issue(ws_db, "Other member of B's project")
     ws_db.assign_issue_to_project(other_member_of_b, proj_b)
 
-    winner = wp.merge_issues(a, b, reason_label="test collision")
+    result = wp.merge_issues(a, b, reason_label="test collision")
 
-    assert winner == proj_a
+    assert result["status"] == "deferred"
+    assert result["winner_project_id"] == proj_a
+    assert result["loser_project_id"] == proj_b
+    # NOTHING actually merged - real projects must not be silently collapsed.
     assert ws_db.get_issue(a)["project_id"] == proj_a
-    assert ws_db.get_issue(b)["project_id"] == proj_a
-    assert ws_db.get_issue(other_member_of_b)["project_id"] == proj_a, \
-        "the OTHER member of the losing project must move too, not just b"
-    assert ws_db.get_project(proj_b)["status"] == "archived"
+    assert ws_db.get_issue(b)["project_id"] == proj_b
+    assert ws_db.get_issue(other_member_of_b)["project_id"] == proj_b
+    assert ws_db.get_project(proj_b)["status"] != "archived"
+    sugg = ws_db.get_project_suggestion(result["suggestion_id"])
+    assert sugg["suggestion_kind"] == "merge_projects"
 
 
 def test_project_name_for_deterministic_tie_break_by_first_seen(ws_db):

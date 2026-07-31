@@ -2444,8 +2444,100 @@ def _allocate_project_id_on(conn: sqlite3.Connection) -> str:
     return f"proj-{max_n + 1:03d}"
 
 
+def would_collide_established_projects(issue_id_a: str, issue_id_b: str, *,
+                                        _conn: Optional[sqlite3.Connection] = None) -> Optional[dict]:
+    """Read-only check: would merging these two issues collide two ALREADY-
+    established projects? Gates on how established the LOSING side is
+    (2+ real members beyond the two triggering issues themselves), not on
+    which signal triggered the merge - a durable rule that protects EVERY
+    merge_issues_txn caller (reference-ID auto-merge, a confirmed
+    suggestion, a precedent auto-resolve), not just today's known ones. A
+    1-member loser (just the issue being merged, e.g. an earlier one-off
+    merge_issues_txn call created a singleton project) is low-risk -
+    nothing else gets uprooted - and stays automatic; a real 2+-member
+    project has its own history/synthesis/attachments and must not be
+    silently collapsed.
+
+    Returns None when there's no collision (including the low-risk
+    1-member-loser case), or {"winner_project_id", "loser_project_id",
+    "loser_members"} (full member id list, for a side-by-side review)
+    when it fires.
+
+    _conn lets merge_issues_txn reuse its own already-open, already-locked
+    connection instead of re-acquiring _lock (a plain non-reentrant
+    threading.Lock - re-acquiring it from the same thread would deadlock)."""
+    def _query(conn: sqlite3.Connection) -> Optional[dict]:
+        row_a = conn.execute("SELECT project_id FROM issues WHERE id = ?", (issue_id_a,)).fetchone()
+        row_b = conn.execute("SELECT project_id FROM issues WHERE id = ?", (issue_id_b,)).fetchone()
+        project_a = row_a["project_id"] if row_a else None
+        project_b = row_b["project_id"] if row_b else None
+        if not (project_a and project_b and project_a != project_b):
+            return None
+        winner, loser = project_a, project_b
+        members = conn.execute("SELECT id FROM issues WHERE project_id = ?", (loser,)).fetchall()
+        loser_members = [m["id"] for m in members if m["id"] not in (issue_id_a, issue_id_b)]
+        if not loser_members:
+            return None
+        return {"winner_project_id": winner, "loser_project_id": loser, "loser_members": loser_members}
+
+    if _conn is not None:
+        return _query(_conn)
+    with _lock:
+        conn = _connect()
+        try:
+            return _query(conn)
+        finally:
+            conn.close()
+
+
+def force_merge_projects(project_a: str, project_b: str, *, reason_label: str) -> str:
+    """Actually collapses two established projects into one - the real
+    execution of an explicitly-human-authorized 'merge_projects'
+    reconciliation (see workgraph_projects._confirm_merge_projects_
+    suggestion). project_a always wins - the caller already decided which
+    side is "winner" before calling this (same tie-break merge_issues_txn's
+    own collision branch used before this gate existed). One transaction,
+    same BEGIN IMMEDIATE/COMMIT/ROLLBACK + bounded-retry pattern as
+    merge_issues_txn - see that function's own docstring for why."""
+    now = time.time()
+    with _lock:
+        conn = _connect()
+        try:
+            for attempt in range(5):
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    break
+                except sqlite3.OperationalError:
+                    if attempt == 4:
+                        raise
+                    time.sleep(random.uniform(0, 0.02) * (attempt + 1))
+            try:
+                members = conn.execute("SELECT id FROM issues WHERE project_id = ?", (project_b,)).fetchall()
+                for member in members:
+                    conn.execute(
+                        "UPDATE issues SET project_id = ?, updated_at = ? WHERE id = ?",
+                        (project_a, now, member["id"]),
+                    )
+                    conn.execute(
+                        """INSERT INTO audit_log (entity_type, entity_id, field, old_value, new_value, changed_ts, reason)
+                           VALUES ('project', ?, 'issue_membership', ?, ?, ?, ?)""",
+                        (project_a, project_b, project_a, now, f"{reason_label}: project {project_b} merged into {project_a}"),
+                    )
+                conn.execute("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?", ("archived", now, project_b))
+                conn.execute("COMMIT")
+                return project_a
+            except Exception:
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.OperationalError:
+                    pass
+                raise
+        finally:
+            conn.close()
+
+
 def merge_issues_txn(issue_id_a: str, issue_id_b: str, *, reason_label: str,
-                      new_project_name: str, new_project_category: Optional[str]) -> str:
+                      new_project_name: str, new_project_category: Optional[str]) -> dict:
     """The real merge, as one all-or-nothing transaction. workgraph_projects.
     merge_issues() is a thin wrapper around this.
 
@@ -2471,11 +2563,31 @@ def merge_issues_txn(issue_id_a: str, issue_id_b: str, *, reason_label: str,
     busy_timeout, so a concurrent writer holding the lock raises
     immediately rather than waiting.
 
-    Returns the resulting project_id."""
+    2026-07-31 (step 5, mandatory reconciliation): checked FIRST, before
+    ever opening a write transaction - if this merge would collide two
+    ALREADY-established projects (see would_collide_established_projects),
+    refuses to auto-collapse and creates a 'merge_projects' pending
+    suggestion instead. Returns {"status": "merged", "project_id": ...} or
+    {"status": "deferred", "suggestion_id": ..., "winner_project_id": ...,
+    "loser_project_id": ...} - every caller must check "status" now, not
+    assume a bare project_id."""
     now = time.time()
     with _lock:
         conn = _connect()
         try:
+            collision = would_collide_established_projects(issue_id_a, issue_id_b, _conn=conn)
+            if collision is not None:
+                suggestion_id = _create_project_suggestion_on(
+                    conn, issue_id_a=issue_id_a, issue_id_b=issue_id_b,
+                    reason=(f"{reason_label}: would merge project {collision['loser_project_id']} "
+                            f"({len(collision['loser_members'])} other members) into "
+                            f"{collision['winner_project_id']} - needs review before collapsing an established project"),
+                    suggestion_kind="merge_projects", now=now,
+                )
+                return {"status": "deferred", "suggestion_id": suggestion_id,
+                        "winner_project_id": collision["winner_project_id"],
+                        "loser_project_id": collision["loser_project_id"]}
+
             for attempt in range(5):
                 try:
                     conn.execute("BEGIN IMMEDIATE")
@@ -2535,7 +2647,7 @@ def merge_issues_txn(issue_id_a: str, issue_id_b: str, *, reason_label: str,
                     )
 
                 conn.execute("COMMIT")
-                return project_id
+                return {"status": "merged", "project_id": project_id}
             except Exception:
                 try:
                     conn.execute("ROLLBACK")
@@ -2551,6 +2663,28 @@ def merge_issues_txn(issue_id_a: str, issue_id_b: str, *, reason_label: str,
 _SUGGESTION_KINDS = ("merge", "link", "merge_projects")
 
 
+def _create_project_suggestion_on(conn: sqlite3.Connection, *, issue_id_a: str, issue_id_b: str,
+                                   reason: str, suggestion_kind: str, now: float) -> int:
+    """Same dedupe-then-insert logic as create_project_suggestion, against a
+    GIVEN connection - for merge_issues_txn's own use (2026-07-31, step 5):
+    it already holds _lock for its whole body, so calling back into
+    create_project_suggestion (which acquires _lock itself) would deadlock."""
+    existing = conn.execute(
+        """SELECT id FROM pending_project_suggestions
+           WHERE status = 'pending' AND suggestion_kind = ? AND
+               ((issue_id_a = ? AND issue_id_b = ?) OR (issue_id_a = ? AND issue_id_b = ?))""",
+        (suggestion_kind, issue_id_a, issue_id_b, issue_id_b, issue_id_a),
+    ).fetchone()
+    if existing:
+        return existing["id"]
+    cur = conn.execute(
+        """INSERT INTO pending_project_suggestions (issue_id_a, issue_id_b, reason, created_ts, suggestion_kind)
+           VALUES (?, ?, ?, ?, ?)""",
+        (issue_id_a, issue_id_b, reason, now, suggestion_kind),
+    )
+    return cur.lastrowid
+
+
 def create_project_suggestion(*, issue_id_a: str, issue_id_b: str, reason: str,
                                suggestion_kind: str = "merge") -> int:
     """suggestion_kind added 2026-07-31 - see pending_project_suggestions'
@@ -2563,20 +2697,10 @@ def create_project_suggestion(*, issue_id_a: str, issue_id_b: str, reason: str,
     with _lock:
         conn = _connect()
         try:
-            existing = conn.execute(
-                """SELECT id FROM pending_project_suggestions
-                   WHERE status = 'pending' AND suggestion_kind = ? AND
-                       ((issue_id_a = ? AND issue_id_b = ?) OR (issue_id_a = ? AND issue_id_b = ?))""",
-                (suggestion_kind, issue_id_a, issue_id_b, issue_id_b, issue_id_a),
-            ).fetchone()
-            if existing:
-                return existing["id"]
-            cur = conn.execute(
-                """INSERT INTO pending_project_suggestions (issue_id_a, issue_id_b, reason, created_ts, suggestion_kind)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (issue_id_a, issue_id_b, reason, time.time(), suggestion_kind),
+            return _create_project_suggestion_on(
+                conn, issue_id_a=issue_id_a, issue_id_b=issue_id_b, reason=reason,
+                suggestion_kind=suggestion_kind, now=time.time(),
             )
-            return cur.lastrowid
         finally:
             conn.close()
 

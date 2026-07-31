@@ -2630,9 +2630,13 @@
 
 </script>
 <style>
-:root{--surface:#FFFFFF;--red:#E1251B;--red-d:#B41E16;--ink:#1A1A1A;--mut:#4A443C;--mut2:#4A443C;--line:#E1E0DC;--line2:#CECCC7;--bg:#E2E6E1;--pink-t:#FBE7E3;--teal-t:#DCEBE9;--teal-d:#2F6E6B;--amber-t:#FBF1DA;--amber-d:#8A5A00;--blue-t:#E4EBF1;--blue-d:#2E5E8C;--cci-green:#1F7A5A;--cci-yellow:#C9A227;--cci-orange:#D2691E;--cci-red:#C0392B;--ai:#5C2B50;--ai-t:#EDDFE9;--bblue:#0F3A85;--blue-mut:#8FA3BE;--shadow:0 1px 4px rgba(38,30,20,.08);--shadow-lg:0 12px 34px rgba(38,30,20,.12);--glow:0 8px 24px rgba(225,37,27,.28);--sans:'Libre Franklin',system-ui,Arial,sans-serif;--mono:'Roboto Mono',ui-monospace,monospace;--fz-h:30px;--fz-title:16px;--fz-body:14px;--fz-sm:13px;--fz-meta:11.5px;--fz-mono:10.5px;}
+:root{--surface:#FFFFFF;--red:#E1251B;--red-d:#B41E16;--ink:#1A1A1A;--mut:#4A443C;--mut2:#4A443C;--line:#E1E0DC;--line2:#CECCC7;--bg:#E2E6E1;--pink-t:#FBE7E3;--teal-t:#DCEBE9;--teal-d:#2F6E6B;--amber-t:#FBF1DA;--amber-d:#8A5A00;--blue-t:#E4EBF1;--blue-d:#2E5E8C;--cci-green:#1F7A5A;--cci-yellow:#C9A227;--cci-orange:#D2691E;--cci-red:#C0392B;--ai:#5C2B50;--ai-t:#EDDFE9;--bblue:#0F3A85;--blue-mut:#8FA3BE;--shadow:0 1px 4px rgba(38,30,20,.08);--shadow-lg:0 12px 34px rgba(38,30,20,.12);--glow:0 8px 24px rgba(225,37,27,.28);--sans:'Libre Franklin',system-ui,Arial,sans-serif;--mono:'Roboto Mono',ui-monospace,monospace;--fz-h:30px;--fz-title:16px;--fz-body:14px;--fz-sm:13px;--fz-meta:11.5px;--fz-mono:10.5px;
+/* Settings view (grafted from the former standalone settings.html) authored against
+   --muted/--border/--accent token names that don't exist on this page - alias them
+   onto the real tokens rather than rewriting ~330 lines of inline styles. */
+--muted:var(--mut);--border:var(--line);--accent:var(--bblue);}
 /* dark theme, additive token override; light byte-identical */
-html[data-theme="dark"]{--header:#0A0A0A;--tint-8fb3f0:#19253a;--tint-9fb4d2:#172232;--tint-d7e2ef:#162434;--tint-f6d79a:#1E302D;--tint-ff8e85:#3e1d1b;--surface:#262626;color-scheme:dark;--red:#F0574C;--red-d:#D2453A;--ink:#ECECEC;--mut:#B0B0B0;--mut2:#8A8A8A;--line:#3A3A3A;--line2:#484848;--bg:#1C1C1C;--pink-t:#3A211E;--teal-t:#1E302D;--teal-d:#5FBAAE;--amber-t:#2E2713;--amber-d:#DBAA50;--blue-t:#2E2E2E;--blue-d:#7CA6E2;--ai:#C99BD1;--ai-t:#33253B;--bblue:#6E9AD8;--shadow:0 1px 2px rgba(0,0,0,.5),0 1px 3px rgba(0,0,0,.4);}
+html[data-theme="dark"]{--header:#0A0A0A;--tint-8fb3f0:#19253a;--tint-9fb4d2:#172232;--tint-d7e2ef:#162434;--tint-f6d79a:#1E302D;--tint-ff8e85:#3e1d1b;--surface:#262626;color-scheme:dark;--red:#F0574C;--red-d:#D2453A;--ink:#ECECEC;--mut:#B0B0B0;--mut2:#8A8A8A;--line:#3A3A3A;--line2:#484848;--bg:#1C1C1C;--pink-t:#3A211E;--teal-t:#1E302D;--teal-d:#5FBAAE;--amber-t:#2E2713;--amber-d:#DBAA50;--blue-t:#2E2E2E;--blue-d:#7CA6E2;--ai:#C99BD1;--ai-t:#33253B;--bblue:#6E9AD8;--shadow:0 1px 2px rgba(0,0,0,.5),0 1px 3px rgba(0,0,0,.4);--muted:var(--mut);--border:var(--line);--accent:var(--bblue);}
 
 /* ════════════════════════════════════════════════════════════════════════
    PCC ADD — page-level view toggle + Personal Command Center board.
@@ -4266,6 +4270,344 @@ body.ownerlock #ownernote{display:block}
       </div>
 
       <div class="savnote" style="margin-top:14px"><span class="sp">✦</span><span>"Confirm" on a suggestion marks it reviewed only — there's no API to merge two issues into a brand-new project yet (only to assign an issue to an <em>existing</em> project), so actually merging a confirmed pair is still a manual follow-up for now.</span></div>
+    </div>
+
+    <!-- ════ SETTINGS ADD: fourth sibling view — grafted from the former standalone
+         /settings page so it renders inside the real Cockpit shell instead of a
+         separate page. See pccShowSettings() / CANON_RAIL / the avatar menu. ════ -->
+    <div id="cp-view-settings" style="display:none">
+    <div style="max-width:760px;margin:0 auto;padding:8px 4px">
+
+  <!-- ── You (the operator) · Settings #5d ─────────────────────────────── -->
+  <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:6px 0 10px">You</div>
+  <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px">
+    <div style="color:var(--muted,#667);font-size:13px;margin-bottom:10px">How your workers address you in the Team Room.</div>
+    <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
+      <label style="flex:2;min-width:180px">
+        <span style="display:block;font-size:12px;color:var(--muted,#667);margin-bottom:4px">Your name</span>
+        <input id="mgr-name" placeholder="e.g. George" aria-label="Your name"
+          style="width:100%;border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:9px;padding:8px 11px;font:600 14px sans-serif;color:inherit">
+      </label>
+      <label style="flex:1;min-width:120px">
+        <span style="display:block;font-size:12px;color:var(--muted,#667);margin-bottom:4px">@tag <span style="font-weight:400">(optional)</span></span>
+        <input id="mgr-tag" placeholder="auto" aria-label="Your @tag"
+          style="width:100%;border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:9px;padding:8px 11px;font:600 14px monospace;color:inherit">
+      </label>
+      <button id="mgr-save" style="border:1px solid var(--border,#ddd);background:var(--accent,#0f766e);color:#fff;font:600 13px sans-serif;padding:9px 16px;border-radius:9px;cursor:pointer">Save</button>
+      <span id="mgr-fb" style="font-size:12px;color:var(--muted,#888)"></span>
+    </div>
+  </div>
+
+  <!-- ── Team name · Settings #7 ───────────────────────────────────────── -->
+  <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:26px 0 10px">Team name</div>
+  <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px">
+    <div style="color:var(--muted,#667);font-size:13px;margin-bottom:10px">What this team is called. This is just a label — renaming it never affects how your workers coordinate.</div>
+    <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
+      <label style="flex:1;min-width:180px">
+        <span style="display:block;font-size:12px;color:var(--muted,#667);margin-bottom:4px">Name</span>
+        <input id="cohort-name" placeholder="e.g. Finance Crew" aria-label="Team name"
+          style="width:100%;border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:9px;padding:8px 11px;font:600 14px sans-serif;color:inherit">
+      </label>
+      <button id="cohort-save" style="border:1px solid var(--border,#ddd);background:var(--accent,#0f766e);color:#fff;font:600 13px sans-serif;padding:9px 16px;border-radius:9px;cursor:pointer">Save</button>
+      <span id="cohort-fb" style="font-size:12px;color:var(--muted,#888)"></span>
+    </div>
+  </div>
+
+  <!-- ── Workers · rename any time (existing) ──────────────────────────── -->
+  <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:26px 0 10px">Workers · rename any time</div>
+  <div id="worker-list" style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;overflow:hidden">
+    <div style="padding:16px;color:var(--muted,#667);font-size:14px">Loading…</div>
+  </div>
+  <div id="add-worker" style="margin-top:10px">
+    <a href="/getting-started" style="color:var(--accent,#0f766e);font-weight:600;text-decoration:none;font-size:14px">+ Add a worker</a>
+  </div>
+
+  <!-- ── Cockpit · chat history window ─────────────────────────────────── -->
+  <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:26px 0 10px">Cockpit</div>
+  <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px">
+    <div style="color:var(--muted,#667);font-size:13px;margin-bottom:10px">How many messages of each worker's conversation thread stays visible in the cockpit's chat panel. Each worker keeps its own independent window — this applies per thread, not as one shared pool.</div>
+    <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
+      <label style="flex:1;min-width:140px">
+        <span style="display:block;font-size:12px;color:var(--muted,#667);margin-bottom:4px">Messages per worker thread</span>
+        <input id="chat-window" type="number" min="5" max="200" placeholder="20" aria-label="Chat history window"
+          style="width:100%;border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:9px;padding:8px 11px;font:600 14px sans-serif;color:inherit">
+      </label>
+      <button id="chat-window-save" style="border:1px solid var(--border,#ddd);background:var(--accent,#0f766e);color:#fff;font:600 13px sans-serif;padding:9px 16px;border-radius:9px;cursor:pointer">Save</button>
+      <span id="chat-window-fb" style="font-size:12px;color:var(--muted,#888)"></span>
+    </div>
+  </div>
+
+  <!-- ── Data sources (existing) ───────────────────────────────────────── -->
+  <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:26px 0 10px">Data sources</div>
+  <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px;color:var(--muted,#667);font-size:14px">
+    Connected via your Lilly sign-in. Manage source access with your admin.
+  </div>
+
+  <!-- ── Data & Retention (added 2026-07-29) ───────────────────────────── -->
+  <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:26px 0 10px">Data &amp; retention</div>
+  <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px">
+
+    <div style="color:var(--muted,#667);font-size:13px;margin-bottom:12px">
+      Real supplier contracts and documents are <b>never</b> auto-deleted by anything below, under any setting — only the
+      operational data (activity log, diagnostic history) ages out, and only once you turn enforcement on.
+    </div>
+
+    <div id="ret-disk" style="display:flex;gap:18px;flex-wrap:wrap;padding:10px 0;border-bottom:1px solid var(--border,#eee);margin-bottom:12px;font-size:12px;color:var(--muted,#667)">Loading disk usage…</div>
+
+    <label style="display:flex;align-items:center;gap:8px;margin-bottom:14px;cursor:pointer">
+      <input type="checkbox" id="ret-enforce" style="width:16px;height:16px">
+      <span style="font-size:13px"><b>Enable automated cleanup</b> — until this is on, everything below only reports what it would do, nothing is ever deleted.</span>
+    </label>
+
+    <div style="display:grid;grid-template-columns:1fr auto;gap:8px 12px;align-items:center;font-size:13px;margin-bottom:6px">
+      <span>Worker notifications, kept for</span>
+      <span><input id="ret-notif-days" type="number" min="1" style="width:70px;border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:7px;padding:5px 8px;font:600 13px sans-serif;color:inherit"> days</span>
+      <span>Activity log (events), kept for</span>
+      <span><input id="ret-events-days" type="number" min="1" style="width:70px;border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:7px;padding:5px 8px;font:600 13px sans-serif;color:inherit"> days (archived, not deleted)</span>
+      <span>Ask-Jasper diagnostic log, kept for</span>
+      <span><input id="ret-socrates-days" type="number" min="1" style="width:70px;border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:7px;padding:5px 8px;font:600 13px sans-serif;color:inherit"> days</span>
+      <span>Server logs, kept for</span>
+      <span><input id="ret-logs-days" type="number" min="1" style="width:70px;border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:7px;padding:5px 8px;font:600 13px sans-serif;color:inherit"> days</span>
+      <span>Processed mail-ingest drop files, kept for</span>
+      <span><input id="ret-ingest-days" type="number" min="1" style="width:70px;border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:7px;padding:5px 8px;font:600 13px sans-serif;color:inherit"> days</span>
+    </div>
+
+    <div style="color:var(--muted,#667);font-size:12px;margin:12px 0 6px">Database snapshots — kept daily, then thinned to weekly, then monthly:</div>
+    <div style="display:flex;gap:10px;align-items:center;font-size:13px;margin-bottom:12px;flex-wrap:wrap">
+      <span>Daily ×<input id="ret-snap-daily" type="number" min="1" style="width:55px;border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:7px;padding:5px 8px;font:600 13px sans-serif;color:inherit"></span>
+      <span>Weekly ×<input id="ret-snap-weekly" type="number" min="1" style="width:55px;border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:7px;padding:5px 8px;font:600 13px sans-serif;color:inherit"></span>
+      <span>Monthly ×<input id="ret-snap-monthly" type="number" min="1" style="width:55px;border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:7px;padding:5px 8px;font:600 13px sans-serif;color:inherit"></span>
+    </div>
+
+    <div style="display:flex;align-items:center;gap:12px">
+      <button id="ret-save" style="border:1px solid var(--border,#ddd);background:var(--accent,#0f766e);color:#fff;font:600 13px sans-serif;padding:9px 16px;border-radius:9px;cursor:pointer">Save</button>
+      <span id="ret-fb" style="font-size:12px;color:var(--muted,#888)"></span>
+      <span id="ret-last-run" style="font-size:12px;color:var(--muted,#888);margin-left:auto"></span>
+    </div>
+  </div>
+
+  <!-- ── Personal Response Learning (added 2026-07-29, task #45) ───────── -->
+  <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:26px 0 10px">Personal response learning</div>
+  <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px">
+
+    <label style="display:flex;align-items:flex-start;gap:8px;margin-bottom:14px;cursor:pointer">
+      <input type="checkbox" id="prl-enabled" style="width:16px;height:16px;margin-top:2px">
+      <span style="font-size:13px;line-height:1.55">
+        <b>Personal Response Learning</b> — off by default. When this is on, Jasper studies patterns in how <i>you</i>
+        respond to things: the phrasing you tend to use, which systems or people you point a worker toward for a given
+        kind of question, and what you consistently ask to have done — and uses that to draft replies that sound more
+        like you, and to suggest "you usually…" next steps. It only looks at messages <i>you</i> send — never anyone
+        else's. Turning this off stops new observation immediately, but doesn't erase what's already been learned on
+        its own — use "Forget what's been learned" below for that.
+      </span>
+    </label>
+
+    <div style="display:flex;flex-direction:column;gap:10px;padding-left:24px;margin-bottom:14px">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+        <input type="checkbox" id="prl-app-chat" style="width:15px;height:15px">
+        <span style="font-size:13px">In-app chat with workers — learn from messages you send to Tia, relay, curator, and bridge in Back Office.</span>
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+        <input type="checkbox" id="prl-sent-mail" style="width:15px;height:15px">
+        <span style="font-size:13px">Sent email — learn from mail you send, scanned the same read-only way your inbox already is.</span>
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+        <input type="checkbox" id="prl-sent-teams" style="width:15px;height:15px">
+        <span style="font-size:13px">Sent Teams messages — learn from your own messages inside chats Jasper already ingests.</span>
+      </label>
+    </div>
+
+    <div id="prl-stats" style="font-size:12px;color:var(--muted,#667);margin-bottom:8px">Loading…</div>
+    <div id="prl-top-patterns" style="margin-bottom:12px"></div>
+
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <button id="prl-save" style="border:1px solid var(--border,#ddd);background:var(--accent,#0f766e);color:#fff;font:600 13px sans-serif;padding:9px 16px;border-radius:9px;cursor:pointer">Save</button>
+      <span id="prl-fb" style="font-size:12px;color:var(--muted,#888)"></span>
+      <button id="prl-forget" style="border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);color:inherit;font:600 13px sans-serif;padding:9px 16px;border-radius:9px;cursor:pointer;margin-left:auto">Forget what's been learned</button>
+      <span id="prl-forget-fb" style="font-size:12px;color:var(--muted,#888)"></span>
+    </div>
+  </div>
+
+  <!-- ── Rules & overrides group (task #61 gap fix: 4 rule-shaped sections
+       had no grouping, forcing a lot of scrolling to find any one of them) -->
+  <details open style="margin:26px 0 0">
+  <summary style="cursor:pointer;font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667)">Rules &amp; overrides</summary>
+  <div style="margin-top:10px">
+
+  <!-- ── Gate Board (added 2026-07-30, task #67) ───────────────────────── -->
+  <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:0 0 10px">Gate Board</div>
+  <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px;margin-bottom:20px">
+    <div style="color:var(--muted,#667);font-size:13px;margin-bottom:12px">
+      Every prerequisite rule at a glance, with how many currently-open issues each one is actually gating right
+      now — computed live each time you load this, not a separate counter that could drift. A rule gating zero
+      issues isn't wrong, just dormant right now.
+    </div>
+    <div id="gateboard-list">Loading…</div>
+  </div>
+
+  <!-- ── Aristotle: prerequisite rules (added 2026-07-29, task #51) ────── -->
+  <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:16px 0 10px">Prerequisite rules (Aristotle)</div>
+  <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px">
+    <div style="color:var(--muted,#667);font-size:13px;margin-bottom:12px">
+      Teach Jasper a gate: "don't treat X as ready to act on until Y has been seen for the same project or supplier."
+      For example, a signature request shouldn't be flagged ready to sign until an approved purchase order has come
+      through for that same deal. Jasper only ever says <b>"no confirmation seen yet"</b> — never that something
+      hasn't happened — since it can only see what's actually arrived in your mail.
+    </div>
+
+    <div id="ar-rules-list" style="margin-bottom:14px">Loading…</div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:8px 12px;align-items:end;font-size:13px">
+      <label>
+        <span style="display:block;font-size:12px;color:var(--muted,#667);margin-bottom:4px">When this happens…</span>
+        <select id="ar-trigger" style="width:100%;border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:7px;padding:6px 8px;font:600 13px sans-serif;color:inherit"></select>
+      </label>
+      <label>
+        <span style="display:block;font-size:12px;color:var(--muted,#667);margin-bottom:4px">…require this first</span>
+        <select id="ar-requires" style="width:100%;border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:7px;padding:6px 8px;font:600 13px sans-serif;color:inherit"></select>
+      </label>
+      <label>
+        <span style="display:block;font-size:12px;color:var(--muted,#667);margin-bottom:4px">Match on</span>
+        <select id="ar-match-on" style="border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:7px;padding:6px 8px;font:600 13px sans-serif;color:inherit">
+          <option value="project">Project</option>
+          <option value="supplier">Supplier</option>
+        </select>
+      </label>
+      <label style="grid-column:1 / span 2">
+        <span style="display:block;font-size:12px;color:var(--muted,#667);margin-bottom:4px">Explain the requirement (shown in the warning)</span>
+        <input id="ar-reason" placeholder="e.g. an approved Ariba PO for this project" style="width:100%;border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:7px;padding:6px 8px;font:500 13px sans-serif;color:inherit">
+      </label>
+      <button id="ar-add" style="border:1px solid var(--border,#ddd);background:var(--accent,#0f766e);color:#fff;font:600 13px sans-serif;padding:9px 16px;border-radius:9px;cursor:pointer">Add rule</button>
+    </div>
+    <span id="ar-fb" style="font-size:12px;color:var(--muted,#888);display:block;margin-top:8px"></span>
+  </div>
+
+  <!-- ── Suggested rules (added 2026-07-30, tasks #52/#54) ─────────────── -->
+  <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:26px 0 10px">Suggested rules</div>
+  <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px">
+    <div style="color:var(--muted,#667);font-size:13px;margin-bottom:12px">
+      Jasper never activates a rule on its own — these are candidates it noticed on its own (from real, repeated
+      history) or that you explained in Back Office chat with <code>#addrule</code>. Nothing here does anything
+      until you confirm it.
+    </div>
+    <div id="arsug-list">Loading…</div>
+    <span id="arsug-fb" style="font-size:12px;color:var(--muted,#888);display:block;margin-top:6px"></span>
+  </div>
+
+  <!-- ── Signal-treatment overrides (added 2026-07-30, task #58) ───────── -->
+  <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:26px 0 10px">Signal-treatment overrides</div>
+  <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px">
+    <div style="color:var(--muted,#667);font-size:13px;margin-bottom:12px">
+      Jasper recognizes known automated senders (Ariba, DocuSign, ContractPodAI, and others) and gives each a
+      default treatment. Correct one here — e.g. "mark ContractPodAI's obligation-update emails as noise" — without
+      a code change; it sticks until you change it again.
+    </div>
+    <div id="sigrules-list" style="margin-bottom:14px">Loading…</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:8px 12px;align-items:end;font-size:13px">
+      <label>
+        <span style="display:block;font-size:12px;color:var(--muted,#667);margin-bottom:4px">Signal type</span>
+        <select id="sigrules-type" style="width:100%;border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:7px;padding:6px 8px;font:600 13px sans-serif;color:inherit"></select>
+      </label>
+      <label>
+        <span style="display:block;font-size:12px;color:var(--muted,#667);margin-bottom:4px">Treatment</span>
+        <select id="sigrules-treatment" style="width:100%;border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:7px;padding:6px 8px;font:600 13px sans-serif;color:inherit">
+          <option value="noise">Noise</option>
+          <option value="fyi">FYI</option>
+          <option value="actionable">Actionable</option>
+          <option value="closure">Closure</option>
+        </select>
+      </label>
+      <label>
+        <span style="display:block;font-size:12px;color:var(--muted,#667);margin-bottom:4px">Reason (optional)</span>
+        <input id="sigrules-reason" placeholder="why" style="width:100%;border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:7px;padding:6px 8px;font:500 13px sans-serif;color:inherit">
+      </label>
+      <button id="sigrules-add" style="border:1px solid var(--border,#ddd);background:var(--accent,#0f766e);color:#fff;font:600 13px sans-serif;padding:9px 16px;border-radius:9px;cursor:pointer">Save</button>
+    </div>
+    <span id="sigrules-fb" style="font-size:12px;color:var(--muted,#888);display:block;margin-top:8px"></span>
+  </div>
+
+  <!-- ── Ownership rules (added 2026-07-30, task #60) ──────────────────── -->
+  <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:26px 0 10px">Ownership rules</div>
+  <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px">
+    <div style="color:var(--muted,#667);font-size:13px;margin-bottom:12px">
+      A standing rule for who owns a task by default, for a given category/company/domain/topic match. There's no
+      UI to create one yet — this list exists so that if one is ever created (via the underlying API), nothing sits
+      invisible with no way to see or remove it.
+    </div>
+    <div id="ownrules-list">Loading…</div>
+  </div>
+
+  </div>
+  </details>
+
+  <!-- ── Capability suggestions (added 2026-07-30, task #57) ───────────── -->
+  <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:26px 0 10px">Capability suggestions</div>
+  <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px">
+    <div style="color:var(--muted,#667);font-size:13px;margin-bottom:12px">
+      Any worker can log a note here when it notices a real gap in what Jasper can do. Confirming means "worth
+      building" — it doesn't trigger anything automatic on its own.
+    </div>
+    <div id="capsug-list">Loading…</div>
+    <span id="capsug-fb" style="font-size:12px;color:var(--muted,#888);display:block;margin-top:6px"></span>
+  </div>
+
+  <!-- ── Weekly Digest (added 2026-07-30, task #76) ─────────────────────── -->
+  <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:26px 0 10px">Weekly Digest</div>
+  <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px">
+    <div style="color:var(--muted,#667);font-size:13px;margin-bottom:12px">
+      What changed and what's outstanding over the last 7 days — built entirely from numbers Jasper already
+      computes elsewhere (priority scoring, value found, hard deadlines), just rolled up over a week instead of
+      shown one issue at a time.
+    </div>
+    <div id="digest-body">Loading…</div>
+  </div>
+
+  <!-- ── Party resolution review queue (added 2026-07-30, task #79) ────── -->
+  <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:26px 0 10px">Party Resolution Review Queue</div>
+  <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px">
+    <div style="color:var(--muted,#667);font-size:13px;margin-bottom:12px">
+      External contacts with no identified company — not automated senders (Ariba, DocuSign, and the others
+      already correctly have no company), real contacts. Without a company, this contact can't be grouped into
+      the Supplier Dashboard or matched by a supplier-scoped rule.
+    </div>
+    <div id="partyreview-list">Loading…</div>
+  </div>
+
+  <!-- ── Signal volume trends (added 2026-07-30, task #66) ─────────────── -->
+  <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:26px 0 10px">Signal volume trends</div>
+  <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px">
+    <div style="color:var(--muted,#667);font-size:13px;margin-bottom:12px">
+      How much of each recognized automated signal (Ariba approvals, DocuSign requests, and the others in the list
+      above) has come in per month, over the last 6 months — a plain count, no interpretation, so you can see
+      whether something's trending up or just noisy this week.
+    </div>
+    <div id="sigtrend-list">Loading…</div>
+  </div>
+
+  <!-- ── Health Check (added 2026-07-30, task #74) ──────────────────────── -->
+  <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:26px 0 10px">Health Check</div>
+  <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px">
+    <div style="color:var(--muted,#667);font-size:13px;margin-bottom:12px">
+      6 deterministic checks (ingest cursors advancing, disk usage sane, the scheduled refresh actually running, a
+      recent backup, no failed-ingest pileup, no runaway process count), run once a day. This shows the result of
+      the LAST daily run, not a fresh check — re-checking on every page load would corrupt the day-over-day
+      comparisons a couple of these checks depend on.
+    </div>
+    <div id="hc-asof" style="font-size:12px;color:var(--muted,#888);margin-bottom:10px"></div>
+    <div id="hc-list">Loading…</div>
+  </div>
+
+  <!-- ── Server · Settings #6 ──────────────────────────────────────────── -->
+  <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:26px 0 10px">Server</div>
+  <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px">
+    <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+      <div style="flex:1;min-width:180px;color:var(--muted,#667);font-size:13px">Restart Symphony. Occasionally a change needs a fresh start to take hold. Your team and its history are kept.</div>
+      <button id="restart-btn" style="border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);color:inherit;font:600 13px sans-serif;padding:9px 16px;border-radius:9px;cursor:pointer">Restart server</button>
+      <span id="restart-fb" style="font-size:12px;color:var(--muted,#888)"></span>
+    </div>
+  </div>
+
+</div>
     </div>
   </main>
 </div>
@@ -6813,7 +7155,8 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
   // clicks are handled by the delegated listener on .rail (see wireRailClicks).
   var CANON_RAIL = [
     ['home',     '#', 'Home',   'rep,owner,lead', '<path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/>'],
-    ['mywork',   '#', 'My work','rep,owner,lead,__disabled__', '<rect x="3" y="7" width="18" height="13" rx="2"/><path d="M8 7V5a2 2 0 012-2h4a2 2 0 012 2v2"/>']
+    ['mywork',   '#', 'My work','rep,owner,lead,__disabled__', '<rect x="3" y="7" width="18" height="13" rx="2"/><path d="M8 7V5a2 2 0 012-2h4a2 2 0 012 2v2"/>'],
+    ['settings', '#', 'Settings','rep,owner,lead', '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82z"/>']
   ];
   function railKeyFromLabel(t) {
     t = (t || '').toLowerCase();
@@ -6873,6 +7216,10 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
         rail.querySelectorAll('.nav').forEach(function (n) { n.classList.remove('on'); });
         a.classList.add('on');
         window.pccShowView('pcc');
+      } else if (key === 'settings' && window.pccShowSettings) {
+        rail.querySelectorAll('.nav').forEach(function (n) { n.classList.remove('on'); });
+        a.classList.add('on');
+        window.pccShowSettings();
       }
     });
   });
@@ -7059,10 +7406,10 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
       who.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleWho(); } });
       menu.querySelector('#theo-wm-settings').addEventListener('click', function (e) {
         e.stopPropagation(); menu.classList.remove('on'); who.setAttribute('aria-expanded', 'false');
-        // Fixed 2026-07-29 (Tia) — was 'settings.html', a 404 (no such route/
-        // file; the real route is /settings, per server_lean.py and every
-        // other link in the app: static/welcome.html, help.html, base.html).
-        location.href = '/settings';
+        // Settings is now a fourth sibling view inside this same shell (SETTINGS
+        // ADD, 2026-07-31) rather than a navigation to the old standalone /settings
+        // page - same in-place pattern as the adjacent Help Center button below.
+        try { if (window.pccShowSettings) window.pccShowSettings(); } catch (er) {}
       });
       menu.querySelector('#theo-wm-help').addEventListener('click', function (e) {
         e.stopPropagation(); menu.classList.remove('on'); who.setAttribute('aria-expanded', 'false');
@@ -9800,6 +10147,633 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
   }
   window.pjShowView = pjShowView;  // exposed for the left-rail nav script (separate scope)
   document.getElementById("cpViewProjectsBtn").addEventListener("click", pjShowView);
+
+  // ---- SETTINGS ADD: fourth sibling view — reached via the rail gear icon or
+  // the avatar dropdown, never via a tab button, so there's no matching
+  // cpViewSettingsBtn to toggle on - just clear the other three views' state.
+  function pccShowSettings() {
+    document.getElementById("cp-view-mywork").style.display = "none";
+    document.getElementById("cp-view-pcc").style.display = "none";
+    document.getElementById("cp-view-projects").style.display = "none";
+    document.getElementById("cp-view-settings").style.display = "";
+    document.getElementById("cpViewMyWorkBtn").classList.remove("is-on");
+    document.getElementById("cpViewMyWorkBtn").setAttribute("aria-selected", "false");
+    document.getElementById("cpViewPccBtn").classList.remove("is-on");
+    document.getElementById("cpViewPccBtn").setAttribute("aria-selected", "false");
+    document.getElementById("cpViewProjectsBtn").classList.remove("is-on");
+    document.getElementById("cpViewProjectsBtn").setAttribute("aria-selected", "false");
+    var rail = document.querySelector(".rail");
+    if (rail) {
+      rail.querySelectorAll(".nav").forEach(function (n) { n.classList.remove("on"); });
+      var settingsNav = rail.querySelector('[data-rail-key="settings"]');
+      if (settingsNav) settingsNav.classList.add("on");
+    }
+    if (window.pccInitSettings) window.pccInitSettings();
+  }
+  window.pccShowSettings = pccShowSettings;  // exposed for the rail nav script + avatar menu (separate scopes)
+})();
+</script>
+
+<!-- ════════════════════════════════════════════════════════════════════════
+     SETTINGS ADD — logic for the #cp-view-settings panel above, grafted
+     verbatim from the former standalone /settings page (templates/settings.html).
+     Wrapped in a lazy pccInitSettings() rather than the original page's
+     run-on-load IIFE, since this now lives inside every Cockpit load and its
+     ~15 fetches should only fire the first time a user actually opens Settings.
+     ════════════════════════════════════════════════════════════════════════ -->
+<script>
+(function(){
+  var stInited = false;
+  function pccInitSettings(){
+    if (stInited) return;
+    stInited = true;
+    function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+    // ── Cockpit · chat history window ─────────────────────────────────────
+    const chatWindowInput = document.getElementById('chat-window');
+    const chatWindowFb = document.getElementById('chat-window-fb');
+    fetch('/api/cockpit/settings').then(r=>r.json()).then(d=>{
+      chatWindowInput.value = d.chat_history_window || 20;
+    }).catch(()=>{});
+    document.getElementById('chat-window-save').addEventListener('click', async ()=>{
+      const n = parseInt(chatWindowInput.value, 10);
+      if(!n || n < 5 || n > 200){ chatWindowFb.textContent = 'must be between 5 and 200'; return; }
+      chatWindowFb.textContent = 'saving…';
+      try{
+        const r = await fetch('/api/cockpit/settings',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({chat_history_window:n})});
+        const d = await r.json();
+        if(r.ok){ chatWindowFb.textContent='✓ saved'; setTimeout(()=>chatWindowFb.textContent='',2000); }
+        else { chatWindowFb.textContent = d.detail || 'error'; }
+      }catch(e){ chatWindowFb.textContent='error'; }
+    });
+
+    // ── You (operator) ────────────────────────────────────────────────────
+    const mgrName = document.getElementById('mgr-name');
+    const mgrTag  = document.getElementById('mgr-tag');
+    const mgrFb   = document.getElementById('mgr-fb');
+    fetch('/api/manager').then(r=>r.json()).then(d=>{
+      if(d.id)  mgrName.value = d.id;
+      if(d.tag) mgrTag.value  = d.tag;
+    }).catch(()=>{});
+    document.getElementById('mgr-save').addEventListener('click', async ()=>{
+      const id = mgrName.value.trim();
+      if(!id){ mgrFb.textContent='your name cannot be empty'; return; }
+      mgrFb.textContent='saving…';
+      try{
+        const r = await fetch('/api/manager',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({id:id, tag:mgrTag.value.trim()||null})});
+        const d = await r.json();
+        if(r.ok){ mgrTag.value=d.tag||''; mgrFb.textContent='✓ saved'; setTimeout(()=>mgrFb.textContent='',2000); }
+        else { mgrFb.textContent = d.detail || d.error || 'error'; }
+      }catch(e){ mgrFb.textContent='error'; }
+    });
+
+    // ── Team name (cohort display) ────────────────────────────────────────
+    const cohortName = document.getElementById('cohort-name');
+    const cohortFb   = document.getElementById('cohort-fb');
+    fetch('/api/cohort').then(r=>r.json()).then(d=>{ if(d.display_name) cohortName.value = d.display_name; }).catch(()=>{});
+    document.getElementById('cohort-save').addEventListener('click', async ()=>{
+      const dn = cohortName.value.trim();
+      if(!dn){ cohortFb.textContent='name cannot be empty'; return; }
+      cohortFb.textContent='saving…';
+      try{
+        const r = await fetch('/api/cohort/rename',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({display_name:dn})});
+        const d = await r.json();
+        if(r.ok){ cohortFb.textContent='✓ saved'; setTimeout(()=>cohortFb.textContent='',2000); }
+        else { cohortFb.textContent = d.detail || d.error || 'error'; }
+      }catch(e){ cohortFb.textContent='error'; }
+    });
+
+    // ── Workers (rename) ──────────────────────────────────────────────────
+    const list = document.getElementById('worker-list');
+    function row(m){
+      const name = m.display_name || m.name || m.id;
+      const role = m.archetype || m.role || '';
+      const wrap = document.createElement('div');
+      wrap.style.cssText = 'display:flex;gap:12px;align-items:center;padding:13px 16px;border-top:1px solid var(--border,#eee);flex-wrap:wrap';
+      wrap.innerHTML =
+        '<input value="'+esc(name)+'" aria-label="Worker name" '+
+          'style="flex:1;min-width:150px;border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:9px;padding:8px 11px;font:600 14px sans-serif;color:inherit">'+
+        '<span style="font:500 12px monospace;color:var(--muted,#888)">'+esc(role)+'</span>'+
+        '<button style="border:1px solid var(--border,#ddd);background:var(--accent,#0f766e);color:#fff;font:600 13px sans-serif;padding:8px 14px;border-radius:9px;cursor:pointer">Save</button>'+
+        '<span class="fb" style="font-size:12px;color:var(--muted,#888)"></span>';
+      const input = wrap.querySelector('input');
+      const btn = wrap.querySelector('button');
+      const fb = wrap.querySelector('.fb');
+      btn.addEventListener('click', async ()=>{
+        const dn = input.value.trim();
+        if(!dn){ fb.textContent='name cannot be empty'; return; }
+        fb.textContent='saving…';
+        try{
+          const r = await fetch('/api/workers/'+encodeURIComponent(m.id)+'/rename',
+            {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({display_name:dn})});
+          const d = await r.json();
+          if(r.ok){ fb.textContent='✓ saved'; setTimeout(()=>fb.textContent='',2000); }
+          else { fb.textContent = d.detail || d.error || 'error'; }
+        }catch(e){ fb.textContent='error'; }
+      });
+      return wrap;
+    }
+    fetch('/api/members').then(r=>r.json()).then(ms=>{
+      list.innerHTML='';
+      if(!ms.length){ list.innerHTML='<div style="padding:16px;color:var(--muted,#667);font-size:14px">No workers yet — <a href="/getting-started">compose your cohort</a>.</div>'; return; }
+      ms.forEach(m=>list.appendChild(row(m)));
+    }).catch(()=>{ list.innerHTML='<div style="padding:16px;color:var(--muted,#667)">Could not load workers.</div>'; });
+
+    // ── Data & Retention ───────────────────────────────────────────────────
+    function fmtBytes(n){
+      if(!n) return '0 B';
+      const units=['B','KB','MB','GB'];
+      let i=0; let v=n;
+      while(v>=1024 && i<units.length-1){ v/=1024; i++; }
+      return v.toFixed(v<10&&i>0?1:0)+' '+units[i];
+    }
+    const retEls = {
+      enforce: document.getElementById('ret-enforce'),
+      notif: document.getElementById('ret-notif-days'),
+      events: document.getElementById('ret-events-days'),
+      socrates: document.getElementById('ret-socrates-days'),
+      logs: document.getElementById('ret-logs-days'),
+      ingest: document.getElementById('ret-ingest-days'),
+      snapDaily: document.getElementById('ret-snap-daily'),
+      snapWeekly: document.getElementById('ret-snap-weekly'),
+      snapMonthly: document.getElementById('ret-snap-monthly'),
+    };
+    const retFb = document.getElementById('ret-fb');
+    const retDisk = document.getElementById('ret-disk');
+    const retLastRun = document.getElementById('ret-last-run');
+    fetch('/api/settings/retention').then(r=>r.json()).then(d=>{
+      retEls.enforce.checked = !!d.enforcement_enabled;
+      retEls.notif.value = d.categories.bus_worker_notifications.days;
+      retEls.events.value = d.categories.bus_events.days;
+      retEls.socrates.value = d.categories.socrates_retrieval_log.days;
+      retEls.logs.value = d.categories.logs.keep_days;
+      retEls.ingest.value = d.categories.raw_ingest_processed.days;
+      retEls.snapDaily.value = d.db_snapshots.daily_keep;
+      retEls.snapWeekly.value = d.db_snapshots.weekly_keep;
+      retEls.snapMonthly.value = d.db_snapshots.monthly_keep;
+      const u = d.disk_usage;
+      retDisk.innerHTML =
+        '<span>Database: <b>'+fmtBytes(u.workgraph_db_bytes)+'</b></span>'+
+        '<span>Activity log: <b>'+fmtBytes(u.bus_db_bytes)+'</b></span>'+
+        '<span>Documents: <b>'+fmtBytes(u.documents_bytes)+'</b></span>'+
+        '<span>Backups: <b>'+fmtBytes(u.backups_bytes)+'</b></span>'+
+        '<span>Server logs: <b>'+fmtBytes(u.logs_bytes)+'</b></span>';
+      retLastRun.textContent = d.last_retention_run ? ('last ran '+d.last_retention_run) : 'never run yet';
+    }).catch(()=>{ retDisk.textContent = 'Could not load disk usage.'; });
+    document.getElementById('ret-save').addEventListener('click', async ()=>{
+      const body = {
+        enforcement_enabled: retEls.enforce.checked,
+        bus_worker_notifications: { days: parseInt(retEls.notif.value, 10) },
+        bus_events: { days: parseInt(retEls.events.value, 10) },
+        socrates_retrieval_log: { days: parseInt(retEls.socrates.value, 10) },
+        logs: { keep_days: parseInt(retEls.logs.value, 10) },
+        raw_ingest_processed: { days: parseInt(retEls.ingest.value, 10) },
+        db_snapshots: {
+          daily_keep: parseInt(retEls.snapDaily.value, 10),
+          weekly_keep: parseInt(retEls.snapWeekly.value, 10),
+          monthly_keep: parseInt(retEls.snapMonthly.value, 10),
+        },
+      };
+      retFb.textContent = 'saving…';
+      try{
+        const r = await fetch('/api/settings/retention',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+        const d = await r.json();
+        if(r.ok){ retFb.textContent='✓ saved'; setTimeout(()=>retFb.textContent='',2000); }
+        else { retFb.textContent = d.detail || 'error'; }
+      }catch(e){ retFb.textContent='error'; }
+    });
+
+    // ── Personal Response Learning ─────────────────────────────────────────
+    const prlEls = {
+      enabled: document.getElementById('prl-enabled'),
+      appChat: document.getElementById('prl-app-chat'),
+      sentMail: document.getElementById('prl-sent-mail'),
+      sentTeams: document.getElementById('prl-sent-teams'),
+    };
+    const prlStats = document.getElementById('prl-stats');
+    const prlFb = document.getElementById('prl-fb');
+    const prlForgetFb = document.getElementById('prl-forget-fb');
+    const prlTopPatterns = document.getElementById('prl-top-patterns');
+    const PRL_SURFACE_LABEL = { app_chat: 'In-app chat', sent_mail: 'Sent email', sent_teams: 'Sent Teams' };
+    function prlRenderTopPatterns(topPatterns){
+      const blocks = Object.entries(topPatterns || {})
+        .filter(([, list]) => list && list.length)
+        .map(([surface, list]) => `
+          <div style="margin-top:6px">
+            <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--muted,#888)">${esc(PRL_SURFACE_LABEL[surface] || surface)}</div>
+            ${list.map(p => `<div style="font-size:12.5px;padding:2px 0"><code>${esc(p.pattern_key)}</code> <span style="color:var(--muted,#667)">× ${esc(String(p.hit_count))}</span></div>`).join('')}
+          </div>`);
+      prlTopPatterns.innerHTML = blocks.length ? blocks.join('') :
+        '<div style="font-size:12px;color:var(--muted,#667)">Nothing learned yet.</div>';
+    }
+    function prlLoad(){
+      return fetch('/api/settings/personal-learning').then(r=>r.json()).then(d=>{
+        prlEls.enabled.checked = !!d.enabled;
+        prlEls.appChat.checked = !!d.surfaces.app_chat;
+        prlEls.sentMail.checked = !!d.surfaces.sent_mail;
+        prlEls.sentTeams.checked = !!d.surfaces.sent_teams;
+        prlStats.textContent = d.patterns_learned + ' pattern' + (d.patterns_learned===1?'':'s') + ' learned so far'
+          + (d.last_run ? (' · last ran ' + d.last_run) : ' · never run yet');
+        prlRenderTopPatterns(d.top_patterns);
+      }).catch(()=>{ prlStats.textContent = 'Could not load.'; });
+    }
+    prlLoad();
+    document.getElementById('prl-save').addEventListener('click', async ()=>{
+      prlFb.textContent = 'saving…';
+      try{
+        const r = await fetch('/api/settings/personal-learning',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({enabled: prlEls.enabled.checked,
+            surfaces: {app_chat: prlEls.appChat.checked, sent_mail: prlEls.sentMail.checked, sent_teams: prlEls.sentTeams.checked}})});
+        if(r.ok){ prlFb.textContent='✓ saved'; setTimeout(()=>prlFb.textContent='',2000); prlLoad(); }
+        else { const d = await r.json(); prlFb.textContent = d.detail || 'error'; }
+      }catch(e){ prlFb.textContent='error'; }
+    });
+    document.getElementById('prl-forget').addEventListener('click', async ()=>{
+      if(!confirm("Forget everything Jasper has learned about how you respond? This can't be undone (it will simply start learning again from here).")) return;
+      prlForgetFb.textContent = 'clearing…';
+      try{
+        const r = await fetch('/api/settings/personal-learning/forget',{method:'POST'});
+        const d = await r.json();
+        if(r.ok){ prlForgetFb.textContent = '✓ cleared '+d.cleared; setTimeout(()=>prlForgetFb.textContent='',2500); prlLoad(); }
+        else { prlForgetFb.textContent = 'error'; }
+      }catch(e){ prlForgetFb.textContent = 'error'; }
+    });
+
+    // ── Gate Board (task #67) ────────────────────────────────────────────────
+    const gateboardList = document.getElementById('gateboard-list');
+    function gateboardRender(board){
+      if(!board.active.length && !board.pending.length && !board.inactive.length){
+        gateboardList.innerHTML = '<div style="color:var(--muted,#667);font-size:13px">No rules yet — add one below, or teach one in Back Office chat with #addrule.</div>';
+        return;
+      }
+      const activeHtml = board.active.length ? board.active.map(r => `
+        <div style="display:flex;align-items:baseline;gap:10px;padding:6px 0;border-bottom:1px solid var(--border,#eee);font-size:13px">
+          <span style="font-weight:600">${esc(r.trigger_signal_type)} <span style="color:var(--muted,#999);font-weight:400">needs</span> ${esc(r.requires_signal_type)}</span>
+          <span style="margin-left:auto;font:700 11px monospace;padding:2px 8px;border-radius:20px;white-space:nowrap;background:${r.currently_gating > 0 ? 'var(--amber-t,#fbf1da)' : 'var(--bg,#fafafa)'};color:${r.currently_gating > 0 ? 'var(--amber-d,#8a5a00)' : 'var(--muted,#999)'}">gating ${r.currently_gating}</span>
+        </div>`).join('') : '<div style="color:var(--muted,#667);font-size:13px;padding:6px 0">No active rules yet.</div>';
+      const pendingHtml = board.pending.length
+        ? `<div style="margin-top:10px;font-size:12px;color:var(--muted,#888)">${board.pending.length} suggestion${board.pending.length === 1 ? '' : 's'} awaiting confirmation — see Suggested rules below.</div>` : '';
+      const inactiveHtml = board.inactive.length
+        ? `<div style="margin-top:4px;font-size:12px;color:var(--muted,#888)">${board.inactive.length} deactivated rule${board.inactive.length === 1 ? '' : 's'}.</div>` : '';
+      gateboardList.innerHTML = activeHtml + pendingHtml + inactiveHtml;
+    }
+    function gateboardLoad(){
+      return fetch('/api/workgraph/gate-board').then(r => r.json()).then(gateboardRender)
+        .catch(() => { gateboardList.textContent = 'Could not load.'; });
+    }
+    gateboardLoad();
+
+    // ── Aristotle: prerequisite rules ──────────────────────────────────────
+    const arList = document.getElementById('ar-rules-list');
+    const arTrigger = document.getElementById('ar-trigger');
+    const arRequires = document.getElementById('ar-requires');
+    const arMatchOn = document.getElementById('ar-match-on');
+    const arReason = document.getElementById('ar-reason');
+    const arFb = document.getElementById('ar-fb');
+
+    function arRenderRules(rules){
+      if(!rules.length){ arList.innerHTML = '<div style="color:var(--muted,#667);font-size:13px">No rules yet.</div>'; return; }
+      arList.innerHTML = rules.map(r => `
+        <div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border,#eee);font-size:13px">
+          <div style="flex:1">
+            <div><code>${esc(r.trigger_signal_type)}</code> requires <code>${esc(r.requires_signal_type)}</code> (same ${esc(r.match_on)})</div>
+            ${r.reason ? `<div style="color:var(--muted,#667);font-size:12px;margin-top:2px">${esc(r.reason)}</div>` : ''}
+          </div>
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+            <input type="checkbox" ${r.active ? 'checked' : ''} data-ar-toggle="${r.id}" style="width:15px;height:15px">
+            <span style="font-size:12px;color:var(--muted,#667)">active</span>
+          </label>
+          <button data-ar-delete="${r.id}" style="border:1px solid var(--border,#ddd);background:none;color:inherit;font:600 12px sans-serif;padding:5px 10px;border-radius:7px;cursor:pointer">Delete</button>
+        </div>`).join('');
+      arList.querySelectorAll('[data-ar-toggle]').forEach(cb => cb.addEventListener('change', async () => {
+        const wasChecked = !cb.checked;
+        try{
+          const r = await fetch(`/api/settings/prerequisite-rules/${cb.getAttribute('data-ar-toggle')}/active`,
+            {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({active: cb.checked})});
+          if(!r.ok){ cb.checked = wasChecked; const d = await r.json().catch(()=>({})); arFb.textContent = d.detail || "couldn't save"; setTimeout(()=>arFb.textContent='',3000); }
+        }catch(e){ cb.checked = wasChecked; arFb.textContent = "couldn't save"; setTimeout(()=>arFb.textContent='',3000); }
+      }));
+      arList.querySelectorAll('[data-ar-delete]').forEach(btn => btn.addEventListener('click', async () => {
+        if(!confirm('Delete this prerequisite rule?')) return;
+        await fetch(`/api/settings/prerequisite-rules/${btn.getAttribute('data-ar-delete')}`, {method:'DELETE'});
+        arLoad(); gateboardLoad();
+      }));
+    }
+    function arLoad(){
+      return fetch('/api/settings/prerequisite-rules').then(r=>r.json()).then(d=>{
+        const opts = d.known_signal_types.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('');
+        arTrigger.innerHTML = opts;
+        arRequires.innerHTML = opts;
+        arRenderRules(d.rules);
+      }).catch(()=>{ arList.textContent = 'Could not load.'; });
+    }
+    arLoad();
+    document.getElementById('ar-add').addEventListener('click', async ()=>{
+      if(arTrigger.value === arRequires.value){ arFb.textContent = 'trigger and requirement must differ'; return; }
+      arFb.textContent = 'adding…';
+      try{
+        const r = await fetch('/api/settings/prerequisite-rules',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({trigger_signal_type: arTrigger.value, requires_signal_type: arRequires.value,
+            match_on: arMatchOn.value, reason: arReason.value})});
+        const d = await r.json();
+        if(r.ok){ arFb.textContent = '✓ added'; arReason.value=''; setTimeout(()=>arFb.textContent='',2000); arLoad(); gateboardLoad(); }
+        else { arFb.textContent = d.detail || 'error'; }
+      }catch(e){ arFb.textContent = 'error'; }
+    });
+
+    // ── Suggested rules (tasks #52/#54) ────────────────────────────────────
+    const arsugList = document.getElementById('arsug-list');
+    function arsugRender(suggestions){
+      if(!suggestions.length){ arsugList.innerHTML = '<div style="color:var(--muted,#667);font-size:13px">Nothing pending.</div>'; return; }
+      arsugList.innerHTML = suggestions.map(s => {
+        const originLabel = s.origin === 'detected' ? 'Noticed automatically' : 'From a chat conversation';
+        const structured = s.trigger_signal_type && s.requires_signal_type && s.match_on;
+        const summary = structured
+          ? `<code>${esc(s.trigger_signal_type)}</code> requires <code>${esc(s.requires_signal_type)}</code> (same ${esc(s.match_on)})`
+          : '<i>Not structured yet — use the form above to add it as a real rule, or edit the fields below.</i>';
+        return `<div style="padding:10px 0;border-bottom:1px solid var(--border,#eee);font-size:13px">
+          <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--muted,#888);margin-bottom:3px">${originLabel}</div>
+          <div>${summary}</div>
+          ${s.reason ? `<div style="color:var(--muted,#667);font-size:12px;margin-top:2px">${esc(s.reason)}</div>` : ''}
+          ${s.evidence ? `<div style="color:var(--muted,#667);font-size:12px;margin-top:2px">${esc(s.evidence)}</div>` : ''}
+          ${s.raw_explanation ? `<div style="color:var(--muted,#667);font-size:12px;margin-top:2px;font-style:italic">"${esc(s.raw_explanation)}"</div>` : ''}
+          <div style="display:flex;gap:8px;margin-top:8px">
+            <button data-arsug-confirm="${s.id}" ${structured ? '' : 'disabled'} style="border:1px solid var(--border,#ddd);background:var(--accent,#0f766e);color:#fff;font:600 12px sans-serif;padding:5px 12px;border-radius:7px;cursor:pointer">Confirm</button>
+            <button data-arsug-reject="${s.id}" style="border:1px solid var(--border,#ddd);background:none;color:inherit;font:600 12px sans-serif;padding:5px 12px;border-radius:7px;cursor:pointer">Reject</button>
+          </div>
+        </div>`;
+      }).join('');
+      arsugList.querySelectorAll('[data-arsug-confirm]').forEach(btn => btn.addEventListener('click', () => arsugResolve(btn.getAttribute('data-arsug-confirm'), 'confirm')));
+      arsugList.querySelectorAll('[data-arsug-reject]').forEach(btn => btn.addEventListener('click', () => arsugResolve(btn.getAttribute('data-arsug-reject'), 'reject')));
+    }
+    const arsugFb = document.getElementById('arsug-fb');
+    function arsugLoad(){
+      return fetch('/api/settings/prerequisite-rule-suggestions').then(r=>r.json()).then(d=>arsugRender(d.suggestions))
+        .catch(()=>{ arsugList.textContent = 'Could not load.'; });
+    }
+    async function arsugResolve(id, action){
+      try{
+        const r = await fetch(`/api/settings/prerequisite-rule-suggestions/${id}/resolve`,{method:'POST',
+          headers:{'Content-Type':'application/json'}, body:JSON.stringify({action})});
+        if(r.ok){ arsugFb.textContent = ''; arsugLoad(); arLoad(); gateboardLoad(); }
+        else { const d = await r.json().catch(()=>({})); arsugFb.textContent = d.detail || 'error'; setTimeout(()=>arsugFb.textContent='',3000); }
+      }catch(e){ arsugFb.textContent = 'error'; setTimeout(()=>arsugFb.textContent='',3000); }
+    }
+    arsugLoad();
+
+    // ── Capability suggestions (task #57) ──────────────────────────────────
+    const capsugList = document.getElementById('capsug-list');
+    function capsugRender(suggestions){
+      if(!suggestions.length){ capsugList.innerHTML = '<div style="color:var(--muted,#667);font-size:13px">Nothing pending.</div>'; return; }
+      capsugList.innerHTML = suggestions.map(s => `
+        <div style="padding:10px 0;border-bottom:1px solid var(--border,#eee);font-size:13px">
+          <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--muted,#888);margin-bottom:3px">From ${esc(s.origin)}</div>
+          <div><b>Noticed:</b> ${esc(s.observation)}</div>
+          <div style="margin-top:2px"><b>Suggests:</b> ${esc(s.suggestion)}</div>
+          ${s.rationale ? `<div style="color:var(--muted,#667);font-size:12px;margin-top:2px">${esc(s.rationale)}</div>` : ''}
+          <div style="display:flex;gap:8px;margin-top:8px">
+            <button data-capsug-confirm="${s.id}" style="border:1px solid var(--border,#ddd);background:var(--accent,#0f766e);color:#fff;font:600 12px sans-serif;padding:5px 12px;border-radius:7px;cursor:pointer">Worth building</button>
+            <button data-capsug-reject="${s.id}" style="border:1px solid var(--border,#ddd);background:none;color:inherit;font:600 12px sans-serif;padding:5px 12px;border-radius:7px;cursor:pointer">Not now</button>
+          </div>
+        </div>`).join('');
+      capsugList.querySelectorAll('[data-capsug-confirm]').forEach(btn => btn.addEventListener('click', () => capsugResolve(btn.getAttribute('data-capsug-confirm'), 'confirmed')));
+      capsugList.querySelectorAll('[data-capsug-reject]').forEach(btn => btn.addEventListener('click', () => capsugResolve(btn.getAttribute('data-capsug-reject'), 'rejected')));
+    }
+    const capsugFb = document.getElementById('capsug-fb');
+    function capsugLoad(){
+      return fetch('/api/workgraph/capability-suggestions?status=pending').then(r=>r.json()).then(d=>capsugRender(d.suggestions))
+        .catch(()=>{ capsugList.textContent = 'Could not load.'; });
+    }
+    async function capsugResolve(id, status){
+      try{
+        const r = await fetch(`/api/workgraph/capability-suggestions/${id}/resolve`,{method:'POST',
+          headers:{'Content-Type':'application/json'}, body:JSON.stringify({status})});
+        if(r.ok){ capsugFb.textContent = ''; capsugLoad(); }
+        else { const d = await r.json().catch(()=>({})); capsugFb.textContent = d.detail || 'error'; setTimeout(()=>capsugFb.textContent='',3000); }
+      }catch(e){ capsugFb.textContent = 'error'; setTimeout(()=>capsugFb.textContent='',3000); }
+    }
+    capsugLoad();
+
+    // ── Weekly Digest (task #76) ─────────────────────────────────────────────
+    const digestBody = document.getElementById('digest-body');
+    function digestFmtMoney(amount){
+      if (amount >= 1e9) return '$' + (amount / 1e9).toFixed(1) + 'B';
+      if (amount >= 1e6) return '$' + (amount / 1e6).toFixed(1) + 'M';
+      if (amount >= 1e3) return '$' + (amount / 1e3).toFixed(0) + 'K';
+      return '$' + Math.round(amount);
+    }
+    function digestRow(label, value){
+      return `<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--border,#eee);font-size:13px"><span style="color:var(--muted,#667)">${esc(label)}</span><b>${value}</b></div>`;
+    }
+    function digestIssueList(title, issues){
+      if (!issues.length) return '';
+      const rows = issues.map(i => `<li style="font-size:12.5px;margin-bottom:2px">${esc(i.title)}</li>`).join('');
+      return `<div style="margin-top:10px"><div style="font:700 11px/1 monospace;text-transform:uppercase;letter-spacing:.03em;color:var(--muted,#888);margin-bottom:4px">${esc(title)}</div><ul style="margin:0;padding-left:18px">${rows}</ul></div>`;
+    }
+    function digestRender(d){
+      digestBody.innerHTML =
+        digestRow('Opened this week', d.opened_count) +
+        digestRow('Closed this week', d.closed_count) +
+        digestRow('Currently open', d.open_count) +
+        digestRow('With a hard deadline', d.hard_deadline_count) +
+        digestRow('Value found across open threads', digestFmtMoney(d.value_found_total)) +
+        digestIssueList('Top priority right now', d.top_priority) +
+        digestIssueList('Closed this week', d.closed_this_week) +
+        digestIssueList('Hard deadlines to watch', d.hard_deadline_issues);
+    }
+    function digestLoad(){
+      return fetch('/api/workgraph/weekly-digest').then(r => r.json()).then(digestRender)
+        .catch(() => { digestBody.textContent = 'Could not load.'; });
+    }
+    digestLoad();
+
+    // ── Party resolution review queue (task #79) ────────────────────────────
+    const partyreviewList = document.getElementById('partyreview-list');
+    function partyreviewRender(parties){
+      if(!parties.length){ partyreviewList.innerHTML = '<div style="color:var(--muted,#667);font-size:13px">Nothing needs review right now.</div>'; return; }
+      partyreviewList.innerHTML = parties.map(p => `
+        <div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border,#eee);font-size:13px">
+          <div style="flex:1;min-width:0">
+            <div style="font-weight:600">${esc(p.display_name || p.primary_email)}</div>
+            <div style="color:var(--muted,#888);font-size:12px">${esc(p.primary_email)}</div>
+          </div>
+          <input type="text" placeholder="Company name" data-partyreview-company="${p.id}" style="border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:7px;padding:6px 8px;font:500 13px sans-serif;color:inherit;width:180px">
+          <button data-partyreview-save="${p.id}" style="border:1px solid var(--border,#ddd);background:var(--accent,#0f766e);color:#fff;font:600 12px sans-serif;padding:6px 12px;border-radius:7px;cursor:pointer">Save</button>
+        </div>
+        <span id="partyreview-fb-${p.id}" style="font-size:11.5px;color:var(--muted,#888);display:block;margin:-4px 0 4px"></span>`).join('');
+      partyreviewList.querySelectorAll('[data-partyreview-save]').forEach(btn => btn.addEventListener('click', () => partyreviewSave(btn.getAttribute('data-partyreview-save'))));
+    }
+    async function partyreviewSave(partyId){
+      const input = partyreviewList.querySelector(`[data-partyreview-company="${partyId}"]`);
+      const fb = document.getElementById('partyreview-fb-' + partyId);
+      const company = input.value.trim();
+      if(!company){ if(fb) fb.textContent = 'enter a company name first'; return; }
+      try{
+        const r = await fetch(`/api/workgraph/parties/${encodeURIComponent(partyId)}/correct`, {method:'POST',
+          headers:{'Content-Type':'application/json'}, body:JSON.stringify({affiliation:'external', company, reason:'party review queue'})});
+        if(r.ok){ partyreviewLoad(); }
+        else { const d = await r.json().catch(()=>({})); if(fb) fb.textContent = d.detail || 'error'; }
+      }catch(e){ if(fb) fb.textContent = 'error'; }
+    }
+    function partyreviewLoad(){
+      return fetch('/api/workgraph/party-review-queue').then(r=>r.json()).then(d=>partyreviewRender(d.parties))
+        .catch(()=>{ partyreviewList.textContent = 'Could not load.'; });
+    }
+    partyreviewLoad();
+
+    // ── Signal volume trends (task #66) ─────────────────────────────────────
+    const sigtrendList = document.getElementById('sigtrend-list');
+    function sigtrendRender(months, series){
+      const types = Object.keys(series);
+      if(!types.length){ sigtrendList.innerHTML = '<div style="color:var(--muted,#667);font-size:13px">No recognized signals in the last 6 months yet.</div>'; return; }
+      const maxCount = Math.max(1, ...types.flatMap(t => series[t]));
+      sigtrendList.innerHTML = types.map(t => {
+        const counts = series[t];
+        const bars = counts.map((c, i) => `
+          <div title="${esc(months[i])}: ${c}" style="display:flex;flex-direction:column;align-items:center;gap:3px;flex:1;min-width:0">
+            <div style="width:100%;max-width:22px;height:34px;display:flex;align-items:flex-end;background:var(--bg,#fafafa);border-radius:3px 3px 0 0">
+              <div style="width:100%;background:var(--accent,#0f766e);border-radius:3px 3px 0 0;height:${Math.round((c / maxCount) * 100)}%"></div>
+            </div>
+            <div style="font-size:9.5px;color:var(--muted,#999)">${esc(months[i].slice(5))}</div>
+          </div>`).join('');
+        const total = counts.reduce((a, b) => a + b, 0);
+        return `
+          <div style="padding:10px 0;border-bottom:1px solid var(--border,#eee)">
+            <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
+              <div style="font:600 13px sans-serif">${esc(t)}</div>
+              <div style="font-size:11.5px;color:var(--muted,#888)">${total} total</div>
+            </div>
+            <div style="display:flex;gap:4px">${bars}</div>
+          </div>`;
+      }).join('');
+    }
+    function sigtrendLoad(){
+      return fetch('/api/workgraph/signal-trends?months=6').then(r => r.json()).then(d => sigtrendRender(d.months, d.series))
+        .catch(() => { sigtrendList.textContent = 'Could not load.'; });
+    }
+    sigtrendLoad();
+
+    // ── Health Check (task #74) ─────────────────────────────────────────────
+    const hcList = document.getElementById('hc-list');
+    const hcAsOf = document.getElementById('hc-asof');
+    const HC_LABELS = {
+      cursors_advancing: 'Ingest cursors advancing',
+      disk_growth_sane: 'Disk usage sane',
+      scheduled_refresh_ran: 'Scheduled refresh ran recently',
+      backup_recent: 'Recent backup exists',
+      raw_ingest_failed: 'No failed-ingest pileup',
+      claude_process_count: 'No runaway process count',
+    };
+    function hcDetailLine(key, check){
+      if (key === 'cursors_advancing' && check.stale_cursors && check.stale_cursors.length)
+        return check.stale_cursors.map(s => `${s.source}: ${s.age_hours}h stale`).join(', ');
+      if (key === 'disk_growth_sane' && check.findings && check.findings.length)
+        return check.findings.map(f => `${f.metric} ${f.issue} (${f.old} → ${f.new})`).join(', ');
+      if (key === 'scheduled_refresh_ran') return check.age_hours != null ? `last ran ${check.age_hours}h ago` : (check.detail || '');
+      if (key === 'backup_recent') return check.age_hours != null ? `newest snapshot ${check.age_hours}h old` : (check.detail || '');
+      if (key === 'raw_ingest_failed') return `${check.count} failed item${check.count === 1 ? '' : 's'}`;
+      if (key === 'claude_process_count') return check.count != null ? `${check.count} running${check.yesterday_count != null ? ' (was ' + check.yesterday_count + ')' : ''}` : (check.detail || '');
+      return check.detail || '';
+    }
+    function hcRender(result){
+      if (!result) { hcAsOf.textContent = ''; hcList.innerHTML = '<div style="color:var(--muted,#667);font-size:13px">Hasn’t run yet — runs automatically once a day.</div>'; return; }
+      hcAsOf.textContent = `As of ${result.as_of} — overall ${result.ok ? 'OK' : 'issues found'}`;
+      hcList.innerHTML = Object.entries(result.checks).map(([key, check]) => {
+        const detail = hcDetailLine(key, check);
+        return `
+        <div style="display:flex;align-items:baseline;gap:10px;padding:7px 0;border-bottom:1px solid var(--border,#eee);font-size:13px">
+          <span style="font:700 10px monospace;text-transform:uppercase;padding:2px 8px;border-radius:20px;white-space:nowrap;background:${check.ok ? 'var(--bg,#f0f0f0)' : '#fbe7e3'};color:${check.ok ? 'var(--muted,#888)' : '#b41e16'}">${check.ok ? 'OK' : 'CHECK'}</span>
+          <span style="flex:1"><b>${esc(HC_LABELS[key] || key)}</b>${detail ? ' — ' + esc(detail) : ''}</span>
+        </div>`;
+      }).join('');
+    }
+    function hcLoad(){
+      return fetch('/api/settings/health-check').then(r => r.json()).then(d => hcRender(d.result))
+        .catch(() => { hcList.textContent = 'Could not load.'; });
+    }
+    hcLoad();
+
+    // ── Signal-treatment overrides (task #58) ──────────────────────────────
+    const sigrulesList = document.getElementById('sigrules-list');
+    const sigrulesType = document.getElementById('sigrules-type');
+    const sigrulesTreatment = document.getElementById('sigrules-treatment');
+    const sigrulesReason = document.getElementById('sigrules-reason');
+    const sigrulesFb = document.getElementById('sigrules-fb');
+    function sigrulesRender(overrides){
+      if(!overrides.length){ sigrulesList.innerHTML = '<div style="color:var(--muted,#667);font-size:13px">No overrides yet — every signal type is using its default treatment.</div>'; return; }
+      sigrulesList.innerHTML = overrides.map(o => `
+        <div style="display:flex;align-items:baseline;gap:10px;padding:6px 0;border-bottom:1px solid var(--border,#eee);font-size:13px">
+          <code>${esc(o.signal_type)}</code>
+          <span style="color:var(--accent,#0f766e);font-weight:700;text-transform:uppercase;font-size:11px">${esc(o.treatment)}</span>
+          ${o.reason ? `<span style="color:var(--muted,#667);font-size:12px">${esc(o.reason)}</span>` : ''}
+        </div>`).join('');
+    }
+    function sigrulesLoad(){
+      return fetch('/api/workgraph/signal-rules').then(r=>r.json()).then(d=>{
+        sigrulesType.innerHTML = d.known_signal_types.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('');
+        sigrulesRender(d.overrides);
+      }).catch(()=>{ sigrulesList.textContent = 'Could not load.'; });
+    }
+    document.getElementById('sigrules-add').addEventListener('click', async ()=>{
+      sigrulesFb.textContent = 'saving…';
+      try{
+        const r = await fetch(`/api/workgraph/signal-rules/${encodeURIComponent(sigrulesType.value)}`,{method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({treatment: sigrulesTreatment.value, reason: sigrulesReason.value, set_by: window.MANAGER_TAG})});
+        const d = await r.json();
+        if(r.ok){ sigrulesFb.textContent = '✓ saved'; sigrulesReason.value=''; setTimeout(()=>sigrulesFb.textContent='',2000); sigrulesLoad(); }
+        else { sigrulesFb.textContent = d.detail || 'error'; }
+      }catch(e){ sigrulesFb.textContent = 'error'; }
+    });
+    sigrulesLoad();
+
+    // ── Ownership rules (task #60) ─────────────────────────────────────────
+    const ownrulesList = document.getElementById('ownrules-list');
+    function ownrulesRender(rules){
+      if(!rules.length){ ownrulesList.innerHTML = '<div style="color:var(--muted,#667);font-size:13px">No standing rules yet.</div>'; return; }
+      ownrulesList.innerHTML = rules.map(r => `
+        <div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border,#eee);font-size:13px">
+          <div style="flex:1">
+            <div>When <code>${esc(r.match_field)}</code> = <code>${esc(r.match_value)}</code>, owner defaults to <b>${esc(r.default_owner)}</b></div>
+            ${r.created_reason ? `<div style="color:var(--muted,#667);font-size:12px;margin-top:2px">${esc(r.created_reason)}</div>` : ''}
+          </div>
+          <button data-ownrule-delete="${r.id}" style="border:1px solid var(--border,#ddd);background:none;color:inherit;font:600 12px sans-serif;padding:5px 10px;border-radius:7px;cursor:pointer">Remove</button>
+        </div>`).join('');
+      ownrulesList.querySelectorAll('[data-ownrule-delete]').forEach(btn => btn.addEventListener('click', async () => {
+        if(!confirm('Remove this ownership rule?')) return;
+        await fetch(`/api/workgraph/ownership-rules/${btn.getAttribute('data-ownrule-delete')}`, {method:'DELETE'});
+        ownrulesLoad();
+      }));
+    }
+    function ownrulesLoad(){
+      return fetch('/api/workgraph/ownership-rules').then(r=>r.json()).then(d=>ownrulesRender(d.rules))
+        .catch(()=>{ ownrulesList.textContent = 'Could not load.'; });
+    }
+    ownrulesLoad();
+
+    // ── Server restart ────────────────────────────────────────────────────
+    const restartBtn = document.getElementById('restart-btn');
+    const restartFb  = document.getElementById('restart-fb');
+    restartBtn.addEventListener('click', async ()=>{
+      if(!confirm('Restart the Symphony server? It will be back in a few seconds.')) return;
+      restartBtn.disabled = true;
+      restartFb.textContent = 'restarting…';
+      try{ await fetch('/api/server/restart',{method:'POST'}); }catch(e){ /* the process re-execs; a dropped connection is expected */ }
+      let tries = 0;
+      const poll = setInterval(async ()=>{
+        tries++;
+        try{
+          const r = await fetch('/cockpit',{cache:'no-store'});
+          if(r.ok){ clearInterval(poll); restartFb.textContent='✓ back — reloading'; setTimeout(()=>window.location.reload(),600); }
+        }catch(e){ /* still down, keep polling */ }
+        if(tries > 40){ clearInterval(poll); restartFb.textContent='taking longer than usual — reload manually'; restartBtn.disabled=false; }
+      }, 1000);
+    });
+  }
+  window.pccInitSettings = pccInitSettings;
 })();
 </script>
 </body>

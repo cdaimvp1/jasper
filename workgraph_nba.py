@@ -293,5 +293,71 @@ def recompute_all(now: float | None = None) -> dict:
     return {"scored": updated, "as_of": now}
 
 
+def candidate_actions(issue: dict, evidence: list[dict], synthesis: Optional[dict] = None) -> list[dict]:
+    """Part E1 of the grouping/NBA redesign (2026-07-30): unifies the 3
+    previously-uncoordinated "what should Marc do next" surfaces - this
+    issue's own single nba_action_kind/nba_reason verdict, workgraph_
+    recommend.py's per-evidence-row recommendations (ev["recommendation"],
+    already populated by attach_recommendations before this is called),
+    and curator's own synthesis suggested_actions - into one ranked,
+    deduped list. Each candidate: {kind, label, rationale, score,
+    source_surface}. Top-ranked is the de facto NBA; the rest are real
+    alternatives, not previously visible together anywhere.
+
+    Read-time only - does NOT change what recompute_all() above writes to
+    issues.nba_action_kind/nba_reason. Confirmed by reading recompute_all
+    itself: that column's 7-value CHECK-constrained enum is only EVER
+    written as 'review' or 'wait' by real code (the other 5 allowed
+    values are unused) - it was never a rich action-type vocabulary, and
+    repurposing it here would have meant either a real CHECK-constraint
+    mismatch against workgraph_recommend's own kind strings (contract_
+    review/prep/summarize, none of which are in that enum) or silently
+    losing information by forcing everything into 2 buckets. This
+    function is purely additive instead - no schema change, no new
+    clickable UI yet (that's Part E2), just making the 3 signals
+    comparable in one ranked place for the first time."""
+    candidates = []
+
+    if issue.get("nba_reason"):
+        kind = "nudge" if issue.get("state") == "waiting" else "draft_reply"
+        candidates.append({
+            "kind": kind, "label": "Nudge" if kind == "nudge" else "Draft a reply",
+            "rationale": issue["nba_reason"], "score": issue.get("priority_score") or 0.5,
+            "source_surface": "nba",
+        })
+
+    seen_kinds = {c["kind"] for c in candidates}
+    for ev in evidence:
+        rec = ev.get("recommendation")
+        if not rec or rec.get("kind") in seen_kinds:
+            continue
+        seen_kinds.add(rec["kind"])
+        candidates.append({
+            "kind": rec["kind"], "label": rec.get("label") or rec["kind"],
+            "rationale": rec.get("rationale") or "", "score": 0.5, "source_surface": "evidence_row",
+        })
+
+    if synthesis:
+        seen_labels = {c["label"] for c in candidates}
+        for a in (synthesis.get("suggested_actions") or []):
+            label = a.get("label") or ""
+            if not label or label in seen_labels:
+                continue
+            seen_labels.add(label)
+            candidates.append({
+                "kind": "custom", "label": label, "rationale": a.get("rationale") or "",
+                "score": 0.45, "source_surface": "synthesis",
+            })
+
+    if not candidates:
+        candidates.append({
+            "kind": "draft_reply", "label": "Draft a reply", "rationale": "",
+            "score": 0.2, "source_surface": "fallback",
+        })
+
+    candidates.sort(key=lambda c: c["score"], reverse=True)
+    return candidates[:4]
+
+
 if __name__ == "__main__":
     print(json.dumps(recompute_all(), indent=2))

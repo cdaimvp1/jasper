@@ -252,3 +252,76 @@ def test_value_at_risk_rollup_top_capped_at_five_but_total_counts_all(ws_db):
     assert rollup["issue_count"] == 7
     assert len(rollup["top"]) == 5
     assert rollup["total"] == sum((i + 1) * 100_000 for i in range(7))
+
+
+# --- Part E1 (2026-07-30): unified ranked candidate-action scoring -------
+
+def test_candidate_actions_includes_nba_surface_when_reason_present():
+    issue = {"nba_reason": "your move · $200,000", "state": "active", "priority_score": 0.7}
+    result = nba.candidate_actions(issue, evidence=[])
+    assert len(result) == 1
+    assert result[0]["kind"] == "draft_reply"
+    assert result[0]["source_surface"] == "nba"
+    assert result[0]["rationale"] == "your move · $200,000"
+
+
+def test_candidate_actions_waiting_state_maps_to_nudge():
+    issue = {"nba_reason": "waiting on vendor", "state": "waiting", "priority_score": 0.4}
+    result = nba.candidate_actions(issue, evidence=[])
+    assert result[0]["kind"] == "nudge"
+    assert result[0]["label"] == "Nudge"
+
+
+def test_candidate_actions_includes_evidence_row_recommendation():
+    issue = {"nba_reason": None, "state": "active", "priority_score": 0.5}
+    evidence = [{"recommendation": {"kind": "contract_review", "label": "Review the attached document",
+                                     "rationale": "has an attachment"}}]
+    result = nba.candidate_actions(issue, evidence)
+    kinds = {c["kind"] for c in result}
+    assert "contract_review" in kinds
+
+
+def test_candidate_actions_dedupes_evidence_rows_by_kind():
+    issue = {"nba_reason": None, "state": "active", "priority_score": 0.5}
+    evidence = [
+        {"recommendation": {"kind": "summarize", "label": "Summarize the thread", "rationale": "r1"}},
+        {"recommendation": {"kind": "summarize", "label": "Summarize the thread", "rationale": "r2"}},
+    ]
+    result = nba.candidate_actions(issue, evidence)
+    assert len([c for c in result if c["kind"] == "summarize"]) == 1
+
+
+def test_candidate_actions_includes_synthesis_suggested_actions():
+    issue = {"nba_reason": None, "state": "active", "priority_score": 0.5}
+    synthesis = {"suggested_actions": [{"label": "Build a 1-page deal summary", "rationale": "per the DoA question"}]}
+    result = nba.candidate_actions(issue, [], synthesis)
+    assert any(c["label"] == "Build a 1-page deal summary" and c["source_surface"] == "synthesis" for c in result)
+
+
+def test_candidate_actions_never_empty_even_with_no_real_signal():
+    issue = {"nba_reason": None, "state": "active", "priority_score": None}
+    result = nba.candidate_actions(issue, [])
+    assert len(result) == 1
+    assert result[0]["source_surface"] == "fallback"
+
+
+def test_candidate_actions_ranked_by_score_descending():
+    issue = {"nba_reason": "your move", "state": "active", "priority_score": 0.9}
+    evidence = [{"recommendation": {"kind": "summarize", "label": "Summarize", "rationale": "r"}}]
+    synthesis = {"suggested_actions": [{"label": "Custom task", "rationale": "r"}]}
+    result = nba.candidate_actions(issue, evidence, synthesis)
+    scores = [c["score"] for c in result]
+    assert scores == sorted(scores, reverse=True)
+    assert result[0]["source_surface"] == "nba"
+
+
+def test_candidate_actions_capped_at_four():
+    issue = {"nba_reason": "your move", "state": "active", "priority_score": 0.9}
+    evidence = [
+        {"recommendation": {"kind": "contract_review", "label": "a", "rationale": "r"}},
+        {"recommendation": {"kind": "prep", "label": "b", "rationale": "r"}},
+        {"recommendation": {"kind": "summarize", "label": "c", "rationale": "r"}},
+    ]
+    synthesis = {"suggested_actions": [{"label": "d", "rationale": "r"}, {"label": "e", "rationale": "r"}]}
+    result = nba.candidate_actions(issue, evidence, synthesis)
+    assert len(result) == 4

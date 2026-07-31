@@ -1174,6 +1174,11 @@ async def api_workgraph_issue_detail(issue_id: str):
     # Enhancement #88: dollar value in play, already computed for Value-at-
     # risk/the Supplier Dashboard, just never attached to the issue itself.
     issue["value_found"] = workgraph_nba.value_amount_for_issue(issue_id)
+    # Part E1 (2026-07-30): unified ranked candidate actions - read-time
+    # only, see workgraph_nba.candidate_actions' own docstring. Falls back
+    # to project_synthesis's suggested_actions the same way the frontend
+    # already does when this issue has no synthesis of its own.
+    issue["candidate_actions"] = workgraph_nba.candidate_actions(issue, evidence, synthesis or project_synthesis)
     return JSONResponse({"issue": sanitize_surrogates(issue), "evidence": sanitize_surrogates(evidence),
                         "pending_actions": sanitize_surrogates(pending), "tasks": sanitize_surrogates(tasks),
                         "state_history": sanitize_surrogates(state_history),

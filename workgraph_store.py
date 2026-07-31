@@ -1449,6 +1449,94 @@ def get_raw_items_for_issue(issue_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def get_calendar_raw_items_for_remediation() -> list[dict]:
+    """Every real calendar raw_item's subject/organizer/occurred_ts/
+    issue_id - for remediate_calendar_series.py (step 7, meeting-grouping
+    design pass) to re-derive what each occurrence's series identity
+    SHOULD be under the step-3 fix, and find already-created Issues that
+    are still fragmented across separate ids for the same real series."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT subject, from_actor, occurred_ts, issue_id FROM raw_items WHERE source = 'calendar'"
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def remediate_merge_issue_identity(winner_id: str, loser_id: str, *, reason_label: str) -> None:
+    """One-off ISSUE-identity consolidation for remediate_calendar_series.py
+    (step 7) - NOT the same operation as merge_issues_txn (which merges two
+    issues into the same PROJECT, leaving both issue rows intact). This
+    reassigns every real FK reference from the loser issue to the winner
+    and archives the loser issue itself, because the loser was never a
+    genuinely distinct Issue in the first place - it's a fragment of one
+    real recurring series that should have shared one Issue identity from
+    the start (see remediate_calendar_series.py's own module docstring).
+
+    issue_parties is repointed row-by-row with an existing-link check first
+    - its PK is (issue_id, party_id), and the SAME party can already be
+    linked to both winner and loser (e.g. the same organizer on every
+    occurrence). synthesis rows are deliberately left alone (orphaned but
+    harmless, never hard-deleted - matches this codebase's own never-
+    silently-drop convention).
+
+    One all-or-nothing transaction, same BEGIN IMMEDIATE/COMMIT/ROLLBACK +
+    bounded-retry pattern as merge_issues_txn - see that function's own
+    docstring for why this repo uses that pattern instead of the module's
+    public autocommit helpers for a multi-step write."""
+    now = time.time()
+    with _lock:
+        conn = _connect()
+        try:
+            for attempt in range(5):
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    break
+                except sqlite3.OperationalError:
+                    if attempt == 4:
+                        raise
+                    time.sleep(random.uniform(0, 0.02) * (attempt + 1))
+            try:
+                for table in ("raw_items", "evidence", "work_tasks", "issue_state_history",
+                              "nba_choice_log", "shadow_grouping_log"):
+                    conn.execute(f"UPDATE {table} SET issue_id = ? WHERE issue_id = ?", (winner_id, loser_id))
+                conn.execute("UPDATE thread_map SET issue_id = ? WHERE issue_id = ?", (winner_id, loser_id))
+
+                loser_parties = conn.execute(
+                    "SELECT party_id, role FROM issue_parties WHERE issue_id = ?", (loser_id,)
+                ).fetchall()
+                for p in loser_parties:
+                    existing = conn.execute(
+                        "SELECT 1 FROM issue_parties WHERE issue_id = ? AND party_id = ?", (winner_id, p["party_id"])
+                    ).fetchone()
+                    if existing is None:
+                        conn.execute(
+                            "INSERT INTO issue_parties (issue_id, party_id, role) VALUES (?, ?, ?)",
+                            (winner_id, p["party_id"], p["role"]),
+                        )
+                conn.execute("DELETE FROM issue_parties WHERE issue_id = ?", (loser_id,))
+
+                conn.execute("UPDATE issues SET state = ?, updated_at = ? WHERE id = ?",
+                             ("noise-archived", now, loser_id))
+                conn.execute(
+                    """INSERT INTO audit_log (entity_type, entity_id, field, old_value, new_value, changed_ts, reason)
+                       VALUES ('issue', ?, 'issue_identity_merged_into', ?, ?, ?, ?)""",
+                    (loser_id, loser_id, winner_id, now, reason_label),
+                )
+                conn.execute("COMMIT")
+            except Exception:
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.OperationalError:
+                    pass
+                raise
+        finally:
+            conn.close()
+
+
 def get_raw_items_for_issues(issue_ids: list[str]) -> dict[str, list[dict]]:
     """Batched form of get_raw_items_for_issue - one query for N issues
     instead of N queries. Fixed 2026-07-30 (hardening pass #3): workgraph_

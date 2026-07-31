@@ -976,3 +976,75 @@ def test_create_project_link_rejects_invalid_link_type(ws_db):
     p2 = ws_db.create_project_with_new_id(name="P2", category="other")
     with pytest.raises(sqlite3.IntegrityError):
         ws_db.create_project_link(from_project_id=p1, to_project_id=p2, link_type="bogus", reason="r")
+
+
+# --- remediate_merge_issue_identity (step 7, calendar-series remediation) -
+
+def test_remediate_merge_issue_identity_reassigns_raw_items_and_archives_loser(ws_db):
+    winner = ws_db.create_issue_with_new_id(title="Winner", state="active", category="other")
+    loser = ws_db.create_issue_with_new_id(title="Loser occurrence", state="active", category="other")
+    rid = ws_db.insert_raw_item(source="calendar", stable_key="evt-1", thread_key="evt-1", dedupe_key="dk1",
+                                 occurred_ts=time.time(), subject="s", from_actor="a@example.com", participants_json="[]")
+    ws_db.link_raw_item_to_issue(rid, loser)
+
+    ws_db.remediate_merge_issue_identity(winner, loser, reason_label="test remediation")
+
+    assert ws_db.get_raw_item(rid)["issue_id"] == winner
+    assert ws_db.get_issue(loser)["state"] == "noise-archived"
+
+
+def test_remediate_merge_issue_identity_moves_all_fk_tables(ws_db):
+    winner = ws_db.create_issue_with_new_id(title="Winner", state="active", category="other")
+    loser = ws_db.create_issue_with_new_id(title="Loser", state="active", category="other")
+    ws_db.create_task(issue_id=loser, label="a task", owner=None)
+
+    ws_db.remediate_merge_issue_identity(winner, loser, reason_label="test")
+
+    tasks = ws_db.list_tasks_for_issue(winner) if hasattr(ws_db, "list_tasks_for_issue") else None
+    conn = ws_db._connect()
+    row = conn.execute("SELECT issue_id FROM work_tasks WHERE label = ?", ("a task",)).fetchone()
+    conn.close()
+    assert row["issue_id"] == winner
+
+
+def test_remediate_merge_issue_identity_dedupes_shared_party(ws_db):
+    """The real shape: the SAME organizer/party is linked to both the
+    winner and the loser (every occurrence of a recurring series shares
+    the organizer) - must not violate issue_parties' (issue_id, party_id)
+    primary key."""
+    winner = ws_db.create_issue_with_new_id(title="Winner", state="active", category="other")
+    loser = ws_db.create_issue_with_new_id(title="Loser", state="active", category="other")
+    ws_db.upsert_party(id="shared-organizer", primary_email="org@example.com", display_name="Organizer",
+                        affiliation="internal", affiliation_confidence="H", affiliation_source="domain", company=None)
+    ws_db.link_party_to_issue(winner, "shared-organizer")
+    ws_db.link_party_to_issue(loser, "shared-organizer")
+
+    ws_db.remediate_merge_issue_identity(winner, loser, reason_label="test")
+
+    parties = ws_db.list_parties_for_issue(winner)
+    assert len([p for p in parties if p["id"] == "shared-organizer"]) == 1
+
+
+def test_remediate_merge_issue_identity_moves_a_party_only_the_loser_had(ws_db):
+    winner = ws_db.create_issue_with_new_id(title="Winner", state="active", category="other")
+    loser = ws_db.create_issue_with_new_id(title="Loser", state="active", category="other")
+    ws_db.upsert_party(id="loser-only", primary_email="attendee@example.com", display_name="Attendee",
+                        affiliation="internal", affiliation_confidence="H", affiliation_source="domain", company=None)
+    ws_db.link_party_to_issue(loser, "loser-only")
+
+    ws_db.remediate_merge_issue_identity(winner, loser, reason_label="test")
+
+    parties = ws_db.list_parties_for_issue(winner)
+    assert any(p["id"] == "loser-only" for p in parties)
+
+
+def test_get_calendar_raw_items_for_remediation_only_returns_calendar_source(ws_db):
+    ws_db.insert_raw_item(source="calendar", stable_key="c1", thread_key="c1", dedupe_key="dkc1",
+                           occurred_ts=time.time(), subject="cal", from_actor="a@example.com", participants_json="[]")
+    ws_db.insert_raw_item(source="outlook_mail", stable_key="m1", thread_key="m1", dedupe_key="dkm1",
+                           occurred_ts=time.time(), subject="mail", from_actor="a@example.com", participants_json="[]")
+
+    rows = ws_db.get_calendar_raw_items_for_remediation()
+
+    assert len(rows) == 1
+    assert rows[0]["subject"] == "cal"

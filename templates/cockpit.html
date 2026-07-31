@@ -8479,6 +8479,7 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
     const tasks = d.tasks || [], stateHistory = d.state_history || [];
     const parties = d.parties || [], project = d.project || null;
     const asks = d.asks || [], decisions = d.decisions || [], keyFacts = d.key_facts || [];
+    const repeatSignals = d.repeat_signals || [];
     const body = document.getElementById("pccDetail");
     const timeline = pccBuildTimeline(evidence, stateHistory);
     const lastTs = timeline.length ? timeline[0].ts : null;
@@ -8574,6 +8575,28 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
           <span class="pcc-zone-note">${asks.length} ask${asks.length === 1 ? "" : "s"} &middot; ${decisions.length} decision${decisions.length === 1 ? "" : "s"} &middot; ${keyFacts.length} key fact${keyFacts.length === 1 ? "" : "s"}</span>
         </div>
         ${extractionRowsHtml}
+      </div>` : "";
+
+    // Part D (2026-07-30): repeat-of-earlier-ask + escalation signals -
+    // curator only writes one of these when a new ask genuinely restates a
+    // prior one on this issue (see ingest/SYNTHESIS_ROUTINE.md), so this
+    // zone only appears when there's real signal, never a guess rendered
+    // as if it were one.
+    const repeatRowsHtml = repeatSignals.map(r => {
+      const daysNote = r.days_since_first_ask != null ? `${r.days_since_first_ask}d since first ask` : "";
+      const escBadge = r.escalated ? '<span class="pcc-deadline-badge" style="background:var(--pink-t);color:var(--red-d)">Escalated</span>' : '<span class="pcc-deadline-badge" style="background:var(--bg);color:var(--mut2)">Repeat</span>';
+      const note = [daysNote, r.escalated ? (r.escalation_note || "") : ""].filter(Boolean).join(" — ");
+      return `<div class="pcc-radar-row" style="cursor:default">
+        ${escBadge}
+        <span class="pcc-radar-mention-text">${pccEsc(r.ask_text)}${note ? ` (${pccEsc(note)})` : ""}</span>
+      </div>`;
+    }).join("");
+    const repeatZoneHtml = repeatRowsHtml ? `
+      <div class="pcc-zone">
+        <div class="pcc-zone-hd"><span>Repeat asks &amp; escalation</span>
+          <span class="pcc-zone-note">${repeatSignals.length} flagged</span>
+        </div>
+        ${repeatRowsHtml}
       </div>` : "";
 
     // Progress pairs each event with what the system can do about it. The
@@ -8741,6 +8764,7 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
         ${suggestZoneHtml}
         ${deadlinesZoneHtml}
         ${extractionZoneHtml}
+        ${repeatZoneHtml}
         <div class="pcc-zone">
           <div class="pcc-zone-hd"><span>Progress</span><span class="pcc-zone-note">What happened, and what can be done about it</span><span class="pcc-stale-pill pcc-stale-${stale.cls}">${pccEsc(stale.label)}</span></div>
           <div class="pcc-tl">${timelineRows}</div>

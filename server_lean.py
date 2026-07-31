@@ -76,6 +76,7 @@ import workgraph_export
 import workgraph_commitments
 import workgraph_asks_decisions
 import workgraph_key_facts
+import workgraph_repeat_signals
 import health_check
 import workgraph_suppliers
 import workgraph_digest
@@ -1186,7 +1187,11 @@ async def api_workgraph_issue_detail(issue_id: str):
                         # issue rather than every open issue.
                         "asks": sanitize_surrogates(workgraph_asks_decisions.list_asks_for_issue(issue_id)),
                         "decisions": sanitize_surrogates(workgraph_asks_decisions.list_decisions_for_issue(issue_id)),
-                        "key_facts": sanitize_surrogates(workgraph_key_facts.list_key_facts_for_issue(issue_id))})
+                        "key_facts": sanitize_surrogates(workgraph_key_facts.list_key_facts_for_issue(issue_id)),
+                        # Part D (2026-07-30): repeat-ask/escalation signals
+                        # curator recorded for this issue - see
+                        # workgraph_repeat_signals.py.
+                        "repeat_signals": sanitize_surrogates(workgraph_repeat_signals.list_repeat_signals_for_issue(issue_id))})
 
 
 class OpenEmailBody(BaseModel):

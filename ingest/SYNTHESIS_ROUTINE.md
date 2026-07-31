@@ -46,10 +46,34 @@ different jobs.
    POST /api/workgraph/raw_items/{raw_item_id}/extraction
    {"extracted_json": {"asks": [...], "decisions": [...],
                         "dates_mentioned": [{"text": "...", "kind": "hard"|"soft"}, ...],
-                        "commitments": [...], "key_facts": [...]}}
+                        "commitments": [...], "key_facts": [...],
+                        "repeat_signals": [{"ask_text": "...", "days_since_first_ask": 6,
+                                             "escalated": true,
+                                             "escalation_note": "2nd follow-up, now from the
+                                             requester's manager rather than the requester"}, ...]}}
    ```
    Computed ONCE per raw_item, permanently — never re-extract an item that already has a row here
    (check first; the routes list above tell you which raw_items already have one).
+
+   **`repeat_signals` (added 2026-07-30, Marc's direct request) — only populate this when a NEW ask
+   on this raw_item is genuinely restating one already asked earlier on the SAME issue, never a
+   guess:**
+   - Before writing `asks` for this raw_item, check this issue's prior asks:
+     `GET /api/workgraph/issues/{issue_id}` returns an `asks` list (already scoped to this one
+     issue) — read it first, same "gather the delta, not a guess" discipline as everywhere else in
+     this routine.
+   - If (and only if) a new ask is clearly the same request restated — a reminder, a follow-up, "as
+     mentioned before," the same specific thing being asked again — add one `repeat_signals` entry:
+     `ask_text` (the new raw_item's own restatement, verbatim), `days_since_first_ask` (real
+     arithmetic from this raw_item's `occurred_ts` minus the first ask's `occurred_ts` — never
+     estimate this, it's computable), `escalated` (true only if this occurrence came from a
+     DIFFERENT, more senior, or otherwise new sender than the original ask — not true just because
+     time has passed), and `escalation_note` only when `escalated` is true (say who/what changed,
+     don't repeat the ask text here).
+   - If a new ask is NOT a clear repeat (a genuinely new, distinct ask, even on a related topic),
+     do not force a `repeat_signals` entry — omitting it entirely is the normal, correct outcome for
+     most asks, same as `estimated_completion` being genuinely absent in step 5 below. This field
+     exists to capture a real, judged repeat — never to flag every ask as "maybe related."
 
    **`dates_mentioned` entries need real judgment on `kind` (added 2026-07-30, Marc's direct
    request) — this is exactly the kind of call deterministic code can't make, which is why it

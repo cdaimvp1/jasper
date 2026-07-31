@@ -1145,7 +1145,7 @@ async def api_export_issues_csv(start: str, end: str, state: Optional[str] = Non
 
 
 @app.get("/api/workgraph/issues/{issue_id}")
-async def api_workgraph_issue_detail(issue_id: str):
+async def api_workgraph_issue_detail(issue_id: str, log_choice: bool = False):
     issue = wg.get_issue(issue_id)
     if issue is None:
         raise HTTPException(404, f"no such issue: {issue_id}")
@@ -1179,12 +1179,18 @@ async def api_workgraph_issue_detail(issue_id: str):
     # to project_synthesis's suggested_actions the same way the frontend
     # already does when this issue has no synthesis of its own.
     issue["candidate_actions"] = workgraph_nba.candidate_actions(issue, evidence, synthesis or project_synthesis)
-    # Part E2 (2026-07-30): log what was offered, once per open (not-yet-
-    # chosen) window - avoids spamming a new row on every repeat page
-    # view. This is the first real "what did we offer vs. what did Marc
-    # actually do" audit trail; the learning step over accumulated rows is
-    # a deliberate later phase, not built yet.
-    if wg.get_most_recent_open_choice_log(issue_id) is None:
+    # Part E2 (2026-07-30): log what was offered - ONLY when the caller is
+    # a real, intentional detail-pane view (log_choice=true), never the
+    # Inbox/Project-detail background bucketing prefetch, which calls this
+    # exact endpoint for every issue in the list on every 20s poll. Fixed
+    # same-day after catching it live: without this guard, one poll cycle
+    # would have written a choice-log row for every issue in the database
+    # regardless of whether Marc ever looked at it - diluting the whole
+    # point of this table (what was offered when a real decision was
+    # actually being made). Once per open (not-yet-chosen) window even
+    # when log_choice is true - avoids spamming a new row on every repeat
+    # view of the same issue.
+    if log_choice and wg.get_most_recent_open_choice_log(issue_id) is None:
         wg.create_nba_choice_log(
             issue_id=issue_id,
             offered_json=json.dumps(issue["candidate_actions"], default=str),

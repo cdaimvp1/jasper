@@ -8461,14 +8461,17 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
     });
     let d = pccDetailCache[issueId];
     if (!d) {
-      const r = await fetch(`/api/workgraph/issues/${encodeURIComponent(issueId)}`, { cache: "no-store" });
+      // log_choice=1: this is a real, intentional detail-pane view - see
+      // server_lean.py's own comment on why this must NOT be set on the
+      // background bucketing prefetch in pccLoadIssues below.
+      const r = await fetch(`/api/workgraph/issues/${encodeURIComponent(issueId)}?log_choice=1`, { cache: "no-store" });
       if (!r.ok) return;
       d = await r.json();
       pccDetailCache[issueId] = d;
     }
     pccRenderDetail(d);
     // Refresh in the background so a stale cache entry doesn't hide a just-added task/pending action.
-    fetch(`/api/workgraph/issues/${encodeURIComponent(issueId)}`, { cache: "no-store" })
+    fetch(`/api/workgraph/issues/${encodeURIComponent(issueId)}?log_choice=1`, { cache: "no-store" })
       .then(r => (r.ok ? r.json() : null))
       .then(fresh => { if (fresh) { pccDetailCache[issueId] = fresh; if (pccSelectedId === issueId) pccRenderDetail(fresh); } })
       .catch(() => {});

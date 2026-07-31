@@ -109,7 +109,7 @@ def test_list_open_issue_ids_for_reference_finds_matching_issue(ws_db):
                                  participants_json="[]")
     ws_db.link_raw_item_to_issue(rid, iid)
     conn = ws_db._connect()
-    conn.execute("UPDATE raw_items SET pr_number = ? WHERE id = ?", ("PR999999", rid))
+    conn.execute("UPDATE raw_items SET pr_number = ?, pr_number_base = ? WHERE id = ?", ("PR999999", "PR999999", rid))
     conn.close()
 
     assert ws_db.list_open_issue_ids_for_reference("PR999999") == [iid]
@@ -122,7 +122,7 @@ def test_list_open_issue_ids_for_reference_excludes_closed_issues(ws_db):
                                  participants_json="[]")
     ws_db.link_raw_item_to_issue(rid, iid)
     conn = ws_db._connect()
-    conn.execute("UPDATE raw_items SET pr_number = ? WHERE id = ?", ("PR888888", rid))
+    conn.execute("UPDATE raw_items SET pr_number = ?, pr_number_base = ? WHERE id = ?", ("PR888888", "PR888888", rid))
     conn.close()
 
     assert ws_db.list_open_issue_ids_for_reference("PR888888") == []
@@ -145,7 +145,7 @@ def test_list_open_issue_ids_for_reference_orders_most_recently_updated_first(ws
                                      participants_json="[]")
         ws_db.link_raw_item_to_issue(rid, iid)
         conn = ws_db._connect()
-        conn.execute("UPDATE raw_items SET pr_number = ? WHERE id = ?", ("PR777000", rid))
+        conn.execute("UPDATE raw_items SET pr_number = ?, pr_number_base = ? WHERE id = ?", ("PR777000", "PR777000", rid))
         conn.close()
     conn = ws_db._connect()
     conn.execute("UPDATE issues SET updated_at = ? WHERE id = ?", (100.0, older))
@@ -153,6 +153,39 @@ def test_list_open_issue_ids_for_reference_orders_most_recently_updated_first(ws
     conn.close()
 
     assert ws_db.list_open_issue_ids_for_reference("PR777000") == [newer, older]
+
+
+def test_list_open_issue_ids_for_reference_matches_on_base_not_full_string(ws_db):
+    """The real bug this fixes: querying by base "PR1140347" must find an
+    issue whose raw_item's full pr_number is a DIFFERENT version
+    ("PR1140347-V3") of the same real requisition."""
+    iid = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    rid = ws_db.insert_raw_item(source="outlook_mail", stable_key="pr4", thread_key="pr4", dedupe_key="pr4",
+                                 occurred_ts=time.time(), subject="s", from_actor="a@example.com",
+                                 participants_json="[]")
+    ws_db.link_raw_item_to_issue(rid, iid)
+    conn = ws_db._connect()
+    conn.execute("UPDATE raw_items SET pr_number = ?, pr_number_base = ? WHERE id = ?",
+                 ("PR1140347-V3", "PR1140347", rid))
+    conn.close()
+
+    assert ws_db.list_open_issue_ids_for_reference("PR1140347") == [iid]
+
+
+def test_classify_raw_item_persists_pr_number_base(ws_db):
+    iid = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    rid = ws_db.insert_raw_item(source="outlook_mail", stable_key="pr5", thread_key="pr5", dedupe_key="pr5",
+                                 occurred_ts=time.time(), subject="s", from_actor="a@example.com",
+                                 participants_json="[]")
+    ws_db.link_raw_item_to_issue(rid, iid)
+    ws_db.classify_raw_item(
+        rid, item_class="ACTIONABLE-ASK", direction="inbound", direction_inferred=False,
+        topic="other", topic_inferred=True, sentiment="neutral", sentiment_inferred=True,
+        anomaly_flag=False, pr_number="PR416079-V33", pr_number_base="PR416079",
+    )
+    row = ws_db.get_raw_items_for_issue(iid)[0]
+    assert row["pr_number"] == "PR416079-V33"
+    assert row["pr_number_base"] == "PR416079"
 
 
 def test_upsert_response_pattern_increments_hit_count_on_repeat(ws_db):
@@ -353,6 +386,123 @@ def test_alerts_migration_is_crash_safe(ws_db, monkeypatch):
         "SELECT name FROM sqlite_master WHERE type='table' AND name='alerts_pre_task55'"
     ).fetchone()
     assert orphan_check is None  # no orphaned table left behind either
+
+
+# --- merge_issues_txn (meeting-grouping/related-project identity pass) ----
+
+def test_merge_issues_txn_creates_new_project_when_neither_has_one(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
+    project_id = ws_db.merge_issues_txn(a, b, reason_label="test", new_project_name="New", new_project_category="other")
+    assert ws_db.get_issue(a)["project_id"] == project_id
+    assert ws_db.get_issue(b)["project_id"] == project_id
+    assert ws_db.get_project(project_id)["name"] == "New"
+
+
+def test_merge_issues_txn_collision_moves_every_member_and_archives_loser(ws_db):
+    proj_a = ws_db.create_project_with_new_id(name="Project A", category="other")
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    ws_db.assign_issue_to_project(a, proj_a)
+
+    proj_b = ws_db.create_project_with_new_id(name="Project B", category="other")
+    b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
+    ws_db.assign_issue_to_project(b, proj_b)
+    other = ws_db.create_issue_with_new_id(title="Other member of B", state="active", category="other")
+    ws_db.assign_issue_to_project(other, proj_b)
+
+    winner = ws_db.merge_issues_txn(a, b, reason_label="test collision", new_project_name="unused", new_project_category="other")
+
+    assert winner == proj_a
+    assert ws_db.get_issue(other)["project_id"] == proj_a
+    assert ws_db.get_project(proj_b)["status"] == "archived"
+
+
+def test_merge_issues_txn_is_crash_safe(ws_db):
+    """The real bug this fixes: merge_issues() used to run as several
+    independent autocommit connections (list_issues_for_project,
+    assign_issue_to_project x2-3, set_project_status) - a crash partway
+    through left the DB partially merged (e.g. the loser project archived
+    with some members still pointing at it, or the OTHER member of the
+    losing project reassigned but issue_a/issue_b themselves not yet
+    touched) with no recovery path. This simulates a genuine crash
+    (an exception that is NOT the caught sqlite3.OperationalError) firing
+    right after the losing project's OTHER member is reassigned, and proves
+    NOTHING was committed - not even that one UPDATE - because the whole
+    thing is one transaction."""
+    proj_a = ws_db.create_project_with_new_id(name="Project A", category="other")
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    ws_db.assign_issue_to_project(a, proj_a)
+
+    proj_b = ws_db.create_project_with_new_id(name="Project B", category="other")
+    b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
+    ws_db.assign_issue_to_project(b, proj_b)
+    other = ws_db.create_issue_with_new_id(title="Other member of B", state="active", category="other")
+    ws_db.assign_issue_to_project(other, proj_b)
+
+    real_connect = sqlite3.connect
+    call_count = {"reassigns": 0}
+
+    class _CrashingConnection(sqlite3.Connection):
+        def execute(self, sql, *args, **kwargs):
+            if sql.startswith("UPDATE issues SET project_id") and args and args[0] and args[0][0] == proj_a:
+                call_count["reassigns"] += 1
+                result = super().execute(sql, *args, **kwargs)
+                raise RuntimeError("simulated crash right after reassigning the other member")
+            return super().execute(sql, *args, **kwargs)
+
+    def fake_sqlite_connect(*args, **kwargs):
+        kwargs["factory"] = _CrashingConnection
+        return real_connect(*args, **kwargs)
+
+    sqlite3.connect = fake_sqlite_connect
+    try:
+        with pytest.raises(RuntimeError, match="simulated crash"):
+            ws_db.merge_issues_txn(a, b, reason_label="test crash", new_project_name="unused", new_project_category="other")
+    finally:
+        sqlite3.connect = real_connect
+    assert call_count["reassigns"] == 1  # confirms the crash point was actually hit
+
+    # Nothing committed: proj_b still active, other still belongs to it,
+    # a/b untouched - exactly as if the merge had never been attempted.
+    assert ws_db.get_project(proj_b)["status"] != "archived"
+    assert ws_db.get_issue(other)["project_id"] == proj_b
+    assert ws_db.get_issue(a)["project_id"] == proj_a
+    assert ws_db.get_issue(b)["project_id"] == proj_b
+
+
+def test_merge_issues_txn_retries_on_lock_then_succeeds(ws_db, monkeypatch):
+    """Bounded retry on BEGIN IMMEDIATE - _connect() sets no busy_timeout, so
+    a concurrent writer holding the lock raises immediately rather than
+    waiting. Simulates that happening twice, then succeeding on the third
+    attempt, and confirms the retry sleep is bounded (not a real sleep in
+    tests) and the merge still completes correctly."""
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
+
+    real_connect = sqlite3.connect
+    call_count = {"begins": 0}
+
+    class _LockedThenOkConnection(sqlite3.Connection):
+        def execute(self, sql, *args, **kwargs):
+            if sql == "BEGIN IMMEDIATE":
+                call_count["begins"] += 1
+                if call_count["begins"] < 3:
+                    raise sqlite3.OperationalError("database is locked")
+            return super().execute(sql, *args, **kwargs)
+
+    def fake_sqlite_connect(*args, **kwargs):
+        kwargs["factory"] = _LockedThenOkConnection
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr("time.sleep", lambda *a: None)
+    sqlite3.connect = fake_sqlite_connect
+    try:
+        project_id = ws_db.merge_issues_txn(a, b, reason_label="test retry", new_project_name="New", new_project_category="other")
+    finally:
+        sqlite3.connect = real_connect
+    assert call_count["begins"] == 3
+    assert ws_db.get_issue(a)["project_id"] == project_id
+    assert ws_db.get_issue(b)["project_id"] == project_id
 
 
 def test_list_distinct_signal_types_in_use(ws_db):

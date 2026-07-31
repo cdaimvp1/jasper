@@ -7,6 +7,7 @@
 import time
 
 import workgraph_classify as wc
+import workgraph_signals
 
 
 def test_escalating_matches_negative_cue_stem():
@@ -146,6 +147,7 @@ def _pending_item(ws_db, thread_key, subject, pr_number=None, item_class="ACTION
         rid, item_class=item_class, direction="inbound", direction_inferred=False,
         topic="other", topic_inferred=True, sentiment="neutral", sentiment_inferred=True,
         anomaly_flag=False, signal_type=None, pr_number=pr_number,
+        pr_number_base=workgraph_signals.reference_base(pr_number),
     )
     return rid
 

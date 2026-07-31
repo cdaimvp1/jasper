@@ -49,6 +49,25 @@ OWNER_NAME_UPPER = "MARC LANE"
 # already uses, now the single shared source instead of two copies.
 REFERENCE_ID_RE = re.compile(r"\b(?:PR|PO)\d{4,}(?:-V\d+)?\b", re.I)
 
+# 2026-07-31 (meeting-grouping/related-project identity pass): the version
+# suffix above (-V33 etc.) is real and worth keeping for display, but every
+# matching function in workgraph_projects.py used to compare the FULL
+# versioned string - so "PR416079-V32" and "PR416079-V33" were treated as
+# two entirely unrelated identities, and worse, as ACTIVELY CONTRADICTING
+# evidence by the disjoint-reference veto (real production pair confirmed:
+# PR1140347-V2/V3). This strips the version suffix for MATCHING only - the
+# full string (raw_items.pr_number) is untouched and still shown as the
+# reference-ID chip.
+_VERSION_SUFFIX_RE = re.compile(r"-V\d+$", re.I)
+
+
+def reference_base(full: Optional[str]) -> Optional[str]:
+    """Version-stripped identity for matching (e.g. "PR416079-V33" ->
+    "PR416079"). None/"" in, None out - never fabricates an identity."""
+    if not full:
+        return full
+    return _VERSION_SUFFIX_RE.sub("", full.upper())
+
 # (signal_type, sender-substring-or-None, subject regex, default treatment).
 # Order matters - first match wins; within one sender family, the most
 # specific/least-ambiguous pattern comes first (e.g. "fully approved" before
@@ -137,11 +156,13 @@ def known_signal_types() -> list[str]:
 
 
 def classify_signal(*, subject: str, from_actor: str) -> Optional[dict]:
-    """Returns {signal_type, treatment, pr_number} for a recognized automated
-    signal email, or None when nothing matches (the email is NOT one of these
-    known systems - falls through to classify.py's normal cues, never forced).
-    `treatment` is the live override if one has been set for this signal_type,
-    else the rule's own hardcoded default."""
+    """Returns {signal_type, treatment, pr_number, pr_number_base} for a
+    recognized automated signal email, or None when nothing matches (the
+    email is NOT one of these known systems - falls through to classify.py's
+    normal cues, never forced). `treatment` is the live override if one has
+    been set for this signal_type, else the rule's own hardcoded default.
+    `pr_number_base` is the version-stripped identity (see reference_base) -
+    used for matching only; `pr_number` stays the full string, for display."""
     subject = subject or ""
 
     for signal_type, domain, pattern, default_treatment in _RULES:
@@ -159,6 +180,8 @@ def classify_signal(*, subject: str, from_actor: str) -> Optional[dict]:
             pass  # fail-open to the hardcoded default rather than block classification
 
         m = REFERENCE_ID_RE.search(subject)
-        return {"signal_type": signal_type, "treatment": treatment, "pr_number": m.group(0).upper() if m else None}
+        pr_number = m.group(0).upper() if m else None
+        return {"signal_type": signal_type, "treatment": treatment, "pr_number": pr_number,
+                "pr_number_base": reference_base(pr_number)}
 
     return None

@@ -81,23 +81,50 @@ def reference_ids_for_issue(issue_id: str) -> set:
     contributes nothing (None), never a guess. Public (not underscore-
     prefixed): enhancement #86 (issue detail panel reference-ID chip)
     reuses this exact same set from server_lean.py rather than re-deriving
-    it - one real source, not two copies of the same read."""
+    it - one real source, not two copies of the same read.
+
+    DISPLAY/AUDIT ONLY - keeps the full versioned string (e.g.
+    "PR416079-V33"). Matching/grouping logic below uses
+    reference_base_ids_for_issue instead (2026-07-31 fix) - see that
+    function's own docstring for why the two must NOT be the same set."""
     return {
         item["pr_number"].upper() for item in ws.get_raw_items_for_issue(issue_id)
         if item.get("pr_number")
     }
 
 
+def reference_base_ids_for_issue(issue_id: str) -> set:
+    """Same shape as reference_ids_for_issue, but version-stripped (e.g.
+    "PR416079-V33" -> "PR416079") - the set actually used for MATCHING.
+
+    2026-07-31 fix: every matching function below used to compare the FULL
+    versioned string, so "PR416079-V32" and "PR416079-V33" (confirmed real:
+    PR1140347-V2/V3 both exist in production today) were treated as two
+    entirely unrelated identities - and worse, _vetoed_by_reference_mismatch
+    treated the mismatch as ACTIVELY CONTRADICTING evidence, which could
+    veto an otherwise-valid party/company/topic match. reference_ids_for_
+    issue (above) stays untouched for display/audit - server_lean.py's
+    issue-detail reference-ID chip should keep showing the specific
+    version, not the collapsed base."""
+    return {
+        item["pr_number_base"].upper() for item in ws.get_raw_items_for_issue(issue_id)
+        if item.get("pr_number_base")
+    }
+
+
 def _vetoed_by_reference_mismatch(issue_id: str, sibling_id: str) -> bool:
     """True when BOTH issues have at least one identified PR/PO reference
-    and the sets are disjoint - a real, structured signal that overrides
-    ANY of the strong-signal checks below (shared party/company/subject),
-    since two different purchase requisitions are two different
-    transactions no matter how similar their surrounding text looks."""
-    my_refs = reference_ids_for_issue(issue_id)
+    BASE and the sets are disjoint - a real, structured signal that
+    overrides ANY of the strong-signal checks below (shared party/company/
+    subject), since two different purchase requisitions are two different
+    transactions no matter how similar their surrounding text looks.
+    Matches on the version-stripped base (see reference_base_ids_for_issue)
+    so a version bump (V32 -> V33 on the same requisition) is never
+    mistaken for a contradiction."""
+    my_refs = reference_base_ids_for_issue(issue_id)
     if not my_refs:
         return False
-    sibling_refs = reference_ids_for_issue(sibling_id)
+    sibling_refs = reference_base_ids_for_issue(sibling_id)
     return bool(sibling_refs) and my_refs.isdisjoint(sibling_refs)
 
 
@@ -115,8 +142,13 @@ def _shared_reference_id(issue_id: str):
     (reference_id, sibling_issue_id) for the first other OPEN issue
     sharing at least one of this issue's reference ids, or None. No veto
     check needed on this branch - a shared reference and a disjoint
-    reference are mutually exclusive by construction."""
-    my_refs = reference_ids_for_issue(issue_id)
+    reference are mutually exclusive by construction.
+
+    Matches on the version-stripped base (2026-07-31 fix) - so an issue
+    whose only raw_item says "PR416079-V32" now correctly finds a sibling
+    whose raw_item says "PR416079-V33", instead of the two never matching
+    at all."""
+    my_refs = reference_base_ids_for_issue(issue_id)
     for ref in sorted(my_refs):
         for sibling_id in ws.list_open_issue_ids_for_reference(ref):
             if sibling_id != issue_id:
@@ -394,7 +426,7 @@ def _issue_signal_snapshot(issue_id: str, issue: Optional[dict] = None) -> dict:
         "companies": companies,
         "internal": internal,
         "topic_key": topic_key if len(topic_key) >= MIN_TOPIC_KEY_LEN else "",
-        "references": reference_ids_for_issue(issue_id),
+        "references": reference_base_ids_for_issue(issue_id),  # base, not full - see that function's docstring
         "category": issue.get("category"),
         "project_id": issue.get("project_id"),
     }
@@ -531,35 +563,28 @@ def merge_issues(issue_id_a: str, issue_id_b: str, *, reason_label: str) -> str:
     that reaches this), but the deterministic strong-signal path can
     still land here directly, so this handles the collision correctly
     rather than assuming it can't happen: every member of the LOSING
-    project moves to the winning one, and the emptied loser is archived
-    (workgraph_store.set_project_status - the exact mechanism task #81's
-    one-off remediation used, now actually wired into the ongoing path
-    instead of only ever being called by a test)."""
+    project moves to the winning one, and the emptied loser is archived.
+
+    Fixed again 2026-07-31 (real adversarial review, meeting-grouping design
+    pass): the whole multi-step reassign-and-archive sequence used to run as
+    several independent autocommit connections (via ws.list_issues_for_
+    project/assign_issue_to_project/set_project_status/create_project_with_
+    new_id) - a crash partway through left the DB partially merged with no
+    recovery path. This is now a thin wrapper: only the pre-computation that
+    genuinely needs to happen before a transaction can begin (the new
+    project's name/category, derived from issue_a's own parties) stays
+    here; the actual merge is one all-or-nothing transaction in
+    workgraph_store.merge_issues_txn (see its own docstring for why it has
+    to talk to a single connection directly instead of calling back into
+    other ws.* helpers)."""
     issue_a = ws.get_issue(issue_id_a)
-    issue_b = ws.get_issue(issue_id_b)
-    project_a = issue_a.get("project_id")
-    project_b = issue_b.get("project_id")
-
-    if project_a and project_b and project_a != project_b:
-        winner, loser = project_a, project_b
-        for member in ws.list_issues_for_project(loser):
-            if member["id"] in (issue_id_a, issue_id_b):
-                continue  # reassigned explicitly below either way
-            ws.assign_issue_to_project(member["id"], winner, reason=f"{reason_label}: project {loser} merged into {winner}")
-        ws.set_project_status(loser, "archived")
-        project_id = winner
-    elif project_a:
-        project_id = project_a
-    elif project_b:
-        project_id = project_b
-    else:
-        parties = ws.list_parties_for_issue(issue_id_a)
-        category = issue_a.get("category")
-        project_id = ws.create_project_with_new_id(name=_project_name_for(issue_a, category, parties), category=category)
-
-    ws.assign_issue_to_project(issue_id_a, project_id, reason=f"{reason_label} with {issue_id_b}")
-    ws.assign_issue_to_project(issue_id_b, project_id, reason=f"{reason_label} with {issue_id_a}")
-    return project_id
+    parties = ws.list_parties_for_issue(issue_id_a)
+    category = issue_a.get("category")
+    return ws.merge_issues_txn(
+        issue_id_a, issue_id_b, reason_label=reason_label,
+        new_project_name=_project_name_for(issue_a, category, parties),
+        new_project_category=category,
+    )
 
 
 def confirm_suggestion(suggestion_id: int) -> dict:

@@ -612,6 +612,20 @@ def init_workgraph() -> None:
             # column doesn't exist yet at that point on a pre-existing DB.
             conn.execute("CREATE INDEX IF NOT EXISTS idx_raw_pr_number ON raw_items(pr_number)")
             try:
+                # 2026-07-31 (meeting-grouping/related-project identity pass):
+                # version-stripped identity for MATCHING only - pr_number above
+                # keeps meaning "full string, for display/audit." Real bug this
+                # fixes: PR1140347-V2 and PR1140347-V3 were two entirely
+                # unrelated strings to every exact-match lookup, and the
+                # disjoint-set veto in workgraph_projects.py treated that
+                # mismatch as ACTIVELY CONTRADICTING evidence - worse than no
+                # reference at all. Must come after the pr_number ALTER TABLE
+                # above, same reasoning as idx_raw_pr_number below.
+                conn.execute("ALTER TABLE raw_items ADD COLUMN pr_number_base TEXT")
+            except sqlite3.OperationalError:
+                pass
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_raw_pr_number_base ON raw_items(pr_number_base)")
+            try:
                 # Outlook's own message identifier - the PS scan has always
                 # emitted this, but until now it was only used transiently to
                 # build stable_key/dedupe_key and never persisted. Needed to
@@ -818,6 +832,7 @@ def classify_raw_item(
     anomaly_flag: bool,
     signal_type: Optional[str] = None,
     pr_number: Optional[str] = None,
+    pr_number_base: Optional[str] = None,
 ) -> None:
     with _lock:
         conn = _connect()
@@ -826,10 +841,11 @@ def classify_raw_item(
                 """UPDATE raw_items SET
                        classified = 1, item_class = ?, direction = ?, direction_inferred = ?,
                        topic = ?, topic_inferred = ?, sentiment = ?, sentiment_inferred = ?,
-                       anomaly_flag = ?, signal_type = ?, pr_number = ?
+                       anomaly_flag = ?, signal_type = ?, pr_number = ?, pr_number_base = ?
                    WHERE id = ?""",
                 (item_class, direction, int(direction_inferred), topic, int(topic_inferred),
-                 sentiment, int(sentiment_inferred), int(anomaly_flag), signal_type, pr_number, raw_item_id),
+                 sentiment, int(sentiment_inferred), int(anomaly_flag), signal_type, pr_number,
+                 pr_number_base, raw_item_id),
             )
         finally:
             conn.close()
@@ -1394,16 +1410,22 @@ def get_raw_items_for_issues(issue_ids: list[str]) -> dict[str, list[dict]]:
     return out
 
 
-def list_open_issue_ids_for_reference(pr_number: str) -> list[str]:
+def list_open_issue_ids_for_reference(pr_number_base: str) -> list[str]:
     """Every currently-open issue with at least one raw_item carrying this
-    exact reference ID (PR/PO number). Grouping/NBA redesign Part A1/C: a
+    version-stripped reference identity (PR/PO base, e.g. "PR416079" - see
+    workgraph_signals.reference_base). Grouping/NBA redesign Part A1/C: a
     real, structured identifier is a positive match signal on its own, not
     just a veto (see workgraph_projects._vetoed_by_reference_mismatch for
     the existing negative-only use of this same field). Ordered by
     updated_at DESC so a caller wanting "the" single best match (Part C)
     can just take the first result - a deterministic, stable choice, not
-    an unordered pick."""
-    if not pr_number:
+    an unordered pick.
+
+    Matches on pr_number_base, not the full versioned pr_number (2026-07-31
+    fix) - "PR416079-V32" and "PR416079-V33" are the SAME real requisition,
+    and matching on the full string treated them as unrelated (or, worse,
+    actively contradicting - see _vetoed_by_reference_mismatch)."""
+    if not pr_number_base:
         return []
     with _lock:
         conn = _connect()
@@ -1411,10 +1433,10 @@ def list_open_issue_ids_for_reference(pr_number: str) -> list[str]:
             rows = conn.execute(
                 """SELECT i.id FROM issues i
                    JOIN raw_items r ON r.issue_id = i.id
-                   WHERE r.pr_number = ? AND i.state IN ('active','waiting','blocked')
+                   WHERE r.pr_number_base = ? AND i.state IN ('active','waiting','blocked')
                    GROUP BY i.id
                    ORDER BY i.updated_at DESC""",
-                (pr_number,),
+                (pr_number_base,),
             ).fetchall()
         finally:
             conn.close()
@@ -2336,6 +2358,126 @@ def assign_issue_to_project(issue_id: str, project_id: Optional[str], *, reason:
                    VALUES ('project', ?, 'issue_membership', ?, ?, ?, ?)""",
                 (project_id or old_project_id, old_project_id, project_id, time.time(), reason),
             )
+        finally:
+            conn.close()
+
+
+def _allocate_project_id_on(conn: sqlite3.Connection) -> str:
+    """Same max-existing-suffix scheme as next_project_id(), but queries the
+    GIVEN connection instead of opening a new one - for use inside
+    merge_issues_txn's own transaction, where BEGIN IMMEDIATE already holds
+    SQLite's RESERVED lock for the whole call, making the classic
+    SELECT-MAX-then-INSERT race impossible without needing the separate
+    IntegrityError-retry loop next_project_id()'s own caller
+    (create_project_with_new_id) needs outside a transaction."""
+    rows = conn.execute("SELECT id FROM projects WHERE id LIKE 'proj-%'").fetchall()
+    max_n = 0
+    for r in rows:
+        try:
+            max_n = max(max_n, int(r["id"].split("-", 1)[1]))
+        except (IndexError, ValueError):
+            continue
+    return f"proj-{max_n + 1:03d}"
+
+
+def merge_issues_txn(issue_id_a: str, issue_id_b: str, *, reason_label: str,
+                      new_project_name: str, new_project_category: Optional[str]) -> str:
+    """The real merge, as one all-or-nothing transaction. workgraph_projects.
+    merge_issues() is a thin wrapper around this.
+
+    Replaces what used to be a sequence of independent autocommit
+    connections/statements (get_issue, list_issues_for_project,
+    assign_issue_to_project x2-3, set_project_status, create_project_with_
+    new_id) - a crash partway through (e.g. after reassigning some but not
+    all of a losing project's members, or after archiving the loser but
+    before reassigning issue_a/issue_b themselves) left the DB in a
+    partially-merged, inconsistent state with no recovery path. This talks
+    to ONE connection directly rather than calling back into other ws.*
+    helpers - _lock (module-level, above) is a plain non-reentrant
+    threading.Lock, so calling back into another ws.* function that itself
+    acquires _lock from inside this function's own `with _lock:` block
+    would deadlock the calling thread against itself.
+
+    Mirrors the alerts-table migration's own BEGIN IMMEDIATE/COMMIT/ROLLBACK
+    pattern in init_workgraph() above (same file) - that migration exists
+    for the identical reason (a multi-step write that must be all-or-
+    nothing, in the same multi-process WAL-mode environment). The bounded
+    retry on BEGIN IMMEDIATE mirrors create_issue_with_new_id's/
+    create_task's own IntegrityError-retry idiom - _connect() sets no
+    busy_timeout, so a concurrent writer holding the lock raises
+    immediately rather than waiting.
+
+    Returns the resulting project_id."""
+    now = time.time()
+    with _lock:
+        conn = _connect()
+        try:
+            for attempt in range(5):
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    break
+                except sqlite3.OperationalError:
+                    if attempt == 4:
+                        raise
+                    time.sleep(random.uniform(0, 0.02) * (attempt + 1))
+            try:
+                row_a = conn.execute("SELECT project_id FROM issues WHERE id = ?", (issue_id_a,)).fetchone()
+                row_b = conn.execute("SELECT project_id FROM issues WHERE id = ?", (issue_id_b,)).fetchone()
+                project_a = row_a["project_id"] if row_a else None
+                project_b = row_b["project_id"] if row_b else None
+
+                if project_a and project_b and project_a != project_b:
+                    winner, loser = project_a, project_b
+                    members = conn.execute(
+                        "SELECT id FROM issues WHERE project_id = ?", (loser,)
+                    ).fetchall()
+                    for member in members:
+                        member_id = member["id"]
+                        if member_id in (issue_id_a, issue_id_b):
+                            continue  # reassigned explicitly below either way
+                        conn.execute(
+                            "UPDATE issues SET project_id = ?, updated_at = ? WHERE id = ?",
+                            (winner, now, member_id),
+                        )
+                        conn.execute(
+                            """INSERT INTO audit_log (entity_type, entity_id, field, old_value, new_value, changed_ts, reason)
+                               VALUES ('project', ?, 'issue_membership', ?, ?, ?, ?)""",
+                            (winner, loser, winner, now, f"{reason_label}: project {loser} merged into {winner}"),
+                        )
+                    conn.execute("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?", ("archived", now, loser))
+                    project_id = winner
+                elif project_a:
+                    project_id = project_a
+                elif project_b:
+                    project_id = project_b
+                else:
+                    project_id = _allocate_project_id_on(conn)
+                    conn.execute(
+                        "INSERT INTO projects (id, name, category, status, opened_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        (project_id, new_project_name, new_project_category, "active", now, now),
+                    )
+
+                for iid, other in ((issue_id_a, issue_id_b), (issue_id_b, issue_id_a)):
+                    row = conn.execute("SELECT project_id FROM issues WHERE id = ?", (iid,)).fetchone()
+                    old_project_id = row["project_id"] if row else None
+                    if old_project_id == project_id:
+                        continue
+                    conn.execute("UPDATE issues SET project_id = ?, updated_at = ? WHERE id = ?", (project_id, now, iid))
+                    conn.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (now, project_id))
+                    conn.execute(
+                        """INSERT INTO audit_log (entity_type, entity_id, field, old_value, new_value, changed_ts, reason)
+                           VALUES ('project', ?, 'issue_membership', ?, ?, ?, ?)""",
+                        (project_id, old_project_id, project_id, now, f"{reason_label} with {other}"),
+                    )
+
+                conn.execute("COMMIT")
+                return project_id
+            except Exception:
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.OperationalError:
+                    pass
+                raise
         finally:
             conn.close()
 

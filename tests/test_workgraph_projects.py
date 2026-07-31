@@ -40,8 +40,12 @@ def _raw_item(ws_db, issue_id, subject, key, from_actor="a@example.com"):
     ws_db.link_raw_item_to_issue(rid, issue_id)
     m = workgraph_signals.REFERENCE_ID_RE.search(subject or "")
     if m:
+        pr_number = m.group(0).upper()
         conn = ws_db._connect()
-        conn.execute("UPDATE raw_items SET pr_number = ? WHERE id = ?", (m.group(0).upper(), rid))
+        conn.execute(
+            "UPDATE raw_items SET pr_number = ?, pr_number_base = ? WHERE id = ?",
+            (pr_number, workgraph_signals.reference_base(pr_number), rid),
+        )
         conn.close()
     return rid
 
@@ -120,6 +124,38 @@ def test_veto_false_when_neither_side_has_a_reference(ws_db):
     assert wp._vetoed_by_reference_mismatch(a, b) is False
 
 
+def test_veto_false_when_references_are_different_versions_of_the_same_requisition(ws_db):
+    """The real bug (2026-07-31 fix): PR1140347-V2 and PR1140347-V3 both
+    exist in production today as the SAME real requisition at different
+    approval-cycle versions - the old exact-string match treated this as
+    ACTIVELY CONTRADICTING evidence (worse than no reference at all), which
+    could veto an otherwise-valid party/company/topic match."""
+    a = _issue(ws_db, "A")
+    _raw_item(ws_db, a, "PR1140347-V2 approval needed", "v9")
+    b = _issue(ws_db, "B")
+    _raw_item(ws_db, b, "PR1140347-V3 approval needed", "v10")
+    assert wp._vetoed_by_reference_mismatch(a, b) is False
+
+
+def test_shared_reference_id_matches_across_versions(ws_db):
+    """Positive counterpart of the fix above - a version bump on the SAME
+    requisition must now find its sibling, not just fail to veto it."""
+    a = _issue(ws_db, "A")
+    _raw_item(ws_db, a, "PR1140347-V2 approval needed", "v11")
+    b = _issue(ws_db, "B")
+    _raw_item(ws_db, b, "PR1140347-V3 approval needed", "v12")
+    result = wp._shared_reference_id(a)
+    assert result == ("PR1140347", b)
+
+
+def test_reference_base_ids_for_issue_strips_version(ws_db):
+    a = _issue(ws_db, "A")
+    _raw_item(ws_db, a, "PR416079-V33 approval needed", "v13")
+    assert wp.reference_base_ids_for_issue(a) == {"PR416079"}
+    # display set is untouched - still the full versioned string
+    assert wp.reference_ids_for_issue(a) == {"PR416079-V33"}
+
+
 # --- Part A1 (2026-07-30): matching reference ID as a positive signal ----
 
 def test_shared_reference_id_finds_sibling_with_no_other_signal_shared(ws_db):
@@ -133,7 +169,12 @@ def test_shared_reference_id_finds_sibling_with_no_other_signal_shared(ws_db):
 
     result = wp._shared_reference_id(a)
 
-    assert result == ("PR854779-V4", b)
+    # 2026-07-31: matches/returns the version-stripped BASE now (see
+    # reference_base_ids_for_issue) - both raw_items happen to share the
+    # exact same version here, but the function no longer relies on that;
+    # a genuinely different version on each side (the whole point of the
+    # fix) would still return this same base.
+    assert result == ("PR854779", b)
 
 
 def test_shared_reference_id_none_when_no_reference(ws_db):

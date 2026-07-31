@@ -172,8 +172,9 @@ def strip_subject_prefix(subject: str) -> str:
 def classify_item(*, subject: str, body_preview: str, from_actor: str) -> dict:
     """Pure (well - one settings-table read inside workgraph_signals, fail-
     open to its hardcoded default on any error). Returns
-    direction/topic/sentiment/anomaly/item_class/signal_type/pr_number, each
-    inferred field flagged, plus an overall confidence tier (H/M/L).
+    direction/topic/sentiment/anomaly/item_class/signal_type/pr_number/
+    pr_number_base, each inferred field flagged, plus an overall confidence
+    tier (H/M/L).
 
     A recognized automated signal (Ariba PR approval, Adobe Sign/DocuSign,
     ContractPodAI - see workgraph_signals.py) is checked FIRST and, when
@@ -287,6 +288,13 @@ def classify_item(*, subject: str, body_preview: str, from_actor: str) -> dict:
     if not pr_number:
         m = workgraph_signals.REFERENCE_ID_RE.search(text)
         pr_number = m.group(0).upper() if m else None
+    # 2026-07-31 (meeting-grouping/related-project identity pass): version-
+    # stripped identity for matching only - see workgraph_signals.
+    # reference_base's own docstring for why the full pr_number above stays
+    # untouched (still the real display/audit value).
+    pr_number_base = signal.get("pr_number_base") if signal else None
+    if not pr_number_base:
+        pr_number_base = workgraph_signals.reference_base(pr_number)
 
     return {
         "item_class": item_class,
@@ -297,6 +305,7 @@ def classify_item(*, subject: str, body_preview: str, from_actor: str) -> dict:
         "confidence": confidence,
         "signal_type": signal["signal_type"] if signal else None,
         "pr_number": pr_number,
+        "pr_number_base": pr_number_base,
     }
 
 
@@ -317,6 +326,7 @@ def run_classification(limit: int = 500) -> dict:
             sentiment=result["sentiment"], sentiment_inferred=result["sentiment_inferred"],
             anomaly_flag=result["anomaly_flag"],
             signal_type=result["signal_type"], pr_number=result["pr_number"],
+            pr_number_base=result["pr_number_base"],
         )
         counts[result["item_class"]] = counts.get(result["item_class"], 0) + 1
     return {"classified": len(items), "by_class": counts}
@@ -445,9 +455,13 @@ def cluster_and_link(limit: int = 500) -> dict:
         is_new_issue = False
         reference_match = None
         if issue_id is None:
-            pr_number = item.get("pr_number")
-            if pr_number:
-                candidates = ws.list_open_issue_ids_for_reference(pr_number)
+            # 2026-07-31: match on pr_number_base (version-stripped), not
+            # the full pr_number - see list_open_issue_ids_for_reference's
+            # own docstring for why (PR416079-V32/V33 are the same real
+            # requisition, not two unrelated strings).
+            pr_number_base = item.get("pr_number_base")
+            if pr_number_base:
+                candidates = ws.list_open_issue_ids_for_reference(pr_number_base)
                 if candidates:
                     reference_match = candidates[0]
                     would_attach_via_reference += 1
@@ -554,12 +568,20 @@ def backfill_reclassify() -> dict:
         # future NEGATIVE_CUE/POSITIVE_CUE/OFF_CHANNEL/direction-cue change
         # would have silently never reached the existing backlog. Now every
         # field classify_item can produce is both compared and written.
+        # 2026-07-31: pr_number_base added to the comparison - without this,
+        # every existing row that already has a pr_number set (and whose
+        # OTHER fields haven't changed) would be silently skipped forever,
+        # leaving pr_number_base permanently NULL for the whole pre-existing
+        # backlog even after this fix ships. Confirmed as the exact gotcha
+        # this migration needs to avoid during the meeting-grouping/related-
+        # project identity design pass.
         if (result["topic"] == item.get("topic") and result["item_class"] == item.get("item_class")
                 and result["signal_type"] == item.get("signal_type")
                 and result["direction"] == item.get("direction")
                 and result["sentiment"] == item.get("sentiment")
                 and result["anomaly_flag"] == bool(item.get("anomaly_flag"))
-                and result["pr_number"] == item.get("pr_number")):
+                and result["pr_number"] == item.get("pr_number")
+                and result["pr_number_base"] == item.get("pr_number_base")):
             continue  # already correct - nothing to update
 
         if item.get("issue_id") and result["topic"] and item["issue_id"] not in issue_new_topic:
@@ -572,6 +594,7 @@ def backfill_reclassify() -> dict:
             sentiment=result["sentiment"], sentiment_inferred=result["sentiment_inferred"],
             anomaly_flag=result["anomaly_flag"],
             signal_type=result["signal_type"], pr_number=result["pr_number"],
+            pr_number_base=result["pr_number_base"],
         )
         updated += 1
         if item.get("issue_id"):

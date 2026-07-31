@@ -69,11 +69,42 @@ def _parse_iso_to_epoch(iso_str: str) -> float:
         return time.time()
 
 
+def _calendar_series_key(ev: dict, eid: str, subject: str, organizer: str, start: str | None) -> tuple[str, str]:
+    """2026-07-31 fix (meeting-grouping design pass): real captured Graph
+    payloads (10 files, ~100+ events) confirmed seriesMasterId/recurrence are
+    NEVER populated in practice - not a rare fallback, the only case that
+    ever happens. Every real occurrence of a recurring series was getting
+    its OWN thread_key (= its own id), so every occurrence became its own
+    separate Issue - confirmed against real production data: 7 separate
+    issues for one real "DROP-IN HOURS" series.
+
+    thread_key already means "this source's series/thread identity" for
+    every other source (mail's conversationId, Teams' chat_id) - fixing the
+    VALUE computed here is sufficient; cluster_and_link already guarantees
+    one thread_key -> one Issue forever via the existing thread_map, no
+    other code needs to change.
+
+    Deliberately excludes weekday from the synthetic key: the real
+    DROP-IN HOURS series recurs Mon-Thu at the same time slot, but its
+    attendee list isn't stable occurrence-to-occurrence - a weekday-
+    inclusive key would fragment one real series into up to four. Returns
+    (thread_key, thread_key_source) - the second value is purely for
+    auditability (a heuristic key needs to be diagnosable later, not
+    re-guessed)."""
+    series_master_id = ev.get("seriesMasterId")
+    if series_master_id:
+        return f"graph:{series_master_id}", "graph_series_master_id"
+    if organizer:
+        hhmm = (start or "")[11:16]  # raw ISO substring, no timezone conversion
+        norm_subject = ws.normalize_topic_key(subject)  # reuse existing normalizer, no second copy
+        return f"synth:{organizer.lower()}|{norm_subject}|{hhmm}", "synthetic_calendar_series"
+    return eid, "stable_key_fallback"  # a genuinely one-off event with no organizer stays its own series
+
+
 def _process_calendar(payload: dict) -> list[dict]:
     """Real shape observed this session: a list of event objects (id, subject,
-    organizer, attendees[], start{dateTime,timeZone}, end{...}, summary, ...).
-    thread_key: the recurring series id when present, else the event's own id
-    (a non-recurring event is its own one-item series)."""
+    organizer, attendees[], start{dateTime,timeZone}, end{...}, summary,
+    isOrganizer, ...). thread_key: see _calendar_series_key."""
     events = payload.get("events") or []
     out = []
     for ev in events:
@@ -83,19 +114,25 @@ def _process_calendar(payload: dict) -> list[dict]:
         attendees = ev.get("attendees") or []
         start = (ev.get("start") or {}).get("dateTime")
         occurred_ts = _parse_iso_to_epoch(start) if start else time.time()
-        series_id = ev.get("seriesMasterId") or eid  # non-recurring events lack this field
+        thread_key, thread_key_source = _calendar_series_key(ev, eid, subject, organizer, start)
         participants = [organizer] + list(attendees)
         source_ref = eid
+        is_organizer = ev.get("isOrganizer")
         out.append({
             "source": "calendar",
             "stable_key": eid,
-            "thread_key": series_id,
+            "thread_key": thread_key,
+            "thread_key_source": thread_key_source,
             "dedupe_key": _dedupe_key(occurred_ts, participants, source_ref),
             "occurred_ts": occurred_ts,
             "subject": subject,
             "from_actor": organizer,
             "participants": participants,
             "body_preview": (ev.get("summary") or "")[:500],
+            # Real Graph field, previously discarded - NULL is a real,
+            # legitimate "unknown" (confirmed inconsistently present across
+            # capture calls), never silently defaulted to 0/False.
+            "is_organizer": (1 if is_organizer is True else 0 if is_organizer is False else None),
         })
     return out
 
@@ -231,6 +268,8 @@ def process_file(path: Path) -> dict:
             from_actor=item.get("from_actor"),
             participants_json=json.dumps(item.get("participants") or [], ensure_ascii=False),
             body_preview=item.get("body_preview"),
+            thread_key_source=item.get("thread_key_source"),
+            is_organizer=item.get("is_organizer"),
         )
         if row_id is None:
             duplicates += 1

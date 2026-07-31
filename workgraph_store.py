@@ -626,6 +626,24 @@ def init_workgraph() -> None:
                 pass
             conn.execute("CREATE INDEX IF NOT EXISTS idx_raw_pr_number_base ON raw_items(pr_number_base)")
             try:
+                # 2026-07-31 (meeting-grouping/related-project identity pass):
+                # auditability for the calendar thread_key fix - a heuristic
+                # synthetic series key needs to be diagnosable later, not
+                # re-guessed. NULL for every non-calendar source. Values:
+                # 'graph_series_master_id' | 'synthetic_calendar_series' |
+                # 'stable_key_fallback'.
+                conn.execute("ALTER TABLE raw_items ADD COLUMN thread_key_source TEXT")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                # Real Graph payload field (ev["isOrganizer"]), previously
+                # discarded - 1/0/NULL. NULL is a real, legitimate "unknown"
+                # (confirmed inconsistently present across capture calls) -
+                # never silently defaulted to 0.
+                conn.execute("ALTER TABLE raw_items ADD COLUMN is_organizer INTEGER")
+            except sqlite3.OperationalError:
+                pass
+            try:
                 # Outlook's own message identifier - the PS scan has always
                 # emitted this, but until now it was only used transiently to
                 # build stable_key/dedupe_key and never persisted. Needed to
@@ -741,6 +759,8 @@ def insert_raw_item(
     body_preview: Optional[str] = None,
     raw_ref: Optional[str] = None,
     entry_id: Optional[str] = None,
+    thread_key_source: Optional[str] = None,
+    is_organizer: Optional[int] = None,
 ) -> Optional[int]:
     """Insert one raw item. Returns the new row id, or None if it was a duplicate
     (dedupe_key already present — first write wins, matching the reference
@@ -752,10 +772,12 @@ def insert_raw_item(
                 cur = conn.execute(
                     """INSERT INTO raw_items
                        (source, stable_key, thread_key, dedupe_key, occurred_ts,
-                        subject, from_actor, participants, body_preview, raw_ref, ingested_ts, entry_id)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        subject, from_actor, participants, body_preview, raw_ref, ingested_ts, entry_id,
+                        thread_key_source, is_organizer)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (source, stable_key, thread_key, dedupe_key, occurred_ts,
-                     subject, from_actor, participants_json, body_preview, raw_ref, time.time(), entry_id),
+                     subject, from_actor, participants_json, body_preview, raw_ref, time.time(), entry_id,
+                     thread_key_source, is_organizer),
                 )
                 return cur.lastrowid
             except sqlite3.IntegrityError:

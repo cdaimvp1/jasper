@@ -172,6 +172,27 @@ def test_list_open_issue_ids_for_reference_matches_on_base_not_full_string(ws_db
     assert ws_db.list_open_issue_ids_for_reference("PR1140347") == [iid]
 
 
+def test_insert_raw_item_persists_thread_key_source_and_is_organizer(ws_db):
+    rid = ws_db.insert_raw_item(
+        source="calendar", stable_key="evt-1", thread_key="synth:x|y|19:00", dedupe_key="dk1",
+        occurred_ts=time.time(), subject="s", from_actor="a@example.com", participants_json="[]",
+        thread_key_source="synthetic_calendar_series", is_organizer=1,
+    )
+    row = ws_db.get_raw_item(rid)
+    assert row["thread_key_source"] == "synthetic_calendar_series"
+    assert row["is_organizer"] == 1
+
+
+def test_insert_raw_item_defaults_thread_key_source_and_is_organizer_to_none(ws_db):
+    rid = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key="m-1", thread_key="m-1", dedupe_key="dk2",
+        occurred_ts=time.time(), subject="s", from_actor="a@example.com", participants_json="[]",
+    )
+    row = ws_db.get_raw_item(rid)
+    assert row["thread_key_source"] is None
+    assert row["is_organizer"] is None
+
+
 def test_classify_raw_item_persists_pr_number_base(ws_db):
     iid = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
     rid = ws_db.insert_raw_item(source="outlook_mail", stable_key="pr5", thread_key="pr5", dedupe_key="pr5",

@@ -1179,6 +1179,23 @@ async def api_workgraph_issue_detail(issue_id: str):
     # to project_synthesis's suggested_actions the same way the frontend
     # already does when this issue has no synthesis of its own.
     issue["candidate_actions"] = workgraph_nba.candidate_actions(issue, evidence, synthesis or project_synthesis)
+    # Part E2 (2026-07-30): log what was offered, once per open (not-yet-
+    # chosen) window - avoids spamming a new row on every repeat page
+    # view. This is the first real "what did we offer vs. what did Marc
+    # actually do" audit trail; the learning step over accumulated rows is
+    # a deliberate later phase, not built yet.
+    if wg.get_most_recent_open_choice_log(issue_id) is None:
+        wg.create_nba_choice_log(
+            issue_id=issue_id,
+            offered_json=json.dumps(issue["candidate_actions"], default=str),
+            scoring_inputs_json=json.dumps({
+                "state": issue.get("state"), "category": issue.get("category"),
+                "priority_score": issue.get("priority_score"), "value_found": issue.get("value_found"),
+                "confidence_tier": issue.get("confidence_tier"),
+                "has_unmet_prerequisite": issue.get("has_unmet_prerequisite"),
+                "lesson_id_cited": issue.get("lesson_id_cited"),
+            }, default=str),
+        )
     return JSONResponse({"issue": sanitize_surrogates(issue), "evidence": sanitize_surrogates(evidence),
                         "pending_actions": sanitize_surrogates(pending), "tasks": sanitize_surrogates(tasks),
                         "state_history": sanitize_surrogates(state_history),
@@ -1289,6 +1306,12 @@ async def api_workgraph_issue_status(issue_id: str, body: WorkgraphIssueStatusBo
     if not fields:
         raise HTTPException(400, "at least one of state/priority required")
     wg.update_issue(issue_id, **fields)
+    # Part E2 (2026-07-30): a real, deterministic action was just taken
+    # against this issue - resolve whichever candidate list was most
+    # recently offered, if any.
+    open_log = wg.get_most_recent_open_choice_log(issue_id)
+    if open_log is not None and body.state is not None:
+        wg.mark_choice_log_chosen(open_log["id"], chosen_action_kind=body.state)
     return JSONResponse({"ok": True, "issue": sanitize_surrogates(wg.get_issue(issue_id))})
 
 
@@ -2022,6 +2045,13 @@ async def api_cockpit_action(body: CockpitActionBody):
         issue_id=body.issue_id, action_kind=body.action_kind, worker=body.worker,
         instructions=body.instructions, message_id=result.get("message_id"),
     )
+    # Part E2 (2026-07-30): a real generative action was just requested -
+    # resolve whichever candidate list was most recently offered, if any,
+    # and link it to the real pending_action this produced.
+    open_log = wg.get_most_recent_open_choice_log(body.issue_id)
+    if open_log is not None:
+        wg.mark_choice_log_chosen(open_log["id"], chosen_action_kind=body.action_kind,
+                                   resulting_pending_action_id=pending_id)
     return JSONResponse({"ok": True, "pending_action_id": pending_id, "message_id": result.get("message_id")})
 
 

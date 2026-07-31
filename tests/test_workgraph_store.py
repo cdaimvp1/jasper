@@ -559,3 +559,50 @@ def test_set_project_status_rejects_invalid_status(ws_db):
     with pytest.raises(ValueError):
         ws_db.set_project_status(pid, "bogus")
     assert ws_db.get_project(pid)["status"] != "bogus"
+
+
+# --- nba_choice_log (Part E2, grouping/NBA redesign) ----------------------
+
+def test_create_nba_choice_log_defaults_to_offered_status(ws_db):
+    iid = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    log_id = ws_db.create_nba_choice_log(issue_id=iid, offered_json="[]", scoring_inputs_json="{}")
+    log = ws_db.get_most_recent_open_choice_log(iid)
+    assert log["id"] == log_id
+    assert log["status"] == "offered"
+    assert log["chosen_action_kind"] is None
+
+
+def test_get_most_recent_open_choice_log_none_when_no_rows(ws_db):
+    iid = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    assert ws_db.get_most_recent_open_choice_log(iid) is None
+
+
+def test_get_most_recent_open_choice_log_ignores_already_chosen_rows(ws_db):
+    iid = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    log_id = ws_db.create_nba_choice_log(issue_id=iid, offered_json="[]", scoring_inputs_json="{}")
+    ws_db.mark_choice_log_chosen(log_id, chosen_action_kind="draft_reply")
+    assert ws_db.get_most_recent_open_choice_log(iid) is None
+
+
+def test_get_most_recent_open_choice_log_returns_the_latest_when_several(ws_db):
+    iid = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    first = ws_db.create_nba_choice_log(issue_id=iid, offered_json="[]", scoring_inputs_json="{}")
+    ws_db.mark_choice_log_chosen(first, chosen_action_kind="snooze")
+    second = ws_db.create_nba_choice_log(issue_id=iid, offered_json="[]", scoring_inputs_json="{}")
+    log = ws_db.get_most_recent_open_choice_log(iid)
+    assert log["id"] == second
+
+
+def test_mark_choice_log_chosen_sets_all_real_fields(ws_db):
+    iid = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    log_id = ws_db.create_nba_choice_log(issue_id=iid, offered_json='[{"kind":"draft_reply"}]', scoring_inputs_json="{}")
+    ws_db.mark_choice_log_chosen(log_id, chosen_action_kind="draft_reply",
+                                  resulting_pending_action_id=42, chosen_note="matched top candidate")
+    conn = ws_db._connect()
+    row = dict(conn.execute("SELECT * FROM nba_choice_log WHERE id = ?", (log_id,)).fetchone())
+    conn.close()
+    assert row["status"] == "chosen"
+    assert row["chosen_action_kind"] == "draft_reply"
+    assert row["resulting_pending_action_id"] == 42
+    assert row["chosen_note"] == "matched top candidate"
+    assert row["chosen_ts"] is not None

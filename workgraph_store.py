@@ -194,6 +194,28 @@ def init_workgraph() -> None:
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_pending_actions_issue ON pending_actions(issue_id, requested_ts DESC)")
 
+            # Part E2 of the grouping/NBA redesign (2026-07-30): the first
+            # real "what did we offer vs. what did Marc actually do" audit
+            # trail - feeds a later learning step once enough real data
+            # accumulates (explicitly out of scope for this build). Follows
+            # the lessons table's own real-repeated-outcome convention, not
+            # a write-once-and-forget log.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS nba_choice_log (
+                    id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    issue_id                    TEXT NOT NULL REFERENCES issues(id),
+                    offered_ts                  REAL NOT NULL,
+                    offered_json                TEXT NOT NULL,   -- ranked [{kind,label,rationale,score,source_surface}]
+                    scoring_inputs_json         TEXT NOT NULL,   -- state/days_stale/due/value/category/lesson snapshot at offer time
+                    status                      TEXT NOT NULL DEFAULT 'offered' CHECK (status IN ('offered','chosen','ignored','expired')),
+                    chosen_action_kind          TEXT,
+                    chosen_ts                   REAL,
+                    resulting_pending_action_id INTEGER REFERENCES pending_actions(id),
+                    chosen_note                 TEXT
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_nba_choice_log_issue_status ON nba_choice_log(issue_id, status, offered_ts DESC)")
+
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS alerts (
                     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1531,6 +1553,58 @@ def list_pending_actions(issue_id: Optional[str] = None) -> list[dict]:
         finally:
             conn.close()
     return [dict(r) for r in rows]
+
+
+# --- nba_choice_log (Part E2, grouping/NBA redesign, 2026-07-30) --------
+
+def create_nba_choice_log(*, issue_id: str, offered_json: str, scoring_inputs_json: str) -> int:
+    now = time.time()
+    with _lock:
+        conn = _connect()
+        try:
+            cur = conn.execute(
+                """INSERT INTO nba_choice_log
+                   (issue_id, offered_ts, offered_json, scoring_inputs_json, status)
+                   VALUES (?, ?, ?, ?, 'offered')""",
+                (issue_id, now, offered_json, scoring_inputs_json),
+            )
+            return cur.lastrowid
+        finally:
+            conn.close()
+
+
+def get_most_recent_open_choice_log(issue_id: str) -> Optional[dict]:
+    """The most recent still-'offered' (not yet chosen/ignored/expired) row
+    for this issue, or None. Used both to avoid spamming a new log row on
+    every repeat page view (only insert one if none is already open) and
+    to resolve which row a real action taken against this issue should
+    update."""
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM nba_choice_log WHERE issue_id = ? AND status = 'offered' "
+                "ORDER BY offered_ts DESC LIMIT 1",
+                (issue_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+    return dict(row) if row else None
+
+
+def mark_choice_log_chosen(log_id: int, *, chosen_action_kind: Optional[str],
+                            resulting_pending_action_id: Optional[int] = None,
+                            chosen_note: Optional[str] = None) -> None:
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                """UPDATE nba_choice_log SET status = 'chosen', chosen_action_kind = ?, chosen_ts = ?,
+                   resulting_pending_action_id = ?, chosen_note = ? WHERE id = ?""",
+                (chosen_action_kind, time.time(), resulting_pending_action_id, chosen_note, log_id),
+            )
+        finally:
+            conn.close()
 
 
 # --- alerts -------------------------------------------------------------

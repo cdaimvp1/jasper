@@ -8480,6 +8480,7 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
     const parties = d.parties || [], project = d.project || null;
     const asks = d.asks || [], decisions = d.decisions || [], keyFacts = d.key_facts || [];
     const repeatSignals = d.repeat_signals || [];
+    const candidateActions = issue.candidate_actions || [];
     const body = document.getElementById("pccDetail");
     const timeline = pccBuildTimeline(evidence, stateHistory);
     const lastTs = timeline.length ? timeline[0].ts : null;
@@ -8597,6 +8598,25 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
           <span class="pcc-zone-note">${repeatSignals.length} flagged</span>
         </div>
         ${repeatRowsHtml}
+      </div>` : "";
+
+    // Part E2 (2026-07-30): the top-ranked candidate (index 0) is already
+    // effectively represented by the existing why-line/primary action
+    // buttons above - this renders the REST (real alternatives, never
+    // previously visible anywhere) as a compact clickable list. "custom"
+    // (synthesis-sourced) candidates carry their own label/rationale
+    // through as instructions, since they have no fixed action_kind.
+    const otherCandidates = candidateActions.slice(1);
+    const altActionsHtml = otherCandidates.map(c => `
+      <button type="button" class="pcc-suggest-row" style="width:100%;text-align:left;cursor:pointer;border:none;background:none"
+              data-gen="${pccEsc(c.kind)}" ${c.kind === "custom" ? `data-instructions="${pccEsc(c.label + (c.rationale ? ' - ' + c.rationale : ''))}"` : ""}>
+        <div class="pcc-suggest-label">${pccEsc(c.label)}</div>
+        ${c.rationale ? `<div class="pcc-suggest-rationale">${pccEsc(c.rationale)}</div>` : ""}
+      </button>`).join("");
+    const altActionsZoneHtml = altActionsHtml ? `
+      <div class="pcc-zone" style="margin-top:0">
+        <div class="pcc-zone-hd"><span>Other suggested actions</span></div>
+        ${altActionsHtml}
       </div>` : "";
 
     // Progress pairs each event with what the system can do about it. The
@@ -8762,6 +8782,7 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
       <div class="pcc-detail-stack">
         ${summaryZoneHtml}
         ${suggestZoneHtml}
+        ${altActionsZoneHtml}
         ${deadlinesZoneHtml}
         ${extractionZoneHtml}
         ${repeatZoneHtml}
@@ -8782,7 +8803,7 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
     // bound to no longer render, and getElementById().addEventListener would
     // throw on every issue selection.
     body.querySelectorAll("[data-act]").forEach(btn => btn.addEventListener("click", () => pccRunDeterministic(issue.id, btn.getAttribute("data-act"))));
-    body.querySelectorAll("[data-gen]").forEach(btn => btn.addEventListener("click", () => pccRunGenerative(issue.id, btn.getAttribute("data-gen"))));
+    body.querySelectorAll("[data-gen]").forEach(btn => btn.addEventListener("click", () => pccRunGenerative(issue.id, btn.getAttribute("data-gen"), btn.getAttribute("data-instructions"))));
     body.querySelectorAll("[data-open-action]").forEach(btn => btn.addEventListener("click", async () => {
       const endpoint = btn.getAttribute("data-open-action");
       const rawItemId = parseInt(btn.getAttribute("data-raw-item-id"), 10);
@@ -8834,10 +8855,15 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
     await pccLoadIssues();
     if (issueId === pccSelectedId) pccSelectIssue(issueId);
   }
-  async function pccRunGenerative(issueId, actionKind) {
+  async function pccRunGenerative(issueId, actionKind, instructions) {
+    // Part E2 (2026-07-30): instructions is optional (undefined/null for
+    // every pre-existing caller, unchanged behavior) - used by the new
+    // "other suggested actions" alternatives list to carry a candidate's
+    // own label/rationale through for "custom" (synthesis-sourced)
+    // candidates, which have no fixed action_kind of their own.
     await fetch("/api/cockpit/actions", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ issue_id: issueId, action_kind: actionKind, worker: "bridge" }),
+      body: JSON.stringify({ issue_id: issueId, action_kind: actionKind, worker: "bridge", instructions: instructions || null }),
     });
     delete pccDetailCache[issueId];
     pccSelectIssue(issueId);  // re-render so the "pending" row shows up

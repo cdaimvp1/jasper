@@ -36,8 +36,10 @@ import sys
 import time
 from difflib import SequenceMatcher
 from pathlib import Path
+from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import config
 import workgraph_store as ws
 import workgraph_lessons
 import workgraph_signals
@@ -336,6 +338,171 @@ def _weak_signal_candidates(issue: dict) -> list:
     return out
 
 
+# --- Part A2 of the grouping/NBA redesign (2026-07-30): weighted multi- ---
+# --- signal confidence model, computed alongside the ordered model above --
+#
+# Real production evidence this session: the ordered model above trusts
+# ANY ONE of shared-company/matching-topic alone to auto-merge - the same
+# shape that already caused a real bug (task #81: 71 issues wrongly merged
+# because a subject-topic match alone fired). Marc's own instinct, checked
+# against the real pipeline: a shared internal sender or a bare category
+# match are each real but individually weak signals that should COMBINE
+# for confidence rather than trust any one alone. Reference-ID match and
+# shared-external-party stay standalone-sufficient (real, structurally
+# unambiguous signals, unlike the other three which are all heuristics).
+#
+# No single one of the 4 combinable signals reaches AUTO_MERGE_THRESHOLD
+# alone (max weight 0.40) - this directly closes the task #81 shape.
+# Ships shadow-logged only (config('grouping','scored_model_enabled')
+# defaults off) - group_issue() always computes this for comparison, but
+# only ACTS on it once the flag is on, and the flag should only be
+# switched on after backtest_scored_model()'s output has been reviewed
+# (see that function's own docstring) - a hard gate, not a formality.
+SCORE_WEIGHTS = {"company": 0.40, "topic": 0.40, "sender": 0.30, "category": 0.15}
+AUTO_MERGE_THRESHOLD = 0.65
+WEAK_SUGGESTION_FLOOR = 0.15  # preserves today's "one weak signal -> suggestion" behavior
+
+
+def _issue_signal_snapshot(issue_id: str, issue: Optional[dict] = None) -> dict:
+    """Precomputed signal data for ONE issue, shared by both the live
+    per-issue path (scored_grouping_decision) and the bulk backtest
+    (backtest_scored_model) - one real implementation, so the two can
+    never silently disagree about what a signal means."""
+    if issue is None:
+        issue = ws.get_issue(issue_id)
+    parties = ws.list_parties_for_issue(issue_id)
+    companies = {
+        p["company"].lower() for p in parties
+        if p.get("affiliation") == "external" and p.get("company")
+        and not workgraph_signals._SYSTEM_SENDER.match(p.get("primary_email") or "")
+    }
+    internal = {p["id"] for p in parties if p.get("affiliation") == "internal"}
+    has_external = any(p.get("affiliation") == "external" for p in parties)
+    topic_key = ws.normalize_topic_key(issue.get("title") or "") if has_external else ""
+    return {
+        "id": issue_id,
+        "companies": companies,
+        "internal": internal,
+        "topic_key": topic_key if len(topic_key) >= MIN_TOPIC_KEY_LEN else "",
+        "references": reference_ids_for_issue(issue_id),
+        "category": issue.get("category"),
+        "project_id": issue.get("project_id"),
+    }
+
+
+def _pairwise_score(a: dict, b: dict):
+    """Combined confidence score for two issues' precomputed signal
+    snapshots (see _issue_signal_snapshot). Company/topic/sender/category
+    each contribute a partial weight; none reaches AUTO_MERGE_THRESHOLD
+    alone. A disjoint reference-ID pair is vetoed to 0 regardless - the
+    same absolute override the ordered model already applies. Returns
+    (score, matched_signal_names)."""
+    if a["references"] and b["references"] and a["references"].isdisjoint(b["references"]):
+        return 0.0, []
+    signals = []
+    score = 0.0
+    if a["companies"] and b["companies"] and not a["companies"].isdisjoint(b["companies"]):
+        score += SCORE_WEIGHTS["company"]
+        signals.append("company")
+    if a["topic_key"] and b["topic_key"]:
+        m = SequenceMatcher(None, a["topic_key"], b["topic_key"]).find_longest_match(
+            0, len(a["topic_key"]), 0, len(b["topic_key"]))
+        if m.size >= MIN_TOPIC_KEY_LEN:
+            score += SCORE_WEIGHTS["topic"]
+            signals.append("topic")
+    if a["internal"] and b["internal"] and not a["internal"].isdisjoint(b["internal"]):
+        score += SCORE_WEIGHTS["sender"]
+        signals.append("sender")
+    if a["category"] and a["category"] != "other" and a["category"] == b["category"]:
+        score += SCORE_WEIGHTS["category"]
+        signals.append("category")
+    return score, signals
+
+
+def scored_grouping_decision(issue_id: str, issue: dict) -> dict:
+    """The scored model's verdict for ONE issue - always computed by
+    group_issue() regardless of whether config('grouping',
+    'scored_model_enabled') is on, so it can be shadow-logged for
+    comparison against the real (ordered-model) decision before ever
+    being trusted to act. Returns {verdict: auto_merge|suggest|no_match,
+    score, sibling_id, matched_signals}."""
+    m = _shared_reference_id(issue_id)
+    if m:
+        ref, sibling_id = m
+        return {"verdict": "auto_merge", "score": 1.0, "sibling_id": sibling_id, "matched_signals": ["reference"]}
+    m = _shared_external_party(issue_id)
+    if m:
+        party_id, sibling_id = m
+        if not _vetoed_by_reference_mismatch(issue_id, sibling_id):
+            return {"verdict": "auto_merge", "score": 1.0, "sibling_id": sibling_id, "matched_signals": ["party"]}
+
+    my_snapshot = _issue_signal_snapshot(issue_id, issue)
+    best_score, best_sibling, best_signals = 0.0, None, []
+    # Same limit fix as _shared_topic_key/_weak_signal_candidates above.
+    for other in ws.list_issues(states=None, limit=10000):
+        if other["id"] == issue_id:
+            continue
+        if my_snapshot["project_id"] and my_snapshot["project_id"] == other.get("project_id"):
+            continue
+        if other.get("project_id") and other.get("project_id") != my_snapshot["project_id"]:
+            continue  # never target an issue already in a DIFFERENT project - same rule as _weak_signal_candidates
+        other_snapshot = _issue_signal_snapshot(other["id"], other)
+        score, signals = _pairwise_score(my_snapshot, other_snapshot)
+        if score > best_score:
+            best_score, best_sibling, best_signals = score, other["id"], signals
+
+    if best_score >= AUTO_MERGE_THRESHOLD:
+        verdict = "auto_merge"
+    elif best_score >= WEAK_SUGGESTION_FLOOR:
+        verdict = "suggest"
+    else:
+        verdict = "no_match"
+    return {"verdict": verdict, "score": round(best_score, 2),
+            "sibling_id": best_sibling if verdict != "no_match" else None, "matched_signals": best_signals}
+
+
+def backtest_scored_model() -> dict:
+    """The required gate before config('grouping','scored_model_enabled')
+    is ever set to true - READ-ONLY, changes nothing. Runs the scored
+    model against every real pair in the current corpus and reports the
+    two things that matter:
+    (a) same-project pairs the new model would now score BELOW threshold
+        - informational (a real merge the new model wouldn't make on its
+        own; not necessarily wrong, just worth knowing).
+    (b) different-project (or one/both ungrouped) pairs the new model
+        would now score AT/OR-ABOVE threshold - the actual false-positive
+        class that matters (the exact task #81 shape) and needs human
+        review before the flag is ever enabled.
+    Every issue's signal snapshot is computed ONCE up front (real queries,
+    O(n)), then compared pairwise purely in memory (O(n^2) cheap set ops)
+    - fast even at real corpus scale."""
+    issues = ws.list_issues(states=None, limit=10000)
+    snapshots = {i["id"]: _issue_signal_snapshot(i["id"], i) for i in issues}
+    ids = list(snapshots.keys())
+
+    same_project_below_threshold = []
+    different_project_at_or_above = []
+    for idx, a_id in enumerate(ids):
+        a = snapshots[a_id]
+        for b_id in ids[idx + 1:]:
+            b = snapshots[b_id]
+            score, signals = _pairwise_score(a, b)
+            same_project = bool(a["project_id"] and a["project_id"] == b["project_id"])
+            if same_project and score < AUTO_MERGE_THRESHOLD:
+                same_project_below_threshold.append(
+                    {"a": a_id, "b": b_id, "score": round(score, 2), "project_id": a["project_id"]})
+            elif not same_project and score >= AUTO_MERGE_THRESHOLD:
+                different_project_at_or_above.append({
+                    "a": a_id, "b": b_id, "score": round(score, 2), "signals": signals,
+                    "a_project": a["project_id"], "b_project": b["project_id"],
+                })
+    return {
+        "issues_checked": len(ids),
+        "same_project_pairs_below_threshold": same_project_below_threshold,
+        "different_project_pairs_at_or_above_threshold": different_project_at_or_above,
+    }
+
+
 def merge_issues(issue_id_a: str, issue_id_b: str, *, reason_label: str) -> str:
     """The one place two issues actually become the same project - joins
     whichever of the two already has a project, or creates a new one.
@@ -414,15 +581,47 @@ def reject_suggestion(suggestion_id: int) -> dict:
 
 
 def group_issue(issue_id: str) -> dict:
-    """Runs the strong/weak signal logic for ONE issue. Safe to re-run -
+    """Runs the grouping logic for ONE issue. Safe to re-run -
     assign_issue_to_project and create_project_suggestion are both
     idempotent (the former no-ops if already assigned to the target project,
-    the latter reuses an existing pending row for the same pair)."""
+    the latter reuses an existing pending row for the same pair).
+
+    Part A2 of the grouping/NBA redesign (2026-07-30): scored_grouping_
+    decision() is ALWAYS computed, regardless of config('grouping',
+    'scored_model_enabled') - attached to every return as "shadow_scored"
+    for comparison against whichever model actually acted. Only when the
+    flag is on does the scored model's verdict replace the ordered
+    first-match model below (see backtest_scored_model()'s own docstring
+    for the required review before ever enabling that flag)."""
     issue = ws.get_issue(issue_id)
     if issue is None:
         return {"issue_id": issue_id, "action": "not_found"}
     if issue.get("project_id"):
         return {"issue_id": issue_id, "action": "already_grouped", "project_id": issue["project_id"]}
+
+    shadow_scored = scored_grouping_decision(issue_id, issue)
+    scored_model_enabled = bool(config.get("grouping", "scored_model_enabled"))
+
+    if scored_model_enabled:
+        if shadow_scored["verdict"] == "auto_merge":
+            reason_label = f"scored signal ({','.join(shadow_scored['matched_signals'])}, score={shadow_scored['score']})"
+            project_id = merge_issues(issue_id, shadow_scored["sibling_id"], reason_label=reason_label)
+            return {"issue_id": issue_id, "action": "auto_merged", "project_id": project_id,
+                    "signal": "scored", "shadow_scored": shadow_scored}
+        if shadow_scored["verdict"] == "suggest":
+            precedent = workgraph_lessons.precedent_prefilter(issue)
+            if precedent == "confirmed":
+                project_id = merge_issues(issue_id, shadow_scored["sibling_id"],
+                                           reason_label="auto-resolved by precedent (repeated confirmed pattern)")
+                return {"issue_id": issue_id, "action": "auto_merged", "project_id": project_id,
+                        "signal": "precedent", "shadow_scored": shadow_scored}
+            if precedent != "rejected":
+                ws.create_project_suggestion(
+                    issue_id_a=issue_id, issue_id_b=shadow_scored["sibling_id"],
+                    reason=f"scored signal ({','.join(shadow_scored['matched_signals'])}, score={shadow_scored['score']})",
+                )
+                return {"issue_id": issue_id, "action": "suggested", "count": 1, "shadow_scored": shadow_scored}
+        return {"issue_id": issue_id, "action": "no_match", "shadow_scored": shadow_scored}
 
     match = _strong_signal_match(issue_id, issue)
     if match:
@@ -434,7 +633,8 @@ def group_issue(issue_id: str) -> dict:
             "topic": f"strong signal: matching subject core '{detail}'",
         }[kind]
         project_id = merge_issues(issue_id, sibling_id, reason_label=reason_label)
-        return {"issue_id": issue_id, "action": "auto_merged", "project_id": project_id, "signal": kind}
+        return {"issue_id": issue_id, "action": "auto_merged", "project_id": project_id,
+                "signal": kind, "shadow_scored": shadow_scored}
 
     candidates = _weak_signal_candidates(issue)
 
@@ -450,7 +650,8 @@ def group_issue(issue_id: str) -> dict:
     if precedent == "confirmed" and candidates:
         project_id = merge_issues(issue_id, candidates[0]["id"],
                                    reason_label="auto-resolved by precedent (repeated confirmed pattern)")
-        return {"issue_id": issue_id, "action": "auto_merged", "project_id": project_id, "signal": "precedent"}
+        return {"issue_id": issue_id, "action": "auto_merged", "project_id": project_id,
+                "signal": "precedent", "shadow_scored": shadow_scored}
 
     suggested = 0
     if precedent != "rejected":
@@ -461,8 +662,8 @@ def group_issue(issue_id: str) -> dict:
             )
             suggested += 1
     if suggested:
-        return {"issue_id": issue_id, "action": "suggested", "count": suggested}
-    return {"issue_id": issue_id, "action": "no_match"}
+        return {"issue_id": issue_id, "action": "suggested", "count": suggested, "shadow_scored": shadow_scored}
+    return {"issue_id": issue_id, "action": "no_match", "shadow_scored": shadow_scored}
 
 
 def backfill_regroup_by_reference() -> dict:

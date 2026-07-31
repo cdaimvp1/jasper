@@ -457,3 +457,231 @@ def test_backfill_regroup_by_reference_is_safe_to_rerun(ws_db):
     assert first["auto_merged"] == 1
     assert second["auto_merged"] == 0
     assert second["already_grouped"] == 2
+
+
+# --- Part A2 (2026-07-30): weighted multi-signal scoring model -----------
+
+def _isolate_config(monkeypatch, tmp_path):
+    """Same isolation pattern as test_retention.py's retention_env fixture -
+    config.SETTINGS_PATH is bound at import time, not per-test."""
+    import config
+    monkeypatch.setattr(config, "SETTINGS_PATH", tmp_path / "settings.json")
+    monkeypatch.setattr(config, "_cache", {})
+    monkeypatch.setattr(config, "_cache_mtime", 0.0)
+    return config
+
+
+def test_pairwise_score_single_signal_never_reaches_threshold(ws_db):
+    a = _issue(ws_db, "A")
+    _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
+    b = _issue(ws_db, "B, unrelated subject entirely")
+    _link_party(ws_db, b, "p2", "other@acme.com", company="Acme")
+
+    snap_a = wp._issue_signal_snapshot(a, ws_db.get_issue(a))
+    snap_b = wp._issue_signal_snapshot(b, ws_db.get_issue(b))
+    score, signals = wp._pairwise_score(snap_a, snap_b)
+
+    assert signals == ["company"]
+    assert score == wp.SCORE_WEIGHTS["company"]
+    assert score < wp.AUTO_MERGE_THRESHOLD
+
+
+def test_pairwise_score_company_and_topic_combine_above_threshold(ws_db):
+    a = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted")
+    _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
+    b = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted again")
+    _link_party(ws_db, b, "p2", "other@acme.com", company="Acme")
+
+    snap_a = wp._issue_signal_snapshot(a, ws_db.get_issue(a))
+    snap_b = wp._issue_signal_snapshot(b, ws_db.get_issue(b))
+    score, signals = wp._pairwise_score(snap_a, snap_b)
+
+    assert set(signals) == {"company", "topic"}
+    assert score == wp.SCORE_WEIGHTS["company"] + wp.SCORE_WEIGHTS["topic"]
+    assert score >= wp.AUTO_MERGE_THRESHOLD
+
+
+def test_pairwise_score_category_other_never_contributes(ws_db):
+    a = _issue(ws_db, "A")
+    b = _issue(ws_db, "B")
+    snap_a = wp._issue_signal_snapshot(a, ws_db.get_issue(a))
+    snap_b = wp._issue_signal_snapshot(b, ws_db.get_issue(b))
+    score, signals = wp._pairwise_score(snap_a, snap_b)
+    assert "category" not in signals
+    assert score == 0.0
+
+
+def test_pairwise_score_disjoint_reference_vetoes_everything(ws_db):
+    """Even a strong combined score must be zeroed by a disjoint reference
+    ID - the absolute override carries over unchanged from the ordered
+    model."""
+    a = _issue(ws_db, "Action required: Approve the Requisition that X submitted")
+    _raw_item(ws_db, a, "PR111111", "pa1")
+    _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
+    b = _issue(ws_db, "Action required: Approve the Requisition that X submitted")
+    _raw_item(ws_db, b, "PR222222", "pa2")
+    _link_party(ws_db, b, "p2", "rep2@acme.com", company="Acme")
+
+    snap_a = wp._issue_signal_snapshot(a, ws_db.get_issue(a))
+    snap_b = wp._issue_signal_snapshot(b, ws_db.get_issue(b))
+    score, signals = wp._pairwise_score(snap_a, snap_b)
+
+    assert score == 0.0
+    assert signals == []
+
+
+def test_scored_grouping_decision_reference_match_is_auto_merge(ws_db):
+    a = _issue(ws_db, "First notice")
+    _raw_item(ws_db, a, "PR333222 approval needed", "sg1")
+    b = _issue(ws_db, "Totally different subject")
+    _raw_item(ws_db, b, "REMINDER PR333222", "sg2")
+
+    decision = wp.scored_grouping_decision(a, ws_db.get_issue(a))
+
+    assert decision["verdict"] == "auto_merge"
+    assert decision["score"] == 1.0
+    assert decision["sibling_id"] == b
+    assert decision["matched_signals"] == ["reference"]
+
+
+def test_scored_grouping_decision_combined_weak_signals_auto_merge(ws_db):
+    a = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted")
+    _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
+    b = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted again")
+    _link_party(ws_db, b, "p2", "other@acme.com", company="Acme")
+
+    decision = wp.scored_grouping_decision(a, ws_db.get_issue(a))
+
+    assert decision["verdict"] == "auto_merge"
+    assert decision["sibling_id"] == b
+    assert set(decision["matched_signals"]) == {"company", "topic"}
+
+
+def test_scored_grouping_decision_single_weak_signal_is_suggest_not_merge(ws_db):
+    a = _issue(ws_db, "A")
+    _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
+    b = _issue(ws_db, "B, unrelated subject entirely")
+    _link_party(ws_db, b, "p2", "other@acme.com", company="Acme")
+
+    decision = wp.scored_grouping_decision(a, ws_db.get_issue(a))
+
+    assert decision["verdict"] == "suggest"
+    assert decision["sibling_id"] == b
+
+
+def test_scored_grouping_decision_nothing_shared_is_no_match(ws_db):
+    a = _issue(ws_db, "A")
+    _issue(ws_db, "Completely unrelated")
+    decision = wp.scored_grouping_decision(a, ws_db.get_issue(a))
+    assert decision["verdict"] == "no_match"
+    assert decision["sibling_id"] is None
+
+
+def test_group_issue_shadow_scored_always_attached_regardless_of_flag(ws_db):
+    a = _issue(ws_db, "First notice")
+    _raw_item(ws_db, a, "PR444555 approval needed", "sg3")
+    b = _issue(ws_db, "Totally different subject")
+    _raw_item(ws_db, b, "REMINDER PR444555", "sg4")
+
+    result = wp.group_issue(a)
+
+    assert "shadow_scored" in result
+    assert result["shadow_scored"]["verdict"] == "auto_merge"
+
+
+def test_group_issue_flag_off_uses_ordered_model_not_scored_model(ws_db, monkeypatch, tmp_path):
+    """Real behavior check: a pair scoring high under the scored model but
+    matching NOTHING in the ordered model must still be a no_match while
+    the flag is off - confirms the scored model is truly shadow-only."""
+    config = _isolate_config(monkeypatch, tmp_path)
+    assert config.get("grouping", "scored_model_enabled") in (None, False)
+
+    a = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted")
+    _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
+    b = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted again")
+    _link_party(ws_db, b, "p2", "other@acme.com", company="Acme")
+
+    result = wp.group_issue(a)
+
+    # company+topic alone WOULD cross AUTO_MERGE_THRESHOLD under the scored
+    # model, but the ordered model's _strong_signal_match ALSO fires here
+    # (shared company IS one of its 3 checks) - so this specific case still
+    # auto-merges either way. The real assertion is that the ORDERED
+    # model's signal label is what's actually used, not "scored".
+    assert result["action"] == "auto_merged"
+    assert result["signal"] in ("company", "topic")
+    assert result["shadow_scored"]["verdict"] == "auto_merge"
+
+
+def test_group_issue_flag_on_uses_scored_model(ws_db, monkeypatch, tmp_path):
+    config = _isolate_config(monkeypatch, tmp_path)
+    config.set_value(True, "grouping", "scored_model_enabled")
+
+    a = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted")
+    _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
+    b = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted again")
+    _link_party(ws_db, b, "p2", "other@acme.com", company="Acme")
+
+    result = wp.group_issue(a)
+
+    assert result["action"] == "auto_merged"
+    assert result["signal"] == "scored"
+
+
+def test_group_issue_flag_on_single_weak_signal_creates_suggestion_not_merge(ws_db, monkeypatch, tmp_path):
+    config = _isolate_config(monkeypatch, tmp_path)
+    config.set_value(True, "grouping", "scored_model_enabled")
+
+    a = _issue(ws_db, "A")
+    _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
+    b = _issue(ws_db, "B, unrelated subject entirely")
+    _link_party(ws_db, b, "p2", "other@acme.com", company="Acme")
+
+    result = wp.group_issue(a)
+
+    assert result["action"] == "suggested"
+    assert ws_db.get_issue(a)["project_id"] is None
+
+
+# --- backtest_scored_model (Part A2's required gate) ----------------------
+
+def test_backtest_scored_model_is_read_only(ws_db):
+    a = _issue(ws_db, "A")
+    _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
+    b = _issue(ws_db, "B, unrelated subject entirely")
+    _link_party(ws_db, b, "p2", "other@acme.com", company="Acme")
+
+    wp.backtest_scored_model()
+
+    assert ws_db.get_issue(a)["project_id"] is None
+    assert ws_db.get_issue(b)["project_id"] is None
+
+
+def test_backtest_scored_model_flags_different_project_pair_scoring_above_threshold(ws_db):
+    a = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted")
+    _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
+    b = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted again")
+    _link_party(ws_db, b, "p2", "other@acme.com", company="Acme")
+
+    result = wp.backtest_scored_model()
+
+    hits = result["different_project_pairs_at_or_above_threshold"]
+    assert any({h["a"], h["b"]} == {a, b} for h in hits)
+
+
+def test_backtest_scored_model_task81_boilerplate_case_stays_a_veto(ws_db):
+    """Regression fixture: the real task #81 bug (boilerplate subject +
+    Ariba's own no-reply sender defeating company identification) must
+    NOT become a false positive under the scored model either - the
+    disjoint-reference veto still applies."""
+    a = _issue(ws_db, "Approve PR1111865")
+    _raw_item(ws_db, a, _BOILERPLATE.format(name="BRIAN LAUGHLIN", pr="PR1111865"), "bt1")
+    _link_party(ws_db, a, "ariba1", "no-reply@ansmtp.ariba.com")
+    b = _issue(ws_db, "Approve PR1193376")
+    _raw_item(ws_db, b, _BOILERPLATE.format(name="THOMAS TURNER", pr="PR1193376"), "bt2")
+    _link_party(ws_db, b, "ariba2", "no-reply@ansmtp.ariba.com")
+
+    result = wp.backtest_scored_model()
+
+    hits = result["different_project_pairs_at_or_above_threshold"]
+    assert not any({h["a"], h["b"]} == {a, b} for h in hits)

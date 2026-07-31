@@ -5935,6 +5935,15 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
     if (amount >= 1e3) return '$' + (amount / 1e3).toFixed(0) + 'K';
     return '$' + Math.round(amount);
   }
+  // Fixed 2026-07-30: this file's top-level <script> blocks are SEPARATE
+  // closures, not one shared scope (unlike pccEsc/pccFmtAge etc., which all
+  // live in the SAME block as their callers). pccRenderDetail (a later,
+  // different block) called this bare and threw "hoFmtMoney is not
+  // defined" - a real, confirmed-live ReferenceError that also broke
+  // clicking into any issue from the Project Detail view (pccSelectIssue
+  // calls pccRenderDetail). Exposed on window, same pattern already used
+  // for renderPartyChip/pccShowView/pccSelectIssue in this same file.
+  window.hoFmtMoney = hoFmtMoney;
 
   var state = { parties: [], projects: [], projectDetail: {}, issueParties: {}, suppliers: [] };
 
@@ -7739,10 +7748,11 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
 
   function start() {
     injectCss();
-    // load the app-wide feature modules (help center, voice) once, no page edits needed
-    ['assets/theo-connectors.js', 'assets/theo-help.js', 'assets/theo-voice.js', 'assets/theo-mentions.js'].forEach(function (src) {
-      var sc = document.createElement('script'); sc.src = src; sc.async = true; document.head.appendChild(sc);
-    });
+    // Fixed 2026-07-30: these 4 files never existed in this Jasper install's
+    // static/ (leftover from the Theo template this shell was forked from) -
+    // every page load 404'd 4 times for nothing. Jasper has its own real
+    // Help drawer and voice dictation built directly into this file; this
+    // injection wasn't wiring up either.
     // The header now hosts a small always-SLEEPING Theo (see startWalk in the brand
     // IIFE). Do NOT retire it here anymore, the old killWalk loop is removed so the
     // sleeper actually runs.
@@ -8691,7 +8701,7 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
     if (issue.due) metaBits.push(`Due ${pccEsc(issue.due)}`);
     // Enhancement #88: dollar value in play - already computed for Value-at-
     // risk/the Supplier Dashboard, never previously shown on the issue itself.
-    if (issue.value_found) metaBits.push(`${hoFmtMoney(issue.value_found)} in play`);
+    if (issue.value_found) metaBits.push(`${window.hoFmtMoney(issue.value_found)} in play`);
     const metaLine = metaBits.join(" &middot; ");
 
     // Synthesis: prefer this issue's own synthesis; once an issue is grouped

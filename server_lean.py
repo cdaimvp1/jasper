@@ -1507,14 +1507,29 @@ async def api_project_detail(project_id: str):
     # Project-detail redesign (2026-07-31, Marc's own design brief):
     # real rollups across every member issue, reusing the exact same
     # per-issue readers already built this session - no new extraction,
-    # just aggregation at a different scope.
+    # just aggregation at a different scope. Each per-issue reader returns
+    # bare strings (correct for the issue-level panel, where "which issue"
+    # is already implied by context) - at project scope that context is
+    # gone the moment a project has 2+ issues, so every entry gets tagged
+    # with issue_id/issue_title here at the aggregation point rather than
+    # changing the per-issue readers' own return shape for their existing
+    # (correctly-scoped) callers.
     asks, decisions, key_facts, commitments, repeat_signals = [], [], [], [], []
+    title_by_id = {i["id"]: (i.get("display_title") or i["title"]) for i in issues}
     for iid in issue_ids:
-        asks.extend(workgraph_asks_decisions.list_asks_for_issue(iid))
-        decisions.extend(workgraph_asks_decisions.list_decisions_for_issue(iid))
-        key_facts.extend(workgraph_key_facts.list_key_facts_for_issue(iid))
-        commitments.extend(workgraph_commitments.list_commitments_for_issue(iid))
-        repeat_signals.extend(workgraph_repeat_signals.list_repeat_signals_for_issue(iid))
+        issue_title = title_by_id.get(iid, iid)
+        asks.extend({"issue_id": iid, "issue_title": issue_title, "text": t}
+                    for t in workgraph_asks_decisions.list_asks_for_issue(iid))
+        decisions.extend({"issue_id": iid, "issue_title": issue_title, "text": t}
+                    for t in workgraph_asks_decisions.list_decisions_for_issue(iid))
+        key_facts.extend({"issue_id": iid, "issue_title": issue_title, "text": t}
+                    for t in workgraph_key_facts.list_key_facts_for_issue(iid))
+        commitments.extend({"issue_id": iid, "issue_title": issue_title, "text": t}
+                    for t in workgraph_commitments.list_commitments_for_issue(iid))
+        for rs in workgraph_repeat_signals.list_repeat_signals_for_issue(iid):
+            rs["issue_id"] = iid
+            rs["issue_title"] = issue_title
+            repeat_signals.append(rs)
     parties = workgraph_projects.aggregate_parties_for_project(project_id)
     value_by_issue = workgraph_nba.value_amounts_for_issues(open_ids)
     # "What the next owner must know" needs one real headline action, not

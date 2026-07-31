@@ -10059,6 +10059,78 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
 
     const pjStatusCls = project.status === "waiting" ? "status-waiting" : project.status === "done" ? "status-done"
       : project.status === "archived" ? "status-noise-archived" : "status-active";
+
+    // "Milestones and unresolved dependencies" (design brief) - gated/hard-
+    // deadline counts and value-in-play were already being computed by
+    // server_lean.py's api_project_detail but never actually rendered here.
+    const gatedBadge = gatedCount > 0 ? `<span class="pcc-deadline-badge" style="background:var(--pink-t);color:var(--red-d)">${gatedCount} gated</span>` : "";
+    const hardDeadlineBadge = hardDeadlineCount > 0 ? `<span class="pcc-deadline-badge" style="background:var(--pink-t);color:var(--red-d)">${hardDeadlineCount} hard deadline${hardDeadlineCount === 1 ? "" : "s"}</span>` : "";
+    const valueBadge = valueFound > 0 ? `<span class="pcc-deadline-badge" style="background:var(--blue-t);color:var(--bblue)">${window.hoFmtMoney(valueFound)} in play</span>` : "";
+
+    // "What the next owner must know" (design brief) - the one real headline
+    // action already computed server-side (top_action), same why-line idiom
+    // as the issue detail panel's whyLineHtml. Reuses the .pj-issue-row click
+    // wiring below rather than a separate handler.
+    const topActionHtml = topAction ? `
+      <div class="pcc-why-line pj-issue-row" data-id="${pjEsc(topAction.issue_id)}" style="cursor:pointer">Top priority: <b>${pjEsc(topAction.title)}</b>${topAction.reason ? " &mdash; " + pjEsc(topAction.reason) : ""}</div>` : "";
+
+    // "Internal and external relationships" (design brief) - real party data
+    // was already fetched (aggregate_parties_for_project) but never rendered.
+    // Same renderPartyChip idiom already used per-issue-row above and in the
+    // issue detail panel.
+    const stakeholdersZoneHtml = parties.length ? `
+      <div class="pcc-zone" style="margin-top:0">
+        <div class="pcc-zone-hd"><span>Stakeholders</span><span class="pcc-zone-note">${parties.length} across ${issues.length} issue${issues.length === 1 ? "" : "s"}</span></div>
+        <div class="pcc-actions-row">${parties.map(p => window.renderPartyChip(p)).join("")}</div>
+      </div>` : "";
+
+    // "Decision and commitment history" (design brief) - asks/decisions/key
+    // facts/commitments were all fetched but never rendered. Unlike the
+    // issue-level extractionRow (Enhancement #87), each entry here carries
+    // its own issue_id/issue_title (added server-side just for this - see
+    // api_project_detail) since "which issue" is no longer implied by
+    // context once a project has more than one member issue.
+    const pjExtractionRow = (label, entry) => `
+      <div class="pcc-radar-row pcc-radar-row-mentioned" data-id="${pjEsc(entry.issue_id)}">
+        <span class="pcc-deadline-badge" style="background:var(--bg);color:var(--mut2);flex:none">${label}</span>
+        <span class="pcc-radar-title">${pjEsc(entry.issue_title)}</span>
+        <span class="pcc-radar-mention-text">${pjEsc(entry.text)}</span>
+      </div>`;
+    const projExtractionRowsHtml = [
+      ...asks.map(e => pjExtractionRow("Ask", e)),
+      ...decisions.map(e => pjExtractionRow("Decision", e)),
+      ...keyFacts.map(e => pjExtractionRow("Key fact", e)),
+      ...commitments.map(e => pjExtractionRow("Commitment", e)),
+    ].join("");
+    const extractionZoneHtml = projExtractionRowsHtml ? `
+      <div class="pcc-zone" style="margin-top:0">
+        <div class="pcc-zone-hd"><span>Asks, decisions &amp; commitments</span>
+          <span class="pcc-zone-note">${asks.length} ask${asks.length === 1 ? "" : "s"} &middot; ${decisions.length} decision${decisions.length === 1 ? "" : "s"} &middot; ${keyFacts.length} key fact${keyFacts.length === 1 ? "" : "s"} &middot; ${commitments.length} commitment${commitments.length === 1 ? "" : "s"}</span>
+        </div>
+        ${projExtractionRowsHtml}
+      </div>` : "";
+
+    // Same field, same "curator only writes this on a genuine repeat" rule
+    // as the issue-level repeatZoneHtml (Part D) - just tagged with which
+    // issue each one belongs to, for the same reason as the zone above.
+    const projRepeatRowsHtml = repeatSignals.map(r => {
+      const daysNote = r.days_since_first_ask != null ? `${r.days_since_first_ask}d since first ask` : "";
+      const escBadge = r.escalated
+        ? '<span class="pcc-deadline-badge" style="background:var(--pink-t);color:var(--red-d);flex:none">Escalated</span>'
+        : '<span class="pcc-deadline-badge" style="background:var(--bg);color:var(--mut2);flex:none">Repeat</span>';
+      const note = [daysNote, r.escalated ? (r.escalation_note || "") : ""].filter(Boolean).join(" — ");
+      return `<div class="pcc-radar-row pcc-radar-row-mentioned" data-id="${pjEsc(r.issue_id)}">
+        ${escBadge}
+        <span class="pcc-radar-title">${pjEsc(r.issue_title)}</span>
+        <span class="pcc-radar-mention-text">${pjEsc(r.ask_text)}${note ? ` (${pjEsc(note)})` : ""}</span>
+      </div>`;
+    }).join("");
+    const repeatZoneHtml = projRepeatRowsHtml ? `
+      <div class="pcc-zone" style="margin-top:0">
+        <div class="pcc-zone-hd"><span>Repeat asks &amp; escalation</span><span class="pcc-zone-note">${repeatSignals.length} flagged</span></div>
+        ${projRepeatRowsHtml}
+      </div>` : "";
+
     body.innerHTML = `
       <div class="pcc-detail-hd">
         <div class="pcc-detail-hd-main">
@@ -10066,11 +10138,16 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
             <span class="pcc-status-badge ${pjStatusCls}">${pjEsc(project.status)}</span>
             <span class="pcc-deadline-badge" style="background:var(--bg);color:var(--mut2)">${pjEsc(project.id)}</span>
             <span class="pcc-meta-line">${pjEsc(project.category || "other")} &middot; ${issues.length} issue${issues.length === 1 ? "" : "s"}</span>
+            ${gatedBadge}${hardDeadlineBadge}${valueBadge}
           </div>
           <div class="pcc-detail-title">${pjEsc((synth && synth.derived_title) || project.name)}</div>
+          ${topActionHtml}
         </div>
       </div>
       ${summaryZones}
+      ${stakeholdersZoneHtml}
+      ${extractionZoneHtml}
+      ${repeatZoneHtml}
       <div class="pcc-zone">
         <div class="pcc-zone-hd"><span>Issues</span><span class="why-chip">${issues.length} total</span></div>
         ${issueRows}
@@ -10080,6 +10157,13 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
         ${docRows}
       </div>`;
     body.querySelectorAll(".pj-issue-row").forEach(row => {
+      row.addEventListener("click", () => {
+        const issueId = row.getAttribute("data-id");
+        if (window.pccShowView) window.pccShowView("pcc");
+        if (window.pccSelectIssue) window.pccSelectIssue(issueId);
+      });
+    });
+    body.querySelectorAll(".pcc-radar-row[data-id]").forEach(row => {
       row.addEventListener("click", () => {
         const issueId = row.getAttribute("data-id");
         if (window.pccShowView) window.pccShowView("pcc");

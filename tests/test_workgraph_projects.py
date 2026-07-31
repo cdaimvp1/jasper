@@ -248,9 +248,11 @@ def test_shared_real_company_with_different_pr_numbers_does_not_merge(ws_db):
     assert result["action"] == "no_match"
 
 
-def test_shared_real_company_without_reference_numbers_still_merges(ws_db):
-    """No PR/PO present on either side - the veto never applies, and the
-    existing shared-company behavior is unchanged."""
+def test_shared_real_company_without_reference_numbers_suggests_not_merges(ws_db):
+    """No PR/PO present on either side, so the reference veto never applies -
+    but shared company alone is narrowed (2026-07-31) to suggest-only, never
+    auto-merge on its own: an exact company match only proves the same
+    company is involved, not the same transaction."""
     a = _issue(ws_db, "Deal A")
     _raw_item(ws_db, a, "Let's discuss the renewal", "c3")
     _link_party(ws_db, a, "rep1", "rep1@acme.com", company="Acme")
@@ -261,7 +263,8 @@ def test_shared_real_company_without_reference_numbers_still_merges(ws_db):
 
     result = wp.group_issue(a)
 
-    assert result["action"] == "auto_merged"
+    assert result["action"] == "suggested"
+    assert result["count"] == 1
 
 
 def test_weak_signal_candidates_exclude_disjoint_reference_pair(ws_db):
@@ -590,9 +593,13 @@ def test_group_issue_shadow_scored_always_attached_regardless_of_flag(ws_db):
 
 
 def test_group_issue_flag_off_uses_ordered_model_not_scored_model(ws_db, monkeypatch, tmp_path):
-    """Real behavior check: a pair scoring high under the scored model but
-    matching NOTHING in the ordered model must still be a no_match while
-    the flag is off - confirms the scored model is truly shadow-only."""
+    """Real behavior check: a pair scoring high under the scored model
+    (shared company) only SUGGESTS under the live, narrowed (2026-07-31)
+    ordered model - which is the point of the narrowing: shared company
+    alone is no longer auto-merge-worthy in the path that's actually live
+    while the flag is off, even though shadow_scored still reports what the
+    scored model itself would have done. Confirms the flag really gates
+    which model ACTS, not just which model is computed."""
     config = _isolate_config(monkeypatch, tmp_path)
     assert config.get("grouping", "scored_model_enabled") in (None, False)
 
@@ -603,13 +610,7 @@ def test_group_issue_flag_off_uses_ordered_model_not_scored_model(ws_db, monkeyp
 
     result = wp.group_issue(a)
 
-    # company+topic alone WOULD cross AUTO_MERGE_THRESHOLD under the scored
-    # model, but the ordered model's _strong_signal_match ALSO fires here
-    # (shared company IS one of its 3 checks) - so this specific case still
-    # auto-merges either way. The real assertion is that the ORDERED
-    # model's signal label is what's actually used, not "scored".
-    assert result["action"] == "auto_merged"
-    assert result["signal"] in ("company", "topic")
+    assert result["action"] == "suggested"
     assert result["shadow_scored"]["verdict"] == "auto_merge"
 
 
@@ -685,3 +686,63 @@ def test_backtest_scored_model_task81_boilerplate_case_stays_a_veto(ws_db):
 
     hits = result["different_project_pairs_at_or_above_threshold"]
     assert not any({h["a"], h["b"]} == {a, b} for h in hits)
+
+
+# --- aggregate_parties_for_project (project-detail redesign, 2026-07-31) --
+
+def _project_with_issues(ws_db, *issue_ids):
+    pid = ws_db.create_project_with_new_id(name="P", category="other")
+    for iid in issue_ids:
+        ws_db.assign_issue_to_project(iid, pid)
+    return pid
+
+
+def test_aggregate_parties_dedupes_across_member_issues(ws_db):
+    a = _issue(ws_db, "A")
+    b = _issue(ws_db, "B")
+    _link_party(ws_db, a, "shared", "rep@acme.com", company="Acme")
+    _link_party(ws_db, b, "shared", "rep@acme.com", company="Acme")
+    pid = _project_with_issues(ws_db, a, b)
+
+    parties = wp.aggregate_parties_for_project(pid)
+
+    assert len(parties) == 1
+    assert parties[0]["id"] == "shared"
+    assert parties[0]["issue_count"] == 2
+
+
+def test_aggregate_parties_marks_most_linked_as_primary(ws_db):
+    a = _issue(ws_db, "A")
+    b = _issue(ws_db, "B")
+    c = _issue(ws_db, "C")
+    _link_party(ws_db, a, "frequent", "freq@acme.com", company="Acme")
+    _link_party(ws_db, b, "frequent", "freq@acme.com", company="Acme")
+    _link_party(ws_db, c, "rare", "rare@acme.com", company="Acme")
+    pid = _project_with_issues(ws_db, a, b, c)
+
+    parties = wp.aggregate_parties_for_project(pid)
+    by_id = {p["id"]: p for p in parties}
+
+    assert by_id["frequent"]["issue_count"] == 2
+    assert by_id["frequent"]["is_primary"] is True
+    assert by_id["rare"]["is_primary"] is False
+
+
+def test_aggregate_parties_marks_primary_separately_per_affiliation(ws_db):
+    a = _issue(ws_db, "A")
+    _link_party(ws_db, a, "ext1", "rep@acme.com", company="Acme")
+    ws_db.upsert_party(id="int1", primary_email="colleague@lilly.com", display_name="Colleague",
+                        affiliation="internal", affiliation_confidence="H", affiliation_source="domain", company=None)
+    ws_db.link_party_to_issue(a, "int1")
+    pid = _project_with_issues(ws_db, a)
+
+    parties = wp.aggregate_parties_for_project(pid)
+    by_id = {p["id"]: p for p in parties}
+
+    assert by_id["ext1"]["is_primary"] is True
+    assert by_id["int1"]["is_primary"] is True
+
+
+def test_aggregate_parties_empty_project_returns_empty_list(ws_db):
+    pid = ws_db.create_project_with_new_id(name="Empty", category="other")
+    assert wp.aggregate_parties_for_project(pid) == []

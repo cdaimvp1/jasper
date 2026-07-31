@@ -167,6 +167,44 @@ def test_recompute_all_leaves_has_unmet_prerequisite_zero_when_no_rule_triggers(
     assert issue["has_unmet_prerequisite"] == 0
 
 
+def test_recompute_all_does_not_reset_updated_at(ws_db):
+    """Regression: update_issue() used to unconditionally bump updated_at on
+    every write, so recompute_all()'s periodic NBA rescoring erased the very
+    staleness signal it's supposed to measure - a 10-day-quiet issue looked
+    freshly touched again after each recompute pass."""
+    issue_id = ws_db.create_issue_with_new_id(title="Stale one", state="active", category="other")
+    before = ws_db.get_issue(issue_id)["updated_at"]
+    time.sleep(0.01)
+
+    nba.recompute_all()
+
+    after = ws_db.get_issue(issue_id)["updated_at"]
+    assert after == before
+
+
+def test_update_issue_touch_updated_at_false_leaves_timestamp_alone(ws_db):
+    issue_id = ws_db.create_issue_with_new_id(title="X", state="active", category="other")
+    before = ws_db.get_issue(issue_id)["updated_at"]
+    time.sleep(0.01)
+
+    ws_db.update_issue(issue_id, touch_updated_at=False, priority_score=0.5)
+
+    issue = ws_db.get_issue(issue_id)
+    assert issue["priority_score"] == 0.5
+    assert issue["updated_at"] == before
+
+
+def test_update_issue_default_still_touches_updated_at(ws_db):
+    issue_id = ws_db.create_issue_with_new_id(title="Y", state="active", category="other")
+    before = ws_db.get_issue(issue_id)["updated_at"]
+    time.sleep(0.01)
+
+    ws_db.update_issue(issue_id, priority_score=0.5)
+
+    issue = ws_db.get_issue(issue_id)
+    assert issue["updated_at"] > before
+
+
 def test_score_issue_no_warning_when_no_rule_triggers(ws_db):
     issue_id = ws_db.create_issue_with_new_id(title="Normal issue", state="active", category="other")
     row_id = ws_db.insert_raw_item(

@@ -76,3 +76,26 @@ def test_list_open_commitments_multiple_per_issue_all_included(ws_db):
     entries = wc.list_open_commitments()
 
     assert {e["text"] for e in entries} == {"first commitment", "second commitment"}
+
+
+# --- list_commitments_for_issue (project-detail redesign, 2026-07-31) ----
+
+def test_list_commitments_for_issue_scoped_to_one_issue(ws_db):
+    iid = _issue_with_commitments(ws_db, "Mine", "c7", ["mine"])
+    _issue_with_commitments(ws_db, "Other", "c8", ["not mine"])
+    assert wc.list_commitments_for_issue(iid) == ["mine"]
+
+
+def test_list_commitments_for_issue_includes_closed_issues(ws_db):
+    issue_id = ws_db.create_issue_with_new_id(title="Closed", state="done", category="other")
+    rid = ws_db.insert_raw_item(source="outlook_mail", stable_key="c9", thread_key="c9", dedupe_key="c9",
+                                 occurred_ts=time.time(), subject="s", from_actor="a@example.com",
+                                 participants_json="[]")
+    ws_db.link_raw_item_to_issue(rid, issue_id)
+    ws_db.create_extraction(rid, json.dumps({"commitments": ["closed-issue commitment"]}))
+    assert wc.list_commitments_for_issue(issue_id) == ["closed-issue commitment"]
+
+
+def test_list_commitments_for_issue_empty_when_none(ws_db):
+    iid = ws_db.create_issue_with_new_id(title="None", state="active", category="other")
+    assert wc.list_commitments_for_issue(iid) == []

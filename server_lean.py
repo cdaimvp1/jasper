@@ -1500,9 +1500,43 @@ async def api_project_detail(project_id: str):
     workgraph_deadlines.attach_deadline_info(issues)
     synthesis = wg.get_synthesis("project", project_id)
     attachments = wg.list_attachments_for_project(project_id)
+    issue_ids = [i["id"] for i in issues]
+    open_issues = [i for i in issues if i["state"] in ("active", "waiting", "blocked")]
+    open_ids = [i["id"] for i in open_issues]
+
+    # Project-detail redesign (2026-07-31, Marc's own design brief):
+    # real rollups across every member issue, reusing the exact same
+    # per-issue readers already built this session - no new extraction,
+    # just aggregation at a different scope.
+    asks, decisions, key_facts, commitments, repeat_signals = [], [], [], [], []
+    for iid in issue_ids:
+        asks.extend(workgraph_asks_decisions.list_asks_for_issue(iid))
+        decisions.extend(workgraph_asks_decisions.list_decisions_for_issue(iid))
+        key_facts.extend(workgraph_key_facts.list_key_facts_for_issue(iid))
+        commitments.extend(workgraph_commitments.list_commitments_for_issue(iid))
+        repeat_signals.extend(workgraph_repeat_signals.list_repeat_signals_for_issue(iid))
+    parties = workgraph_projects.aggregate_parties_for_project(project_id)
+    value_by_issue = workgraph_nba.value_amounts_for_issues(open_ids)
+    # "What the next owner must know" needs one real headline action, not
+    # a full per-issue candidate_actions() call for every member (that
+    # would mean N extra full detail fetches) - the highest-priority open
+    # issue's own already-computed nba_reason is the cheap, honest answer.
+    top_issue = max(open_issues, key=lambda i: i.get("priority_score") or 0, default=None)
     return JSONResponse({"project": sanitize_surrogates(project), "issues": sanitize_surrogates(issues),
                         "synthesis": sanitize_surrogates(synthesis),
-                        "attachments": sanitize_surrogates(attachments)})
+                        "attachments": sanitize_surrogates(attachments),
+                        "parties": sanitize_surrogates(parties),
+                        "asks": sanitize_surrogates(asks), "decisions": sanitize_surrogates(decisions),
+                        "key_facts": sanitize_surrogates(key_facts),
+                        "commitments": sanitize_surrogates(commitments),
+                        "repeat_signals": sanitize_surrogates(repeat_signals),
+                        "value_found": sum(value_by_issue.values()),
+                        "gated_open_issue_count": sum(1 for i in open_issues if i.get("has_unmet_prerequisite")),
+                        "hard_deadline_open_issue_count": sum(1 for i in open_issues if i.get("has_hard_deadline")),
+                        "top_action": sanitize_surrogates({
+                            "issue_id": top_issue["id"], "title": top_issue.get("display_title") or top_issue["title"],
+                            "reason": top_issue.get("nba_reason"),
+                        }) if top_issue and top_issue.get("nba_reason") else None})
 
 
 class IssueProjectBody(BaseModel):

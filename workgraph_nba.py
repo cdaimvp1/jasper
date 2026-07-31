@@ -286,7 +286,7 @@ def recompute_all(now: float | None = None) -> dict:
         # aristotle.WARNING_PREFIX) - checking it here avoids recomputing
         # check_prerequisites() a second time just to get this boolean.
         has_unmet_prerequisite = reason.startswith(workgraph_aristotle.WARNING_PREFIX)
-        ws.update_issue(issue["id"], priority_score=score, nba_reason=reason,
+        ws.update_issue(issue["id"], touch_updated_at=False, priority_score=score, nba_reason=reason,
                          nba_action_kind=action_kind, lesson_id_cited=lesson_id,
                          has_unmet_prerequisite=1 if has_unmet_prerequisite else 0)
         updated += 1

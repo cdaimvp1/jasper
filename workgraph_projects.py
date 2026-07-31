@@ -8,22 +8,21 @@ not a required review-queue step - so every grouping/reassignment operation
 here is just a call to workgraph_store.assign_issue_to_project, the same
 function a worker would call on Marc's behalf after he corrects one in chat.
 
-Strong signal (auto-merge, no confirmation needed): two issues share at
-least one EXTERNAL party. Sharing an INTERNAL party isn't a signal at all -
-the same Lilly colleagues show up across dozens of unrelated threads, so
-that alone proves nothing; a shared external supplier/counterparty contact
-is what actually indicates "the same negotiation/relationship."
+Narrowed 2026-07-31 per a real adversarial review of this module: only a
+matching structured reference ID (a real PR/PO/contract number - see
+_shared_reference_id) is a real project-identity proof, unambiguous enough
+to auto-merge on its own. Sharing an external party, an external company,
+or a subject/topic core is a RELATIONSHIP signal, not project identity - an
+account manager, consultant, or supplier contact routinely spans many
+concurrent, unrelated deals, so none of the three is trusted to auto-merge
+by itself anymore (see group_issue()'s docstring for the full history:
+this module originally treated a shared external party as sufficient on
+its own, which is what this narrowing walks back).
 
-Originally this also required matching category, excluding 'other' as too
-noisy a bucket to trust alone. Backfilling against Marc's real data showed
-that requirement blocking almost every real grouping opportunity: 87% of
-his issues (97/112) land in category='other' because the topic-regex
-taxonomy (built for an 8-category procurement vocabulary) doesn't fit most
-of his actual traffic, while the SAME external contacts (pwc.com, leahai.com,
-moxo.com, veeva.com, salesforce.com...) clearly recur across multiple
-issues regardless of category. A shared external party is treated as
-sufficient signal on its own now; category still informs the project's
-display name/label, it just isn't a gate on merging.
+Strong signal (candidate generation - suggested, not auto-merged, unless a
+repeated CONFIRMED precedent already exists for this exact pattern): two
+issues share an external party, an external company, or a matching
+subject/topic core.
 
 Weak signal (suggested, never auto-applied): same non-'other' category and
 opened within a proximity window, but no shared external party - written to
@@ -32,6 +31,7 @@ confirm or reject via workgraph_store.resolve_project_suggestion.
 """
 from __future__ import annotations
 
+import json
 import sys
 import time
 from difflib import SequenceMatcher
@@ -268,14 +268,24 @@ def _strong_signal_match(issue_id: str, issue: dict):
     confidence: matching reference ID (Part A1, 2026-07-30 - a real
     structured identifier, checked first since it's the least ambiguous
     signal available) > exact external party > shared external company >
-    matching normalized subject/topic core. Any one is trusted enough to
-    auto-merge without asking - UNLESS vetoed by a disjoint PR/PO reference
-    number (see _vetoed_by_reference_mismatch above), which overrides the
+    matching normalized subject/topic core, vetoed by a disjoint PR/PO
+    reference number (see _vetoed_by_reference_mismatch above) for the
     latter three (a shared-reference match can't itself be vetoed by a
     reference mismatch - see _shared_reference_id's own docstring).
     A candidate rejected on reference grounds is not retried against a
     weaker signal for the same pair; the safer failure mode is no_match,
-    not risking a second wrong merge via a looser check. Returns
+    not risking a second wrong merge via a looser check.
+
+    Narrowed 2026-07-31 per real adversarial review of this module: only
+    "reference" is a real structured identity, unambiguous enough for
+    group_issue() to auto-merge on its own. Party/company/topic each only
+    prove that a person/company/subject is shared, not that it's the SAME
+    transaction (an account manager, consultant, or supplier contact
+    routinely spans many concurrent, unrelated deals) - group_issue() now
+    routes those three through the same precedent-check + suggestion path
+    as weak signals instead of merging on them directly. Kept as one
+    function (rather than splitting into "auto" vs "suggest" checks)
+    because the ordering/veto logic is shared and must stay in sync. Returns
     (kind, detail, sibling_issue_id) or None."""
     m = _shared_reference_id(issue_id)
     if m:
@@ -592,7 +602,14 @@ def group_issue(issue_id: str) -> dict:
     for comparison against whichever model actually acted. Only when the
     flag is on does the scored model's verdict replace the ordered
     first-match model below (see backtest_scored_model()'s own docstring
-    for the required review before ever enabling that flag)."""
+    for the required review before ever enabling that flag).
+
+    2026-07-31 follow-up: every decision below (once shadow_scored exists)
+    is also persisted to workgraph_store.shadow_grouping_log via _finish -
+    previously the shadow verdict was computed but discarded the moment
+    this function returned, so there was no way to build a real historical
+    dataset of live-vs-scored (dis)agreement to review before ever
+    reconsidering the scored model."""
     issue = ws.get_issue(issue_id)
     if issue is None:
         return {"issue_id": issue_id, "action": "not_found"}
@@ -602,26 +619,36 @@ def group_issue(issue_id: str) -> dict:
     shadow_scored = scored_grouping_decision(issue_id, issue)
     scored_model_enabled = bool(config.get("grouping", "scored_model_enabled"))
 
+    def _finish(action: str, *, signal: Optional[str] = None, sibling_id: Optional[str] = None, **extra) -> dict:
+        ws.log_shadow_grouping_decision(
+            issue_id=issue_id, live_action=action, live_signal=signal, live_sibling_id=sibling_id,
+            scored_verdict=shadow_scored["verdict"], scored_score=shadow_scored["score"],
+            scored_sibling_id=shadow_scored.get("sibling_id"),
+            scored_signals_json=json.dumps(shadow_scored.get("matched_signals") or []),
+        )
+        result = {"issue_id": issue_id, "action": action, "shadow_scored": shadow_scored, **extra}
+        if signal is not None:
+            result["signal"] = signal
+        return result
+
     if scored_model_enabled:
         if shadow_scored["verdict"] == "auto_merge":
             reason_label = f"scored signal ({','.join(shadow_scored['matched_signals'])}, score={shadow_scored['score']})"
             project_id = merge_issues(issue_id, shadow_scored["sibling_id"], reason_label=reason_label)
-            return {"issue_id": issue_id, "action": "auto_merged", "project_id": project_id,
-                    "signal": "scored", "shadow_scored": shadow_scored}
+            return _finish("auto_merged", signal="scored", sibling_id=shadow_scored["sibling_id"], project_id=project_id)
         if shadow_scored["verdict"] == "suggest":
             precedent = workgraph_lessons.precedent_prefilter(issue)
             if precedent == "confirmed":
                 project_id = merge_issues(issue_id, shadow_scored["sibling_id"],
                                            reason_label="auto-resolved by precedent (repeated confirmed pattern)")
-                return {"issue_id": issue_id, "action": "auto_merged", "project_id": project_id,
-                        "signal": "precedent", "shadow_scored": shadow_scored}
+                return _finish("auto_merged", signal="precedent", sibling_id=shadow_scored["sibling_id"], project_id=project_id)
             if precedent != "rejected":
                 ws.create_project_suggestion(
                     issue_id_a=issue_id, issue_id_b=shadow_scored["sibling_id"],
                     reason=f"scored signal ({','.join(shadow_scored['matched_signals'])}, score={shadow_scored['score']})",
                 )
-                return {"issue_id": issue_id, "action": "suggested", "count": 1, "shadow_scored": shadow_scored}
-        return {"issue_id": issue_id, "action": "no_match", "shadow_scored": shadow_scored}
+                return _finish("suggested", signal="scored", sibling_id=shadow_scored["sibling_id"], count=1)
+        return _finish("no_match")
 
     match = _strong_signal_match(issue_id, issue)
     if match:
@@ -632,9 +659,24 @@ def group_issue(issue_id: str) -> dict:
             "company": f"strong signal: shared external company '{detail}'",
             "topic": f"strong signal: matching subject core '{detail}'",
         }[kind]
-        project_id = merge_issues(issue_id, sibling_id, reason_label=reason_label)
-        return {"issue_id": issue_id, "action": "auto_merged", "project_id": project_id,
-                "signal": kind, "shadow_scored": shadow_scored}
+        if kind == "reference":
+            project_id = merge_issues(issue_id, sibling_id, reason_label=reason_label)
+            return _finish("auto_merged", signal=kind, sibling_id=sibling_id, project_id=project_id)
+        # Narrowed 2026-07-31 (see _strong_signal_match's docstring): party/
+        # company/topic prove a relationship, not a project identity - never
+        # auto-merge on these alone. Route through the same repeated-
+        # confirmed-precedent check (a genuinely higher bar - multiple past
+        # EXPLICIT human confirmations, not a single heuristic match) and
+        # otherwise fall back to a suggestion instead of merging outright.
+        precedent = workgraph_lessons.precedent_prefilter(issue)
+        if precedent == "confirmed":
+            project_id = merge_issues(issue_id, sibling_id,
+                                       reason_label="auto-resolved by precedent (repeated confirmed pattern)")
+            return _finish("auto_merged", signal="precedent", sibling_id=sibling_id, project_id=project_id)
+        if precedent != "rejected":
+            ws.create_project_suggestion(issue_id_a=issue_id, issue_id_b=sibling_id, reason=reason_label)
+            return _finish("suggested", signal=kind, sibling_id=sibling_id, count=1)
+        return _finish("no_match")
 
     candidates = _weak_signal_candidates(issue)
 
@@ -650,8 +692,7 @@ def group_issue(issue_id: str) -> dict:
     if precedent == "confirmed" and candidates:
         project_id = merge_issues(issue_id, candidates[0]["id"],
                                    reason_label="auto-resolved by precedent (repeated confirmed pattern)")
-        return {"issue_id": issue_id, "action": "auto_merged", "project_id": project_id,
-                "signal": "precedent", "shadow_scored": shadow_scored}
+        return _finish("auto_merged", signal="precedent", sibling_id=candidates[0]["id"], project_id=project_id)
 
     suggested = 0
     if precedent != "rejected":
@@ -662,8 +703,8 @@ def group_issue(issue_id: str) -> dict:
             )
             suggested += 1
     if suggested:
-        return {"issue_id": issue_id, "action": "suggested", "count": suggested, "shadow_scored": shadow_scored}
-    return {"issue_id": issue_id, "action": "no_match", "shadow_scored": shadow_scored}
+        return _finish("suggested", sibling_id=candidates[0]["id"] if candidates else None, count=suggested)
+    return _finish("no_match")
 
 
 def backfill_regroup_by_reference() -> dict:
@@ -696,6 +737,39 @@ def run(issue_ids: list) -> dict:
         "no_match": sum(1 for r in results if r["action"] == "no_match"),
         "already_grouped": sum(1 for r in results if r["action"] == "already_grouped"),
     }
+
+
+def aggregate_parties_for_project(project_id: str) -> list[dict]:
+    """Project-detail redesign (2026-07-31, Marc's own design brief -
+    "internal and external relationships"): every real party across ALL
+    of this project's member issues, deduped by party id, annotated with
+    issue_count (how many member issues they appear on - real signal of
+    how central they are, not guessed) and is_primary (the most-linked
+    contact, first_seen_ts ascending as the tie-break - same stable
+    convention used everywhere else in this module). is_primary is
+    marked separately per affiliation, so a project can have both a
+    primary external contact and a primary internal one."""
+    issues = ws.list_issues_for_project(project_id)
+    by_party: dict = {}
+    for issue in issues:
+        for p in ws.list_parties_for_issue(issue["id"]):
+            pid = p["id"]
+            if pid not in by_party:
+                entry = dict(p)
+                entry["issue_count"] = 0
+                by_party[pid] = entry
+            by_party[pid]["issue_count"] += 1
+
+    parties = list(by_party.values())
+    for affiliation in ("external", "internal"):
+        group = [p for p in parties if p.get("affiliation") == affiliation]
+        group.sort(key=lambda p: (-p["issue_count"], p.get("first_seen_ts") or 0))
+        for i, p in enumerate(group):
+            p["is_primary"] = (i == 0)
+    for p in parties:
+        p.setdefault("is_primary", False)
+    parties.sort(key=lambda p: (p.get("affiliation") != "external", -p["issue_count"], p.get("first_seen_ts") or 0))
+    return parties
 
 
 if __name__ == "__main__":

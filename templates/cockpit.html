@@ -8528,6 +8528,21 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
     const asks = d.asks || [], decisions = d.decisions || [], keyFacts = d.key_facts || [];
     const repeatSignals = d.repeat_signals || [];
     const candidateActions = issue.candidate_actions || [];
+    // 2026-07-31: bind the real primary action button to the actual
+    // top-ranked candidate instead of a hardcoded draft_reply/nudge pair -
+    // confirmed via real adversarial review that the two could disagree
+    // (a top-ranked contract_review/synthesis candidate was silently
+    // discarded), and that a Low-confidence "abstain" issue still showed a
+    // live primary action button that contradicted its own abstain
+    // framing just below it. Suppress the primary button entirely while
+    // abstaining; every candidate (not just the alternatives) then still
+    // surfaces in the "other suggested actions" list below rather than
+    // being silently dropped.
+    const primaryCandidate = issue.confidence_tier === "L" ? null : (candidateActions[0] || null);
+    const primaryLabel = primaryCandidate ? primaryCandidate.label : "Draft a reply";
+    const primaryKind = primaryCandidate ? primaryCandidate.kind : "draft_reply";
+    const primaryInstructions = primaryCandidate
+      ? (primaryCandidate.label + (primaryCandidate.rationale ? " - " + primaryCandidate.rationale : "")) : "";
     const body = document.getElementById("pccDetail");
     const timeline = pccBuildTimeline(evidence, stateHistory);
     const lastTs = timeline.length ? timeline[0].ts : null;
@@ -8653,7 +8668,7 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
     // previously visible anywhere) as a compact clickable list. "custom"
     // (synthesis-sourced) candidates carry their own label/rationale
     // through as instructions, since they have no fixed action_kind.
-    const otherCandidates = candidateActions.slice(1);
+    const otherCandidates = primaryCandidate ? candidateActions.slice(1) : candidateActions;
     const altActionsHtml = otherCandidates.map(c => `
       <button type="button" class="pcc-suggest-row" style="width:100%;text-align:left;cursor:pointer;border:none;background:none"
               data-gen="${pccEsc(c.kind)}" ${c.kind === "custom" ? `data-instructions="${pccEsc(c.label + (c.rationale ? ' - ' + c.rationale : ''))}"` : ""}>
@@ -8811,8 +8826,7 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
           ${supplierGateHtml}
         </div>
         <div class="pcc-actions-row pcc-detail-hd-actions">
-          ${issue.state === "waiting" ? '<button class="mqb primary" type="button" data-gen="nudge">✉ Nudge</button>' : ""}
-          <button class="mqb primary" type="button" data-gen="draft_reply">Draft a reply</button>
+          ${primaryCandidate ? `<button class="mqb primary" type="button" data-gen="${pccEsc(primaryKind)}" data-instructions="${pccEsc(primaryInstructions)}">${primaryKind === "nudge" ? "✉ " : ""}${pccEsc(primaryLabel)}</button>` : ""}
           <button class="mqb ghost" type="button" data-act="done">✓ Mark done</button>
           <button class="mqb ghost" type="button" data-act="snooze">Snooze 3d</button>
           <div class="pcc-kebab-wrap">
@@ -9610,6 +9624,27 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
       } catch (e) { /* row just renders without party chips */ }
     }));
     const body = document.getElementById("pjProjectDetail");
+
+    // Project-detail redesign (2026-07-31, Marc's own design brief:
+    // "current narrative and state / internal and external relationships /
+    // decision and commitment history / risks, sensitivities, and
+    // negotiation context / milestones and unresolved dependencies /
+    // important documents and evidence / next actions and recurring
+    // cadence / what the next owner must know"). Every zone below reuses
+    // an already-real, already-computed data source - see
+    // server_lean.py's api_project_detail for exactly where each comes
+    // from. "Risks/sensitivities" and "recurring cadence" are honestly
+    // NOT fully real yet (see workgraph_projects.aggregate_parties_for_
+    // project's caller and REVIEW_BRIEF-style notes elsewhere) - this
+    // renders only what's genuinely computed (hard-deadline/gated counts,
+    // value in play), never a fabricated risk score.
+    const parties = d.parties || [];
+    const asks = d.asks || [], decisions = d.decisions || [], keyFacts = d.key_facts || [], commitments = d.commitments || [];
+    const repeatSignals = d.repeat_signals || [];
+    const topAction = d.top_action || null;
+    const gatedCount = d.gated_open_issue_count || 0;
+    const hardDeadlineCount = d.hard_deadline_open_issue_count || 0;
+    const valueFound = d.value_found || 0;
     // issues arrives pre-sorted priority_score DESC (workgraph_store.
     // list_issues_for_project) - the rank badge below just makes that order
     // visible, rather than leaving it as an invisible fetch-order fact (task

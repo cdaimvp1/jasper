@@ -9516,6 +9516,18 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
     return null;
   }
 
+  // 2026-07-31 (Marc's direct report): a message that VISIBLY starts with
+  // "@something" but doesn't resolve to a known worker (a typo, or the
+  // worker list not finished loading yet) used to fall silently into
+  // askSocrates() below - indistinguishable on screen from an intentional
+  // free-text question, so a failed mention looked like Socrates just gave
+  // a strange answer instead of the message never reaching anyone. This is
+  // the one thing send() checks BEFORE deciding "no mention -> Socrates":
+  // an unresolved @mention is a failure to report, never a fallback to take.
+  function looksLikeMention(text) {
+    return /^@\S+/.test(text);
+  }
+
   // A free-text message with no resolvable "@Name" used to be a dead end
   // (error placeholder, nothing sent). It's now Socrates's entry point: ask
   // Jasper anything, answered from precedent/synthesis/evidence it already
@@ -9561,6 +9573,16 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
     const slug = resolveMention(text);
     const addRule = isAddRuleMessage(text);
     if (compose) compose.classList.remove("error");
+    if (!slug && looksLikeMention(text)) {
+      // Never silently reroute an unresolved @mention to Socrates - restore
+      // the text (same recovery already used below for a failed POST) so
+      // Marc can fix the name and resend rather than wondering why "Socrates"
+      // answered something addressed to a worker.
+      const attempted = text.match(/^@(\S+)/)[1];
+      if (compose) compose.classList.add("error");
+      alert(`"@${attempted}" doesn't match a known worker - check the spelling, or wait a moment if the worker list just loaded.`);
+      return;
+    }
     input.value = "";
     input.style.height = "auto";
     if (!slug) {

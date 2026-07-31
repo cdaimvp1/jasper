@@ -4,6 +4,8 @@
   False on a real cue match, so confidence tier H is actually reachable
 - backfill_reclassify writes the FRESH result, not stale item[...] values
 """
+import time
+
 import workgraph_classify as wc
 
 
@@ -127,3 +129,110 @@ def test_backfill_reclassify_updates_pr_number_only_change(ws_db):
     row = conn.execute("SELECT pr_number FROM raw_items WHERE id = ?", (rid,)).fetchone()
     conn.close()
     assert row["pr_number"] == "PO4200703817"
+
+
+# --- Part C (2026-07-30): raw-item-to-issue linking via reference ID -----
+
+def _pending_item(ws_db, thread_key, subject, pr_number=None, item_class="ACTIONABLE-ASK", from_actor="a@example.com"):
+    """A classified-but-not-yet-linked raw_item, ready for cluster_and_link().
+    Each thread_key is deliberately unique per call so thread_map_lookup
+    never resolves it - the whole point is testing the NO-thread-match
+    fallback path."""
+    rid = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key=thread_key, thread_key=thread_key, dedupe_key=thread_key,
+        occurred_ts=time.time(), subject=subject, from_actor=from_actor, participants_json="[]",
+    )
+    ws_db.classify_raw_item(
+        rid, item_class=item_class, direction="inbound", direction_inferred=False,
+        topic="other", topic_inferred=True, sentiment="neutral", sentiment_inferred=True,
+        anomaly_flag=False, signal_type=None, pr_number=pr_number,
+    )
+    return rid
+
+
+def _isolate_config(ws_db, monkeypatch, tmp_path):
+    """Same isolation pattern as test_retention.py's retention_env fixture -
+    config.SETTINGS_PATH is bound at import time, not per-test via
+    isolated_paths, so it needs its own explicit monkeypatch here."""
+    import config
+    monkeypatch.setattr(config, "SETTINGS_PATH", tmp_path / "settings.json")
+    monkeypatch.setattr(config, "_cache", {})
+    monkeypatch.setattr(config, "_cache_mtime", 0.0)
+    return config
+
+
+def test_cluster_and_link_creates_new_issue_when_no_reference_match(ws_db):
+    _pending_item(ws_db, "ck1", "A brand new ask with nothing structured in it")
+    result = wc.cluster_and_link()
+    assert result["issues_created"] == 1
+    assert result["attached_via_reference"] == 0
+    assert result["would_attach_via_reference"] == 0
+
+
+def test_cluster_and_link_shadow_logs_but_does_not_attach_when_flag_off(ws_db, monkeypatch, tmp_path):
+    """The real ship default - the flag defaults off, so a real reference
+    match must be COUNTED but must NOT change behavior (still creates a
+    new issue, same as before this feature existed)."""
+    config = _isolate_config(ws_db, monkeypatch, tmp_path)
+    assert config.get("grouping", "reference_id_auto_attach_enabled") in (None, False)
+
+    _pending_item(ws_db, "ck2", "First notice", pr_number="PR555000", from_actor="alice@example.com")
+    wc.cluster_and_link()
+    _pending_item(ws_db, "ck3", "REMINDER: still needs approval", pr_number="PR555000", from_actor="bob@example.com")
+    result = wc.cluster_and_link()
+
+    assert result["reference_auto_attach_enabled"] is False
+    assert result["would_attach_via_reference"] == 1
+    assert result["attached_via_reference"] == 0
+    assert result["issues_created"] == 1, "second item must still create its OWN new issue while the flag is off"
+
+
+def test_cluster_and_link_attaches_via_reference_when_flag_enabled(ws_db, monkeypatch, tmp_path):
+    config = _isolate_config(ws_db, monkeypatch, tmp_path)
+    config.set_value(True, "grouping", "reference_id_auto_attach_enabled")
+
+    first_rid = _pending_item(ws_db, "ck4", "First notice", pr_number="PR666000", from_actor="alice@example.com")
+    wc.cluster_and_link()
+    first_issue_id = ws_db.get_raw_item(first_rid)["issue_id"]
+
+    _pending_item(ws_db, "ck5", "REMINDER: still needs approval", pr_number="PR666000", from_actor="bob@example.com")
+    result = wc.cluster_and_link()
+
+    assert result["reference_auto_attach_enabled"] is True
+    assert result["attached_via_reference"] == 1
+    assert result["issues_created"] == 0, "must attach to the existing issue, not create a second one"
+    issues = ws_db.list_issues(states=None, limit=10000)
+    assert len(issues) == 1
+    assert issues[0]["id"] == first_issue_id
+
+
+def test_cluster_and_link_writes_breadcrumb_evidence_when_attached_via_reference(ws_db, monkeypatch, tmp_path):
+    config = _isolate_config(ws_db, monkeypatch, tmp_path)
+    config.set_value(True, "grouping", "reference_id_auto_attach_enabled")
+
+    _pending_item(ws_db, "ck6", "First notice", pr_number="PR777888", from_actor="alice@example.com")
+    wc.cluster_and_link()
+    _pending_item(ws_db, "ck7", "REMINDER: still needs approval", pr_number="PR777888", from_actor="bob@example.com")
+    wc.cluster_and_link()
+
+    issue_id = ws_db.list_issues(states=None, limit=10000)[0]["id"]
+    evidence = ws_db.list_evidence(issue_id)
+    breadcrumbed = [e for e in evidence if "auto-attached via shared reference" in (e.get("summary") or "")]
+    assert len(breadcrumbed) == 1
+    assert "PR777888" in breadcrumbed[0]["summary"]
+
+
+def test_cluster_and_link_reference_match_ignores_closed_issues(ws_db, monkeypatch, tmp_path):
+    config = _isolate_config(ws_db, monkeypatch, tmp_path)
+    config.set_value(True, "grouping", "reference_id_auto_attach_enabled")
+
+    first_rid = _pending_item(ws_db, "ck8", "First notice", pr_number="PR112233", from_actor="alice@example.com")
+    wc.cluster_and_link()
+    first_issue_id = ws_db.get_raw_item(first_rid)["issue_id"]
+    ws_db.update_issue(first_issue_id, state="done")
+
+    _pending_item(ws_db, "ck9", "REMINDER: still needs approval", pr_number="PR112233", from_actor="bob@example.com")
+    result = wc.cluster_and_link()
+
+    assert result["attached_via_reference"] == 0
+    assert result["issues_created"] == 1

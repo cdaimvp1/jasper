@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import config
 import workgraph_store as ws
 import workgraph_parties
 import workgraph_projects
@@ -408,12 +409,30 @@ def cluster_and_link(limit: int = 500) -> dict:
     default), not silently dropped. FYI-EVIDENCE items get the same
     not-promoted treatment when there's no existing thread to attach to -
     a standalone informational note (a meeting recap, a group-chat aside)
-    isn't something Marc needs to track as an open Issue on its own."""
+    isn't something Marc needs to track as an open Issue on its own.
+
+    Part C of the grouping/NBA redesign (2026-07-30): before creating a
+    brand-new issue for an item with no thread_key match, check whether its
+    real reference ID (PR/PO number) already matches an existing OPEN
+    issue - Outlook's ConversationID (thread_key) only links true reply
+    chains, so a freshly-sent automated reminder (not a reply) about the
+    same requisition gets a NEW ConversationID and would otherwise always
+    create a duplicate issue (the exact real bug Part A1 fixed
+    retroactively via backfill). Gated behind config('grouping',
+    'reference_id_auto_attach_enabled'), same report-only-by-default
+    pattern as retention.py's enforcement_enabled: always COMPUTES and
+    counts what it would do; only actually attaches when the flag is on.
+    Ships with the flag OFF - this has no backtest path the way Part A2
+    does, so it can only be validated by watching would_attach_via_
+    reference against real new mail for a bake-in period first."""
+    reference_auto_attach = bool(config.get("grouping", "reference_id_auto_attach_enabled"))
     with_pending = ws.get_items_pending_link(limit)
     created = 0
     linked = 0
     skipped_noise = 0
     skipped_fyi_standalone = 0
+    attached_via_reference = 0
+    would_attach_via_reference = 0
     touched_issues = set()
 
     for item in with_pending:
@@ -424,25 +443,43 @@ def cluster_and_link(limit: int = 500) -> dict:
         thread_key = item["thread_key"]
         issue_id = ws.thread_map_lookup(thread_key)
         is_new_issue = False
+        reference_match = None
         if issue_id is None:
-            if item["item_class"] == "FYI-EVIDENCE":
-                skipped_fyi_standalone += 1
-                continue
-            title = strip_subject_prefix(item.get("subject") or "(no subject)")
-            state = "active" if item["item_class"] == "ACTIONABLE-ASK" else "waiting"
-            issue_id = ws.create_issue_with_new_id(
-                title=title, category=item.get("topic"),
-                state=state, priority="med", confidence_tier=item.get("confidence") or "M",
-            )
-            ws.thread_map_set(thread_key, issue_id)
-            created += 1
-            is_new_issue = True
+            pr_number = item.get("pr_number")
+            if pr_number:
+                candidates = ws.list_open_issue_ids_for_reference(pr_number)
+                if candidates:
+                    reference_match = candidates[0]
+                    would_attach_via_reference += 1
+            if reference_match and reference_auto_attach:
+                issue_id = reference_match
+                ws.thread_map_set(thread_key, issue_id)
+                attached_via_reference += 1
+            elif issue_id is None:
+                if item["item_class"] == "FYI-EVIDENCE":
+                    skipped_fyi_standalone += 1
+                    continue
+                title = strip_subject_prefix(item.get("subject") or "(no subject)")
+                state = "active" if item["item_class"] == "ACTIONABLE-ASK" else "waiting"
+                issue_id = ws.create_issue_with_new_id(
+                    title=title, category=item.get("topic"),
+                    state=state, priority="med", confidence_tier=item.get("confidence") or "M",
+                )
+                ws.thread_map_set(thread_key, issue_id)
+                created += 1
+                is_new_issue = True
 
+        summary = item.get("subject") or item.get("body_preview") or "(no summary)"
+        if issue_id == reference_match and reference_auto_attach:
+            # Real, visible breadcrumb on the issue itself (Progress
+            # timeline) - never silently fold a raw_item in without a
+            # trace of why it landed here instead of a new issue.
+            summary = f"{summary} [auto-attached via shared reference {item.get('pr_number')}]"
         ws.link_raw_item_to_issue(item["id"], issue_id)
         ws.add_evidence(
             issue_id=issue_id,
             type=_evidence_type(item["source"]),
-            summary=item.get("subject") or item.get("body_preview") or "(no summary)",
+            summary=summary,
             raw_item_id=item["id"],
         )
         linked += 1
@@ -472,6 +509,9 @@ def cluster_and_link(limit: int = 500) -> dict:
 
     return {"issues_created": created, "items_linked": linked, "noise_skipped": skipped_noise,
             "fyi_standalone_skipped": skipped_fyi_standalone,
+            "attached_via_reference": attached_via_reference,
+            "would_attach_via_reference": would_attach_via_reference,
+            "reference_auto_attach_enabled": reference_auto_attach,
             "parties": party_result, "projects": project_result}
 
 

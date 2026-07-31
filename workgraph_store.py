@@ -555,6 +555,14 @@ def init_workgraph() -> None:
                 conn.execute("ALTER TABLE raw_items ADD COLUMN pr_number TEXT")
             except sqlite3.OperationalError:
                 pass
+            # Added 2026-07-30 (grouping/NBA redesign, Part A1/C): a new
+            # reverse lookup (which issue already has this PR/PO number)
+            # needs this - not indexed before since pr_number was only ever
+            # read per-issue (get_raw_items_for_issue), never searched
+            # across issues. Must come AFTER the ALTER TABLE above, not
+            # alongside the other raw_items indices near CREATE TABLE - the
+            # column doesn't exist yet at that point on a pre-existing DB.
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_raw_pr_number ON raw_items(pr_number)")
             try:
                 # Outlook's own message identifier - the PS scan has always
                 # emitted this, but until now it was only used transiently to
@@ -1329,6 +1337,33 @@ def get_raw_items_for_issues(issue_ids: list[str]) -> dict[str, list[dict]]:
     for r in rows:
         out.setdefault(r["issue_id"], []).append(dict(r))
     return out
+
+
+def list_open_issue_ids_for_reference(pr_number: str) -> list[str]:
+    """Every currently-open issue with at least one raw_item carrying this
+    exact reference ID (PR/PO number). Grouping/NBA redesign Part A1/C: a
+    real, structured identifier is a positive match signal on its own, not
+    just a veto (see workgraph_projects._vetoed_by_reference_mismatch for
+    the existing negative-only use of this same field). Ordered by
+    updated_at DESC so a caller wanting "the" single best match (Part C)
+    can just take the first result - a deterministic, stable choice, not
+    an unordered pick."""
+    if not pr_number:
+        return []
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                """SELECT i.id FROM issues i
+                   JOIN raw_items r ON r.issue_id = i.id
+                   WHERE r.pr_number = ? AND i.state IN ('active','waiting','blocked')
+                   GROUP BY i.id
+                   ORDER BY i.updated_at DESC""",
+                (pr_number,),
+            ).fetchall()
+        finally:
+            conn.close()
+    return [r["id"] for r in rows]
 
 
 def list_evidence(issue_id: str) -> list[dict]:

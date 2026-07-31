@@ -102,6 +102,59 @@ def test_get_raw_items_for_issues_issue_with_none_omitted(ws_db):
     assert ws_db.get_raw_items_for_issues([iid]) == {}
 
 
+def test_list_open_issue_ids_for_reference_finds_matching_issue(ws_db):
+    iid = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    rid = ws_db.insert_raw_item(source="outlook_mail", stable_key="pr1", thread_key="pr1", dedupe_key="pr1",
+                                 occurred_ts=time.time(), subject="s", from_actor="a@example.com",
+                                 participants_json="[]")
+    ws_db.link_raw_item_to_issue(rid, iid)
+    conn = ws_db._connect()
+    conn.execute("UPDATE raw_items SET pr_number = ? WHERE id = ?", ("PR999999", rid))
+    conn.close()
+
+    assert ws_db.list_open_issue_ids_for_reference("PR999999") == [iid]
+
+
+def test_list_open_issue_ids_for_reference_excludes_closed_issues(ws_db):
+    iid = ws_db.create_issue_with_new_id(title="Closed", state="done", category="other")
+    rid = ws_db.insert_raw_item(source="outlook_mail", stable_key="pr2", thread_key="pr2", dedupe_key="pr2",
+                                 occurred_ts=time.time(), subject="s", from_actor="a@example.com",
+                                 participants_json="[]")
+    ws_db.link_raw_item_to_issue(rid, iid)
+    conn = ws_db._connect()
+    conn.execute("UPDATE raw_items SET pr_number = ? WHERE id = ?", ("PR888888", rid))
+    conn.close()
+
+    assert ws_db.list_open_issue_ids_for_reference("PR888888") == []
+
+
+def test_list_open_issue_ids_for_reference_empty_for_unknown_reference(ws_db):
+    assert ws_db.list_open_issue_ids_for_reference("PR000000") == []
+
+
+def test_list_open_issue_ids_for_reference_empty_string_is_safe(ws_db):
+    assert ws_db.list_open_issue_ids_for_reference("") == []
+
+
+def test_list_open_issue_ids_for_reference_orders_most_recently_updated_first(ws_db):
+    older = ws_db.create_issue_with_new_id(title="Older", state="active", category="other")
+    newer = ws_db.create_issue_with_new_id(title="Newer", state="active", category="other")
+    for iid, key in ((older, "pr3a"), (newer, "pr3b")):
+        rid = ws_db.insert_raw_item(source="outlook_mail", stable_key=key, thread_key=key, dedupe_key=key,
+                                     occurred_ts=time.time(), subject="s", from_actor="a@example.com",
+                                     participants_json="[]")
+        ws_db.link_raw_item_to_issue(rid, iid)
+        conn = ws_db._connect()
+        conn.execute("UPDATE raw_items SET pr_number = ? WHERE id = ?", ("PR777000", rid))
+        conn.close()
+    conn = ws_db._connect()
+    conn.execute("UPDATE issues SET updated_at = ? WHERE id = ?", (100.0, older))
+    conn.execute("UPDATE issues SET updated_at = ? WHERE id = ?", (200.0, newer))
+    conn.close()
+
+    assert ws_db.list_open_issue_ids_for_reference("PR777000") == [newer, older]
+
+
 def test_upsert_response_pattern_increments_hit_count_on_repeat(ws_db):
     ws_db.upsert_response_pattern("app_chat", "ariba", "first mention", 100.0)
     ws_db.upsert_response_pattern("app_chat", "ariba", "second mention", 200.0)

@@ -120,6 +120,74 @@ def test_veto_false_when_neither_side_has_a_reference(ws_db):
     assert wp._vetoed_by_reference_mismatch(a, b) is False
 
 
+# --- Part A1 (2026-07-30): matching reference ID as a positive signal ----
+
+def test_shared_reference_id_finds_sibling_with_no_other_signal_shared(ws_db):
+    """Real production case this closes: 3 separately-sent automated
+    reminders about the same requisition, different sender each time, no
+    Outlook reply-chain - share nothing except the reference number."""
+    a = _issue(ws_db, "First notice")
+    _raw_item(ws_db, a, "PR854779-V4 approval needed", "r1", from_actor="alice@example.com")
+    b = _issue(ws_db, "Reminder")
+    _raw_item(ws_db, b, "REMINDER: PR854779-V4 still needs approval", "r2", from_actor="bob@example.com")
+
+    result = wp._shared_reference_id(a)
+
+    assert result == ("PR854779-V4", b)
+
+
+def test_shared_reference_id_none_when_no_reference(ws_db):
+    a = _issue(ws_db, "A")
+    _raw_item(ws_db, a, "nothing structured here", "r3")
+    assert wp._shared_reference_id(a) is None
+
+
+def test_shared_reference_id_none_when_reference_unique_to_this_issue(ws_db):
+    a = _issue(ws_db, "A")
+    _raw_item(ws_db, a, "PR1111865 approval needed", "r4")
+    assert wp._shared_reference_id(a) is None
+
+
+def test_shared_reference_id_ignores_closed_sibling_issues(ws_db):
+    a = _issue(ws_db, "Open one")
+    _raw_item(ws_db, a, "PR777777 approval needed", "r5")
+    b = ws_db.create_issue_with_new_id(title="Closed one", state="done", category="other")
+    _raw_item(ws_db, b, "PR777777 approval needed", "r6")
+    assert wp._shared_reference_id(a) is None
+
+
+def test_strong_signal_match_prefers_reference_over_party(ws_db):
+    """Reference ID is checked FIRST - even when a shared external party
+    would also match, the reference-id result (and its label) wins."""
+    a = _issue(ws_db, "A")
+    _raw_item(ws_db, a, "PR654321 approval needed", "r7")
+    _link_party(ws_db, a, "shared_party", "rep@acme.com", company="Acme")
+    b = _issue(ws_db, "B")
+    _raw_item(ws_db, b, "PR654321 approval needed again", "r8")
+    _link_party(ws_db, b, "shared_party", "rep@acme.com", company="Acme")
+
+    kind, detail, sibling_id = wp._strong_signal_match(a, ws_db.get_issue(a))
+
+    assert kind == "reference"
+    assert detail == "PR654321"
+    assert sibling_id == b
+
+
+def test_group_issue_merges_via_reference_id_alone(ws_db):
+    """End-to-end: two issues sharing only a reference id (no party/
+    company/topic overlap) actually auto-merge via group_issue()."""
+    a = _issue(ws_db, "First notice about a totally different subject line")
+    _raw_item(ws_db, a, "PR991122 approval needed", "r9", from_actor="alice@example.com")
+    b = _issue(ws_db, "A completely unrelated-looking reminder subject")
+    _raw_item(ws_db, b, "REMINDER on PR991122", "r10", from_actor="bob@example.com")
+
+    result = wp.group_issue(a)
+
+    assert result["action"] == "auto_merged"
+    assert result["signal"] == "reference"
+    assert ws_db.get_issue(a)["project_id"] == ws_db.get_issue(b)["project_id"]
+
+
 # --- group_issue: the real bug, reproduced and fixed ---------------------
 
 _BOILERPLATE = "Action required: Approve the Requisition that {name} submitted - {pr}"
@@ -348,3 +416,44 @@ def test_project_name_for_deterministic_tie_break_by_first_seen(ws_db):
     name = wp._project_name_for(ws_db.get_issue(iid), "other", parties)
 
     assert name.startswith("EarlierCo")
+
+
+# --- backfill_regroup_by_reference (Part A1) ------------------------------
+
+def test_backfill_regroup_by_reference_merges_the_real_split_pattern(ws_db):
+    """The real production case this fixes: 3 separate issues sharing only
+    a reference ID (different sender each time, no other shared signal)."""
+    a = _issue(ws_db, "First notice")
+    _raw_item(ws_db, a, "PR854779-V4 approval needed", "bf1", from_actor="alice@example.com")
+    b = _issue(ws_db, "Second notice, unrelated-looking subject")
+    _raw_item(ws_db, b, "REMINDER: PR854779-V4 still needs approval", "bf2", from_actor="bob@example.com")
+    c = _issue(ws_db, "Third notice, also unrelated-looking")
+    _raw_item(ws_db, c, "please approve PR854779-V4 today", "bf3", from_actor="carol@example.com")
+
+    result = wp.backfill_regroup_by_reference()
+
+    assert result["checked"] == 3
+    a_proj = ws_db.get_issue(a)["project_id"]
+    assert a_proj is not None
+    assert ws_db.get_issue(b)["project_id"] == a_proj
+    assert ws_db.get_issue(c)["project_id"] == a_proj
+
+
+def test_backfill_regroup_by_reference_skips_issues_with_no_reference(ws_db):
+    _issue(ws_db, "No reference at all")
+    result = wp.backfill_regroup_by_reference()
+    assert result["checked"] == 0
+
+
+def test_backfill_regroup_by_reference_is_safe_to_rerun(ws_db):
+    a = _issue(ws_db, "First")
+    _raw_item(ws_db, a, "PR333444 approval needed", "bf4")
+    b = _issue(ws_db, "Second")
+    _raw_item(ws_db, b, "PR333444 approval needed again", "bf5")
+
+    first = wp.backfill_regroup_by_reference()
+    second = wp.backfill_regroup_by_reference()
+
+    assert first["auto_merged"] == 1
+    assert second["auto_merged"] == 0
+    assert second["already_grouped"] == 2

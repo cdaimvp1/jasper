@@ -99,6 +99,29 @@ def _vetoed_by_reference_mismatch(issue_id: str, sibling_id: str) -> bool:
     return bool(sibling_refs) and my_refs.isdisjoint(sibling_refs)
 
 
+def _shared_reference_id(issue_id: str):
+    """Part A1 of the grouping/NBA redesign (2026-07-30): a matching PR/PO
+    reference number is a real, structured identifier - the strongest,
+    least ambiguous signal available here, stronger than a shared external
+    party/company/subject-text (all three are heuristics; this is a fact).
+    Until now this field was used ONLY as a veto (_vetoed_by_reference_
+    mismatch above); this is its positive counterpart, checked FIRST in
+    _strong_signal_match. Real production case this closes: PR854779-V4
+    split across 3 separately-sent automated reminders (a different sender
+    each time, no Outlook reply-chain/ConversationID linking them - the
+    reference number is the only thing they actually share). Returns
+    (reference_id, sibling_issue_id) for the first other OPEN issue
+    sharing at least one of this issue's reference ids, or None. No veto
+    check needed on this branch - a shared reference and a disjoint
+    reference are mutually exclusive by construction."""
+    my_refs = reference_ids_for_issue(issue_id)
+    for ref in sorted(my_refs):
+        for sibling_id in ws.list_open_issue_ids_for_reference(ref):
+            if sibling_id != issue_id:
+                return ref, sibling_id
+    return None
+
+
 def _project_name_for(issue: dict, category: str, parties: list) -> str:
     external = [p for p in parties if p.get("affiliation") == "external" and p.get("company")
                 and not workgraph_signals._SYSTEM_SENDER.match(p.get("primary_email") or "")]
@@ -240,14 +263,22 @@ def _shared_topic_key(issue: dict):
 
 def _strong_signal_match(issue_id: str, issue: dict):
     """First strong deterministic signal found, checked in order of
-    confidence: exact external party > shared external company > matching
-    normalized subject/topic core. Any one is trusted enough to auto-merge
-    without asking - UNLESS vetoed by a disjoint PR/PO reference number
-    (see _vetoed_by_reference_mismatch above), which overrides all three.
+    confidence: matching reference ID (Part A1, 2026-07-30 - a real
+    structured identifier, checked first since it's the least ambiguous
+    signal available) > exact external party > shared external company >
+    matching normalized subject/topic core. Any one is trusted enough to
+    auto-merge without asking - UNLESS vetoed by a disjoint PR/PO reference
+    number (see _vetoed_by_reference_mismatch above), which overrides the
+    latter three (a shared-reference match can't itself be vetoed by a
+    reference mismatch - see _shared_reference_id's own docstring).
     A candidate rejected on reference grounds is not retried against a
     weaker signal for the same pair; the safer failure mode is no_match,
     not risking a second wrong merge via a looser check. Returns
     (kind, detail, sibling_issue_id) or None."""
+    m = _shared_reference_id(issue_id)
+    if m:
+        ref, sibling_id = m
+        return "reference", ref, sibling_id
     m = _shared_external_party(issue_id)
     if m:
         party_id, sibling_id = m
@@ -397,6 +428,7 @@ def group_issue(issue_id: str) -> dict:
     if match:
         kind, detail, sibling_id = match
         reason_label = {
+            "reference": f"strong signal: matching reference ID '{detail}'",
             "party": "strong signal: shared external party",
             "company": f"strong signal: shared external company '{detail}'",
             "topic": f"strong signal: matching subject core '{detail}'",
@@ -431,6 +463,27 @@ def group_issue(issue_id: str) -> dict:
     if suggested:
         return {"issue_id": issue_id, "action": "suggested", "count": suggested}
     return {"issue_id": issue_id, "action": "no_match"}
+
+
+def backfill_regroup_by_reference() -> dict:
+    """One-time repair pass for Part A1 (2026-07-30): _shared_reference_id
+    is a NEW signal - issues linked before this shipped may still be split
+    across separate issues purely because they share only a reference ID,
+    which nothing checked as a positive signal until now (the real known
+    case: PR854779-V4 split across 3 separate issues). Re-runs group_issue()
+    - documented idempotent, see its own docstring - for every currently-
+    open issue that has at least one real reference ID. Only catches
+    issues group_issue() itself would act on (i.e. not already assigned to
+    a project) - matches group_issue()'s own scope, not a new mechanism."""
+    candidates = [
+        i for i in ws.list_issues(states=["active", "waiting", "blocked"], limit=10000)
+        if reference_ids_for_issue(i["id"])
+    ]
+    results = {"checked": len(candidates), "auto_merged": 0, "already_grouped": 0, "no_match": 0, "suggested": 0}
+    for issue in candidates:
+        action = group_issue(issue["id"])["action"]
+        results[action] = results.get(action, 0) + 1
+    return results
 
 
 def run(issue_ids: list) -> dict:

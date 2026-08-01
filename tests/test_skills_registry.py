@@ -74,3 +74,124 @@ def test_resolves_a_real_registered_and_vendored_skill(tmp_path, monkeypatch):
     assert result["display_name"] == "Fake Skill"
     assert result["skill_dir"] == skill_dir
     assert result["skill_dir"].exists()
+
+
+def _fake_source_skill(tmp_path, name="fake-skill", content="v1"):
+    src = tmp_path / "sources" / f"{name}-{content}"
+    src.mkdir(parents=True)
+    (src / "SKILL.md").write_text(f"# {name} ({content})\n", encoding="utf-8")
+    return src
+
+
+def _install_kwargs(**overrides):
+    kwargs = dict(skill_name="fake-skill", display_name="Fake Skill", label="Run Fake Skill",
+                   produces="a fake output", output_kind="output", version="v1")
+    kwargs.update(overrides)
+    return kwargs
+
+
+def test_install_skill_vendors_files_and_registers_action_kind(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    registry_path = tmp_path / "skills_registry.json"
+    monkeypatch.setattr(skills_registry, "REGISTRY_PATH", registry_path)
+    monkeypatch.setattr(skills_registry.paths, "DATA_DIR", data_dir)
+
+    source = _fake_source_skill(tmp_path)
+    entry = skills_registry.install_skill("audit_invoice", source, **_install_kwargs())
+
+    assert entry["version"] == "v1"
+    assert entry["previous_versions"] == []
+    vendored = data_dir / entry["skill_dir"]
+    assert vendored.is_dir()
+    assert (vendored / "SKILL.md").read_text(encoding="utf-8") == "# fake-skill (v1)\n"
+
+    result = skills_registry.get_skill_for_action("audit_invoice")
+    assert result is not None
+    assert result["skill_dir"] == vendored
+
+
+def test_install_skill_new_version_keeps_old_version_on_disk_as_fallback(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    registry_path = tmp_path / "skills_registry.json"
+    monkeypatch.setattr(skills_registry, "REGISTRY_PATH", registry_path)
+    monkeypatch.setattr(skills_registry.paths, "DATA_DIR", data_dir)
+
+    v1_source = _fake_source_skill(tmp_path, content="v1")
+    v1 = skills_registry.install_skill("audit_invoice", v1_source, **_install_kwargs(version="v1"))
+    v1_dir = data_dir / v1["skill_dir"]
+
+    v2_source = _fake_source_skill(tmp_path, content="v2")
+    v2 = skills_registry.install_skill("audit_invoice", v2_source, **_install_kwargs(version="v2"))
+
+    # the OLD version's files are untouched on disk - a real fallback copy,
+    # not just a pointer that happens to still resolve.
+    assert v1_dir.is_dir()
+    assert (v1_dir / "SKILL.md").read_text(encoding="utf-8") == "# fake-skill (v1)\n"
+    assert v2["previous_versions"] == [{"version": "v1", "skill_dir": v1["skill_dir"], "installed_at": v1["installed_at"]}]
+    assert skills_registry.get_skill_for_action("audit_invoice")["version"] == "v2"
+
+
+def test_install_skill_same_version_reinstall_does_not_fabricate_a_fallback(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    registry_path = tmp_path / "skills_registry.json"
+    monkeypatch.setattr(skills_registry, "REGISTRY_PATH", registry_path)
+    monkeypatch.setattr(skills_registry.paths, "DATA_DIR", data_dir)
+
+    source = _fake_source_skill(tmp_path)
+    skills_registry.install_skill("audit_invoice", source, **_install_kwargs())
+    entry = skills_registry.install_skill("audit_invoice", source, **_install_kwargs())
+
+    assert entry["previous_versions"] == []
+
+
+def test_install_skill_prunes_fallback_files_beyond_the_cap(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    registry_path = tmp_path / "skills_registry.json"
+    monkeypatch.setattr(skills_registry, "REGISTRY_PATH", registry_path)
+    monkeypatch.setattr(skills_registry.paths, "DATA_DIR", data_dir)
+
+    dirs_by_version = {}
+    for v in ["v1", "v2", "v3", "v4", "v5"]:
+        source = _fake_source_skill(tmp_path, content=v)
+        entry = skills_registry.install_skill("audit_invoice", source, **_install_kwargs(version=v))
+        dirs_by_version[v] = data_dir / entry["skill_dir"]
+
+    # cap is 3 previous versions - v5 is current, so v2/v3/v4 survive and v1
+    # (the oldest, pushed past the cap) gets pruned from disk entirely.
+    assert not dirs_by_version["v1"].exists()
+    for v in ["v2", "v3", "v4"]:
+        assert dirs_by_version[v].exists()
+    assert dirs_by_version["v5"].exists()
+    versions_kept = [p["version"] for p in skills_registry.get_skill_for_action("audit_invoice")["previous_versions"]]
+    assert versions_kept == ["v4", "v3", "v2"]
+
+
+def test_rollback_skill_restores_the_most_recent_previous_version(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    registry_path = tmp_path / "skills_registry.json"
+    monkeypatch.setattr(skills_registry, "REGISTRY_PATH", registry_path)
+    monkeypatch.setattr(skills_registry.paths, "DATA_DIR", data_dir)
+
+    v1_source = _fake_source_skill(tmp_path, content="v1")
+    skills_registry.install_skill("audit_invoice", v1_source, **_install_kwargs(version="v1"))
+    v2_source = _fake_source_skill(tmp_path, content="v2")
+    skills_registry.install_skill("audit_invoice", v2_source, **_install_kwargs(version="v2"))
+
+    restored = skills_registry.rollback_skill("audit_invoice")
+    assert restored["version"] == "v1"
+    assert skills_registry.get_skill_for_action("audit_invoice")["version"] == "v1"
+    # the rollback itself is reversible - v2 is now the fallback.
+    assert restored["previous_versions"][0]["version"] == "v2"
+
+
+def test_rollback_skill_returns_none_when_there_is_nothing_to_fall_back_to(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    registry_path = tmp_path / "skills_registry.json"
+    monkeypatch.setattr(skills_registry, "REGISTRY_PATH", registry_path)
+    monkeypatch.setattr(skills_registry.paths, "DATA_DIR", data_dir)
+
+    source = _fake_source_skill(tmp_path)
+    skills_registry.install_skill("audit_invoice", source, **_install_kwargs())
+
+    assert skills_registry.rollback_skill("audit_invoice") is None
+    assert skills_registry.rollback_skill("never_registered") is None

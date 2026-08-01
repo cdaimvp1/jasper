@@ -124,3 +124,43 @@ def test_draft_reply_timeout_raises_runtime_error_not_timeout_expired(monkeypatc
     monkeypatch.setattr(subprocess, "run", fake_run)
     with pytest.raises(RuntimeError, match="timed out"):
         oa.draft_reply("some-entry-id")
+
+
+def test_draft_forward_requires_entry_id():
+    with pytest.raises(ValueError):
+        oa.draft_forward("")
+    with pytest.raises(ValueError):
+        oa.draft_forward(None)
+
+
+def test_draft_forward_calls_script_with_entry_id(monkeypatch):
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        return _FakeCompletedProcess(returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = oa.draft_forward("entryid-ABC")
+
+    assert result == {"ok": True}
+    assert "entryid-ABC" in captured["args"]
+    assert str(oa._DRAFT_FORWARD_SCRIPT) in captured["args"]
+
+
+def test_draft_forward_raises_runtime_error_on_failure(monkeypatch):
+    def fake_run(args, **kwargs):
+        return _FakeCompletedProcess(returncode=2, stderr="stale entry id")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match="stale entry id"):
+        oa.draft_forward("stale-id")
+
+
+def test_draft_forward_timeout_raises_runtime_error_not_timeout_expired(monkeypatch):
+    def fake_run(args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=args, timeout=kwargs.get("timeout", 20))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match="timed out"):
+        oa.draft_forward("some-entry-id")

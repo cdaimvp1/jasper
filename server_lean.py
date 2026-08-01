@@ -1160,9 +1160,10 @@ async def api_workgraph_issue_detail(issue_id: str, log_choice: bool = False):
     synthesis = wg.get_synthesis("issue", issue_id)
     project_synthesis = wg.get_synthesis("project", issue["project_id"]) if issue.get("project_id") else None
     attachments = wg.list_attachments_for_issue(issue_id)
-    # 2026-07-29: populate evidence[].recommendation + .attachment (see
-    # workgraph_recommend.py) — the Detail pane's Progress column already
-    # rendered these when present, but nothing ever produced them.
+    # 2026-07-29: populate evidence[].recommendations (list, task #15) +
+    # .attachment (see workgraph_recommend.py) — the Detail pane's Progress
+    # column already rendered these when present, but nothing ever produced
+    # them.
     workgraph_recommend.attach_recommendations(evidence, attachments, time.time())
     deep_links.attach_deep_links(evidence)
     personal_patterns.attach_citations(evidence)
@@ -1291,6 +1292,29 @@ async def api_action_draft_reply(body: DraftReplyBody):
         raise HTTPException(400, "this item has no stored EntryID (ingested before task #43, or not a mail item)")
     try:
         result = await asyncio.to_thread(outlook_actions.draft_reply, entry_id, body.reply_all)
+    except RuntimeError as e:
+        raise HTTPException(500, str(e))
+    return JSONResponse(result)
+
+
+class DraftForwardBody(BaseModel):
+    raw_item_id: int
+
+
+@app.post("/api/action/draft-forward")
+async def api_action_draft_forward(body: DraftForwardBody):
+    """Task #16 - mirrors draft-reply above (outlook_actions.draft_forward:
+    Forward() + Display(), never Send()), same asyncio.to_thread guard for
+    the same reason - a blocking COM round-trip in an async def handler
+    freezes every request on this single-worker server."""
+    raw_item = wg.get_raw_item(body.raw_item_id)
+    if raw_item is None:
+        raise HTTPException(404, f"no such raw_item: {body.raw_item_id}")
+    entry_id = raw_item.get("entry_id")
+    if not entry_id:
+        raise HTTPException(400, "this item has no stored EntryID (ingested before task #43, or not a mail item)")
+    try:
+        result = await asyncio.to_thread(outlook_actions.draft_forward, entry_id)
     except RuntimeError as e:
         raise HTTPException(500, str(e))
     return JSONResponse(result)

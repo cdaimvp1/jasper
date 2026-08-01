@@ -2,9 +2,10 @@
 built from a teams_chat raw_item's thread_key == the real chat_id, confirmed
 against production data: ingest/normalize.py's _process_teams_chat already
 sets thread_key = chat_id verbatim, no parsing needed here), open-email
-(task #46) and draft-reply (task #47) actions for outlook_mail rows.
-evidence["deep_links"] is a LIST (task #47's refactor) since a single email
-can carry more than one action (open + draft reply + a vendor link) at once."""
+(task #46), draft-reply (task #47), and draft-forward (task #16) actions
+for outlook_mail rows. evidence["deep_links"] is a LIST (task #47's
+refactor) since a single email can carry more than one action (open +
+draft reply + draft forward + a vendor link) at once."""
 import json
 
 import deep_links
@@ -41,6 +42,20 @@ def test_draft_reply_action_shape():
     action = deep_links.draft_reply_action({"source": "outlook_mail", "id": 42, "entry_id": "e1"})
     assert action == {"kind": "action", "endpoint": "/api/action/draft-reply",
                        "raw_item_id": 42, "label": "Draft reply"}
+
+
+def test_draft_forward_action_none_for_non_mail_source():
+    assert deep_links.draft_forward_action({"source": "teams_chat", "id": 1, "entry_id": "x"}) is None
+
+
+def test_draft_forward_action_none_without_entry_id():
+    assert deep_links.draft_forward_action({"source": "outlook_mail", "id": 1, "entry_id": None}) is None
+
+
+def test_draft_forward_action_shape():
+    action = deep_links.draft_forward_action({"source": "outlook_mail", "id": 42, "entry_id": "e1"})
+    assert action == {"kind": "action", "endpoint": "/api/action/draft-forward",
+                       "raw_item_id": 42, "label": "Draft forward"}
 
 
 def test_attach_deep_links_teams_evidence_gets_link(ws_db):
@@ -89,7 +104,7 @@ def test_attach_deep_links_mail_with_entry_id_gets_both_actions(ws_db):
     out = deep_links.attach_deep_links(evidence)
 
     links = out[0]["deep_links"]
-    assert {l["label"] for l in links} == {"Open email", "Draft reply"}
+    assert {l["label"] for l in links} == {"Open email", "Draft reply", "Draft forward"}
     assert all(l["kind"] == "action" and l["raw_item_id"] == row_id for l in links)
 
 
@@ -112,7 +127,7 @@ def test_attach_deep_links_mail_with_vendor_signal_gets_all_three_links(ws_db, i
     out = deep_links.attach_deep_links(evidence)
 
     labels = {l["label"] for l in out[0]["deep_links"]}
-    assert labels == {"Open email", "Draft reply", "Open in Adobe Sign"}
+    assert labels == {"Open email", "Draft reply", "Draft forward", "Open in Adobe Sign"}
 
 
 def test_attach_deep_links_calendar_source_gets_no_links(ws_db):

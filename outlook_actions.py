@@ -17,6 +17,7 @@ from pathlib import Path
 _SCRIPT_DIR = Path(__file__).resolve().parent / "ingest"
 _OPEN_ITEM_SCRIPT = _SCRIPT_DIR / "outlook_open_item.ps1"
 _DRAFT_REPLY_SCRIPT = _SCRIPT_DIR / "outlook_draft_reply.ps1"
+_DRAFT_FORWARD_SCRIPT = _SCRIPT_DIR / "outlook_draft_forward.ps1"
 _TIMEOUT_SECONDS = 20
 
 
@@ -63,3 +64,15 @@ def draft_reply(entry_id: str, reply_all: bool = False) -> dict:
     if reply_all:
         args.append("-ReplyAll")
     return _run_powershell(args)
+
+
+def draft_forward(entry_id: str) -> dict:
+    """Creates a REAL Outlook draft forward of the exact item (by EntryID)
+    via COM's own Forward() - a new draft MailItem containing the original
+    message, unaddressed - then Display()s it for review. Never calls
+    Send(): this only ever puts a draft on screen, the same as a person
+    clicking Forward themselves. Raises RuntimeError (with a real reason)
+    on failure."""
+    if not entry_id:
+        raise ValueError("entry_id is required")
+    return _run_powershell(["powershell", "-NoProfile", "-File", str(_DRAFT_FORWARD_SCRIPT), "-EntryID", entry_id])

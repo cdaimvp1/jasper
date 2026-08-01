@@ -37,6 +37,13 @@ source none of this covers, get an empty list rather than a broken button.
 v4 (task #48): a vendor action link (DocuSign/Adobe Sign/Ariba - see
 link_extraction.py) is appended as a fourth possible entry for outlook_mail
 rows whose signal_type is a recognized LIVE signature/approval request.
+
+v5 (task #16, 2026-08-01): a third action, "draft forward" (POST
+/api/action/draft-forward, outlook_actions.draft_forward), mirrors draft
+reply exactly - same entry_id requirement, same Outlook-COM-draft-then-
+Display() shape, just Forward() instead of Reply()/ReplyAll(). Marc's own
+framing: reply and forward should both always be offered as options on a
+mail item, whichever he actually wants to use.
 """
 from __future__ import annotations
 
@@ -72,6 +79,15 @@ def draft_reply_action(raw_item: dict) -> Optional[dict]:
             "raw_item_id": raw_item["id"], "label": "Draft reply"}
 
 
+def draft_forward_action(raw_item: dict) -> Optional[dict]:
+    if raw_item.get("source") != "outlook_mail":
+        return None
+    if not raw_item.get("entry_id"):
+        return None
+    return {"kind": "action", "endpoint": "/api/action/draft-forward",
+            "raw_item_id": raw_item["id"], "label": "Draft forward"}
+
+
 def vendor_action_link(raw_item: dict) -> Optional[dict]:
     extracted = link_extraction.extract_link_for_raw_item(raw_item)
     if not extracted:
@@ -86,7 +102,7 @@ def _links_for_raw_item(raw_item: dict) -> list[dict]:
         return [link] if link else []
     if source == "outlook_mail":
         return [a for a in (open_email_action(raw_item), draft_reply_action(raw_item),
-                             vendor_action_link(raw_item)) if a]
+                             draft_forward_action(raw_item), vendor_action_link(raw_item)) if a]
     return []
 
 

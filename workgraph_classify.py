@@ -524,6 +524,7 @@ def cluster_and_link(limit: int = 500) -> dict:
     does, so it can only be validated by watching would_attach_via_
     reference against real new mail for a bake-in period first."""
     reference_auto_attach = bool(config.get("grouping", "reference_id_auto_attach_enabled"))
+    now = time.time()
     with_pending = ws.get_items_pending_link(limit)
     created = 0
     linked = 0
@@ -541,6 +542,7 @@ def cluster_and_link(limit: int = 500) -> dict:
     for item in with_pending:
         if item["item_class"] == "NOISE":
             skipped_noise += 1
+            ws.mark_link_checked(item["id"], now)
             continue
 
         thread_key = item["thread_key"]
@@ -565,6 +567,7 @@ def cluster_and_link(limit: int = 500) -> dict:
             elif issue_id is None:
                 if item["item_class"] == "FYI-EVIDENCE":
                     skipped_fyi_standalone += 1
+                    ws.mark_link_checked(item["id"], now)
                     continue
                 title = strip_subject_prefix(item.get("subject") or "(no subject)")
                 state = "active" if item["item_class"] == "ACTIONABLE-ASK" else "waiting"

@@ -328,6 +328,57 @@ def test_update_issue_non_state_field_does_not_add_history_row(ws_db):
     assert len(ws_db.list_issue_state_history(iid)) == before
 
 
+# --- get_items_pending_link ordering (2026-08-01, real-incident follow-up) ---
+
+def test_get_items_pending_link_never_checked_sorts_before_already_skipped(ws_db):
+    """The exact bug: plain oldest-first let an ever-growing pool of already-
+    examined-and-skipped rows crowd out rows that have never been looked at,
+    no matter how much older the skipped ones are."""
+    old_skipped = ws_db.insert_raw_item(source="outlook_mail", stable_key="p1", thread_key="p1", dedupe_key="p1",
+                                         occurred_ts=1.0, subject="old", from_actor="a@example.com", participants_json="[]")
+    ws_db.classify_raw_item(old_skipped, item_class="NOISE", direction="inbound", direction_inferred=False,
+                             topic="other", topic_inferred=True, sentiment="neutral", sentiment_inferred=True, anomaly_flag=False)
+    ws_db.mark_link_checked(old_skipped, 500.0)
+
+    new_unchecked = ws_db.insert_raw_item(source="outlook_mail", stable_key="p2", thread_key="p2", dedupe_key="p2",
+                                           occurred_ts=1000.0, subject="new", from_actor="a@example.com", participants_json="[]")
+    ws_db.classify_raw_item(new_unchecked, item_class="ACTIONABLE-ASK", direction="inbound", direction_inferred=False,
+                             topic="other", topic_inferred=True, sentiment="neutral", sentiment_inferred=True, anomaly_flag=False)
+
+    pending = ws_db.get_items_pending_link(limit=1)
+
+    assert [p["id"] for p in pending] == [new_unchecked]
+
+
+def test_get_items_pending_link_orders_oldest_first_within_each_group(ws_db):
+    """Ordering within the never-checked group (and within the already-
+    checked group) is still oldest-occurred_ts-first, unchanged from before
+    this fix - only the CROSS-group priority changed."""
+    older = ws_db.insert_raw_item(source="outlook_mail", stable_key="p3", thread_key="p3", dedupe_key="p3",
+                                   occurred_ts=1.0, subject="older", from_actor="a@example.com", participants_json="[]")
+    ws_db.classify_raw_item(older, item_class="ACTIONABLE-ASK", direction="inbound", direction_inferred=False,
+                             topic="other", topic_inferred=True, sentiment="neutral", sentiment_inferred=True, anomaly_flag=False)
+    newer = ws_db.insert_raw_item(source="outlook_mail", stable_key="p4", thread_key="p4", dedupe_key="p4",
+                                   occurred_ts=2.0, subject="newer", from_actor="a@example.com", participants_json="[]")
+    ws_db.classify_raw_item(newer, item_class="ACTIONABLE-ASK", direction="inbound", direction_inferred=False,
+                             topic="other", topic_inferred=True, sentiment="neutral", sentiment_inferred=True, anomaly_flag=False)
+
+    pending = ws_db.get_items_pending_link(limit=10)
+
+    assert [p["id"] for p in pending] == [older, newer]
+
+
+def test_mark_link_checked_only_affects_the_named_row(ws_db):
+    a = ws_db.insert_raw_item(source="outlook_mail", stable_key="p5", thread_key="p5", dedupe_key="p5",
+                               occurred_ts=1.0, subject="a", from_actor="x@example.com", participants_json="[]")
+    b = ws_db.insert_raw_item(source="outlook_mail", stable_key="p6", thread_key="p6", dedupe_key="p6",
+                               occurred_ts=2.0, subject="b", from_actor="x@example.com", participants_json="[]")
+    ws_db.mark_link_checked(a, 100.0)
+
+    assert ws_db.get_raw_item(a)["last_link_check_ts"] == 100.0
+    assert ws_db.get_raw_item(b)["last_link_check_ts"] is None
+
+
 def test_alerts_table_accepts_unmet_prerequisite_kind(ws_db):
     """Confirms the CHECK constraint migration in init_workgraph() actually
     took effect - not just that CREATE TABLE IF NOT EXISTS silently no-opped

@@ -467,6 +467,48 @@ def test_cluster_and_link_creates_new_issue_when_no_reference_match(ws_db):
     assert result["would_attach_via_reference"] == 0
 
 
+# --- get_items_pending_link backlog starvation (2026-08-01, real incident) --
+
+def test_cluster_and_link_stamps_check_ts_on_noise_skip(ws_db):
+    rid = _pending_item(ws_db, "ckn1", "unsubscribe from this newsletter", item_class="NOISE")
+    wc.cluster_and_link()
+    assert ws_db.get_raw_item(rid)["last_link_check_ts"] is not None
+
+
+def test_cluster_and_link_stamps_check_ts_on_fyi_standalone_skip(ws_db):
+    rid = _pending_item(ws_db, "ckf1", "just an fyi note", item_class="FYI-EVIDENCE")
+    wc.cluster_and_link()
+    assert ws_db.get_raw_item(rid)["last_link_check_ts"] is not None
+
+
+def test_cluster_and_link_does_not_stamp_a_successfully_linked_item(ws_db):
+    rid = _pending_item(ws_db, "cka1", "please approve this")
+    wc.cluster_and_link()
+    assert ws_db.get_raw_item(rid)["last_link_check_ts"] is None
+    assert ws_db.get_raw_item(rid)["issue_id"] is not None
+
+
+def test_cluster_and_link_backlog_of_old_skips_does_not_starve_new_items(ws_db):
+    """End-to-end reproduction of the real incident: a backlog of
+    permanently-skipped items exceeding `limit` must not prevent a
+    genuinely new, real ask from being linked on the very next run."""
+    # Round 1: 5 standalone FYIs, no thread/reference match - all skipped.
+    for i in range(5):
+        _pending_item(ws_db, f"stale{i}", "just an fyi note", item_class="FYI-EVIDENCE")
+    first = wc.cluster_and_link(limit=5)
+    assert first["fyi_standalone_skipped"] == 5
+    assert first["issues_created"] == 0
+
+    # Round 2: a real, brand-new actionable ask arrives. With the OLD plain
+    # oldest-first query and a limit smaller than the stale backlog, this
+    # would never even be examined - confirmed as the live bug's exact shape.
+    rid = _pending_item(ws_db, "fresh1", "please approve this new requisition")
+    second = wc.cluster_and_link(limit=3)  # smaller than the 5-item stale backlog
+
+    assert second["issues_created"] == 1
+    assert ws_db.get_raw_item(rid)["issue_id"] is not None
+
+
 def test_personal_calendar_block_never_becomes_an_issue_end_to_end(ws_db):
     """Real end-to-end reproduction: a HOLD block, classified for real
     (through run_classification, which now passes source/organizer/

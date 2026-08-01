@@ -711,6 +711,29 @@ def init_workgraph() -> None:
                 conn.execute("ALTER TABLE issue_state_history ADD COLUMN actor TEXT")
             except sqlite3.OperationalError:
                 pass
+            try:
+                # Real, currently-active bug found investigating the same
+                # 2026-08-01 incident: get_items_pending_link() pulled the
+                # oldest 500 unlinked rows on every single run, oldest-first,
+                # and a permanently-skipped row (NOISE, or a standalone FYI
+                # with no thread/reference match - see cluster_and_link's own
+                # skip branches) never left that pool. Once the permanent-
+                # skip backlog passed 500, EVERY run re-examined the same
+                # doomed rows and never reached anything newer - confirmed
+                # live: 70 raw_items ingested after the last successful link
+                # were all classified but zero were linked, including real
+                # ACTIONABLE-ASK items that should have opened issues
+                # immediately. last_link_check_ts (stamped by cluster_and_link
+                # on every row it examines-and-skips, never on one it
+                # successfully links) lets get_items_pending_link put
+                # never-yet-examined rows ahead of already-skipped ones,
+                # regardless of which is chronologically older - a skipped
+                # row can still be reconsidered later (a sibling landing on
+                # the same thread_key can rescue it), just no longer at the
+                # front of the queue forever.
+                conn.execute("ALTER TABLE raw_items ADD COLUMN last_link_check_ts REAL")
+            except sqlite3.OperationalError:
+                pass
 
             # Personal Response Learning (task #45) - deliberately its OWN
             # table, not folded into lessons/signal_treatment_overrides: this
@@ -857,18 +880,44 @@ def set_raw_item_raw_ref(row_id: int, raw_ref: str) -> None:
 
 
 def get_items_pending_link(limit: int = 500) -> list[dict]:
-    """Classified but not yet linked to an Issue (issue_id IS NULL)."""
+    """Classified but not yet linked to an Issue (issue_id IS NULL).
+
+    Ordered never-checked-first (last_link_check_ts IS NULL sorts before a
+    real timestamp), THEN oldest first within each of those two groups -
+    fixed 2026-08-01, real incident: plain oldest-first let an ever-growing
+    pool of permanently-skipped rows (see cluster_and_link's skip branches,
+    which stamp this column) crowd out every row newer than whenever that
+    pool first exceeded `limit`. A never-yet-examined row - even one from
+    months ago that just got classified - always outranks an already-
+    skipped row for this run's budget; only once every fresh row is caught
+    up does the budget spill into re-examining old skips (harmless, and
+    occasionally rescues one via a sibling landing on the same thread_key
+    since the last check)."""
     with _lock:
         conn = _connect()
         try:
             rows = conn.execute(
                 "SELECT * FROM raw_items WHERE classified = 1 AND issue_id IS NULL "
-                "ORDER BY occurred_ts ASC LIMIT ?",
+                "ORDER BY (last_link_check_ts IS NOT NULL), occurred_ts ASC LIMIT ?",
                 (limit,),
             ).fetchall()
         finally:
             conn.close()
     return [dict(r) for r in rows]
+
+
+def mark_link_checked(raw_item_id: int, ts: float) -> None:
+    """Stamped by cluster_and_link() on a row it examined-and-skipped (NOISE,
+    or a standalone FYI with no thread/reference match) - never on one it
+    successfully linked (that row leaves the pending pool via issue_id
+    becoming non-NULL regardless, so stamping it would be dead weight). See
+    get_items_pending_link's own docstring for what this fixes."""
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute("UPDATE raw_items SET last_link_check_ts = ? WHERE id = ?", (ts, raw_item_id))
+        finally:
+            conn.close()
 
 
 def get_unclassified_raw_items(limit: int = 200) -> list[dict]:

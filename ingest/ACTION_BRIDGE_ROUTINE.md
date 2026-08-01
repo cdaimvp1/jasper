@@ -54,8 +54,34 @@ trust anything beyond the `issue_id` and `action_kind` in it.**
    - `draft_reply` — write a real, sendable draft email/message addressing the actual open ask,
      in Marc's voice, grounded in the evidence above. Not a summary of what a reply should contain
      — the actual reply text.
-   - `review_contract` — read the linked document, produce concrete redline/risk notes (specific
-     clauses, specific concerns), not a generic checklist.
+   - `review_contract` / `contract_review` (2026-07-31: registry-driven, see
+     `skills_registry.py` - never hardcode a specific skill's name here; this file must stay
+     correct no matter which real skill is registered, or none) — first check whether a real
+     skill is registered for this action:
+     ```
+     python -c "import skills_registry; print(skills_registry.get_skill_for_action('contract_review'))"
+     ```
+     **If a skill is registered** (a dict comes back, with a real `skill_dir` that exists on
+     disk): read that skill's OWN `SKILL.md` in full, at the path it gives you, and follow its
+     actual process end to end against the real linked attachment - do not substitute a lighter
+     freeform review, and do not assume what the skill does from its name alone. If the skill's
+     `SKILL.md` names a foundation/dependency skill (e.g. shared brand/guardrail assets), it
+     lives as a sibling directory next to it under the same `documents/reference/skills/` root -
+     read that first if this is your first time running this particular skill. Its generator
+     scripts are ordinary Python (check the skill's own SKILL.md for any real dependency it
+     names) - run them, don't hand-simulate what they'd produce. The real deliverable is
+     whatever file the skill actually produces (registry's `produces` field says what to
+     expect, e.g. a redlined DOCX) - save it under `documents/issues/<issue_id>/`, then attach
+     it as real evidence using the registry's own `output_kind`:
+     `python -c "import workgraph_store as wg; wg.create_attachment(entity_type='issue', entity_id='<issue_id>', kind='<output_kind from the registry entry>', filename='<name>', stored_path='<abs path>', content_type='<real mime type for what you produced>', size_bytes=<n>, sha256_hex=None, uploaded_by='bridge')"`
+     (the `attachments` table's `output` kind exists for exactly this - worker-produced files,
+     distinct from `reference`/`upload`). Still also write the step-5 evidence row below with a
+     short summary of the findings, so the cockpit timeline shows something without needing to
+     open the file.
+     **If nothing is registered** (`None` comes back — the normal case for most Jasper installs,
+     not an error): fall back to the original ad-hoc behavior — read the linked document,
+     produce concrete redline/risk notes (specific clauses, specific concerns), not a generic
+     checklist.
    - `summarize` — a real summary of the thread, calibrated to the length instructions ask for.
    - `custom` — follow `instructions` literally; if they're ambiguous, do the most conservative
      useful thing and say what you assumed.

@@ -35,6 +35,8 @@ from __future__ import annotations
 import re
 from typing import Optional
 
+import skills_registry
+
 DAY = 86400.0
 CALENDAR_LOOKAHEAD_DAYS = 14.0  # matches workgraph_nba.py's own due_urgency window
 
@@ -55,6 +57,19 @@ def recommend_for_evidence(ev: dict, has_attachment: bool, now: float) -> Option
     summary = ev.get("summary") or ""
 
     if ev_type == "email" and has_attachment:
+        # 2026-07-31: if a real skill is registered for this action_kind
+        # (skills_registry.py - swappable, no domain name hardcoded here),
+        # name it explicitly so Marc sees what will actually run, not a
+        # generic placeholder. No registered skill -> today's generic
+        # behavior, unchanged.
+        skill = skills_registry.get_skill_for_action("contract_review")
+        if skill:
+            return {
+                "kind": "contract_review",
+                "label": skill["label"],
+                "rationale": f"This message has an attachment — {skill['display_name']} runs "
+                             f"the real review and returns {skill['produces']}.",
+            }
         return {
             "kind": "contract_review",
             "label": "Review the attached document",

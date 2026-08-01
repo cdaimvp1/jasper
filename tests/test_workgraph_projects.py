@@ -758,6 +758,100 @@ def test_backfill_regroup_by_reference_is_safe_to_rerun(ws_db):
     assert second["already_grouped"] == 2
 
 
+# --- find_relationship_links_for_grouped_issues (2026-08-01) -------------
+# Real gap: group_issue()'s "if issue.get('project_id'): return
+# already_grouped" means an already-grouped issue is never re-checked for a
+# genuine cross-project RELATIONSHIP (the "link" verdict) - confirmed live
+# on a real Workday deal spanning 2 different projects sharing one company.
+
+def test_find_relationship_links_suggests_shared_company_across_projects(ws_db):
+    a = _issue(ws_db, "Workday Early Renewal Order Form")
+    _link_party(ws_db, a, "dan-workday", "dan@workday.com", company="Workday")
+    ws_db.assign_issue_to_project(a, "proj-a")
+
+    b = _issue(ws_db, "Workday HCM SaaS renewal")
+    _link_party(ws_db, b, "someone-else-workday", "someone@workday.com", company="Workday")
+    ws_db.assign_issue_to_project(b, "proj-b")
+
+    result = wp.find_relationship_links_for_grouped_issues()
+
+    assert result["checked"] == 2
+    assert result["suggested"] >= 1
+    suggestions = ws_db.list_project_suggestions(status="pending")
+    matching = [s for s in suggestions if s["suggestion_kind"] == "link"
+                and {s["issue_id_a"], s["issue_id_b"]} == {a, b}]
+    assert len(matching) == 1
+
+
+def test_find_relationship_links_skips_pair_already_in_same_project(ws_db):
+    a = _issue(ws_db, "First")
+    _link_party(ws_db, a, "dan-workday2", "dan2@workday.com", company="Workday")
+    ws_db.assign_issue_to_project(a, "proj-same")
+
+    b = _issue(ws_db, "Second")
+    _link_party(ws_db, b, "dan-workday2", "dan2@workday.com", company="Workday")
+    ws_db.assign_issue_to_project(b, "proj-same")
+
+    result = wp.find_relationship_links_for_grouped_issues()
+
+    assert result["suggested"] == 0
+
+
+def test_find_relationship_links_vetoed_by_disjoint_reference(ws_db):
+    """Same real-transaction-vs-different-transaction distinction
+    _strong_signal_match itself already enforces - two different purchase
+    requisitions with the same vendor contact are NOT the same relationship
+    suggestion just because the company matches."""
+    a = _issue(ws_db, "First requisition")
+    _raw_item(ws_db, a, "Approve PR100001", "rl1", from_actor="dan3@workday.com")
+    _link_party(ws_db, a, "dan-workday3", "dan3@workday.com", company="Workday")
+    ws_db.assign_issue_to_project(a, "proj-c")
+
+    b = _issue(ws_db, "Second, different requisition")
+    _raw_item(ws_db, b, "Approve PR999999", "rl2", from_actor="dan3@workday.com")
+    _link_party(ws_db, b, "dan-workday3", "dan3@workday.com", company="Workday")
+    ws_db.assign_issue_to_project(b, "proj-d")
+
+    result = wp.find_relationship_links_for_grouped_issues()
+
+    assert result["suggested"] == 0
+
+
+def test_find_relationship_links_ungrouped_sibling_still_suggested(ws_db):
+    """Only the issue BEING checked needs a project already - its sibling
+    doesn't (the real Workday case: marc-014 had no project of its own
+    at all)."""
+    a = _issue(ws_db, "Grouped issue")
+    _link_party(ws_db, a, "dan-workday4", "dan4@workday.com", company="Workday")
+    ws_db.assign_issue_to_project(a, "proj-e")
+
+    b = _issue(ws_db, "Ungrouped sibling")
+    _link_party(ws_db, b, "dan-workday4", "dan4@workday.com", company="Workday")
+
+    result = wp.find_relationship_links_for_grouped_issues()
+
+    assert result["suggested"] == 1
+    assert ws_db.get_issue(b)["project_id"] is None, "must suggest, never assign, a project"
+
+
+def test_find_relationship_links_is_idempotent(ws_db):
+    a = _issue(ws_db, "First")
+    _link_party(ws_db, a, "dan-workday5", "dan5@workday.com", company="Workday")
+    ws_db.assign_issue_to_project(a, "proj-f")
+    b = _issue(ws_db, "Second")
+    _link_party(ws_db, b, "dan-workday5", "dan5@workday.com", company="Workday")
+    ws_db.assign_issue_to_project(b, "proj-g")
+
+    first = wp.find_relationship_links_for_grouped_issues()
+    second = wp.find_relationship_links_for_grouped_issues()
+
+    assert first["suggested"] >= 1
+    assert second["suggested"] == 0
+    suggestions = [s for s in ws_db.list_project_suggestions(status="pending")
+                   if {s["issue_id_a"], s["issue_id_b"]} == {a, b}]
+    assert len(suggestions) == 1
+
+
 # --- Part A2 (2026-07-30): weighted multi-signal scoring model -----------
 
 def _isolate_config(monkeypatch, tmp_path):

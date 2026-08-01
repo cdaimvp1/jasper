@@ -950,6 +950,75 @@ def backfill_regroup_by_reference() -> dict:
     return results
 
 
+def find_relationship_links_for_grouped_issues() -> dict:
+    """One-time (or on-demand) discovery pass, same shape and same 'catches
+    what the live path structurally can't' premise as
+    backfill_regroup_by_reference above. Real gap found 2026-08-01
+    investigating a real Workday relationship: group_issue()'s very first
+    line is `if issue.get("project_id"): return already_grouped` - once an
+    issue has ANY project, it is NEVER evaluated again, for anything,
+    including a genuine cross-project RELATIONSHIP (the "link" verdict
+    _strong_signal_match already knows how to produce). Confirmed live:
+    marc-308 (Workday Early Renewal, already in a project) and marc-014
+    (Workday HCM SaaS renewal, a completely different real Workday deal)
+    share the same external company - a real, useful "these are the same
+    counterparty, worth knowing about" signal - but group_issue() never
+    even computed it for marc-308, because "already_grouped" short-circuits
+    before _shared_external_party/_shared_external_company are ever called.
+
+    This does NOT touch group_issue()'s early return (that guard is correct
+    for its own job - never re-litigate a settled MERGE) and does NOT merge
+    anything itself - only ever creates a 'link'-kind suggestion (the same
+    human-confirm-required, never-auto-applied path _strong_signal_match's
+    own "link" verdict already uses), for a pair that isn't already in the
+    same project and doesn't already have a pending suggestion (create_
+    project_suggestion's own dedup). Party match checked before company
+    (the narrower, higher-confidence signal first) - first match wins per
+    issue, same as _strong_signal_match's own single-candidate shape."""
+    grouped = [i for i in ws.list_issues(states=["active", "waiting", "blocked"], limit=10000) if i.get("project_id")]
+    # Pre-existing 'link' suggestions (any status - a rejected one shouldn't
+    # be re-created either, same as a pending one) - checked in-memory so
+    # this run's own two-direction processing (issue A finds B, then issue
+    # B independently finds A) and any prior run both dedupe against the
+    # SAME set, rather than only catching one of those two cases.
+    seen_pairs = {
+        frozenset((s["issue_id_a"], s["issue_id_b"]))
+        for s in ws.list_project_suggestions(status="pending") + ws.list_project_suggestions(status="confirmed")
+        + ws.list_project_suggestions(status="rejected")
+        if s["suggestion_kind"] == "link"
+    }
+    checked = 0
+    suggested = 0
+    for issue in grouped:
+        checked += 1
+        match = _shared_external_party(issue["id"])
+        kind = "party"
+        if not match:
+            match = _shared_external_company(issue["id"])
+            kind = "company"
+        if not match:
+            continue
+        detail, sibling_id = match
+        sibling = ws.get_issue(sibling_id)
+        if not sibling:
+            continue
+        if sibling.get("project_id") == issue["project_id"]:
+            continue  # already the same project (including both-None, which can't reach here since `issue` is always grouped) - nothing to suggest
+        if _vetoed_by_reference_mismatch(issue["id"], sibling_id):
+            continue
+        pair = frozenset((issue["id"], sibling_id))
+        if pair in seen_pairs:
+            continue
+        ws.create_project_suggestion(
+            issue_id_a=issue["id"], issue_id_b=sibling_id,
+            reason=f"possibly related (not necessarily same project) - shared external {kind} '{detail}'",
+            suggestion_kind="link",
+        )
+        seen_pairs.add(pair)
+        suggested += 1
+    return {"checked": checked, "suggested": suggested}
+
+
 def run(issue_ids: list) -> dict:
     results = [group_issue(i) for i in issue_ids]
     return {

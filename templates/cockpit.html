@@ -3289,6 +3289,82 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
 .pcc-doc-row{padding:9px 18px;border-bottom:1px solid var(--lk-line);font-size:12.5px}
 .pcc-doc-row:hover{background:var(--lk-panel)}
 @media(max-width:1200px){.pcc-tl-row{grid-template-columns:1fr}.pcc-tl-rec-none{display:none}}
+
+/* ── Detail Panel, Refined (task #124 follow-on): 3-tab issue view ── */
+.pcc-detail-grid{display:grid;grid-template-columns:1fr 260px;gap:0}
+.pcc-detail-main{padding:16px 20px;border-right:1px solid var(--lk-line);min-width:0}
+.pcc-detail-side{padding:16px 14px;background:var(--lk-panel)}
+@media(max-width:1000px){.pcc-detail-grid{grid-template-columns:1fr}.pcc-detail-side{border-top:1px solid var(--lk-line)}}
+.pcc-detail-subtabs{display:flex;gap:2px;background:var(--lk-nested);padding:4px;border-radius:var(--lk-r-s);margin-bottom:16px;width:fit-content}
+.pcc-detail-subtab{background:none;border:none;border-radius:var(--lk-r-c);padding:7px 14px;cursor:pointer;font:700 12px var(--sans);color:var(--lk-mut2)}
+.pcc-detail-subtab.on{background:var(--lk-surface);color:var(--lk-ink);box-shadow:var(--lk-elev)}
+.pcc-detail-subpane{display:none}
+.pcc-detail-subpane.on{display:block}
+
+.pcc-nba-card{border:1.5px solid var(--lk-pri);border-radius:var(--lk-r-s);padding:12px 15px;margin-bottom:9px;background:var(--lk-pri-t);width:100%;text-align:left;cursor:pointer;font-family:inherit}
+.pcc-nba-tag{font:800 9.5px/1 var(--mono);text-transform:uppercase;letter-spacing:.04em;color:var(--lk-pri);margin-bottom:7px}
+.pcc-nba-label{font-size:13.5px;font-weight:700;color:var(--lk-ink);margin-bottom:3px}
+.pcc-nba-why{font-size:12px;color:var(--lk-mut)}
+
+.pcc-procbox{border:1px solid var(--lk-line);border-radius:var(--lk-r-s);padding:13px 15px}
+.pcc-procbox-row1{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+.pcc-procbox-ref{font:700 10.5px/1 var(--mono);background:var(--lk-nested);border:1px solid var(--lk-line2);padding:3px 9px;border-radius:6px}
+.pcc-procbox-money{font:800 20px/1 var(--mono);letter-spacing:-.01em;margin-left:auto}
+.pcc-procbox-gate{font-size:12px;padding-top:9px;border-top:1px solid var(--lk-line)}
+
+.pcc-related-row{display:flex;justify-content:space-between;align-items:baseline;gap:12px;padding:7px 0;border-bottom:1px solid var(--lk-line);font-size:12.5px}
+.pcc-related-row:last-child{border-bottom:none}
+.pcc-related-what{color:var(--lk-mut)}
+.pcc-nolink{color:var(--lk-mut2);font-size:11.5px;font-style:italic}
+
+/* Thread & Web: cross-issue project feed, same collapse rule as Progress */
+.pcc-web-intro{color:var(--lk-mut);font-size:12px;margin:-4px 0 14px;max-width:520px}
+.pcc-web-row{display:grid;grid-template-columns:64px 120px 1fr;gap:10px;padding:9px 0;border-bottom:1px solid var(--lk-line);font-size:12.5px;align-items:baseline}
+.pcc-web-row:last-child{border-bottom:none}
+.pcc-web-d{color:var(--lk-mut2);font:700 10.5px/1.3 var(--mono)}
+.pcc-web-issue{font-size:10.5px;font-weight:700;color:var(--lk-pri);background:var(--lk-pri-t);padding:2px 7px;border-radius:20px;
+  display:inline-block;text-overflow:ellipsis;overflow:hidden;white-space:nowrap;max-width:112px;vertical-align:bottom}
+.pcc-web-chan{font:700 9px/1 var(--mono);text-transform:uppercase;background:var(--lk-nested);color:var(--lk-flag);padding:1px 6px;border-radius:20px;margin-right:6px}
+.pcc-web-thread-hd{display:grid;grid-template-columns:64px 120px 1fr;gap:10px;padding:9px 0;width:100%;text-align:left;
+  background:none;border:none;border-bottom:1px solid var(--lk-line);cursor:pointer;font:inherit;color:inherit;align-items:baseline}
+.pcc-web-thread-hd:hover{background:var(--lk-panel)}
+.pcc-web-thread-count{font-size:10.5px;font-weight:700;color:var(--lk-pri);margin-right:6px}
+.pcc-web-thread-hd .chev{width:12px;height:12px;stroke:var(--lk-mut2);fill:none;stroke-width:2.4;transition:transform .15s;flex:none}
+.pcc-web-thread-hd.open .chev{transform:rotate(180deg)}
+.pcc-web-thread-body{display:none;padding-left:10px;margin:0 0 4px;border-left:2px solid var(--lk-line)}
+.pcc-web-thread-body.on{display:block}
+.pcc-web-more{color:var(--lk-mut2);padding:9px 0;font-size:12px}
+.pcc-web-empty{color:var(--lk-mut2);font-size:12.5px;padding:14px 0}
+
+/* Project tab: health rollup + drilldown, top contacts, priority-order issues */
+.pcc-health-row{display:flex;gap:8px;margin-bottom:12px}
+.pcc-health-btn{border:none;border-radius:var(--lk-r-s);padding:9px 12px;cursor:pointer;text-align:left;flex:1;font-family:var(--sans)}
+.pcc-health-btn .n{font:800 18px/1 var(--mono);display:block}
+.pcc-health-btn .l{font-size:10px;text-transform:uppercase;letter-spacing:.03em;opacity:.85}
+.pcc-health-btn.ok{background:var(--blue-t);color:var(--blue-d)}
+.pcc-health-btn.warn{background:var(--amber-t);color:var(--amber-d)}
+.pcc-health-btn.stale{background:var(--pink-t);color:var(--red)}
+.pcc-health-drill{display:none;border:1px solid var(--lk-line);border-radius:var(--lk-r-s);padding:9px 12px;margin:-4px 0 16px;font-size:12.5px}
+.pcc-health-drill.on{display:block}
+.pcc-health-drill .r{display:flex;justify-content:space-between;gap:10px;padding:5px 0;border-bottom:1px solid var(--lk-line)}
+.pcc-health-drill .r:last-child{border-bottom:none}
+.pcc-stakerow{display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid var(--lk-line);font-size:12.5px}
+.pcc-stakerow:last-child{border-bottom:none}
+.pcc-stakerow .role{color:var(--lk-mut2);font-size:11px}
+.pcc-issuerow{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--lk-line);font-size:12.5px;text-decoration:none;color:inherit;cursor:pointer;background:none;border:none;border-bottom:1px solid var(--lk-line);width:100%;text-align:left}
+.pcc-issuerow:last-child{border-bottom:none}
+.pcc-issuerow .rank{font:700 10px/1 var(--mono);color:var(--lk-mut2);width:18px;flex:none}
+.pcc-issuerow .ttl{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pcc-issuerow .val{font:700 11px/1 var(--mono);flex:none;color:var(--lk-mut2)}
+.star{color:var(--lk-pri);font-size:10px;margin-left:2px}
+
+/* Sidebar */
+.pcc-side-block{margin-bottom:20px}
+.pcc-side-hd{font:700 10px/1 var(--mono);text-transform:uppercase;color:var(--lk-mut2);margin:0 0 8px;letter-spacing:.04em}
+.pcc-side-sub{font:700 9.5px/1 var(--mono);text-transform:uppercase;color:var(--lk-mut2);margin:0 0 6px;letter-spacing:.03em}
+.pcc-datestat{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--lk-line);font-size:12px}
+.pcc-datestat:last-child{border-bottom:none}
+.pcc-datestat b{font-family:var(--mono);font-weight:700}
 } /* close #cp-view-pcc scoping wrapper opened above, right after :root{} */
 
 /* Fixed 2026-07-29: same scoping bug class as the #hello/masthead fix above,
@@ -6700,9 +6776,21 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
         <div class="pcc-suggest-label">${pccEsc(c.label)}</div>
         ${c.rationale ? `<div class="pcc-suggest-rationale">${pccEsc(c.rationale)}</div>` : ""}
       </button>`).join("");
-    const altActionsZoneHtml = altActionsHtml ? `
+    // task #124 follow-on ("Detail Panel, Refined"): the primary candidate
+    // used to only show as the header's action button, with everything else
+    // ranked below in "Other suggested actions" - this folds both into one
+    // "Next actions" zone (every real candidate Jasper considered, top pick
+    // called out), matching the approved mockup. Still real candidate_actions
+    // data throughout, nothing new computed.
+    const nextActionsZoneHtml = (primaryCandidate || altActionsHtml) ? `
       <div class="pcc-zone" style="margin-top:0">
-        <div class="pcc-zone-hd"><span>Other suggested actions</span></div>
+        <div class="pcc-zone-hd"><span>Next actions</span><span class="pcc-zone-note">every candidate considered, not just the one picked</span></div>
+        ${primaryCandidate ? `
+        <button type="button" class="pcc-nba-card" data-gen="${pccEsc(primaryKind)}" data-instructions="${pccEsc(primaryInstructions)}">
+          <div class="pcc-nba-tag">Jasper's pick &mdash; ${pccEsc(primaryKind)}</div>
+          <div class="pcc-nba-label">${pccEsc(primaryLabel)}</div>
+          ${primaryCandidate.rationale ? `<div class="pcc-nba-why">${pccEsc(primaryCandidate.rationale)}</div>` : ""}
+        </button>` : ""}
         ${altActionsHtml}
       </div>` : "";
 
@@ -6785,6 +6873,37 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
         <span class="pcc-doc-size">${pccFmtBytes(a.size_bytes)}</span>
       </a>`).join("") || '<div class="pcc-empty">No related documents yet.</div>';
 
+    // task #124 follow-on: "Procurement detail" - real reference ids + real
+    // dollar value + the real gate check already computed for the why-line
+    // above. Deliberately does NOT show a submitter/approval-chain (the
+    // mockup's example had one for that specific real issue, but there is no
+    // backing schema for "who submitted"/"approval step state" generically -
+    // this app's own honesty rule is don't show a field you'd have to fake,
+    // same reasoning as the routing note below).
+    const procurementZoneHtml = ((issue.reference_ids || []).length || issue.value_found) ? `
+      <div class="pcc-zone">
+        <div class="pcc-zone-hd"><span>Procurement detail</span><span class="pcc-zone-note">shown because this is a financial requisition</span></div>
+        <div class="pcc-procbox">
+          <div class="pcc-procbox-row1">
+            ${(issue.reference_ids || []).map(r => `<span class="pcc-procbox-ref">${pccEsc(r)}</span>`).join("")}
+            ${issue.value_found ? `<span class="pcc-procbox-money">${pccEsc(window.hoFmtMoney(issue.value_found))}</span>` : ""}
+          </div>
+          <div class="pcc-procbox-gate" style="color:${issue.has_unmet_prerequisite ? "var(--lk-danger)" : "var(--blue-d)"}">${issue.has_unmet_prerequisite ? "&#9940; Aristotle prerequisite unmet" : "&#10003; No unmet Aristotle prerequisite right now"}</div>
+        </div>
+      </div>` : "";
+
+    // task #124 follow-on: "Related" - conditional exactly like the mockup's
+    // fixed version (real evidence deep link if any exist, real supplier
+    // precedent text if found) - never a placeholder link, matches
+    // pccDeepLinkHtml's own already-honest empty-string-when-absent behavior.
+    const firstDeepLink = evidence.map(e => (e.deep_links || [])[0]).find(Boolean);
+    const relatedZoneHtml = `
+      <div class="pcc-zone">
+        <div class="pcc-zone-hd"><span>Related</span></div>
+        <div class="pcc-related-row"><span class="pcc-related-what">Evidence link</span>${firstDeepLink ? pccDeepLinkHtml([firstDeepLink]) : '<span class="pcc-nolink">no deep link yet</span>'}</div>
+        <div class="pcc-related-row"><span class="pcc-related-what">Supplier precedent</span>${precedent ? `<span class="pcc-nolink">${pccEsc(precedent.title)} &mdash; closed in ${precedent.days_to_close}d</span>` : '<span class="pcc-nolink">no supplier precedent found</span>'}</div>
+      </div>`;
+
     // PROJECTS/PARTIES ADD: affiliation-colored party chips (data already
     // returned by /api/workgraph/issues/{id} — see server_lean.py). Chips are
     // clickable in place via the shared window.renderPartyChip popover.
@@ -6797,6 +6916,36 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
     const PCC_SYSTEM_SENDER = /^(no-?reply|do-?not-?reply|notifications?|automated|system|admin)@/i;
     const requesterParty = parties.find(p => p.affiliation === "internal" && p.display_name);
     const supplierParty = parties.find(p => p.affiliation === "external" && !PCC_SYSTEM_SENDER.test(p.primary_email || ""));
+
+    // task #124 follow-on: sidebar. Per-issue parties (unlike the project-
+    // aggregate list) have no is_primary field - that's a real, computed
+    // signal only at project scope (workgraph_projects.
+    // aggregate_parties_for_project) - so no star here; the Project tab
+    // below is where a real primary contact gets marked.
+    const sideInternal = parties.filter(p => p.affiliation === "internal");
+    const sideExternal = parties.filter(p => p.affiliation === "external");
+    const sideStakeholdersHtml = (window.renderPartyChip && parties.length) ? `
+      <div class="pcc-side-block">
+        <div class="pcc-side-hd">Stakeholders</div>
+        ${sideInternal.length ? `<div class="pcc-side-sub">Internal</div><div class="pcc-actions-row">${sideInternal.map(p => window.renderPartyChip(p)).join("")}</div>` : ""}
+        ${sideExternal.length ? `<div class="pcc-side-sub" style="margin-top:${sideInternal.length ? 10 : 0}px">External</div><div class="pcc-actions-row">${sideExternal.map(p => window.renderPartyChip(p)).join("")}</div>` : ""}
+      </div>` : "";
+    const sideGlanceHtml = `
+      <div class="pcc-side-block">
+        <div class="pcc-side-hd">At a glance</div>
+        ${issue.value_found ? `<div class="pcc-datestat"><span>Value found</span><b>${pccEsc(window.hoFmtMoney(issue.value_found))}</b></div>` : ""}
+        <div class="pcc-datestat"><span>Gate status</span><b style="color:${issue.has_unmet_prerequisite ? "var(--lk-danger)" : "var(--blue-d)"}">${issue.has_unmet_prerequisite ? "gated" : "clear"}</b></div>
+        <div class="pcc-datestat"><span>Precedent</span><b style="color:var(--lk-mut2)">${precedent ? pccEsc(precedent.title) : "none found"}</b></div>
+      </div>`;
+    const sideActionsHtml = (primaryCandidate || true) ? `
+      <div class="pcc-side-block">
+        <div class="pcc-side-hd">Actions</div>
+        <div class="pcc-actions-row" style="flex-direction:column;align-items:stretch;gap:6px">
+          ${primaryCandidate ? `<button class="mqb primary" type="button" data-gen="${pccEsc(primaryKind)}" data-instructions="${pccEsc(primaryInstructions)}">${pccEsc(primaryLabel)}</button>` : ""}
+          <button class="mqb ghost" type="button" data-act="done">Mark done</button>
+          <button class="mqb ghost" type="button" data-act="snooze">Snooze 3d</button>
+        </div>
+      </div>` : "";
 
     // One clean status badge + a single plain meta line, instead of a row of
     // competing colored chips (category/project/nba-reason/due/confidence all
@@ -6892,25 +7041,58 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
         </div>
       </div>
       ${abstainHtml}
-      <div class="pcc-detail-stack">
-        ${summaryZoneHtml}
-        ${suggestZoneHtml}
-        ${altActionsZoneHtml}
-        ${deadlinesZoneHtml}
-        ${extractionZoneHtml}
-        ${repeatZoneHtml}
-        <div class="pcc-zone">
-          <div class="pcc-zone-hd"><span>Progress</span><span class="pcc-zone-note">What happened, and what can be done about it</span><span class="pcc-stale-pill pcc-stale-${stale.cls}">${pccEsc(stale.label)}</span></div>
-          <div class="pcc-tl">${timelineRows}</div>
+      <div class="pcc-detail-grid">
+        <div class="pcc-detail-main">
+          <div class="pcc-detail-subtabs">
+            <button type="button" class="pcc-detail-subtab on" data-sub="overview">Overview</button>
+            <button type="button" class="pcc-detail-subtab" data-sub="web">Thread &amp; Web</button>
+            <button type="button" class="pcc-detail-subtab" data-sub="project">Project</button>
+          </div>
+          <div class="pcc-detail-subpane on" data-pane="overview">
+            <div class="pcc-detail-stack">
+              ${summaryZoneHtml}
+              ${suggestZoneHtml}
+              ${nextActionsZoneHtml}
+              ${deadlinesZoneHtml}
+              ${extractionZoneHtml}
+              ${repeatZoneHtml}
+              ${procurementZoneHtml}
+              ${relatedZoneHtml}
+              <div class="pcc-zone">
+                <div class="pcc-zone-hd"><span>Progress</span><span class="pcc-zone-note">What happened, and what can be done about it</span><span class="pcc-stale-pill pcc-stale-${stale.cls}">${pccEsc(stale.label)}</span></div>
+                <div class="pcc-tl">${timelineRows}</div>
+              </div>
+              <div class="pcc-zone">
+                <div class="pcc-zone-hd"><span>Related documents</span></div>
+                ${docRows}
+              </div>
+            </div>
+          </div>
+          <div class="pcc-detail-subpane" data-pane="web" id="pccWebPane">${project ? '<div class="pcc-empty">Loading&hellip;</div>' : '<div class="pcc-empty">This issue isn&rsquo;t part of a project yet - Thread &amp; Web needs one.</div>'}</div>
+          <div class="pcc-detail-subpane" data-pane="project" id="pccProjectPane">${project ? '<div class="pcc-empty">Loading&hellip;</div>' : '<div class="pcc-empty">This issue isn&rsquo;t part of a project yet.</div>'}</div>
         </div>
-        <div class="pcc-zone">
-          <div class="pcc-zone-hd"><span>Related documents</span></div>
-          ${docRows}
+        <div class="pcc-detail-side">
+          ${sideStakeholdersHtml}
+          ${sideGlanceHtml}
+          ${sideActionsHtml}
         </div>
       </div>`;
       // Tasks and Routing zones removed per the locked design. The raw
       // "<action> requested from <worker> - pending" line is gone too: the
       // Summary zone above is the synthesis that replaces it.
+
+    // task #124 follow-on: tab switching + lazy-load for Thread & Web/Project
+    // (both need a separate project-scoped fetch - never fetched up front,
+    // only if the tab is actually opened). webLoaded/projLoaded are local to
+    // this render call, so switching issues always resets them correctly.
+    let webLoaded = false, projLoaded = false;
+    function pccSwitchDetailTab(name) {
+      body.querySelectorAll(".pcc-detail-subtab").forEach(b => b.classList.toggle("on", b.getAttribute("data-sub") === name));
+      body.querySelectorAll(".pcc-detail-subpane").forEach(p => p.classList.toggle("on", p.getAttribute("data-pane") === name));
+      if (name === "web" && !webLoaded && project) { webLoaded = true; pccRenderThreadWeb(document.getElementById("pccWebPane"), project); }
+      if (name === "project" && !projLoaded && project) { projLoaded = true; pccRenderProjectTab(document.getElementById("pccProjectPane"), project, issue.id); }
+    }
+    body.querySelectorAll(".pcc-detail-subtab").forEach(btn => btn.addEventListener("click", () => pccSwitchDetailTab(btn.getAttribute("data-sub"))));
 
     // Task add/toggle listeners removed with the Tasks zone - the elements they
     // bound to no longer render, and getElementById().addEventListener would
@@ -6949,6 +7131,158 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
       }));
     }
   }
+
+  // ═════════════════════════════════════════════════════════════════════
+  // Detail Panel, Refined (task #124 follow-on) - Thread & Web / Project
+  // tabs. Both are project-scoped, so both share one cached fetch of
+  // GET /api/workgraph/projects/{id} rather than each issuing their own.
+  // ═════════════════════════════════════════════════════════════════════
+  const pccProjectFeedCache = {};
+  async function pccLoadProjectFeed(projectId) {
+    if (pccProjectFeedCache[projectId]) return pccProjectFeedCache[projectId];
+    try {
+      const r = await fetch(`/api/workgraph/projects/${encodeURIComponent(projectId)}`, { cache: "no-store" });
+      if (!r.ok) return null;
+      const d = await r.json();
+      pccProjectFeedCache[projectId] = d;
+      return d;
+    } catch (e) { return null; }
+  }
+
+  // "Proposed, not yet built" in the approved mockup's own legend - staleness
+  // reuses pccStaleness's exact thresholds (2d/7d) for one consistent
+  // definition of "fresh" across the app, rather than a second arbitrary
+  // number. confidence_tier/has_unmet_prerequisite are both already-real
+  // per-issue fields (see server_lean.py/workgraph_classify.py) - nothing
+  // here is invented, only combined.
+  function pccIssueHealth(issue) {
+    const days = issue.updated_at ? (Date.now() / 1000 - issue.updated_at) / 86400 : Infinity;
+    if (days >= 7) return "stale";
+    if (days >= 2 || issue.confidence_tier === "L" || issue.has_unmet_prerequisite) return "warn";
+    return "ok";
+  }
+
+  function pccWebRowHtml(item) {
+    const meta = PCC_CHANNEL_META[item.channel] || { label: item.channel, cls: "blue" };
+    const linkHtml = (item.deepLinks && item.deepLinks.length) ? pccDeepLinkHtml(item.deepLinks) : '<span class="pcc-nolink">no deep link yet</span>';
+    return `<div class="pcc-web-row">
+      <span class="pcc-web-d">${pccFmtAge(item.ts)}</span>
+      <span class="pcc-web-issue" title="${pccEsc(item.issueTitle)}">${pccEsc(item.issueTitle)}</span>
+      <span class="pcc-web-sum"><span class="pcc-web-chan">${pccEsc(meta.label)}</span>${pccEsc(item.summary)} ${linkHtml}</span>
+    </div>`;
+  }
+  window.pccWebThreadTog = function (id, e) {
+    if (e) e.stopPropagation();
+    const d = document.getElementById(id);
+    if (d) d.classList.toggle("on");
+    const b = e && e.currentTarget;
+    if (b) b.classList.toggle("open");
+  };
+
+  // Cross-issue merged feed: every real evidence row across every open issue
+  // in this project (server-side, see api_project_detail's thread_feed),
+  // reusing the EXACT same pccGroupTimeline collapse rule as the single-issue
+  // Progress zone (task #124) - a long Re:/RE: chain collapses the same way
+  // whether you're looking at it from one issue or the whole project.
+  async function pccRenderThreadWeb(container, project) {
+    const feed = await pccLoadProjectFeed(project.id);
+    if (!feed) { container.innerHTML = '<div class="pcc-empty">Couldn&rsquo;t load the project feed.</div>'; return; }
+    const openStates = ["active", "waiting", "blocked"];
+    const openIssueCount = (feed.issues || []).filter(i => openStates.includes(i.state)).length;
+    const rows = (feed.thread_feed || []).map(e => ({
+      kind: "evidence", id: e.id, channel: e.type || "email", summary: e.summary, ts: e.ts,
+      threadKey: e.thread_key || null, deepLinks: e.deep_links || [],
+      issueId: e.issue_id, issueTitle: e.issue_title || e.issue_id,
+    }));
+    if (!rows.length) { container.innerHTML = '<div class="pcc-empty">No activity yet across this project&rsquo;s open issues.</div>'; return; }
+    const groups = pccGroupTimeline(rows);
+    const LIMIT = 20;
+    const shown = groups.slice(0, LIMIT), rest = groups.slice(LIMIT);
+    const shownIssueIds = new Set();
+    shown.forEach(g => (g.isThread ? g.items : [g.item]).forEach(it => shownIssueIds.add(it.issueId)));
+    let restEventCount = 0;
+    const restIssueIds = new Set();
+    rest.forEach(g => {
+      const items = g.isThread ? g.items : [g.item];
+      restEventCount += items.length;
+      items.forEach(it => { if (!shownIssueIds.has(it.issueId)) restIssueIds.add(it.issueId); });
+    });
+    const rowsHtml = shown.map(g => {
+      if (!g.isThread) return pccWebRowHtml(g.item);
+      const first = g.items[0];
+      const gid = "webgrp-" + (first.id != null ? first.id : first.ts);
+      return `<button type="button" class="pcc-web-thread-hd" onclick="pccWebThreadTog('${pccEsc(gid)}',event)">
+        <span class="pcc-web-d">${pccFmtAge(first.ts)}</span>
+        <span class="pcc-web-issue" title="${pccEsc(first.issueTitle)}">${pccEsc(first.issueTitle)}</span>
+        <span class="pcc-web-sum"><span class="pcc-web-thread-count">${g.items.length} replies, same thread</span>${pccEsc(first.summary)}<svg class="chev" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></span>
+      </button>
+      <div class="pcc-web-thread-body" id="${pccEsc(gid)}">${g.items.map(pccWebRowHtml).join("")}</div>`;
+    }).join("");
+    const moreHtml = rest.length
+      ? `<div class="pcc-web-more">${restEventCount} more event${restEventCount === 1 ? "" : "s"} across ${restIssueIds.size} other issue${restIssueIds.size === 1 ? "" : "s"}&hellip;</div>` : "";
+    container.innerHTML = `
+      <div class="pcc-zone-hd" style="margin-top:0">Everything connected to this project, in order</div>
+      <p class="pcc-web-intro">Every email, Teams message, and calendar item across all ${openIssueCount} open issue${openIssueCount === 1 ? "" : "s"} in this project &mdash; not just this one &mdash; merged into one feed.</p>
+      ${rowsHtml}
+      ${moreHtml}`;
+  }
+
+  // Health rollup: real per-issue signal (pccIssueHealth), click-to-drill.
+  // Top contacts: workgraph_projects.aggregate_parties_for_project's real
+  // is_primary field (most-linked contact per affiliation - already
+  // computed server-side, not new here). Issues in priority order: same
+  // priority_score already driving every other ranked list in this app.
+  async function pccRenderProjectTab(container, project, currentIssueId) {
+    const feed = await pccLoadProjectFeed(project.id);
+    if (!feed) { container.innerHTML = '<div class="pcc-empty">Couldn&rsquo;t load the project.</div>'; return; }
+    const issues = feed.issues || [];
+    const openStates = ["active", "waiting", "blocked"];
+    const openIssues = issues.filter(i => openStates.includes(i.state));
+    const buckets = { ok: [], warn: [], stale: [] };
+    openIssues.forEach(i => buckets[pccIssueHealth(i)].push(i));
+    const drillRows = list => list.length ? list.map(i => `
+      <div class="r"><span>${pccEsc(i.display_title || i.title)}${i.id === currentIssueId ? " (this issue)" : ""}</span><span style="color:var(--lk-mut2)">${pccEsc(i.nba_reason || PCC_STATE_LABEL[i.state] || i.state)}</span></div>`).join("")
+      : '<div class="r"><span style="color:var(--lk-mut2)">None.</span></div>';
+    const healthHtml = `
+      <div class="pcc-zone-hd" style="margin-top:0">Health &mdash; click a bucket to see which issues</div>
+      <div class="pcc-health-row">
+        <button type="button" class="pcc-health-btn ok" onclick="pccHealthDrill(this,'ok')"><span class="n">${buckets.ok.length}</span><span class="l">On track</span></button>
+        <button type="button" class="pcc-health-btn warn" onclick="pccHealthDrill(this,'warn')"><span class="n">${buckets.warn.length}</span><span class="l">Needs attention</span></button>
+        <button type="button" class="pcc-health-btn stale" onclick="pccHealthDrill(this,'stale')"><span class="n">${buckets.stale.length}</span><span class="l">Stale</span></button>
+      </div>
+      <div class="pcc-health-drill" data-drill="ok">${drillRows(buckets.ok)}</div>
+      <div class="pcc-health-drill" data-drill="warn">${drillRows(buckets.warn)}</div>
+      <div class="pcc-health-drill" data-drill="stale">${drillRows(buckets.stale)}</div>`;
+    const topContacts = (feed.parties || []).filter(p => p.is_primary);
+    const contactsHtml = topContacts.length ? `
+      <div class="pcc-zone-hd" style="margin-top:20px">Top contacts across the project</div>
+      ${topContacts.map(p => `<div class="pcc-stakerow"><span>${pccEsc(p.display_name || p.primary_email || p.id)} <span class="star">&#9733;</span></span><span class="role">primary ${pccEsc(p.affiliation)} contact &middot; ${p.issue_count} issue${p.issue_count === 1 ? "" : "s"}</span></div>`).join("")}` : "";
+    const sortedIssues = openIssues.slice().sort((a, b) => (b.priority_score || 0) - (a.priority_score || 0));
+    const ISSUE_LIMIT = 6;
+    const issueRowsHtml = sortedIssues.slice(0, ISSUE_LIMIT).map((i, idx) => `
+      <button type="button" class="pcc-issuerow" onclick="pccSelectIssue('${pccEsc(i.id)}')">
+        <span class="rank">#${idx + 1}</span>
+        <span class="ttl">${pccEsc(i.display_title || i.title)}</span>
+        <span class="val">${i.value_found ? pccEsc(window.hoFmtMoney(i.value_found)) : ""}</span>
+      </button>`).join("");
+    const moreIssuesHtml = sortedIssues.length > ISSUE_LIMIT
+      ? `<div class="pcc-issuerow" style="color:var(--lk-mut2)">${sortedIssues.length - ISSUE_LIMIT} more issue${sortedIssues.length - ISSUE_LIMIT === 1 ? "" : "s"}&hellip;</div>` : "";
+    container.innerHTML = `
+      <div class="pcc-zone-hd" style="margin-top:0">Project: ${pccEsc(project.name)}</div>
+      <div class="pcc-datestat"><span>Open issues</span><b>${openIssues.length} of ${issues.length}</b></div>
+      ${healthHtml}
+      ${contactsHtml}
+      <div class="pcc-zone-hd" style="margin-top:20px">Issues, priority order</div>
+      ${issueRowsHtml}
+      ${moreIssuesHtml}`;
+  }
+  window.pccHealthDrill = function (btn, key) {
+    const pane = btn.closest(".pcc-detail-subpane") || document;
+    pane.querySelectorAll(".pcc-health-drill").forEach(d => {
+      if (d.getAttribute("data-drill") === key) d.classList.toggle("on"); else d.classList.remove("on");
+    });
+  };
+
   // Registered ONCE (not per-render, unlike the listeners above which must be
   // re-attached since innerHTML replaces the elements each time) - looks the
   // menu/button up fresh on every click rather than closing over a stale ref.

@@ -1622,7 +1622,11 @@ def list_evidence_for_issues(issue_ids: list[str]) -> dict[str, list[dict]]:
         try:
             placeholders = ",".join("?" * len(issue_ids))
             rows = conn.execute(
-                f"SELECT * FROM evidence WHERE issue_id IN ({placeholders}) ORDER BY ts DESC",
+                f"""SELECT evidence.*, raw_items.thread_key AS thread_key
+                    FROM evidence
+                    LEFT JOIN raw_items ON raw_items.id = evidence.raw_item_id
+                    WHERE evidence.issue_id IN ({placeholders})
+                    ORDER BY evidence.ts DESC""",
                 issue_ids,
             ).fetchall()
         finally:

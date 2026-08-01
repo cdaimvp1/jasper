@@ -1534,12 +1534,36 @@ async def api_project_detail(project_id: str):
             repeat_signals.append(rs)
     parties = workgraph_projects.aggregate_parties_for_project(project_id)
     value_by_issue = workgraph_nba.value_amounts_for_issues(open_ids)
+    # Detail Panel Refined (task #124 follow-on, 2026-08-01): the per-issue
+    # values were already computed above just to sum them - attaching them
+    # back onto each issue costs nothing extra and is what the Project tab's
+    # "issues, priority order" list needs to show a real dollar figure per row.
+    for i in issues:
+        i["value_found"] = value_by_issue.get(i["id"])
     # "What the next owner must know" needs one real headline action, not
     # a full per-issue candidate_actions() call for every member (that
     # would mean N extra full detail fetches) - the highest-priority open
     # issue's own already-computed nba_reason is the cheap, honest answer.
     top_issue = max(open_issues, key=lambda i: i.get("priority_score") or 0, default=None)
+    # Thread & Web (task #124 follow-on): every real evidence row across every
+    # OPEN member issue (closed/noise-archived issues stay out, same scope as
+    # value_found/gated/hard-deadline counts above), tagged with issue_id/
+    # issue_title so a merged cross-issue feed can show which issue each item
+    # belongs to. Deep links attached the same way the single-issue detail
+    # panel already does (deep_links.attach_deep_links) - no separate logic.
+    evidence_by_issue = wg.list_evidence_for_issues(open_ids)
+    thread_feed: list[dict] = []
+    for iid in open_ids:
+        rows = evidence_by_issue.get(iid, [])
+        issue_title = title_by_id.get(iid, iid)
+        for ev in rows:
+            ev["issue_id"] = iid
+            ev["issue_title"] = issue_title
+        thread_feed.extend(rows)
+    deep_links.attach_deep_links(thread_feed)
+    thread_feed.sort(key=lambda ev: ev.get("ts") or 0, reverse=True)
     return JSONResponse({"project": sanitize_surrogates(project), "issues": sanitize_surrogates(issues),
+                        "thread_feed": sanitize_surrogates(thread_feed),
                         "synthesis": sanitize_surrogates(synthesis),
                         "attachments": sanitize_surrogates(attachments),
                         "parties": sanitize_surrogates(parties),

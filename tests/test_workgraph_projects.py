@@ -852,6 +852,34 @@ def test_find_relationship_links_is_idempotent(ws_db):
     assert len(suggestions) == 1
 
 
+def test_find_relationship_links_tries_every_party_not_just_the_first(ws_db):
+    """Real bug found same-day, live: an issue with several external
+    parties whose FIRST party's first sibling already shares its project
+    must still try its OTHER parties, not give up - the exact real case
+    that exposed this (marc-325/marc-280, both real Bodman/Hubert outside
+    counsel on the same uMSA-amendment negotiation) reproduced here with
+    synthetic data of the identical shape."""
+    same_project_sibling = _issue(ws_db, "Already in the same project")
+    _link_party(ws_db, same_project_sibling, "dan-x", "dan@workday.com", company="Workday")
+
+    anchor = _issue(ws_db, "Anchor issue, several external parties")
+    _link_party(ws_db, anchor, "dan-x", "dan@workday.com", company="Workday")  # same party as above
+    _link_party(ws_db, anchor, "counsel-x", "counsel@lawfirm.com", company="Lawfirm")
+    ws_db.assign_issue_to_project(same_project_sibling, "proj-shared")
+    ws_db.assign_issue_to_project(anchor, "proj-shared")
+
+    genuinely_new_sibling = _issue(ws_db, "Different project, shares counsel")
+    _link_party(ws_db, genuinely_new_sibling, "counsel-x", "counsel@lawfirm.com", company="Lawfirm")
+    ws_db.assign_issue_to_project(genuinely_new_sibling, "proj-other")
+
+    result = wp.find_relationship_links_for_grouped_issues()
+
+    assert result["suggested"] >= 1
+    suggestions = ws_db.list_project_suggestions(status="pending")
+    matching = [s for s in suggestions if {s["issue_id_a"], s["issue_id_b"]} == {anchor, genuinely_new_sibling}]
+    assert len(matching) == 1, "must reach the SECOND party (counsel) after the first party's match turned out to be same-project"
+
+
 # --- Part A2 (2026-07-30): weighted multi-signal scoring model -----------
 
 def _isolate_config(monkeypatch, tmp_path):

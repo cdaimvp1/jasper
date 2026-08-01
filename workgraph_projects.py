@@ -972,9 +972,24 @@ def find_relationship_links_for_grouped_issues() -> dict:
     human-confirm-required, never-auto-applied path _strong_signal_match's
     own "link" verdict already uses), for a pair that isn't already in the
     same project and doesn't already have a pending suggestion (create_
-    project_suggestion's own dedup). Party match checked before company
-    (the narrower, higher-confidence signal first) - first match wins per
-    issue, same as _strong_signal_match's own single-candidate shape."""
+    project_suggestion's own dedup).
+
+    Fixed same-day (2026-08-01), confirmed live: the first version of this
+    function called _shared_external_party/_shared_external_company, which
+    each return only their OWN first match - by DESIGN, for their real job
+    (_strong_signal_match only ever needs one strong signal to act on). But
+    an issue with several external parties can have its FIRST party's first
+    sibling be one already in the SAME project (nothing new), which made
+    this function give up on that issue entirely - never trying its OTHER
+    parties, which might have a genuinely new cross-project sibling. Exact
+    real case that exposed it: marc-325 has 3 external parties (Dan
+    Hatfield, Hhubert, Kimberley Davis); Dan Hatfield's first sibling
+    (marc-005) already shares marc-325's project, so the old version quit
+    right there - never reaching Hhubert, who has a real, genuinely
+    unlinked sibling (marc-280, the "uMSA" issue - the exact real
+    relationship this function exists to catch). Now checks EVERY external
+    party, then EVERY external company, collecting every candidate rather
+    than stopping at the first."""
     grouped = [i for i in ws.list_issues(states=["active", "waiting", "blocked"], limit=10000) if i.get("project_id")]
     # Pre-existing 'link' suggestions (any status - a rejected one shouldn't
     # be re-created either, same as a pending one) - checked in-memory so
@@ -991,31 +1006,40 @@ def find_relationship_links_for_grouped_issues() -> dict:
     suggested = 0
     for issue in grouped:
         checked += 1
-        match = _shared_external_party(issue["id"])
-        kind = "party"
-        if not match:
-            match = _shared_external_company(issue["id"])
-            kind = "company"
-        if not match:
-            continue
-        detail, sibling_id = match
-        sibling = ws.get_issue(sibling_id)
-        if not sibling:
-            continue
-        if sibling.get("project_id") == issue["project_id"]:
-            continue  # already the same project (including both-None, which can't reach here since `issue` is always grouped) - nothing to suggest
-        if _vetoed_by_reference_mismatch(issue["id"], sibling_id):
-            continue
-        pair = frozenset((issue["id"], sibling_id))
-        if pair in seen_pairs:
-            continue
-        ws.create_project_suggestion(
-            issue_id_a=issue["id"], issue_id_b=sibling_id,
-            reason=f"possibly related (not necessarily same project) - shared external {kind} '{detail}'",
-            suggestion_kind="link",
-        )
-        seen_pairs.add(pair)
-        suggested += 1
+        parties = ws.list_parties_for_issue(issue["id"])
+        candidates = []  # (kind, detail, sibling_id), party candidates before company
+        for party in parties:
+            if party.get("affiliation") != "external" or workgraph_signals._SYSTEM_SENDER.match(party.get("primary_email") or ""):
+                continue
+            for sibling_id in ws.list_issues_for_party(party["id"]):
+                if sibling_id != issue["id"]:
+                    candidates.append(("party", party["id"], sibling_id))
+        for party in parties:
+            if (party.get("affiliation") != "external" or not party.get("company")
+                    or workgraph_signals._SYSTEM_SENDER.match(party.get("primary_email") or "")):
+                continue
+            for sibling_id in ws.list_issues_for_company(party["company"]):
+                if sibling_id != issue["id"]:
+                    candidates.append(("company", party["company"], sibling_id))
+
+        for kind, detail, sibling_id in candidates:
+            sibling = ws.get_issue(sibling_id)
+            if not sibling:
+                continue
+            if sibling.get("project_id") == issue["project_id"]:
+                continue  # already the same project (including both-None, which can't reach here since `issue` is always grouped) - try the next candidate
+            if _vetoed_by_reference_mismatch(issue["id"], sibling_id):
+                continue
+            pair = frozenset((issue["id"], sibling_id))
+            if pair in seen_pairs:
+                continue
+            ws.create_project_suggestion(
+                issue_id_a=issue["id"], issue_id_b=sibling_id,
+                reason=f"possibly related (not necessarily same project) - shared external {kind} '{detail}'",
+                suggestion_kind="link",
+            )
+            seen_pairs.add(pair)
+            suggested += 1
     return {"checked": checked, "suggested": suggested}
 
 

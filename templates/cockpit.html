@@ -3274,6 +3274,18 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
 .pcc-tl-rec-run{font:600 11.5px var(--sans);background:none;border:1px solid var(--lk-line2);
   color:var(--lk-ink);padding:4px 10px;border-radius:var(--lk-r-c);cursor:pointer}
 .pcc-tl-rec-run:hover{background:var(--lk-nested)}
+.pcc-tl-thread{border-top:1px solid var(--lk-line)}
+.pcc-tl-thread:first-child{border-top:none}
+.pcc-tl-thread-hd{display:grid;grid-template-columns:minmax(0,1fr) 210px;gap:15px;
+  align-items:start;padding:11px 10px;width:100%;text-align:left;background:none;
+  border:none;cursor:pointer;font:inherit;color:inherit}
+.pcc-tl-thread-hd:hover{background:var(--lk-panel)}
+.pcc-tl-thread-count{font-size:10.5px;font-weight:700;color:var(--lk-pri)}
+.pcc-tl-thread-hd .chev{width:14px;height:14px;stroke:var(--lk-mut);fill:none;stroke-width:2.4;
+  transition:transform .15s;flex:none;margin-left:auto}
+.pcc-tl-thread-hd.open .chev{transform:rotate(180deg)}
+.pcc-tl-thread-body{display:none;padding-left:16px;margin:0 10px 6px;border-left:2px solid var(--lk-line)}
+.pcc-tl-thread-body.on{display:block}
 .pcc-doc-row{padding:9px 18px;border-bottom:1px solid var(--lk-line);font-size:12.5px}
 .pcc-doc-row:hover{background:var(--lk-panel)}
 @media(max-width:1200px){.pcc-tl-row{grid-template-columns:1fr}.pcc-tl-rec-none{display:none}}
@@ -6451,7 +6463,11 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
 
   function pccBuildTimeline(evidence, stateHistory) {
     const evItems = (evidence || []).map(e => ({
-      kind: "evidence", channel: e.type || "email", summary: e.summary, ts: e.ts,
+      kind: "evidence", id: e.id, channel: e.type || "email", summary: e.summary, ts: e.ts,
+      // task #124: real Outlook/Graph conversation id (joined from raw_items
+      // in workgraph_store.list_evidence) - lets the timeline collapse long
+      // Re:/RE: chains by actual thread identity, never by subject text.
+      threadKey: e.thread_key || null,
       // carried through so Progress can pair an event with its recommendation
       // and name the attachment that produced it
       recommendation: e.recommendation, attachment: e.attachment,
@@ -6474,6 +6490,38 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
     }));
     return [...evItems, ...stItems].sort((a, b) => (b.ts || 0) - (a.ts || 0));
   }
+
+  // task #124: collapse long Re:/RE: chains. Only CONTIGUOUS runs of 3+
+  // evidence items sharing the same real thread_key collapse - a
+  // state-history entry or a different/missing thread_key always breaks a
+  // run, so a status change mid-thread still shows in place, never buried
+  // inside a merged group.
+  function pccGroupTimeline(timeline) {
+    const groups = [];
+    let i = 0;
+    while (i < timeline.length) {
+      const item = timeline[i];
+      if (item.kind === "evidence" && item.threadKey) {
+        let j = i + 1;
+        while (j < timeline.length && timeline[j].kind === "evidence" && timeline[j].threadKey === item.threadKey) j++;
+        if (j - i >= 3) {
+          groups.push({ isThread: true, items: timeline.slice(i, j) });
+          i = j;
+          continue;
+        }
+      }
+      groups.push({ isThread: false, item });
+      i++;
+    }
+    return groups;
+  }
+  window.pccTlThreadTog = function (id, e) {
+    if (e) e.stopPropagation();
+    const d = document.getElementById(id);
+    if (d) d.classList.toggle("on");
+    const b = e && e.currentTarget;
+    if (b) b.classList.toggle("open");
+  };
 
   async function pccSelectIssue(issueId) {
     pccSelectedId = issueId;
@@ -6663,7 +6711,7 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
     // none - "if any", per the locked design. `recommendation` is not in the
     // API contract yet, so this renders forward-compatibly rather than faking
     // one: no recommendation, no cell.
-    const timelineRows = timeline.map(item => {
+    function pccTlRowHtml(item) {
       const rec = item.recommendation;
       const recHtml = rec && rec.label
         ? `<div class="pcc-tl-rec">
@@ -6691,6 +6739,33 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
           ${item.learnedCitation ? `<div class="pcc-tl-learned">${pccEsc(item.learnedCitation.note)}</div>` : ""}
         </div>
         ${recHtml}
+      </div>`;
+    }
+    // task #124: contiguous 3+ same-thread runs render as one collapsed
+    // header (newest reply's summary + a count) with the individual rows
+    // - same template as any other row, so an expanded reply only ever shows
+    // its own short curated summary, never a raw quoted-chain dump - inside
+    // a toggled body. Everything else (state changes, short/mixed runs)
+    // renders exactly as before.
+    const timelineRows = pccGroupTimeline(timeline).map(g => {
+      if (!g.isThread) return pccTlRowHtml(g.item);
+      const first = g.items[0];
+      const meta = PCC_CHANNEL_META[first.channel] || { label: first.channel, cls: "blue" };
+      const gid = "tlgrp-" + (first.id != null ? first.id : first.ts);
+      return `<div class="pcc-tl-thread">
+        <button type="button" class="pcc-tl-thread-hd" onclick="pccTlThreadTog('${pccEsc(gid)}',event)">
+          <div>
+            <div class="pcc-tl-top">
+              <span class="pcc-chan-chip pcc-chan-${meta.cls}">${pccEsc(meta.label)}</span>
+              <span class="pcc-tl-thread-count">${g.items.length} replies, same thread</span>
+              <span class="pcc-tl-age">${pccFmtAge(first.ts)}</span>
+              <svg class="chev" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
+            </div>
+            <span class="pcc-tl-sum">${pccEsc(first.summary)}</span>
+          </div>
+          <div class="pcc-tl-rec pcc-tl-rec-none"></div>
+        </button>
+        <div class="pcc-tl-thread-body" id="${pccEsc(gid)}">${g.items.map(pccTlRowHtml).join("")}</div>
       </div>`;
     }).join("") || '<div class="pcc-empty">No activity yet.</div>';
 

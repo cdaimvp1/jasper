@@ -1600,7 +1600,12 @@ def list_evidence(issue_id: str) -> list[dict]:
         conn = _connect()
         try:
             rows = conn.execute(
-                "SELECT * FROM evidence WHERE issue_id = ? ORDER BY ts DESC", (issue_id,)
+                """SELECT evidence.*, raw_items.thread_key AS thread_key
+                   FROM evidence
+                   LEFT JOIN raw_items ON raw_items.id = evidence.raw_item_id
+                   WHERE evidence.issue_id = ?
+                   ORDER BY evidence.ts DESC""",
+                (issue_id,),
             ).fetchall()
         finally:
             conn.close()

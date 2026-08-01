@@ -88,9 +88,7 @@ _CAPABILITY_ANSWER = (
     "deadlines, how long a thread's gone quiet, dollar value mentioned in the "
     "thread. The PCC and Projects views track your real issues and projects, "
     "built from your ingested mail. Everything drafts or suggests, nothing "
-    "sends or approves on its own, and real documents are never auto-deleted. "
-    "'My Work' isn't connected yet - it needs Ariba/SAP/Aravo/ServiceNow/"
-    "ContractPodAI access this install doesn't have."
+    "sends or approves on its own, and real documents are never auto-deleted."
 )
 
 

@@ -2338,15 +2338,20 @@ async def api_worker_rename(worker_id: str, body: WorkerRenameBody):
 class ManagerBody(BaseModel):
     id: str                       # what the operator wants to be called
     tag: Optional[str] = None     # optional @-handle; defaults to a slug of id
+    role: Optional[str] = None    # optional role/title label for the cockpit header
 
 
 @app.get("/api/manager")
 async def api_manager_get():
     """Read the current operator (the human running this Symphony) — powers the
-    Settings 'You' field + the top-bar @you. config.manager is the single source."""
+    Settings 'You' field + the cockpit header identity (2026-07-31: replaced a
+    hardcoded 3-person demo cast there - this is now the only source). config.manager
+    is the single source. `role` is optional and unset by default (never a guessed
+    fallback) - the header simply omits the role line until it's genuinely set."""
     mid = (config.get("manager", "id") or "").strip()
     tag = (config.get("manager", "tag") or "").strip()
-    return JSONResponse({"id": mid or None, "tag": tag or None, "display_name": mid or None})
+    role = (config.get("manager", "role") or "").strip()
+    return JSONResponse({"id": mid or None, "tag": tag or None, "role": role or None, "display_name": mid or None})
 
 
 class CockpitSettingsBody(BaseModel):
@@ -2535,10 +2540,11 @@ async def api_cockpit_settings_set(body: CockpitSettingsBody):
 
 @app.post("/api/manager")
 async def api_manager_set(body: ManagerBody):
-    """Set the operator's name (+ optional @-tag) — the SHARED runtime write called by
-    BOTH the compose naming step and the Settings 'You' field (last-confirm-wins).
-    Writes config.manager.id/.tag (settings.json, hot-reloaded). No slot-id and no born
-    discriminator is touched — the operator is not a worker; this is display identity."""
+    """Set the operator's name (+ optional @-tag, + optional role/title) — the SHARED
+    runtime write called by BOTH the compose naming step and the Settings 'You' field
+    (last-confirm-wins). Writes config.manager.id/.tag/.role (settings.json,
+    hot-reloaded). No slot-id and no born discriminator is touched — the operator is
+    not a worker; this is display identity."""
     name = (body.id or "").strip()
     if not name:
         raise HTTPException(400, "your name cannot be empty")
@@ -2549,12 +2555,16 @@ async def api_manager_set(body: ManagerBody):
         tag = re.sub(r"[^\w-]", "", name.split()[0].lower()) or "you"
     if len(tag) > 40:
         raise HTTPException(400, "tag too long (max 40 characters)")
+    role = (body.role or "").strip()
+    if len(role) > 60:
+        raise HTTPException(400, "role too long (max 60 characters)")
     try:
         config.set_value(name, "manager", "id")
         config.set_value(tag, "manager", "tag")
+        config.set_value(role, "manager", "role")
     except Exception as e:
         raise HTTPException(500, f"failed writing operator identity: {e}")
-    return JSONResponse({"ok": True, "id": name, "tag": tag, "display_name": name})
+    return JSONResponse({"ok": True, "id": name, "tag": tag, "role": role or None, "display_name": name})
 
 
 class CohortRenameBody(BaseModel):

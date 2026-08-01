@@ -4297,7 +4297,7 @@ body.ownerlock #ownernote{display:block}
   <!-- ── You (the operator) · Settings #5d ─────────────────────────────── -->
   <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:6px 0 10px">You</div>
   <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px">
-    <div style="color:var(--muted,#667);font-size:13px;margin-bottom:10px">How your workers address you in the Team Room.</div>
+    <div style="color:var(--muted,#667);font-size:13px;margin-bottom:10px">How your workers address you in the Team Room, and what shows in the cockpit header.</div>
     <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
       <label style="flex:2;min-width:180px">
         <span style="display:block;font-size:12px;color:var(--muted,#667);margin-bottom:4px">Your name</span>
@@ -4308,6 +4308,11 @@ body.ownerlock #ownernote{display:block}
         <span style="display:block;font-size:12px;color:var(--muted,#667);margin-bottom:4px">@tag <span style="font-weight:400">(optional)</span></span>
         <input id="mgr-tag" placeholder="auto" aria-label="Your @tag"
           style="width:100%;border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:9px;padding:8px 11px;font:600 14px monospace;color:inherit">
+      </label>
+      <label style="flex:1;min-width:140px">
+        <span style="display:block;font-size:12px;color:var(--muted,#667);margin-bottom:4px">Role/title <span style="font-weight:400">(optional)</span></span>
+        <input id="mgr-role" placeholder="e.g. Sourcing Rep" aria-label="Your role or title"
+          style="width:100%;border:1px solid var(--border,#ddd);background:var(--bg,#fafafa);border-radius:9px;padding:8px 11px;font:600 14px sans-serif;color:inherit">
       </label>
       <button id="mgr-save" style="border:1px solid var(--border,#ddd);background:var(--accent,#0f766e);color:#fff;font:600 13px sans-serif;padding:9px 16px;border-radius:9px;cursor:pointer">Save</button>
       <span id="mgr-fb" style="font-size:12px;color:var(--muted,#888)"></span>
@@ -5879,8 +5884,6 @@ function renderAll(){
  renderContractKpi();renderOrgRollup();
  renderDelegation();
 }
-// "View as" cycles the GLOBAL role (rep -> owner -> lead); theo-brand then calls theoSetRole to re-render this page.
-function cycleView(){ if(window.theoCycleRole) window.theoCycleRole(); }
 function toast(t){const e=$('#toast');e.textContent=t;e.classList.add('on');clearTimeout(e._t);e._t=setTimeout(()=>e.classList.remove('on'),2200);}
 
 // ════════════════════════════════════════════════════════════════
@@ -7139,26 +7142,16 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
   }
   window.theoPaintProviders = paintProviders;
 
-  // ---- One canonical identity across pages (RV1) ----------------------------
-  // Each page hardcoded its OWN default user (Priya Shah / Marc Lane / Jordan
-  // Avery…), so navigating LOOKED like it auto-switched the role. theo-brand is
-  // injected on every page, so it owns a single persisted identity that only
-  // changes when the user hits "Switch role", never on plain navigation.
-  // key = the stable role a page maps to its own local view via window.theoSetRole.
-  var CANON = [
-    { key: 'rep', av: 'ML', nm: 'Marc Lane', role: 'Sourcing Rep' },
-    { key: 'owner', av: 'PS', nm: 'Priya Shah', role: 'Business Owner' },
-    { key: 'lead', av: 'LD', nm: 'Lee Davis', role: 'Procurement Leadership', admin: 'business' },
-  ];
-  // admin is an ORTHOGONAL overlay (business | it), not a base role: business and
-  // IT admins get the same Leadership view + the same admin powers, and a team
-  // manager OR a team member can also hold it. Identity/role-of-record is Workday/Entra.
-  function adminKind() { var w = CANON[roleIdx()]; return (w && w.admin) || null; }
-  function roleIdx() {
-    try { var v = parseInt(localStorage.getItem('theo.role'), 10); if (v >= 0 && v < CANON.length) return v; } catch (e) {}
-    return 0;
-  }
-  // ---- ONE canonical, role-based left rail for every page --------------------
+  // ---- One canonical identity across pages -----------------------------------
+  // 2026-07-31 (Marc's direct correction): this used to hardcode a 3-person
+  // demo cast - "Priya Shah" (Business Owner) and "Lee Davis" (Procurement
+  // Leadership) are not real people, inherited demo data from the Theo
+  // platform this was built on top of, with a "Switch role"/admin-overlay
+  // mechanism to cycle between them. There is exactly one real user per
+  // Jasper install - no role switcher, no admin/Leadership overlay. Real
+  // identity now comes from /api/manager (the same config Settings' "You"
+  // card already writes) - see the rewritten applyIdentity() below.
+  // ---- ONE canonical rail for every page --------------------------------
   // Each page had hand-authored its own rail (different items, order, even a stray
   // "Renewals"), so the nav "moved around / went missing". theo-brand loads on every
   // page, so it rewrites .rail to this single ordered set, filtered by role.
@@ -7196,12 +7189,14 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
     var active = railKeyFromLabel(onTip ? onTip.textContent : '') ||
                  (document.body.getAttribute('data-shell') || '') ||
                  railKeyFromLabel(document.title);
-    var isAdmin = !!adminKind();
-    var roleKey = isAdmin ? 'lead' : CANON[roleIdx()].key, html = '';   // admins get the Leadership view
+    var html = '';
+    // 2026-07-31: dropped the role-gate check here - every real CANON_RAIL
+    // entry already lists all roles (rep,owner,lead), so it was already a
+    // no-op with today's rail contents, and there is no real per-role
+    // distinction to gate on with a single real user. __disabled__ is the
+    // one real flag this loop still honors.
     for (var i = 0; i < CANON_RAIL.length; i++) {
       var it = CANON_RAIL[i];
-      if (it[3] === '__admin__') { if (!isAdmin) continue; }     // admin overlay item (business + IT)
-      else if (it[3].indexOf(roleKey) < 0) continue;            // role gate
       var isDisabled = it[3].indexOf('__disabled__') >= 0;
       html += '<a class="nav' + (it[0] === active ? ' on' : '') + (isDisabled ? ' is-disabled' : '') + '"' +
               ' href="' + it[1] + '" data-rail-key="' + it[0] + '"' +
@@ -7211,8 +7206,6 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
     rail.innerHTML = html;
   }
   window.theoNormalizeRail = normalizeRail;
-  window.theoIsAdmin = function () { return !!adminKind(); };
-  window.theoAdminKind = adminKind;
 
   // Click routing for the (now-trimmed) rail: delegated on .rail itself, since that
   // element survives normalizeRail()'s rail.innerHTML rebuild (only its children are
@@ -7240,23 +7233,29 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
     });
   });
 
+  // 2026-07-31: real identity from /api/manager (Settings' "You" card writes
+  // this same config) instead of the removed 3-person demo cast. My Work's
+  // own internal view-mode (theoSetRole) only ever had one real, exercised
+  // value in production - 'rep' - since nothing could actually reach the
+  // other two before now; kept as a fixed call so that already-disabled
+  // page's own rendering is unaffected.
   function applyIdentity() {
-    var who = CANON[roleIdx()];
-    // Let the page re-map its role-scoped view FIRST (it may set its own labels),
-    // then ENFORCE the canonical label so what's shown is always consistent.
-    try { if (typeof window.theoSetRole === 'function') window.theoSetRole(who.key); } catch (e) {}
-    var av = document.getElementById('av'); if (av) av.textContent = who.av;
-    var nm = document.getElementById('rname'); if (nm) nm.textContent = who.nm;
-    var rr = document.getElementById('rrole'); if (rr) rr.textContent = who.role;
+    try { if (typeof window.theoSetRole === 'function') window.theoSetRole('rep'); } catch (e) {}
+    fetch('/api/manager').then(function (r) { return r.json(); }).then(function (d) {
+      var name = (d && d.id) || '';
+      var av = document.getElementById('av');
+      var nm = document.getElementById('rname');
+      var rr = document.getElementById('rrole');
+      if (nm) nm.textContent = name || 'You';
+      if (av) {
+        var initials = name
+          ? name.trim().split(/\s+/).map(function (w) { return w[0]; }).join('').slice(0, 2).toUpperCase()
+          : '?';
+        av.textContent = initials;
+      }
+      if (rr) rr.textContent = (d && d.role) || '';
+    }).catch(function () {});
   }
-  function theoCycleRole() {
-    var next = (roleIdx() + 1) % CANON.length;
-    try { localStorage.setItem('theo.role', String(next)); } catch (e) {}
-    applyIdentity(); // re-maps the page view (theoSetRole) + enforces the label
-    try { normalizeRail(); } catch (e) {}  // role changed -> re-filter the rail
-    try { if (typeof window.toast === 'function') window.toast('Viewing as ' + CANON[next].role); } catch (e) {}
-  }
-  window.theoCycleRole = theoCycleRole;
   window.theoApplyIdentity = applyIdentity;
   // Sign-out: when wired to the live platform, invalidate the SERVER session
   // (LillyAPI.logout posts /auth/logout, clearing the httpOnly cookie) then
@@ -7907,12 +7906,12 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
     // Source = trusted hardcoded SVG constants (not user input).
     try { paintProviders(); } catch (e) {}
 
-    // Enforce the one canonical identity + route every "Switch role" button
-    // through it (runs last, so it overrides each page's hardcoded default).
+    // Enforce the one canonical (real) identity + rail (runs last, so it
+    // overrides each page's hardcoded default). No "Switch role" wiring -
+    // that mechanism and the demo cast it cycled through are both removed.
     try {
       applyIdentity();
-      normalizeRail();   // one canonical, role-based rail on every page
-      document.querySelectorAll('.switch').forEach(function (b) { b.onclick = theoCycleRole; });
+      normalizeRail();
     } catch (e) {}
 
     // Header action cluster: Switch role (far left) · Tasks · Notifications bell ·
@@ -10397,10 +10396,12 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
     // ── You (operator) ────────────────────────────────────────────────────
     const mgrName = document.getElementById('mgr-name');
     const mgrTag  = document.getElementById('mgr-tag');
+    const mgrRole = document.getElementById('mgr-role');
     const mgrFb   = document.getElementById('mgr-fb');
     fetch('/api/manager').then(r=>r.json()).then(d=>{
       if(d.id)  mgrName.value = d.id;
       if(d.tag) mgrTag.value  = d.tag;
+      if(d.role) mgrRole.value = d.role;
     }).catch(()=>{});
     document.getElementById('mgr-save').addEventListener('click', async ()=>{
       const id = mgrName.value.trim();
@@ -10408,9 +10409,9 @@ window.addEventListener('resize',()=>{const tip=document.getElementById('tltip')
       mgrFb.textContent='saving…';
       try{
         const r = await fetch('/api/manager',{method:'POST',headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({id:id, tag:mgrTag.value.trim()||null})});
+          body:JSON.stringify({id:id, tag:mgrTag.value.trim()||null, role:mgrRole.value.trim()||null})});
         const d = await r.json();
-        if(r.ok){ mgrTag.value=d.tag||''; mgrFb.textContent='✓ saved'; setTimeout(()=>mgrFb.textContent='',2000); }
+        if(r.ok){ mgrTag.value=d.tag||''; mgrRole.value=d.role||''; mgrFb.textContent='✓ saved'; setTimeout(()=>mgrFb.textContent='',2000); if(window.theoApplyIdentity) window.theoApplyIdentity(); }
         else { mgrFb.textContent = d.detail || d.error || 'error'; }
       }catch(e){ mgrFb.textContent='error'; }
     });

@@ -12,11 +12,24 @@ and leaves the cell empty otherwise ("if any", per the locked design) — this
 module is what actually populates it, added 2026-07-29.
 
 v1 heuristic, in priority order (first match wins, else no recommendation):
-  1. email with an attachment  -> contract/document review
-  2. upcoming calendar event (<=14 days out, same window workgraph_nba.py
+  1. email with an attachment AND invoice-audit language (only when
+     audit_invoice is actually registered) -> audit the invoice
+  2. email with an attachment AND SOW/scope language (only when
+     scope_review is actually registered) -> review the SOW
+  3. email with an attachment (any other case) -> contract/document review
+  4. upcoming calendar event (<=14 days out, same window workgraph_nba.py
      uses for due-urgency)      -> draft a pre-read
-  3. email/teams whose summary mentions approval/benchmark/sign-off language
+  5. email/teams whose summary mentions benchmark language specifically
+     (only when market_rate_benchmark is actually registered) -> benchmark
+  6. email/teams whose summary mentions approval/benchmark/sign-off language
                                  -> summarize the thread
+
+2026-08-01: checks 1/2/5 are real skills-registry wiring (task #14) - each
+ONLY fires when its action_kind is actually registered (skills_registry.
+get_skill_for_action), so an install with nothing registered for them falls
+straight through to the same generic behavior as before this change. Never
+a new guess: the trigger phrases are lifted directly from each skill's own
+SKILL.md "Triggers on" list, not invented keywords.
 
 Known limitation, named rather than hidden: the locked design's own mockup
 examples (e.g. "Build a 1-page deal summary" keyed off Priya specifically
@@ -44,6 +57,27 @@ _APPROVAL_RE = re.compile(
     r"\b(approv\w*|sign[- ]?off|benchmark\w*|DoA\b|redline\w*|review\w* (the|this) (contract|order|agreement))\b",
     re.IGNORECASE,
 )
+# Trigger phrases lifted verbatim from each skill's own SKILL.md "Triggers on"
+# list (config/skills_registry.json), not invented - see this module's own
+# docstring (task #14).
+_INVOICE_AUDIT_RE = re.compile(
+    r"\b(audit (?:this|the) invoice|invoice (?:vs\.?|versus|against) (?:the )?contract|"
+    r"invoice discrepanc\w*|over-?billing|billing error|questioned amount|"
+    r"duplicate charge|escalation cap|po vs\.? invoice|invoice.{0,20}mismatch|"
+    r"timesheet reconciliation)\b",
+    re.IGNORECASE,
+)
+_SCOPE_SOW_RE = re.compile(
+    r"\b(review this sow|is this scope well defined|build a statement of work|fix this sow|"
+    r"scope diagnostic|draft a sow|rate card for this sow|acceptance criteria for this sow|"
+    r"change control for this sow|statement of work)\b",
+    re.IGNORECASE,
+)
+_MARKET_BENCHMARK_RE = re.compile(
+    r"\b(benchmark rates?|market rate for|compare our contracts|internal benchmarking|"
+    r"portfolio comparison|rate comparison|portfolio benchmarking)\b",
+    re.IGNORECASE,
+)
 
 
 def recommend_for_evidence(ev: dict, has_attachment: bool, now: float) -> Optional[dict]:
@@ -57,6 +91,31 @@ def recommend_for_evidence(ev: dict, has_attachment: bool, now: float) -> Option
     summary = ev.get("summary") or ""
 
     if ev_type == "email" and has_attachment:
+        # 2026-08-01 (task #14): more specific skills, checked BEFORE the
+        # generic attachment fallback, so a real invoice-audit or SOW ask
+        # names the actual skill that does that instead of the generic
+        # "review the attached document." Each ONLY fires when actually
+        # registered - an unregistered kind falls through to the next check,
+        # same "no registered skill -> today's generic behavior" rule as
+        # contract_review already followed.
+        if _INVOICE_AUDIT_RE.search(summary):
+            skill = skills_registry.get_skill_for_action("audit_invoice")
+            if skill:
+                return {
+                    "kind": "audit_invoice",
+                    "label": skill["label"],
+                    "rationale": f"This message has an attachment and invoice-audit language — "
+                                 f"{skill['display_name']} runs the real audit and returns {skill['produces']}.",
+                }
+        if _SCOPE_SOW_RE.search(summary):
+            skill = skills_registry.get_skill_for_action("scope_review")
+            if skill:
+                return {
+                    "kind": "scope_review",
+                    "label": skill["label"],
+                    "rationale": f"This message has an attachment and SOW/scope language — "
+                                 f"{skill['display_name']} runs the real diagnostic and returns {skill['produces']}.",
+                }
         # 2026-07-31: if a real skill is registered for this action_kind
         # (skills_registry.py - swappable, no domain name hardcoded here),
         # name it explicitly so Marc sees what will actually run, not a
@@ -83,6 +142,18 @@ def recommend_for_evidence(ev: dict, has_attachment: bool, now: float) -> Option
             days_out = (ts - now) / DAY
             if days_out <= CALENDAR_LOOKAHEAD_DAYS:
                 days_label = "today" if days_out < 1 else f"{int(round(days_out))}d"
+                # 2026-08-01 (task #14): name meeting-prep-brief when it's
+                # actually registered - same "exact skill, real output" upgrade
+                # already applied to contract_review, just on the existing
+                # calendar-window trigger instead of a new one.
+                skill = skills_registry.get_skill_for_action("meeting_prep")
+                if skill:
+                    return {
+                        "kind": "meeting_prep",
+                        "label": skill["label"],
+                        "rationale": f"This meeting is {days_label} out — {skill['display_name']} "
+                                     f"reads the invite, the recent thread, and related documents, and returns {skill['produces']}.",
+                    }
                 return {
                     "kind": "prep",
                     "label": "Draft a pre-read",
@@ -90,13 +161,28 @@ def recommend_for_evidence(ev: dict, has_attachment: bool, now: float) -> Option
                                  "beforehand gives attendees time to review before it happens.",
                 }
 
-    if ev_type in ("email", "teams") and _APPROVAL_RE.search(summary):
-        return {
-            "kind": "summarize",
-            "label": "Summarize the thread",
-            "rationale": "This message touches on approval, sign-off, or benchmarking — a "
-                         "short summary makes the ask reviewable at a glance.",
-        }
+    if ev_type in ("email", "teams"):
+        # 2026-08-01 (task #14): benchmark language specifically, checked
+        # before the generic approval/sign-off bucket below, so a real rate
+        # question names market-rate-benchmarking instead of just
+        # "summarize." Falls through to the generic check (which still
+        # matches "benchmark\w*" on its own) when the skill isn't registered.
+        if _MARKET_BENCHMARK_RE.search(summary):
+            skill = skills_registry.get_skill_for_action("market_rate_benchmark")
+            if skill:
+                return {
+                    "kind": "market_rate_benchmark",
+                    "label": skill["label"],
+                    "rationale": f"This message asks about market rates — {skill['display_name']} "
+                                 f"returns {skill['produces']}.",
+                }
+        if _APPROVAL_RE.search(summary):
+            return {
+                "kind": "summarize",
+                "label": "Summarize the thread",
+                "rationale": "This message touches on approval, sign-off, or benchmarking — a "
+                             "short summary makes the ask reviewable at a glance.",
+            }
 
     return None
 

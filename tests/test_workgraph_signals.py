@@ -18,6 +18,22 @@ def test_lookalike_domain_does_not_match():
     assert sig.domain_matches("noreply@ariba.com.evil-phisher.net", "ariba.com") is False
 
 
+def test_request_to_closure_signal_entries_are_real_known_signal_types():
+    """Every key and value must be a real signal_type this module can
+    actually produce (typo-proofing a dict that's easy to get subtly wrong -
+    a misspelled closure signal_type would silently never match anything)."""
+    known = set(sig.known_signal_types())
+    for request_type, closure_type in sig.REQUEST_TO_CLOSURE_SIGNAL.items():
+        assert request_type in known, f"{request_type!r} is not a real signal_type"
+        assert closure_type in known, f"{closure_type!r} is not a real signal_type"
+
+
+def test_concur_has_no_request_to_closure_entry():
+    """Deliberately absent - no matching closure template exists in _RULES
+    for it, so requiring one would freeze an issue 'active' forever."""
+    assert "concur_expense_reminder" not in sig.REQUEST_TO_CLOSURE_SIGNAL
+
+
 def test_unrelated_domain_does_not_match():
     assert sig.domain_matches("someone@example.com", "ariba.com") is False
 

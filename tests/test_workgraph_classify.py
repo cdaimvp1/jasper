@@ -273,6 +273,69 @@ def test_derive_target_state_only_fyi_is_done(ws_db):
     assert wc.derive_target_state(iid) == "done"
 
 
+def test_derive_target_state_unconfirmed_ariba_request_never_auto_closes(ws_db):
+    """The exact latent risk found investigating marc-014/marc-185: an issue
+    whose only evidence is a real ariba_pr_approval_needed request must stay
+    'active' via signal_type identity even if item_class alone would say
+    'done' (simulating what a live signal_treatment_override remapping the
+    trigger's treatment away from 'actionable' would produce)."""
+    iid = ws_db.create_issue_with_new_id(title="PR approval", state="active", category="financial")
+    rid = ws_db.insert_raw_item(source="outlook_mail", stable_key="s1", thread_key="s1", dedupe_key="s1",
+                                 occurred_ts=time.time(), subject="Action Required: Approve the Requisition",
+                                 from_actor="ansmtp@ariba.com", participants_json="[]")
+    # item_class is FYI-EVIDENCE here on purpose - stands in for what an
+    # overridden treatment would produce; signal_type is what must save it.
+    ws_db.classify_raw_item(rid, item_class="FYI-EVIDENCE", direction="inbound", direction_inferred=False,
+                             topic="financial", topic_inferred=True, sentiment="neutral", sentiment_inferred=True,
+                             anomaly_flag=False, signal_type="ariba_pr_approval_needed")
+    ws_db.link_raw_item_to_issue(rid, iid)
+
+    assert wc.derive_target_state(iid) == "active"
+
+
+def test_derive_target_state_ariba_request_with_real_closure_signal_is_done(ws_db):
+    """The other half - a REAL closure email (a distinct signal_type, not
+    just a re-classified item_class) legitimately closes it."""
+    iid = ws_db.create_issue_with_new_id(title="PR approval", state="active", category="financial")
+    rid1 = ws_db.insert_raw_item(source="outlook_mail", stable_key="s2", thread_key="s2", dedupe_key="s2",
+                                  occurred_ts=time.time(), subject="Action Required: Approve the Requisition",
+                                  from_actor="ansmtp@ariba.com", participants_json="[]")
+    ws_db.classify_raw_item(rid1, item_class="ACTIONABLE-ASK", direction="inbound", direction_inferred=False,
+                             topic="financial", topic_inferred=True, sentiment="neutral", sentiment_inferred=True,
+                             anomaly_flag=False, signal_type="ariba_pr_approval_needed")
+    ws_db.link_raw_item_to_issue(rid1, iid)
+    rid2 = ws_db.insert_raw_item(source="outlook_mail", stable_key="s3", thread_key="s3", dedupe_key="s3",
+                                  occurred_ts=time.time() + 1, subject="Notification: The Requisition has been fully approved",
+                                  from_actor="ansmtp@ariba.com", participants_json="[]")
+    ws_db.classify_raw_item(rid2, item_class="FYI-EVIDENCE", direction="inbound", direction_inferred=False,
+                             topic="financial", topic_inferred=True, sentiment="neutral", sentiment_inferred=True,
+                             anomaly_flag=False, signal_type="ariba_pr_fully_approved")
+    ws_db.link_raw_item_to_issue(rid2, iid)
+
+    # ACTIONABLE-ASK is still present (rid1's item_class), so this returns
+    # "active" via the ordinary item_class path, not even reaching the
+    # signal_type check - real, current behavior, asserted so a future
+    # change to the ACTIONABLE-ASK branch can't silently regress this.
+    assert wc.derive_target_state(iid) == "active"
+
+
+def test_derive_target_state_concur_has_no_closure_signal_required(ws_db):
+    """concur_expense_reminder has no matching closure template in the
+    signal catalog - deliberately absent from REQUEST_TO_CLOSURE_SIGNAL, so
+    it must NOT get stuck 'active' forever waiting for an email that will
+    never arrive."""
+    iid = ws_db.create_issue_with_new_id(title="Expense reminder", state="active", category="financial")
+    rid = ws_db.insert_raw_item(source="outlook_mail", stable_key="s4", thread_key="s4", dedupe_key="s4",
+                                 occurred_ts=time.time(), subject="Action Required: Unapplied credit card transactions",
+                                 from_actor="notify@concursolutions.com", participants_json="[]")
+    ws_db.classify_raw_item(rid, item_class="FYI-EVIDENCE", direction="inbound", direction_inferred=False,
+                             topic="financial", topic_inferred=True, sentiment="neutral", sentiment_inferred=True,
+                             anomaly_flag=False, signal_type="concur_expense_reminder")
+    ws_db.link_raw_item_to_issue(rid, iid)
+
+    assert wc.derive_target_state(iid) == "done"
+
+
 def test_recompute_issue_state_uses_derive_target_state_internally(ws_db):
     """Adversarial check on the 2026-08-01 refactor: recompute_issue_state's
     own behavior must be byte-for-byte unchanged now that its derivation is

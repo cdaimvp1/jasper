@@ -179,6 +179,29 @@ def domain_matches(from_actor: str, target_domain: str) -> bool:
     return sender_domain == target_domain or sender_domain.endswith("." + target_domain)
 
 
+# Request signal_type -> the specific real closure signal_type that actually
+# confirms it (2026-08-01, real-incident follow-up). signal_type is a fixed
+# regex-template identity (which real email this was), never affected by a
+# live signal_treatment_override - unlike `treatment`/item_class, which are.
+# Latent risk this closes: recompute_issue_state's "done" branch only ever
+# looked at item_class, so a future override remapping e.g.
+# ariba_pr_approval_needed's treatment away from "actionable" would have
+# made every one of Marc's open Ariba approvals look like "nothing to
+# track" and silently auto-close - the exact real, wrong outcome already
+# found by manual click on marc-014/marc-185, just reachable a second way.
+# Checking the STABLE signal_type identity instead of the override-able
+# mapping closes that path regardless of what any override says. Only
+# request signal_types with a real, confirmed closure counterpart in _RULES
+# are listed - concur_expense_reminder has no matching closure template in
+# this catalog, so it's deliberately absent rather than made to require an
+# email that will never arrive.
+REQUEST_TO_CLOSURE_SIGNAL: dict[str, str] = {
+    "ariba_pr_approval_needed": "ariba_pr_fully_approved",
+    "signature_requested": "signature_fully_executed",
+    "signature_requested_docusign": "signature_completed_docusign",
+}
+
+
 def known_signal_types() -> list[str]:
     """Every signal_type this module can produce, in rule-list order - used
     by workgraph_aristotle.py's Settings UI to populate rule dropdowns so

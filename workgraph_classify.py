@@ -428,11 +428,28 @@ def derive_target_state(issue_id: str) -> str:
     stateful function (which writes to the DB and respects/preserves an
     already-closed issue) just to read this one signal."""
     items = ws.get_raw_items_for_issue(issue_id)
-    classes = {i["item_class"] for i in items if i.get("classified")}
+    classified = [i for i in items if i.get("classified")]
+    classes = {i["item_class"] for i in classified}
     if "ACTIONABLE-ASK" in classes:
         return "active"
     if "WAITING-ON-OTHERS" in classes:
         return "waiting"
+
+    # 2026-08-01 (real-incident follow-up, latent-risk half): item_class alone
+    # is override-able (a live signal_treatment_override can remap what
+    # ariba_pr_approval_needed etc. map to), so before trusting "nothing to
+    # track" for a known open-ended request, check the STABLE signal_type
+    # identity too - it's a fixed regex-template match, never affected by any
+    # override. An issue that ever received a real "approval needed"/
+    # "signature requested" email but never received the matching real
+    # closure email is never "done" via this path, no matter what any
+    # override says the trigger's treatment/item_class currently is.
+    signal_types_present = {i["signal_type"] for i in classified if i.get("signal_type")}
+    for request_type in signal_types_present:
+        closure_type = workgraph_signals.REQUEST_TO_CLOSURE_SIGNAL.get(request_type)
+        if closure_type and closure_type not in signal_types_present:
+            return "active"
+
     return "done"  # thread has only ever been FYI-EVIDENCE/NOISE - nothing to track
 
 

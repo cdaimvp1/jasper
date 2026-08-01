@@ -418,6 +418,24 @@ def backfill_derived_titles() -> dict:
     return {"checked": len(issue_ids), "updated": updated}
 
 
+def derive_target_state(issue_id: str) -> str:
+    """Pure, read-only: what state an issue's evidence alone implies, with no
+    side effects and no regard for its CURRENT state. Extracted out of
+    recompute_issue_state() (2026-08-01) so a caller that only wants to ask
+    "does the evidence actually support closing this?" - e.g. server_lean.py's
+    manual mark-done endpoints, checking whether to attach an advisory
+    warning before a human overrides it - doesn't have to invoke the
+    stateful function (which writes to the DB and respects/preserves an
+    already-closed issue) just to read this one signal."""
+    items = ws.get_raw_items_for_issue(issue_id)
+    classes = {i["item_class"] for i in items if i.get("classified")}
+    if "ACTIONABLE-ASK" in classes:
+        return "active"
+    if "WAITING-ON-OTHERS" in classes:
+        return "waiting"
+    return "done"  # thread has only ever been FYI-EVIDENCE/NOISE - nothing to track
+
+
 def recompute_issue_state(issue_id: str, *, new_item_is_actionable: bool = True) -> Optional[str]:
     """Derive an issue's state from its WHOLE evidence thread, not whichever
     item happened to arrive first (the bug this fixes: an issue opened by an
@@ -451,14 +469,7 @@ def recompute_issue_state(issue_id: str, *, new_item_is_actionable: bool = True)
     retroactively revealing a real unresolved ask, or an explicit "recompute
     everything" request, are real reasons - unlike routine new mail
     arriving on an already-resolved thread)."""
-    items = ws.get_raw_items_for_issue(issue_id)
-    classes = {i["item_class"] for i in items if i.get("classified")}
-    if "ACTIONABLE-ASK" in classes:
-        target = "active"
-    elif "WAITING-ON-OTHERS" in classes:
-        target = "waiting"
-    else:
-        target = "done"  # thread has only ever been FYI-EVIDENCE/NOISE - nothing to track
+    target = derive_target_state(issue_id)
 
     issue = ws.get_issue(issue_id)
     if issue is None:

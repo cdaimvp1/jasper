@@ -230,6 +230,66 @@ def _isolate_config(ws_db, monkeypatch, tmp_path):
     return config
 
 
+# --- derive_target_state (2026-08-01, real-incident follow-up) ----------
+
+def test_derive_target_state_actionable_ask_is_active(ws_db):
+    iid = ws_db.create_issue_with_new_id(title="Ask", state="done", category="financial")
+    rid = ws_db.insert_raw_item(source="outlook_mail", stable_key="d1", thread_key="d1", dedupe_key="d1",
+                                 occurred_ts=time.time(), subject="approve", from_actor="a@example.com",
+                                 participants_json="[]")
+    ws_db.classify_raw_item(rid, item_class="ACTIONABLE-ASK", direction="inbound", direction_inferred=False,
+                             topic="other", topic_inferred=True, sentiment="neutral", sentiment_inferred=True,
+                             anomaly_flag=False)
+    ws_db.link_raw_item_to_issue(rid, iid)
+
+    # Pure read: does NOT touch the issue's actual state, unlike recompute_issue_state.
+    assert wc.derive_target_state(iid) == "active"
+    assert ws_db.get_issue(iid)["state"] == "done"
+
+
+def test_derive_target_state_waiting_on_others(ws_db):
+    iid = ws_db.create_issue_with_new_id(title="Waiting", state="active", category="other")
+    rid = ws_db.insert_raw_item(source="outlook_mail", stable_key="d2", thread_key="d2", dedupe_key="d2",
+                                 occurred_ts=time.time(), subject="will follow up", from_actor="a@example.com",
+                                 participants_json="[]")
+    ws_db.classify_raw_item(rid, item_class="WAITING-ON-OTHERS", direction="inbound", direction_inferred=False,
+                             topic="other", topic_inferred=True, sentiment="neutral", sentiment_inferred=True,
+                             anomaly_flag=False)
+    ws_db.link_raw_item_to_issue(rid, iid)
+
+    assert wc.derive_target_state(iid) == "waiting"
+
+
+def test_derive_target_state_only_fyi_is_done(ws_db):
+    iid = ws_db.create_issue_with_new_id(title="FYI only", state="active", category="other")
+    rid = ws_db.insert_raw_item(source="outlook_mail", stable_key="d3", thread_key="d3", dedupe_key="d3",
+                                 occurred_ts=time.time(), subject="fyi", from_actor="a@example.com",
+                                 participants_json="[]")
+    ws_db.classify_raw_item(rid, item_class="FYI-EVIDENCE", direction="inbound", direction_inferred=False,
+                             topic="other", topic_inferred=True, sentiment="neutral", sentiment_inferred=True,
+                             anomaly_flag=False)
+    ws_db.link_raw_item_to_issue(rid, iid)
+
+    assert wc.derive_target_state(iid) == "done"
+
+
+def test_recompute_issue_state_uses_derive_target_state_internally(ws_db):
+    """Adversarial check on the 2026-08-01 refactor: recompute_issue_state's
+    own behavior must be byte-for-byte unchanged now that its derivation is
+    delegated to derive_target_state rather than inlined."""
+    iid = ws_db.create_issue_with_new_id(title="Ask", state="waiting", category="other")
+    rid = ws_db.insert_raw_item(source="outlook_mail", stable_key="d4", thread_key="d4", dedupe_key="d4",
+                                 occurred_ts=time.time(), subject="approve", from_actor="a@example.com",
+                                 participants_json="[]")
+    ws_db.classify_raw_item(rid, item_class="ACTIONABLE-ASK", direction="inbound", direction_inferred=False,
+                             topic="other", topic_inferred=True, sentiment="neutral", sentiment_inferred=True,
+                             anomaly_flag=False)
+    ws_db.link_raw_item_to_issue(rid, iid)
+
+    assert wc.derive_target_state(iid) == wc.recompute_issue_state(iid) == "active"
+    assert ws_db.get_issue(iid)["state"] == "active"
+
+
 # --- recompute_issue_state (2026-07-31, meeting-grouping design pass) ----
 
 def test_recompute_issue_state_new_item_not_actionable_respects_manual_close(ws_db):

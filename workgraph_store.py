@@ -696,6 +696,21 @@ def init_workgraph() -> None:
                 conn.execute("ALTER TABLE raw_items ADD COLUMN entry_id TEXT")
             except sqlite3.OperationalError:
                 pass
+            try:
+                # Real audit-trail gap found investigating a real incident: two
+                # financial issues (marc-014 $53.7M, marc-185 $111.7M) were
+                # flipped active->done with zero closing evidence, and there was
+                # no way to tell whether that came from the automated
+                # recompute_issue_state() rule or a manual/bulk status-change
+                # click - issue_state_history had (issue_id, from_state,
+                # to_state, changed_ts) and nothing else. NULL for every
+                # historical row (including the automated-rule transitions
+                # that predate this column) and for update_issue()'s own
+                # internal callers that don't pass one - "unknown" is honest
+                # there, not a guess.
+                conn.execute("ALTER TABLE issue_state_history ADD COLUMN actor TEXT")
+            except sqlite3.OperationalError:
+                pass
 
             # Personal Response Learning (task #45) - deliberately its OWN
             # table, not folded into lessons/signal_treatment_overrides: this
@@ -1043,7 +1058,7 @@ def create_issue(
             conn.close()
 
 
-def update_issue(id: str, *, touch_updated_at: bool = True, **fields: Any) -> None:
+def update_issue(id: str, *, touch_updated_at: bool = True, actor: Optional[str] = None, **fields: Any) -> None:
     """Generic field updater for issues (state, priority, nba_*, due, etc.).
     A state change is logged to issue_state_history in the same connection so
     the two writes can never drift (no separate txn to lose).
@@ -1052,11 +1067,20 @@ def update_issue(id: str, *, touch_updated_at: bool = True, **fields: Any) -> No
     today only workgraph_nba.recompute_all()'s periodic NBA rescoring, which
     otherwise erased the very staleness signal it's supposed to measure:
     every tick would bump updated_at, so an issue that had gone quiet for
-    10 days looked freshly touched again after the next recompute pass."""
+    10 days looked freshly touched again after the next recompute pass.
+
+    actor - who/what caused a state change (e.g. "marc" for a manual click,
+    "recompute_issue_state" for the automated rule). Added after a real
+    incident (2026-08-01): two financial issues were flipped to 'done' with
+    zero closing evidence and there was no way to tell whether the automated
+    rule or a manual/bulk endpoint click did it - see issue_state_history's
+    own ALTER TABLE comment. None is honest for callers that don't pass one
+    yet, not a guess at who did it."""
     if not fields:
         return
     if touch_updated_at:
         fields["updated_at"] = time.time()
+    changed_ts = fields.get("updated_at", time.time())
     set_clause = ", ".join(f"{k} = ?" for k in fields)
     values = list(fields.values()) + [id]
     with _lock:
@@ -1068,8 +1092,8 @@ def update_issue(id: str, *, touch_updated_at: bool = True, **fields: Any) -> No
                 old_state = row["state"] if row else None
                 if old_state != new_state:
                     conn.execute(
-                        "INSERT INTO issue_state_history (issue_id, from_state, to_state, changed_ts) VALUES (?, ?, ?, ?)",
-                        (id, old_state, new_state, fields["updated_at"]),
+                        "INSERT INTO issue_state_history (issue_id, from_state, to_state, changed_ts, actor) VALUES (?, ?, ?, ?, ?)",
+                        (id, old_state, new_state, changed_ts, actor),
                     )
             conn.execute(f"UPDATE issues SET {set_clause} WHERE id = ?", values)
         finally:

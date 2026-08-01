@@ -1093,6 +1093,8 @@ async def cockpit_page(request: Request):
 class WorkgraphIssueStatusBody(BaseModel):
     state: Optional[str] = None
     priority: Optional[str] = None
+    actor: Optional[str] = None
+    reason: Optional[str] = None
 
 
 class CockpitActionBody(BaseModel):
@@ -1346,6 +1348,27 @@ async def api_workgraph_task_status(task_id: str, body: TaskStatusBody):
     return JSONResponse({"ok": True, "task": sanitize_surrogates(wg.get_task(task_id))})
 
 
+def _closing_evidence_warning(issue_id: str, new_state: str) -> Optional[str]:
+    """Real incident (2026-08-01): two financial issues (marc-014 $53.7M,
+    marc-185 $111.7M) were manually flipped to 'done' with zero closing
+    evidence - Jasper's own evidence-derived state for both was still
+    'active'. Manually overriding the derived state is legitimate and
+    intentional by design (recompute_issue_state's own docstring: "a human's
+    manual close/archive is... not silently reverted" - Marc sees real
+    approvals Jasper never does), so this never blocks the close. It only
+    returns an advisory string when the evidence disagrees, so the caller
+    (and eventually the UI) has something to show/log instead of a silent,
+    unattributed, unexplained state flip being the only trace it happened."""
+    if new_state not in ("done", "noise-archived"):
+        return None
+    derived = workgraph_classify.derive_target_state(issue_id)
+    if derived == "active":
+        return "Jasper's own evidence still shows an unresolved ask on this issue - closing it anyway."
+    if derived == "waiting":
+        return "Jasper's own evidence shows this is still waiting on someone else - closing it anyway."
+    return None
+
+
 @app.post("/api/workgraph/issues/{issue_id}/status")
 async def api_workgraph_issue_status(issue_id: str, body: WorkgraphIssueStatusBody):
     """Deterministic actions (mark done, snooze, reprioritize, archive) — applied
@@ -1359,19 +1382,25 @@ async def api_workgraph_issue_status(issue_id: str, body: WorkgraphIssueStatusBo
         fields["priority"] = body.priority
     if not fields:
         raise HTTPException(400, "at least one of state/priority required")
-    wg.update_issue(issue_id, **fields)
+    warning = _closing_evidence_warning(issue_id, body.state) if body.state else None
+    actor = body.actor or (config.get("manager", "id") or "unknown")
+    wg.update_issue(issue_id, actor=actor, **fields)
     # Part E2 (2026-07-30): a real, deterministic action was just taken
     # against this issue - resolve whichever candidate list was most
     # recently offered, if any.
     open_log = wg.get_most_recent_open_choice_log(issue_id)
     if open_log is not None and body.state is not None:
         wg.mark_choice_log_chosen(open_log["id"], chosen_action_kind=body.state)
-    return JSONResponse({"ok": True, "issue": sanitize_surrogates(wg.get_issue(issue_id))})
+    result = {"ok": True, "issue": sanitize_surrogates(wg.get_issue(issue_id))}
+    if warning:
+        result["warning"] = warning
+    return JSONResponse(result)
 
 
 class BulkIssueStatusBody(BaseModel):
     issue_ids: list[str]
     state: str
+    actor: Optional[str] = None
 
 
 @app.post("/api/workgraph/issues/bulk-status")
@@ -1389,14 +1418,21 @@ async def api_workgraph_issues_bulk_status(body: BulkIssueStatusBody):
         raise HTTPException(400, f"unsupported bulk triage state: {body.state!r}")
     if not body.issue_ids:
         raise HTTPException(400, "issue_ids must be a non-empty list")
-    updated, missing = [], []
+    actor = body.actor or (config.get("manager", "id") or "unknown")
+    updated, missing, warnings = [], [], {}
     for issue_id in body.issue_ids:
         if wg.get_issue(issue_id) is None:
             missing.append(issue_id)
             continue
-        wg.update_issue(issue_id, state=body.state)
+        warning = _closing_evidence_warning(issue_id, body.state)
+        if warning:
+            warnings[issue_id] = warning
+        wg.update_issue(issue_id, state=body.state, actor=actor)
         updated.append(issue_id)
-    return JSONResponse({"ok": True, "updated": updated, "missing": missing})
+    result = {"ok": True, "updated": updated, "missing": missing}
+    if warnings:
+        result["warnings"] = warnings
+    return JSONResponse(result)
 
 
 @app.get("/api/workgraph/gate-board")

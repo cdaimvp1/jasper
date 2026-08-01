@@ -298,6 +298,36 @@ def test_list_issues_with_unmet_prerequisite(ws_db):
     assert results == {issue_a}  # issue_b never flagged, issue_c excluded (done)
 
 
+# --- issue_state_history actor tracking (2026-08-01, real-incident follow-up) ---
+
+def test_update_issue_state_change_records_actor(ws_db):
+    iid = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    ws_db.update_issue(iid, state="done", actor="marc")
+
+    history = ws_db.list_issue_state_history(iid)
+    last = history[-1]
+    assert last["from_state"] == "active"
+    assert last["to_state"] == "done"
+    assert last["actor"] == "marc"
+
+
+def test_update_issue_no_actor_records_null(ws_db):
+    iid = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    ws_db.update_issue(iid, state="waiting")  # no actor passed - honest unknown, not a guess
+
+    last = ws_db.list_issue_state_history(iid)[-1]
+    assert last["to_state"] == "waiting"
+    assert last["actor"] is None
+
+
+def test_update_issue_non_state_field_does_not_add_history_row(ws_db):
+    iid = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    before = len(ws_db.list_issue_state_history(iid))
+    ws_db.update_issue(iid, priority="high", actor="marc")
+
+    assert len(ws_db.list_issue_state_history(iid)) == before
+
+
 def test_alerts_table_accepts_unmet_prerequisite_kind(ws_db):
     """Confirms the CHECK constraint migration in init_workgraph() actually
     took effect - not just that CREATE TABLE IF NOT EXISTS silently no-opped

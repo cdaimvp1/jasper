@@ -3267,6 +3267,7 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
 .pcc-tl-deeplink-btn{background:none;border:none;padding:0;font-family:inherit;cursor:pointer}
 .pcc-tl-deeplink-btn:disabled{opacity:.6;cursor:default}
 .pcc-tl-learned{display:block;margin-top:6px;font-size:11px;font-style:italic;color:var(--lk-mut2)}
+.pcc-tl-rec-list{display:flex;flex-direction:column;gap:12px}
 .pcc-tl-rec{border-left:3px solid var(--lk-pri);padding-left:11px}
 .pcc-tl-rec-none{border-left-color:var(--lk-line)}
 .pcc-tl-rec-label{font-size:12.5px;font-weight:700;color:var(--lk-ink);line-height:1.35}
@@ -6554,9 +6555,10 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
       // in workgraph_store.list_evidence) - lets the timeline collapse long
       // Re:/RE: chains by actual thread identity, never by subject text.
       threadKey: e.thread_key || null,
-      // carried through so Progress can pair an event with its recommendation
-      // and name the attachment that produced it
-      recommendation: e.recommendation, attachment: e.attachment,
+      // carried through so Progress can pair an event with its recommendation(s)
+      // and name the attachment that produced it. A row can carry more than
+      // one genuine recommendation (task #15) - always a list, possibly empty.
+      recommendations: e.recommendations || [], attachment: e.attachment,
       // task #44/#46/#47: zero or more {kind,label,...} rows - a Teams chat
       // link, or open-email/draft-reply actions for a mail item. Empty when
       // there's nothing to link to.
@@ -6835,17 +6837,19 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
 
     // Progress pairs each event with what the system can do about it. The
     // recommendation column is optional and stays empty when the event carries
-    // none - "if any", per the locked design. `recommendation` is not in the
-    // API contract yet, so this renders forward-compatibly rather than faking
-    // one: no recommendation, no cell.
+    // none - "if any", per the locked design. A row can carry more than one
+    // genuine recommendation (task #15, e.g. an attachment matching both
+    // invoice-audit and SOW language) - every one renders its own card,
+    // stacked, instead of only ever showing the first.
     function pccTlRowHtml(item) {
-      const rec = item.recommendation;
-      const recHtml = rec && rec.label
-        ? `<div class="pcc-tl-rec">
-             <div class="pcc-tl-rec-label">${pccEsc(rec.label)}</div>
-             ${rec.rationale ? `<div class="pcc-tl-rec-why">${pccEsc(rec.rationale)}</div>` : ""}
-             <button type="button" class="pcc-tl-rec-run" data-gen="${pccEsc(rec.kind || "summarize")}">Run this</button>
-           </div>`
+      const recs = item.recommendations || [];
+      const recHtml = recs.length
+        ? `<div class="pcc-tl-rec-list">${recs.map(rec => `
+             <div class="pcc-tl-rec">
+               <div class="pcc-tl-rec-label">${pccEsc(rec.label)}</div>
+               ${rec.rationale ? `<div class="pcc-tl-rec-why">${pccEsc(rec.rationale)}</div>` : ""}
+               <button type="button" class="pcc-tl-rec-run" data-gen="${pccEsc(rec.kind || "summarize")}">Run this</button>
+             </div>`).join("")}</div>`
         : '<div class="pcc-tl-rec pcc-tl-rec-none"></div>';
       if (item.kind === "state") {
         return `<div class="pcc-tl-row">

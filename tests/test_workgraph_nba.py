@@ -26,23 +26,75 @@ def _clear_value_cache():
 
 def test_dollar_range_captures_higher_figure():
     item = {"id": 1, "subject": "Deal worth $2.5-3 million", "body_preview": ""}
-    assert nba._extract_item_value(item) == 3_000_000.0
+    values = [v for v, _, _ in nba._extract_item_candidates(item)]
+    assert max(values) == 3_000_000.0
 
 
 def test_billion_suffix_recognized():
     item = {"id": 2, "subject": "This is a $1.2 billion contract", "body_preview": ""}
-    assert nba._extract_item_value(item) == 1_200_000_000.0
+    values = [v for v, _, _ in nba._extract_item_candidates(item)]
+    assert max(values) == 1_200_000_000.0
 
 
 def test_value_cache_avoids_recomputation():
     item_v1 = {"id": 42, "subject": "Worth $2.5 million", "body_preview": ""}
-    v1 = nba._extract_item_value(item_v1)
-    assert v1 == 2_500_000.0
+    v1 = nba._extract_item_candidates(item_v1)
+    assert v1 == [(2_500_000.0, False, False)]
 
     # same id, DIFFERENT text - cache should still return the ORIGINAL value
     item_v2 = {"id": 42, "subject": "Now says $999 billion", "body_preview": ""}
-    v2 = nba._extract_item_value(item_v2)
+    v2 = nba._extract_item_candidates(item_v2)
     assert v2 == v1, "cache was not used - recomputed from new text for a known id"
+
+
+# --- task #24 (2026-08-01): keyword-proximity cues on value extraction -----
+# Real incident: marc-308 showed $834,353 as "the deal's value" when the
+# text actually says "the order form includes $834,353 in accrued fees" (an
+# adjustment, not the ~$53.7M headline value); marc-296 picked $10,000,000
+# when the only two figures present were both explicitly labeled "credit".
+
+def test_extract_value_amount_ignores_a_lone_accrued_fee_figure():
+    """The exact marc-308 shape: the only dollar figure present is
+    downweighted, so the honest answer is 0.0, not that wrong number."""
+    items = [{"id": 100, "subject": "Order Form",
+              "body_preview": "the order form includes $834,353 in accrued fees for this term"}]
+    assert nba._extract_value_amount(items) == 0.0
+
+
+def test_extract_value_amount_ignores_credit_figures_even_when_larger():
+    """The exact marc-296 shape: max-of-everything would pick $10,000,000
+    (the larger number) even though BOTH figures present are explicitly
+    labeled credits, neither of which is a deal value."""
+    items = [{"id": 101, "subject": "Sap - AI and PTO invoice/credit",
+              "body_preview": "apply both the $205,500 credit (expires 12/15/26) and an appropriate "
+                               "portion of the $10M credit (expires 6/15/28)"}]
+    assert nba._extract_value_amount(items) == 0.0
+
+
+def test_extract_value_amount_prefers_non_downweighted_over_larger_credit():
+    """A real total alongside an adjustment: the smaller, un-cued real
+    figure must win over the larger credit, not just get averaged out or
+    lost to the old plain-max behavior."""
+    items = [{"id": 102, "subject": "Renewal",
+              "body_preview": "the total contract value is $5,000,000 after applying a $9,000,000 credit"}]
+    assert nba._extract_value_amount(items) == 5_000_000.0
+
+
+def test_extract_value_amount_prefer_cue_wins_over_larger_uncued_figure():
+    """Tier 1 (explicit total/contract-value language) outranks tier 2 (the
+    largest un-cued figure) even when the un-cued one is bigger - the "PO
+    amount" language marks the real deal value; the other number, un-cued,
+    could be anything mentioned in passing."""
+    items = [{"id": 103, "subject": "PR",
+              "body_preview": "the requisition amount is $2,000,000, unrelated budget note mentions $8,000,000 elsewhere"}]
+    assert nba._extract_value_amount(items) == 2_000_000.0
+
+
+def test_extract_value_amount_no_cues_anywhere_behaves_as_before():
+    """The vast majority of real issues have no cue words at all - plain
+    max-of-everything, unchanged."""
+    items = [{"id": 104, "subject": "PR416079", "body_preview": "$44,496,204.00 USD"}]
+    assert nba._extract_value_amount(items) == 44_496_204.0
 
 
 def test_default_weights_is_immutable():

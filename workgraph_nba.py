@@ -29,10 +29,12 @@ v2 formula:
     date is set (the common case today — most issues have none yet).
   - value_urgency: log-scaled dollar amount found in the issue's own thread
     text (subject/body_preview across its raw_items), 0 below $1K, saturating
-    at $100M. A single largest-figure-found heuristic — see
-    `_extract_value_amount` for the known failure mode (an unrelated large
-    number quoted in passing), which is exactly why this term is capped at
-    0.18 rather than trusted outright.
+    at $100M. Prefers a figure explicitly labeled as a total/contract-value/
+    requisition amount; else the largest figure NOT flagged as a credit/
+    adjustment/accrued-fee mention; else 0 if every candidate found is one of
+    those (fixed 2026-08-01 - see `_extract_value_amount` for the real
+    incident this closed and the remaining known failure mode, which is
+    exactly why this term stays capped at 0.18 rather than trusted outright).
 """
 from __future__ import annotations
 
@@ -88,6 +90,24 @@ _VALUE_FLOOR = 1_000.0       # below this, don't treat it as a deal-value signal
 _VALUE_LOG_LOW = 3.0         # log10(1,000)
 _VALUE_LOG_SPAN = 5.0        # log10(100,000,000) - log10(1,000)
 
+# Fixed 2026-08-01 (real incident: marc-308 showed $834,353 as "the deal's
+# value" - it's really "the order form includes $834,353 in ACCRUED FEES",
+# an adjustment figure, not the ~$53.7M headline value; marc-296 picked
+# $10,000,000 when the only two numbers present were both explicitly labeled
+# CREDITS). The plain max-of-everything heuristic has no way to tell a total
+# from an adjustment - these two keyword-proximity cues do, cheaply, without
+# an LLM call, matching this module's own house style. A DOWNWEIGHT cue near
+# a figure means "this number is relative to some other, unstated total,"
+# not the total itself.
+_PREFER_CUE = re.compile(
+    r"\b(total|contract value|tcv|po amount|purchase order|requisition|"
+    r"subscription fee|agreement value|deal value|purchase price|"
+    r"not[- ]to[- ]exceed|nte)\b", re.IGNORECASE)
+_DOWNWEIGHT_CUE = re.compile(
+    r"\b(credits?|adjustment|accrued|true-?up|refund|discount|rebate|"
+    r"penalty|late fee|proration|prorated)\b", re.IGNORECASE)
+_CUE_WINDOW_CHARS = 40  # chars either side of a $ match to look for a cue word
+
 
 # Per-raw_item cache (fixed 2026-07-29): recompute_all() re-scores every open issue
 # on every periodic tick "even with zero new evidence" (its own docstring), which
@@ -97,38 +117,62 @@ _VALUE_LOG_SPAN = 5.0        # log10(100,000,000) - log10(1,000)
 # them), so caching the per-item extracted value by raw_item id is always safe: no
 # invalidation logic needed, and a newly-linked raw_item just computes+caches on
 # first encounter like normal.
-_value_cache: dict[int, float] = {}
+_value_cache: dict[int, list[tuple[float, bool]]] = {}
 
 
-def _extract_item_value(item: dict) -> float:
+def _extract_item_candidates(item: dict) -> list[tuple[float, bool, bool]]:
+    """Every dollar figure found in one raw_item's subject+preview, as
+    (value, is_preferred, is_downweighted) triples - flags True when a
+    total/contract-value/requisition-type or a credit/adjustment/accrued-
+    fee-type cue word (respectively) appears within _CUE_WINDOW_CHARS of the
+    match. Cached per raw_item id, same immutability reasoning as the
+    pre-2026-08-01 single-float cache this replaces."""
     key = item.get("id")
     if key is not None and key in _value_cache:
         return _value_cache[key]
-    best = 0.0
     text = " ".join(filter(None, [item.get("subject"), item.get("body_preview")]))
+    candidates: list[tuple[float, bool, bool]] = []
     for match in _DOLLAR_RE.finditer(text):
         suffix = (match.group(3) or "").lower()
         multiplier = _DOLLAR_SUFFIX_MULTIPLIER.get(suffix, 1)
+        window_start = max(0, match.start() - _CUE_WINDOW_CHARS)
+        window_end = min(len(text), match.end() + _CUE_WINDOW_CHARS)
+        window = text[window_start:window_end]
+        preferred = bool(_PREFER_CUE.search(window))
+        downweighted = bool(_DOWNWEIGHT_CUE.search(window))
         for group in (match.group(1), match.group(2)):
             if group is None:
                 continue
-            best = max(best, float(group.replace(",", "")) * multiplier)
+            candidates.append((float(group.replace(",", "")) * multiplier, preferred, downweighted))
     if key is not None:
-        _value_cache[key] = best
-    return best
+        _value_cache[key] = candidates
+    return candidates
 
 
 def _extract_value_amount(raw_items: list[dict]) -> float:
     """Best-effort deterministic dollar-value extraction from this issue's own
-    thread text (subject + body_preview of every linked raw_item). Takes the
-    MAX figure found, on the theory that a deal's own value is usually the
-    largest number quoted in its own thread. Known failure mode: an unrelated
-    large figure mentioned in passing gets picked up too — acceptable because
-    the resulting signal is capped at a modest weight, not trusted outright."""
-    best = 0.0
-    for item in raw_items:
-        best = max(best, _extract_item_value(item))
-    return best
+    thread text (subject + body_preview of every linked raw_item).
+
+    Three tiers, most-trusted first: (1) among figures explicitly labeled as
+    a total/contract-value/requisition-type amount, take the max; (2) else,
+    among figures NOT flagged as a credit/adjustment/accrued-fee mention,
+    take the max, on the theory that a deal's own value is usually the
+    largest un-cued number quoted in its own thread; (3) if EVERY candidate
+    found is downweighted (e.g. the only figures present are both explicitly
+    labeled "credit"), return 0.0 rather than confidently presenting a
+    known-likely-wrong number as the deal's value - no signal is more
+    honest here than a wrong one. Known remaining failure mode: an
+    unrelated, un-cued large figure can still outrank a smaller real one at
+    tier 2, which is why this signal stays capped at a modest weight below,
+    not trusted outright."""
+    all_candidates = [c for item in raw_items for c in _extract_item_candidates(item)]
+    preferred = [v for v, is_preferred, _ in all_candidates if is_preferred]
+    if preferred:
+        return max(preferred)
+    not_downweighted = [v for v, _, downweighted in all_candidates if not downweighted]
+    if not_downweighted:
+        return max(not_downweighted)
+    return 0.0
 
 
 def value_amount_for_issue(issue_id: str) -> float:

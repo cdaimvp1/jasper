@@ -83,7 +83,9 @@ def test_list_open_commitments_multiple_per_issue_all_included(ws_db):
 def test_list_commitments_for_issue_scoped_to_one_issue(ws_db):
     iid = _issue_with_commitments(ws_db, "Mine", "c7", ["mine"])
     _issue_with_commitments(ws_db, "Other", "c8", ["not mine"])
-    assert wc.list_commitments_for_issue(iid) == ["mine"]
+    entries = wc.list_commitments_for_issue(iid)
+    assert [e["text"] for e in entries] == ["mine"]
+    assert entries[0]["raw_item_id"] is not None
 
 
 def test_list_commitments_for_issue_includes_closed_issues(ws_db):
@@ -93,7 +95,7 @@ def test_list_commitments_for_issue_includes_closed_issues(ws_db):
                                  participants_json="[]")
     ws_db.link_raw_item_to_issue(rid, issue_id)
     ws_db.create_extraction(rid, json.dumps({"commitments": ["closed-issue commitment"]}))
-    assert wc.list_commitments_for_issue(issue_id) == ["closed-issue commitment"]
+    assert [e["text"] for e in wc.list_commitments_for_issue(issue_id)] == ["closed-issue commitment"]
 
 
 def test_list_commitments_for_issue_empty_when_none(ws_db):

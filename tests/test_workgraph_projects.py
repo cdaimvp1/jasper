@@ -198,6 +198,63 @@ def test_shared_reference_id_ignores_closed_sibling_issues(ws_db):
     assert wp._shared_reference_id(a) is None
 
 
+# --- related_open_issues_by_reference (checklist rework, 2026-08-01) ------
+
+def test_related_open_issues_by_reference_returns_all_siblings_not_just_first(ws_db):
+    """Real production case: PR854779 split across 3 separately-sent
+    reminders/issues. _shared_reference_id stops at the first sibling
+    (a grouping decision only needs one); this display-oriented function
+    must surface all of them."""
+    a = _issue(ws_db, "First notice")
+    _raw_item(ws_db, a, "PR854779-V4 approval needed", "rr1")
+    b = _issue(ws_db, "Reminder 1")
+    _raw_item(ws_db, b, "REMINDER: PR854779-V4 still needs approval", "rr2")
+    c = _issue(ws_db, "Reminder 2")
+    _raw_item(ws_db, c, "SECOND REMINDER: PR854779-V4 still needs approval", "rr3")
+
+    related = wp.related_open_issues_by_reference(a)
+
+    assert {r["issue_id"] for r in related} == {b, c}
+    assert all(r["shared_reference"] == "PR854779" for r in related)
+    assert {r["title"] for r in related} == {"Reminder 1", "Reminder 2"}
+
+
+def test_related_open_issues_by_reference_empty_when_no_reference(ws_db):
+    a = _issue(ws_db, "A")
+    _raw_item(ws_db, a, "nothing structured here", "rr4")
+    assert wp.related_open_issues_by_reference(a) == []
+
+
+def test_related_open_issues_by_reference_empty_when_reference_unique(ws_db):
+    a = _issue(ws_db, "A")
+    _raw_item(ws_db, a, "PR2222222 approval needed", "rr5")
+    assert wp.related_open_issues_by_reference(a) == []
+
+
+def test_related_open_issues_by_reference_ignores_closed_siblings(ws_db):
+    a = _issue(ws_db, "Open one")
+    _raw_item(ws_db, a, "PR3333333 approval needed", "rr6")
+    b = ws_db.create_issue_with_new_id(title="Closed one", state="done", category="other")
+    _raw_item(ws_db, b, "PR3333333 approval needed", "rr7")
+    assert wp.related_open_issues_by_reference(a) == []
+
+
+def test_related_open_issues_by_reference_dedupes_sibling_seen_via_two_references(ws_db):
+    """A sibling sharing TWO of this issue's reference bases must appear
+    once, not twice."""
+    a = _issue(ws_db, "A")
+    _raw_item(ws_db, a, "PR4444444 approval needed", "rr8")
+    _raw_item(ws_db, a, "PR5555555 approval needed", "rr9")
+    b = _issue(ws_db, "B")
+    _raw_item(ws_db, b, "PR4444444 approval needed", "rr10")
+    _raw_item(ws_db, b, "PR5555555 approval needed", "rr11")
+
+    related = wp.related_open_issues_by_reference(a)
+
+    assert len(related) == 1
+    assert related[0]["issue_id"] == b
+
+
 def test_strong_signal_match_prefers_reference_over_party(ws_db):
     """Reference ID is checked FIRST - even when a shared external party
     would also match, the reference-id result (and its label) wins."""

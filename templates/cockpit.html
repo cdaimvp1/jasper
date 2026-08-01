@@ -3365,6 +3365,16 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
 .pcc-datestat{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--lk-line);font-size:12px}
 .pcc-datestat:last-child{border-bottom:none}
 .pcc-datestat b{font-family:var(--mono);font-weight:700}
+
+/* Checklist (asks/decisions/commitments/repeat signals, tagged + deep-linked) */
+.pcc-check-row{display:flex;gap:10px;align-items:flex-start;padding:9px 0;border-bottom:1px solid var(--lk-line);font-size:13px}
+.pcc-check-row:last-child{border-bottom:none}
+.pcc-check-text{color:var(--lk-ink);flex:1;min-width:0;line-height:1.5}
+.pcc-check-link{display:block;margin-top:4px}
+.pcc-nolink{color:var(--lk-mut2);font-size:11px;font-style:italic}
+.pcc-related-note{background:var(--lk-nested);border-radius:var(--lk-r-c);padding:9px 12px;margin-bottom:6px;font-size:12.5px;color:var(--lk-ink2)}
+.pcc-related-note a{color:var(--lk-pri);font-weight:700;text-decoration:none}
+.pcc-related-note a:hover{text-decoration:underline}
 } /* close #cp-view-pcc scoping wrapper opened above, right after :root{} */
 
 /* Fixed 2026-07-29: same scoping bug class as the #hello/masthead fix above,
@@ -6627,7 +6637,9 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
     const tasks = d.tasks || [], stateHistory = d.state_history || [];
     const parties = d.parties || [], project = d.project || null;
     const asks = d.asks || [], decisions = d.decisions || [], keyFacts = d.key_facts || [];
+    const commitments = d.commitments || [];
     const repeatSignals = d.repeat_signals || [];
+    const relatedByReference = d.related_by_reference || [];
     const candidateActions = issue.candidate_actions || [];
     // 2026-07-31: bind the real primary action button to the actual
     // top-ranked candidate instead of a hardcoded draft_reply/nudge pair -
@@ -6718,49 +6730,76 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
         ${dueRowHtml}${mentionRowsHtml}
       </div>` : "";
 
-    // Enhancement #87: this issue's own asks/decisions/key facts - curator's
-    // real extraction, previously only ever shown in the GLOBAL rollup cards
-    // (workgraph_asks_decisions.py/workgraph_key_facts.py), never scoped to
-    // the one issue Marc is actually looking at. Reuses the shared
-    // pcc-radar-row markup (Value-at-risk/Commitments/global Asks card).
-    const extractionRow = (label, text) => `
-      <div class="pcc-radar-row" style="cursor:default">
-        <span class="pcc-deadline-badge" style="background:var(--bg);color:var(--mut2)">${label}</span>
-        <span class="pcc-radar-mention-text">${pccEsc(text)}</span>
+    // Checklist rework (2026-08-01, task #124 follow-on): asks, decisions,
+    // commitments, and repeat/escalated signals unified into one tagged,
+    // deep-linked list instead of four separate flat rollups - each item is
+    // a real extraction (never invented), tagged by what kind of thing it
+    // is, with the real deep link its source email already carries (Ariba/
+    // Adobe Sign/Outlook - see deep_links.py) attached when one exists.
+    // Key facts stay a separate, un-tagged zone below - reference material,
+    // not something to act on.
+    const PCC_CHECK_BADGE = {
+      ask: { label: "Ask", bg: "var(--bg)", fg: "var(--mut2)" },
+      decision: { label: "Decision", bg: "var(--blue-t)", fg: "var(--bblue)" },
+      commitment: { label: "Commitment", bg: "var(--teal-t)", fg: "var(--teal-d)" },
+      repeat: { label: "Repeat", bg: "var(--bg)", fg: "var(--mut2)" },
+      escalated: { label: "Escalated", bg: "var(--pink-t)", fg: "var(--red-d)" },
+    };
+    const pccCheckRowHtml = (kind, text, deepLinks) => {
+      const badge = PCC_CHECK_BADGE[kind];
+      const linkHtml = (deepLinks && deepLinks.length)
+        ? `<span class="pcc-check-link">${pccDeepLinkHtml(deepLinks)}</span>`
+        : '<span class="pcc-check-link pcc-nolink">no deep link yet</span>';
+      return `<div class="pcc-check-row">
+        <span class="pcc-deadline-badge" style="background:${badge.bg};color:${badge.fg}">${badge.label}</span>
+        <span class="pcc-check-text">${pccEsc(text)}${linkHtml}</span>
       </div>`;
-    const extractionRowsHtml = [
-      ...asks.map(t => extractionRow("Ask", t)),
-      ...decisions.map(t => extractionRow("Decision", t)),
-      ...keyFacts.map(t => extractionRow("Key fact", t)),
-    ].join("");
-    const extractionZoneHtml = extractionRowsHtml ? `
+    };
+    const checklistItems = [
+      ...asks.map(a => ({ kind: "ask", text: a.text, deepLinks: a.deep_links || [] })),
+      ...decisions.map(a => ({ kind: "decision", text: a.text, deepLinks: a.deep_links || [] })),
+      ...commitments.map(a => ({ kind: "commitment", text: a.text, deepLinks: a.deep_links || [] })),
+      // Part D (2026-07-30): curator only writes a repeat signal when a new
+      // ask genuinely restates a prior one on this issue - never a guess
+      // rendered as if it were one.
+      ...repeatSignals.map(r => {
+        const daysNote = r.days_since_first_ask != null ? `${r.days_since_first_ask}d since first ask` : "";
+        const note = [daysNote, r.escalated ? (r.escalation_note || "") : ""].filter(Boolean).join(" — ");
+        return {
+          kind: r.escalated ? "escalated" : "repeat",
+          text: r.ask_text + (note ? ` (${note})` : ""),
+          deepLinks: r.deep_links || [],
+        };
+      }),
+    ];
+    const checklistRowsHtml = checklistItems.map(it => pccCheckRowHtml(it.kind, it.text, it.deepLinks)).join("");
+    // Checklist rework: another open issue sharing a real PR/PO reference
+    // with this one (workgraph_projects.related_open_issues_by_reference) -
+    // a relationship fact, never a claim about which one blocks which
+    // (there isn't yet reliable per-item typing to support that stronger
+    // claim - see task #12).
+    const relatedNoteHtml = relatedByReference.length ? `
+      <div class="pcc-related-note">Also referenced on ${relatedByReference.map(r =>
+        `<a href="#" onclick="pccSelectIssue('${pccEsc(r.issue_id)}');return false">${pccEsc(r.title)}</a> (${pccEsc(r.shared_reference)})`
+      ).join(", ")} &mdash; worth checking whether one is waiting on the other.</div>` : "";
+    const checklistZoneHtml = (checklistRowsHtml || relatedNoteHtml) ? `
       <div class="pcc-zone">
-        <div class="pcc-zone-hd"><span>Asks, decisions &amp; key facts</span>
-          <span class="pcc-zone-note">${asks.length} ask${asks.length === 1 ? "" : "s"} &middot; ${decisions.length} decision${decisions.length === 1 ? "" : "s"} &middot; ${keyFacts.length} key fact${keyFacts.length === 1 ? "" : "s"}</span>
+        <div class="pcc-zone-hd"><span>Checklist</span>
+          <span class="pcc-zone-note">${asks.length} ask${asks.length === 1 ? "" : "s"} &middot; ${decisions.length} decision${decisions.length === 1 ? "" : "s"} &middot; ${commitments.length} commitment${commitments.length === 1 ? "" : "s"}${repeatSignals.length ? ` &middot; ${repeatSignals.length} repeat signal${repeatSignals.length === 1 ? "" : "s"}` : ""}</span>
         </div>
-        ${extractionRowsHtml}
+        ${relatedNoteHtml}
+        ${checklistRowsHtml}
       </div>` : "";
 
-    // Part D (2026-07-30): repeat-of-earlier-ask + escalation signals -
-    // curator only writes one of these when a new ask genuinely restates a
-    // prior one on this issue (see ingest/SYNTHESIS_ROUTINE.md), so this
-    // zone only appears when there's real signal, never a guess rendered
-    // as if it were one.
-    const repeatRowsHtml = repeatSignals.map(r => {
-      const daysNote = r.days_since_first_ask != null ? `${r.days_since_first_ask}d since first ask` : "";
-      const escBadge = r.escalated ? '<span class="pcc-deadline-badge" style="background:var(--pink-t);color:var(--red-d)">Escalated</span>' : '<span class="pcc-deadline-badge" style="background:var(--bg);color:var(--mut2)">Repeat</span>';
-      const note = [daysNote, r.escalated ? (r.escalation_note || "") : ""].filter(Boolean).join(" — ");
-      return `<div class="pcc-radar-row" style="cursor:default">
-        ${escBadge}
-        <span class="pcc-radar-mention-text">${pccEsc(r.ask_text)}${note ? ` (${pccEsc(note)})` : ""}</span>
-      </div>`;
-    }).join("");
-    const repeatZoneHtml = repeatRowsHtml ? `
+    const keyFactsRowsHtml = keyFacts.map(t => `
+      <div class="pcc-radar-row" style="cursor:default">
+        <span class="pcc-deadline-badge" style="background:var(--bg);color:var(--mut2)">Key fact</span>
+        <span class="pcc-radar-mention-text">${pccEsc(t)}</span>
+      </div>`).join("");
+    const keyFactsZoneHtml = keyFactsRowsHtml ? `
       <div class="pcc-zone">
-        <div class="pcc-zone-hd"><span>Repeat asks &amp; escalation</span>
-          <span class="pcc-zone-note">${repeatSignals.length} flagged</span>
-        </div>
-        ${repeatRowsHtml}
+        <div class="pcc-zone-hd"><span>Key facts</span><span class="pcc-zone-note">${keyFacts.length} noted</span></div>
+        ${keyFactsRowsHtml}
       </div>` : "";
 
     // Part E2 (2026-07-30): the top-ranked candidate (index 0) is already
@@ -7054,8 +7093,8 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
               ${suggestZoneHtml}
               ${nextActionsZoneHtml}
               ${deadlinesZoneHtml}
-              ${extractionZoneHtml}
-              ${repeatZoneHtml}
+              ${checklistZoneHtml}
+              ${keyFactsZoneHtml}
               ${procurementZoneHtml}
               ${relatedZoneHtml}
               <div class="pcc-zone">

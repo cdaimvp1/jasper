@@ -43,17 +43,20 @@ def list_open_commitments() -> list[dict]:
                     "issue_id": issue["id"], "title": issue.get("display_title") or issue["title"],
                     "state": issue["state"], "text": text.strip(),
                     "extracted_ts": extraction["extracted_ts"],
+                    "raw_item_id": extraction.get("raw_item_id"),
                 })
     entries.sort(key=lambda e: e["extracted_ts"], reverse=True)
     return entries
 
 
-def list_commitments_for_issue(issue_id: str) -> list[str]:
+def list_commitments_for_issue(issue_id: str) -> list[dict]:
     """Part of the project-detail redesign (2026-07-31): the same real
     field, scoped to ONE issue's own extractions - no state filter, same
     reasoning as workgraph_asks_decisions._texts_for_issue. Feeds the new
     project-level commitments rollup in server_lean.py (loops this over a
-    project's member issues) as well as any future per-issue display."""
+    project's member issues) as well as any future per-issue display.
+    Returns {text, raw_item_id} (2026-08-01, checklist rework) so a caller
+    can attach the source email's real deep link via deep_links."""
     extractions_by_issue = ws.list_extractions_for_issues([issue_id])
     out = []
     for extraction in extractions_by_issue.get(issue_id, []):
@@ -62,5 +65,5 @@ def list_commitments_for_issue(issue_id: str) -> list[str]:
             continue
         for text in commitments:
             if isinstance(text, str) and text.strip():
-                out.append(text.strip())
+                out.append({"text": text.strip(), "raw_item_id": extraction.get("raw_item_id")})
     return out

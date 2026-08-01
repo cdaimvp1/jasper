@@ -156,6 +156,37 @@ def _shared_reference_id(issue_id: str):
     return None
 
 
+def related_open_issues_by_reference(issue_id: str) -> list[dict]:
+    """Checklist rework (2026-08-01): the display-oriented counterpart to
+    _shared_reference_id above - that one stops at the FIRST sibling found
+    (a grouping decision only needs one); this returns EVERY other open
+    issue sharing any of this issue's reference bases, for surfacing real
+    relationships to the user (e.g. "also referenced on PR854779, split
+    across 3 issues"). Deliberately NOT a claim about WHICH one blocks
+    which - the same reference base on two issues today can mean either
+    genuinely related-but-distinct threads or a grouping gap that should
+    have merged them; that judgment isn't made here, just the real fact of
+    the shared reference. {issue_id, title, shared_reference}, one row per
+    (sibling, reference) pair, deduped by sibling."""
+    my_refs = reference_base_ids_for_issue(issue_id)
+    seen_siblings = set()
+    out = []
+    for ref in sorted(my_refs):
+        for sibling_id in ws.list_open_issue_ids_for_reference(ref):
+            if sibling_id == issue_id or sibling_id in seen_siblings:
+                continue
+            sibling = ws.get_issue(sibling_id)
+            if not sibling:
+                continue
+            seen_siblings.add(sibling_id)
+            out.append({
+                "issue_id": sibling_id,
+                "title": sibling.get("display_title") or sibling.get("title") or sibling_id,
+                "shared_reference": ref,
+            })
+    return out
+
+
 def _project_name_for(issue: dict, category: str, parties: list) -> str:
     external = [p for p in parties if p.get("affiliation") == "external" and p.get("company")
                 and not workgraph_signals._SYSTEM_SENDER.match(p.get("primary_email") or "")]

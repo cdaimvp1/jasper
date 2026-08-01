@@ -101,14 +101,16 @@ def test_list_asks_for_issue_scoped_to_one_issue(ws_db):
     iid = _issue_with_extraction(ws_db, "Renewal", "pi1", {"asks": ["confirm the redline"]})
     _issue_with_extraction(ws_db, "Other", "pi2", {"asks": ["unrelated ask"]})
 
-    assert wad.list_asks_for_issue(iid) == ["confirm the redline"]
+    entries = wad.list_asks_for_issue(iid)
+    assert [e["text"] for e in entries] == ["confirm the redline"]
+    assert entries[0]["raw_item_id"] is not None
 
 
 def test_list_decisions_for_issue_scoped_to_one_issue(ws_db):
     iid = _issue_with_extraction(ws_db, "Renewal", "pi3", {"decisions": ["approved for FY27"]})
     _issue_with_extraction(ws_db, "Other", "pi4", {"decisions": ["unrelated decision"]})
 
-    assert wad.list_decisions_for_issue(iid) == ["approved for FY27"]
+    assert [e["text"] for e in wad.list_decisions_for_issue(iid)] == ["approved for FY27"]
 
 
 def test_list_asks_for_issue_includes_closed_issues(ws_db):
@@ -122,7 +124,7 @@ def test_list_asks_for_issue_includes_closed_issues(ws_db):
     ws_db.link_raw_item_to_issue(rid, issue_id)
     ws_db.create_extraction(rid, json.dumps({"asks": ["closed-issue ask"]}))
 
-    assert wad.list_asks_for_issue(issue_id) == ["closed-issue ask"]
+    assert [e["text"] for e in wad.list_asks_for_issue(issue_id)] == ["closed-issue ask"]
 
 
 def test_list_asks_for_issue_empty_when_none(ws_db):

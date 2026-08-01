@@ -44,6 +44,7 @@ def _rollup(field_name: str) -> list[dict]:
                     "issue_id": issue["id"], "title": issue.get("display_title") or issue["title"],
                     "state": issue["state"], "text": text.strip(),
                     "extracted_ts": extraction["extracted_ts"],
+                    "raw_item_id": extraction.get("raw_item_id"),
                 })
     entries.sort(key=lambda e: e["extracted_ts"], reverse=True)
     return entries
@@ -60,11 +61,16 @@ def list_open_decisions() -> list[dict]:
     return _rollup("decisions")
 
 
-def _texts_for_issue(issue_id: str, field_name: str) -> list[str]:
+def _texts_for_issue(issue_id: str, field_name: str) -> list[dict]:
     """Enhancement #87 (issue detail panel): the same real field, scoped to
     ONE issue's own extractions rather than every open issue - no state
     filter, since Marc looking at a specific issue (open or closed) should
-    still see what was actually asked/decided on it."""
+    still see what was actually asked/decided on it. Returns {text,
+    raw_item_id} (2026-08-01, checklist rework) rather than a bare string -
+    raw_item_id is what lets a caller attach the real deep link (Ariba/Adobe
+    Sign/Outlook) the source email already carries, via deep_links.
+    attach_deep_links, instead of this ask ever floating free of its
+    source."""
     extractions_by_issue = ws.list_extractions_for_issues([issue_id])
     out = []
     for extraction in extractions_by_issue.get(issue_id, []):
@@ -73,13 +79,13 @@ def _texts_for_issue(issue_id: str, field_name: str) -> list[str]:
             continue
         for text in values:
             if isinstance(text, str) and text.strip():
-                out.append(text.strip())
+                out.append({"text": text.strip(), "raw_item_id": extraction.get("raw_item_id")})
     return out
 
 
-def list_asks_for_issue(issue_id: str) -> list[str]:
+def list_asks_for_issue(issue_id: str) -> list[dict]:
     return _texts_for_issue(issue_id, "asks")
 
 
-def list_decisions_for_issue(issue_id: str) -> list[str]:
+def list_decisions_for_issue(issue_id: str) -> list[dict]:
     return _texts_for_issue(issue_id, "decisions")

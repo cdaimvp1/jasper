@@ -1204,6 +1204,21 @@ async def api_workgraph_issue_detail(issue_id: str, log_choice: bool = False):
                 "lesson_id_cited": issue.get("lesson_id_cited"),
             }, default=str),
         )
+    # Checklist rework (2026-08-01): asks/decisions/commitments/repeat_signals
+    # now carry a real raw_item_id (see each module's own docstring) - attach
+    # the same real deep link mechanism the Progress-zone evidence rows
+    # already use (Ariba/Adobe Sign/Outlook), so a checklist item is never
+    # floating free of the email that produced it. attach_deep_links mutates
+    # in place and only needs a "raw_item_id" key on each dict, regardless of
+    # what else the dict carries.
+    checklist_asks = workgraph_asks_decisions.list_asks_for_issue(issue_id)
+    checklist_decisions = workgraph_asks_decisions.list_decisions_for_issue(issue_id)
+    checklist_commitments = workgraph_commitments.list_commitments_for_issue(issue_id)
+    checklist_repeat_signals = workgraph_repeat_signals.list_repeat_signals_for_issue(issue_id)
+    deep_links.attach_deep_links(checklist_asks)
+    deep_links.attach_deep_links(checklist_decisions)
+    deep_links.attach_deep_links(checklist_commitments)
+    deep_links.attach_deep_links(checklist_repeat_signals)
     return JSONResponse({"issue": sanitize_surrogates(issue), "evidence": sanitize_surrogates(evidence),
                         "pending_actions": sanitize_surrogates(pending), "tasks": sanitize_surrogates(tasks),
                         "state_history": sanitize_surrogates(state_history),
@@ -1215,13 +1230,20 @@ async def api_workgraph_issue_detail(issue_id: str, log_choice: bool = False):
                         # facts - the same real extraction fields the global
                         # rollup cards already surface, scoped to just this
                         # issue rather than every open issue.
-                        "asks": sanitize_surrogates(workgraph_asks_decisions.list_asks_for_issue(issue_id)),
-                        "decisions": sanitize_surrogates(workgraph_asks_decisions.list_decisions_for_issue(issue_id)),
+                        "asks": sanitize_surrogates(checklist_asks),
+                        "decisions": sanitize_surrogates(checklist_decisions),
                         "key_facts": sanitize_surrogates(workgraph_key_facts.list_key_facts_for_issue(issue_id)),
+                        "commitments": sanitize_surrogates(checklist_commitments),
                         # Part D (2026-07-30): repeat-ask/escalation signals
                         # curator recorded for this issue - see
                         # workgraph_repeat_signals.py.
-                        "repeat_signals": sanitize_surrogates(workgraph_repeat_signals.list_repeat_signals_for_issue(issue_id))})
+                        "repeat_signals": sanitize_surrogates(checklist_repeat_signals),
+                        # Checklist rework: other open issues sharing a real
+                        # PR/PO reference with this one - a relationship
+                        # fact, not a claim about which blocks which (see
+                        # workgraph_projects.related_open_issues_by_reference).
+                        "related_by_reference": sanitize_surrogates(
+                            workgraph_projects.related_open_issues_by_reference(issue_id))})
 
 
 class OpenEmailBody(BaseModel):
@@ -1520,18 +1542,26 @@ async def api_project_detail(project_id: str):
     title_by_id = {i["id"]: (i.get("display_title") or i["title"]) for i in issues}
     for iid in issue_ids:
         issue_title = title_by_id.get(iid, iid)
-        asks.extend({"issue_id": iid, "issue_title": issue_title, "text": t}
+        # Checklist rework (2026-08-01): asks/decisions/commitments now carry
+        # a real raw_item_id (see each module's own docstring) - kept through
+        # here too so project-scoped items can get the same real deep link
+        # the issue-detail endpoint already attaches, not just the text.
+        asks.extend({"issue_id": iid, "issue_title": issue_title, "text": t["text"], "raw_item_id": t["raw_item_id"]}
                     for t in workgraph_asks_decisions.list_asks_for_issue(iid))
-        decisions.extend({"issue_id": iid, "issue_title": issue_title, "text": t}
+        decisions.extend({"issue_id": iid, "issue_title": issue_title, "text": t["text"], "raw_item_id": t["raw_item_id"]}
                     for t in workgraph_asks_decisions.list_decisions_for_issue(iid))
         key_facts.extend({"issue_id": iid, "issue_title": issue_title, "text": t}
                     for t in workgraph_key_facts.list_key_facts_for_issue(iid))
-        commitments.extend({"issue_id": iid, "issue_title": issue_title, "text": t}
+        commitments.extend({"issue_id": iid, "issue_title": issue_title, "text": t["text"], "raw_item_id": t["raw_item_id"]}
                     for t in workgraph_commitments.list_commitments_for_issue(iid))
         for rs in workgraph_repeat_signals.list_repeat_signals_for_issue(iid):
             rs["issue_id"] = iid
             rs["issue_title"] = issue_title
             repeat_signals.append(rs)
+    deep_links.attach_deep_links(asks)
+    deep_links.attach_deep_links(decisions)
+    deep_links.attach_deep_links(commitments)
+    deep_links.attach_deep_links(repeat_signals)
     parties = workgraph_projects.aggregate_parties_for_project(project_id)
     value_by_issue = workgraph_nba.value_amounts_for_issues(open_ids)
     # Detail Panel Refined (task #124 follow-on, 2026-08-01): the per-issue

@@ -40,6 +40,7 @@ def list_repeat_signals_for_issue(issue_id: str) -> list[dict]:
                 "escalated": bool(entry.get("escalated")),
                 "escalation_note": entry.get("escalation_note") if isinstance(entry.get("escalation_note"), str) else None,
                 "extracted_ts": extraction["extracted_ts"],
+                "raw_item_id": extraction.get("raw_item_id"),
             })
     out.sort(key=lambda e: e["extracted_ts"], reverse=True)
     return out

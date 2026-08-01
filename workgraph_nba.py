@@ -297,9 +297,10 @@ def candidate_actions(issue: dict, evidence: list[dict], synthesis: Optional[dic
     """Part E1 of the grouping/NBA redesign (2026-07-30): unifies the 3
     previously-uncoordinated "what should Marc do next" surfaces - this
     issue's own single nba_action_kind/nba_reason verdict, workgraph_
-    recommend.py's per-evidence-row recommendations (ev["recommendation"],
-    already populated by attach_recommendations before this is called),
-    and curator's own synthesis suggested_actions - into one ranked,
+    recommend.py's per-evidence-row recommendations (ev["recommendations"],
+    a LIST per row since task #15 - already populated by
+    attach_recommendations before this is called), and curator's own
+    synthesis suggested_actions - into one ranked,
     deduped list. Each candidate: {kind, label, rationale, score,
     source_surface}. Top-ranked is the de facto NBA; the rest are real
     alternatives, not previously visible together anywhere.
@@ -349,15 +350,18 @@ def candidate_actions(issue: dict, evidence: list[dict], synthesis: Optional[dic
 
     seen_kinds = {c["kind"] for c in candidates}
     for ev in evidence:
-        rec = ev.get("recommendation")
-        if not rec or rec.get("kind") in seen_kinds:
-            continue
-        seen_kinds.add(rec["kind"])
-        candidates.append({
-            "kind": rec["kind"], "label": rec.get("label") or rec["kind"],
-            "rationale": rec.get("rationale") or "",
-            "score": min(0.5, _GENERIC_CEILING), "source_surface": "evidence_row",
-        })
+        # task #15: a row can carry more than one real recommendation (e.g.
+        # an attachment matching both invoice-audit and SOW language) - every
+        # one of them is a genuine candidate, not just the first.
+        for rec in (ev.get("recommendations") or []):
+            if not rec or rec.get("kind") in seen_kinds:
+                continue
+            seen_kinds.add(rec["kind"])
+            candidates.append({
+                "kind": rec["kind"], "label": rec.get("label") or rec["kind"],
+                "rationale": rec.get("rationale") or "",
+                "score": min(0.5, _GENERIC_CEILING), "source_surface": "evidence_row",
+            })
 
     if synthesis:
         seen_labels = {c["label"] for c in candidates}

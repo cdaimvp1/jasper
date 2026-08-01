@@ -312,18 +312,32 @@ def test_candidate_actions_waiting_state_maps_to_nudge():
 
 def test_candidate_actions_includes_evidence_row_recommendation():
     issue = {"nba_reason": None, "state": "active", "priority_score": 0.5}
-    evidence = [{"recommendation": {"kind": "contract_review", "label": "Review the attached document",
-                                     "rationale": "has an attachment"}}]
+    evidence = [{"recommendations": [{"kind": "contract_review", "label": "Review the attached document",
+                                       "rationale": "has an attachment"}]}]
     result = nba.candidate_actions(issue, evidence)
     kinds = {c["kind"] for c in result}
     assert "contract_review" in kinds
 
 
+def test_candidate_actions_includes_multiple_recommendations_from_one_row():
+    # task #15: a single evidence row can carry more than one genuine
+    # recommendation (e.g. an attachment matching both invoice-audit and SOW
+    # language) - both must surface as separate candidates.
+    issue = {"nba_reason": None, "state": "active", "priority_score": 0.5}
+    evidence = [{"recommendations": [
+        {"kind": "audit_invoice", "label": "Run Invoice Audit", "rationale": "r1"},
+        {"kind": "scope_review", "label": "Run Scope Review", "rationale": "r2"},
+    ]}]
+    result = nba.candidate_actions(issue, evidence)
+    kinds = {c["kind"] for c in result}
+    assert {"audit_invoice", "scope_review"} <= kinds
+
+
 def test_candidate_actions_dedupes_evidence_rows_by_kind():
     issue = {"nba_reason": None, "state": "active", "priority_score": 0.5}
     evidence = [
-        {"recommendation": {"kind": "summarize", "label": "Summarize the thread", "rationale": "r1"}},
-        {"recommendation": {"kind": "summarize", "label": "Summarize the thread", "rationale": "r2"}},
+        {"recommendations": [{"kind": "summarize", "label": "Summarize the thread", "rationale": "r1"}]},
+        {"recommendations": [{"kind": "summarize", "label": "Summarize the thread", "rationale": "r2"}]},
     ]
     result = nba.candidate_actions(issue, evidence)
     assert len([c for c in result if c["kind"] == "summarize"]) == 1
@@ -345,7 +359,7 @@ def test_candidate_actions_never_empty_even_with_no_real_signal():
 
 def test_candidate_actions_ranked_by_score_descending():
     issue = {"nba_reason": "your move", "state": "active", "priority_score": 0.9}
-    evidence = [{"recommendation": {"kind": "summarize", "label": "Summarize", "rationale": "r"}}]
+    evidence = [{"recommendations": [{"kind": "summarize", "label": "Summarize", "rationale": "r"}]}]
     synthesis = {"suggested_actions": [{"label": "Custom task", "rationale": "r"}]}
     result = nba.candidate_actions(issue, evidence, synthesis)
     scores = [c["score"] for c in result]
@@ -375,9 +389,9 @@ def test_candidate_actions_synthesis_never_outranked_by_high_priority_generic():
 def test_candidate_actions_capped_at_four():
     issue = {"nba_reason": "your move", "state": "active", "priority_score": 0.9}
     evidence = [
-        {"recommendation": {"kind": "contract_review", "label": "a", "rationale": "r"}},
-        {"recommendation": {"kind": "prep", "label": "b", "rationale": "r"}},
-        {"recommendation": {"kind": "summarize", "label": "c", "rationale": "r"}},
+        {"recommendations": [{"kind": "contract_review", "label": "a", "rationale": "r"}]},
+        {"recommendations": [{"kind": "prep", "label": "b", "rationale": "r"}]},
+        {"recommendations": [{"kind": "summarize", "label": "c", "rationale": "r"}]},
     ]
     synthesis = {"suggested_actions": [{"label": "d", "rationale": "r"}, {"label": "e", "rationale": "r"}]}
     result = nba.candidate_actions(issue, evidence, synthesis)

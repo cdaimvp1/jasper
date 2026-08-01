@@ -33,6 +33,7 @@ import workgraph_store as ws
 import workgraph_parties
 import workgraph_projects
 import workgraph_signals
+import text_extract
 
 # ===========================================================================
 # Cue regexes — adapted from supplier-communication-log.service.ts. The
@@ -386,7 +387,7 @@ def run_classification(limit: int = 500) -> dict:
     for item in items:
         result = classify_item(
             subject=item.get("subject") or "",
-            body_preview=item.get("body_preview") or "",
+            body_preview=text_extract.resolve_item_text(item),
             from_actor=item.get("from_actor") or "",
             source=item.get("source"), organizer=item.get("from_actor"),
             participants=_parse_participants(item),
@@ -746,7 +747,7 @@ def backfill_reclassify() -> dict:
 
     for item in rows:
         result = classify_item(
-            subject=item.get("subject") or "", body_preview=item.get("body_preview") or "",
+            subject=item.get("subject") or "", body_preview=text_extract.resolve_item_text(item),
             from_actor=item.get("from_actor") or "",
             source=item.get("source"), organizer=item.get("from_actor"),
             participants=_parse_participants(item),

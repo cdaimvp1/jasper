@@ -51,6 +51,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import workgraph_store as ws
 import workgraph_lessons
 import workgraph_aristotle
+import text_extract
 
 DAY = 86400.0
 
@@ -121,16 +122,28 @@ _value_cache: dict[int, list[tuple[float, bool]]] = {}
 
 
 def _extract_item_candidates(item: dict) -> list[tuple[float, bool, bool]]:
-    """Every dollar figure found in one raw_item's subject+preview, as
-    (value, is_preferred, is_downweighted) triples - flags True when a
-    total/contract-value/requisition-type or a credit/adjustment/accrued-
-    fee-type cue word (respectively) appears within _CUE_WINDOW_CHARS of the
-    match. Cached per raw_item id, same immutability reasoning as the
-    pre-2026-08-01 single-float cache this replaces."""
+    """Every dollar figure found in one raw_item's subject + resolved body
+    text, as (value, is_preferred, is_downweighted) triples - flags True
+    when a total/contract-value/requisition-type or a credit/adjustment/
+    accrued-fee-type cue word (respectively) appears within
+    _CUE_WINDOW_CHARS of the match. Cached per raw_item id, same
+    immutability reasoning as the pre-2026-08-01 single-float cache this
+    replaces.
+
+    Fixed 2026-08-01 (real-incident follow-up): used to read only
+    item["body_preview"] (500 chars) - text_extract.resolve_item_text()
+    reads the full, quote-stripped body when one was captured (task #43),
+    falling back to body_preview for older mail. Checked before writing
+    this: marc-308's own real $50M figure happened to already sit inside
+    500 chars (found by task #24/#25's fixes, not this one) - not claiming
+    that specific case as proof. This closes the general, forward-looking
+    version of the same gap: any real figure that lands PAST character 500
+    of a longer real email, which the old code could never have reached no
+    matter what else was fixed."""
     key = item.get("id")
     if key is not None and key in _value_cache:
         return _value_cache[key]
-    text = " ".join(filter(None, [item.get("subject"), item.get("body_preview")]))
+    text = " ".join(filter(None, [item.get("subject"), text_extract.resolve_item_text(item)]))
     candidates: list[tuple[float, bool, bool]] = []
     for match in _DOLLAR_RE.finditer(text):
         suffix = (match.group(3) or "").lower()

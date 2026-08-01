@@ -97,6 +97,36 @@ def test_extract_value_amount_no_cues_anywhere_behaves_as_before():
     assert nba._extract_value_amount(items) == 44_496_204.0
 
 
+def test_extract_value_amount_finds_a_figure_past_the_old_500char_cutoff(isolated_paths):
+    """The actual, forward-looking point of task #29: a real total contract
+    value sitting past character 500 of a real email is now found at all -
+    the 500-char body_preview alone could never have reached it no matter
+    what else was fixed. Goes through the real text_extract.resolve_item_text
+    with a real staged file, not a mock, so a real wiring bug would fail this."""
+    import json
+
+    padding = "Filler paragraph text with no dollar figures at all. " * 20  # > 500 chars
+    assert len(padding) > 500
+    full_body = padding + "the total contract value is $12,345,678."
+
+    # Without a raw_ref (old mail, or absorption never happened) - only the
+    # truncated preview is reachable, and the figure genuinely isn't in it.
+    body_preview = full_body[:500]
+    assert "$12,345,678" not in body_preview
+    no_ref_item = {"id": 105, "subject": "Renewal", "body_preview": body_preview, "raw_ref": None}
+    assert nba._extract_value_amount([no_ref_item]) == 0.0
+
+    # With a real raw_ref pointing at a real staged full body (task #43's
+    # actual mechanism) - the figure past character 500 is now reachable.
+    rel = "raw_items/106/body.txt"
+    full_path = isolated_paths.DOCUMENTS_DIR / rel
+    full_path.parent.mkdir(parents=True, exist_ok=True)
+    full_path.write_text(full_body, encoding="utf-8")
+    with_ref_item = {"id": 106, "subject": "Renewal", "body_preview": body_preview,
+                      "raw_ref": json.dumps({"body_text": rel})}
+    assert nba._extract_value_amount([with_ref_item]) == 12_345_678.0
+
+
 def test_default_weights_is_immutable():
     with pytest.raises(TypeError):
         nba.DEFAULT_WEIGHTS["value"] = 999

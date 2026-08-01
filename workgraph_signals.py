@@ -202,6 +202,17 @@ REQUEST_TO_CLOSURE_SIGNAL: dict[str, str] = {
 }
 
 
+def sender_domain(from_actor: Optional[str]) -> Optional[str]:
+    """The bare domain after '@', lowercased, or None for an address with no
+    '@' (or none at all). Centralizes a pattern that was independently
+    duplicated in workgraph_parties.py (x2) and this module's own
+    domain_matches() before this - added when workgraph_classify.py's
+    subject-match fallback (2026-08-01) needed a 4th copy."""
+    if not from_actor or "@" not in from_actor:
+        return None
+    return from_actor.rsplit("@", 1)[-1].lower()
+
+
 def known_signal_types() -> list[str]:
     """Every signal_type this module can produce, in rule-list order - used
     by workgraph_aristotle.py's Settings UI to populate rule dropdowns so

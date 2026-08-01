@@ -157,6 +157,15 @@ _SIGNAL_TYPE_TOPIC = {
 }
 
 _RE_PREFIX = re.compile(r"^\s*(re|fwd?|fw)\s*:\s*", re.I)
+_EXTERNAL_PREFIX = re.compile(r"^\s*\[external\]\s*", re.I)
+_AUTO_REPLY_PREFIX = re.compile(r"^\s*automatic reply:\s*", re.I)
+# Real, observed pattern (2026-08-01 real-incident follow-up): Outlook's own
+# calendar-reminder notification wraps the actual meeting title in this
+# fixed template - "[EXTERNAL] Your meeting "Lilly and Workday - Early
+# Renewal Weekly Meeting" is starting soon...". Extracts the title out of
+# the wrapper rather than trying to strip the wrapper as another prefix,
+# since it's not a prefix - the real subject is INSIDE quotes, not after them.
+_MEETING_STARTING_SOON = re.compile(r'^\s*(?:\[external\]\s*)?your meeting\s+"(.+?)"\s+is starting soon', re.I)
 
 
 def strip_subject_prefix(subject: str) -> str:
@@ -167,6 +176,30 @@ def strip_subject_prefix(subject: str) -> str:
         prev = s
         s = _RE_PREFIX.sub("", s)
     return s.strip()
+
+
+def normalize_subject_for_matching(subject: str) -> str:
+    """A broader normalization than strip_subject_prefix, built for one
+    specific purpose (2026-08-01 real-incident follow-up): deciding whether
+    two DIFFERENT raw_items - no shared thread_key, no shared PR/PO
+    reference - are actually the same real-world conversation Outlook just
+    fragmented into separate ConversationIDs (a meeting series' own
+    reminder/auto-reply/external-tag noise, confirmed on a real thread:
+    "[EXTERNAL] Re: Lilly and Workday - Early Renewal Weekly Meeting",
+    "Automatic reply: Lilly and Workday - Early Renewal Weekly Meeting", and
+    "[EXTERNAL] Your meeting "Lilly and Workday - Early Renewal Weekly
+    Meeting" is starting soon..." all describe the exact same meeting).
+    Lowercased, so this is for equality comparison, not display. Not used
+    for title storage or classification - only for the subject_match
+    candidate check in cluster_and_link()."""
+    s = subject or ""
+    m = _MEETING_STARTING_SOON.match(s)
+    if m:
+        s = m.group(1)
+    else:
+        s = _EXTERNAL_PREFIX.sub("", s)
+        s = _AUTO_REPLY_PREFIX.sub("", s)
+    return strip_subject_prefix(s).strip().lower()
 
 
 def _parse_participants(item: dict) -> Optional[list]:
@@ -499,6 +532,23 @@ def recompute_issue_state(issue_id: str, *, new_item_is_actionable: bool = True)
     return target
 
 
+def _sender_domain_seen_on_issue(issue_id: str, from_actor: Optional[str]) -> bool:
+    """True if `from_actor`'s domain matches (exact or real subdomain,
+    workgraph_signals.domain_matches - never a spoofable substring check)
+    any sender already seen on this issue's existing evidence. The second
+    of the two required conditions for the subject-match fallback below -
+    an exact normalized-subject match ALONE is a real false-positive risk
+    (a generic recurring-meeting title reused by a completely different
+    pair of companies); requiring the actual counterparty too closes it."""
+    domain = workgraph_signals.sender_domain(from_actor)
+    if not domain:
+        return False
+    for existing in ws.get_raw_items_for_issue(issue_id):
+        if workgraph_signals.domain_matches(existing.get("from_actor") or "", domain):
+            return True
+    return False
+
+
 def cluster_and_link(limit: int = 500) -> dict:
     """For every classified-but-not-yet-linked item (issue_id IS NULL),
     resolve via thread_map (an existing Issue's thread_key) or create a new
@@ -522,16 +572,41 @@ def cluster_and_link(limit: int = 500) -> dict:
     counts what it would do; only actually attaches when the flag is on.
     Ships with the flag OFF - this has no backtest path the way Part A2
     does, so it can only be validated by watching would_attach_via_
-    reference against real new mail for a bake-in period first."""
+    reference against real new mail for a bake-in period first.
+
+    Part D (2026-08-01, real-incident follow-up): the "curator LLM layer"
+    this module's own header comment says handles standalone-FYI residue
+    was never actually built - confirmed by grepping the whole repo for it.
+    A real thread ("Early Renewal Weekly Meeting", 7 messages across
+    Outlook's own reminder/auto-reply/[EXTERNAL] noise, no two sharing a
+    ConversationID) sat permanently unlinked as a result. Before giving up
+    on a standalone FYI, this now also checks whether its normalized
+    subject (normalize_subject_for_matching - strips [EXTERNAL]/Automatic
+    reply:/the calendar-reminder wrapper on top of the usual Re:/Fwd:)
+    exact-matches an OPEN issue's own title AND the sender's domain matches
+    a domain already seen on that issue's existing evidence - both required,
+    since either alone is a real false-positive risk (a generic subject
+    line reused by an unrelated sender; the right sender emailing about
+    something unrelated with a coincidentally-matching subject). Same
+    report-only-by-default pattern as the reference-id path above -
+    ships OFF, always counted, no backtest path yet either."""
     reference_auto_attach = bool(config.get("grouping", "reference_id_auto_attach_enabled"))
+    subject_match_auto_attach = bool(config.get("grouping", "subject_match_auto_attach_enabled"))
     now = time.time()
     with_pending = ws.get_items_pending_link(limit)
+    open_issues_by_subject: dict[str, str] = {}
+    for iss in ws.list_issues(states=["active", "waiting", "blocked"], limit=5000):
+        key = normalize_subject_for_matching(iss.get("title") or "")
+        if key:
+            open_issues_by_subject.setdefault(key, iss["id"])
     created = 0
     linked = 0
     skipped_noise = 0
     skipped_fyi_standalone = 0
     attached_via_reference = 0
     would_attach_via_reference = 0
+    attached_via_subject_match = 0
+    would_attach_via_subject_match = 0
     touched_issues = set()
     # 2026-07-31: tracks which touched issues had a genuinely NEW
     # ACTIONABLE-ASK item land this run (vs. just an FYI/waiting reply) -
@@ -566,18 +641,27 @@ def cluster_and_link(limit: int = 500) -> dict:
                 attached_via_reference += 1
             elif issue_id is None:
                 if item["item_class"] == "FYI-EVIDENCE":
-                    skipped_fyi_standalone += 1
-                    ws.mark_link_checked(item["id"], now)
-                    continue
-                title = strip_subject_prefix(item.get("subject") or "(no subject)")
-                state = "active" if item["item_class"] == "ACTIONABLE-ASK" else "waiting"
-                issue_id = ws.create_issue_with_new_id(
-                    title=title, category=item.get("topic"),
-                    state=state, priority="med", confidence_tier=item.get("confidence") or "M",
-                )
-                ws.thread_map_set(thread_key, issue_id)
-                created += 1
-                is_new_issue = True
+                    subject_match = open_issues_by_subject.get(
+                        normalize_subject_for_matching(item.get("subject") or ""))
+                    if subject_match and _sender_domain_seen_on_issue(subject_match, item.get("from_actor")):
+                        would_attach_via_subject_match += 1
+                        if subject_match_auto_attach:
+                            issue_id = subject_match
+                            attached_via_subject_match += 1
+                    if issue_id is None:
+                        skipped_fyi_standalone += 1
+                        ws.mark_link_checked(item["id"], now)
+                        continue
+                if issue_id is None:
+                    title = strip_subject_prefix(item.get("subject") or "(no subject)")
+                    state = "active" if item["item_class"] == "ACTIONABLE-ASK" else "waiting"
+                    issue_id = ws.create_issue_with_new_id(
+                        title=title, category=item.get("topic"),
+                        state=state, priority="med", confidence_tier=item.get("confidence") or "M",
+                    )
+                    ws.thread_map_set(thread_key, issue_id)
+                    created += 1
+                    is_new_issue = True
 
         summary = item.get("subject") or item.get("body_preview") or "(no summary)"
         if issue_id == reference_match and reference_auto_attach:
@@ -585,6 +669,9 @@ def cluster_and_link(limit: int = 500) -> dict:
             # timeline) - never silently fold a raw_item in without a
             # trace of why it landed here instead of a new issue.
             summary = f"{summary} [auto-attached via shared reference {item.get('pr_number')}]"
+        elif subject_match_auto_attach and item["item_class"] == "FYI-EVIDENCE" and issue_id == open_issues_by_subject.get(
+                normalize_subject_for_matching(item.get("subject") or "")):
+            summary = f"{summary} [auto-attached via matching subject + sender]"
         ws.link_raw_item_to_issue(item["id"], issue_id)
         ws.add_evidence(
             issue_id=issue_id,
@@ -624,6 +711,9 @@ def cluster_and_link(limit: int = 500) -> dict:
             "attached_via_reference": attached_via_reference,
             "would_attach_via_reference": would_attach_via_reference,
             "reference_auto_attach_enabled": reference_auto_attach,
+            "attached_via_subject_match": attached_via_subject_match,
+            "would_attach_via_subject_match": would_attach_via_subject_match,
+            "subject_match_auto_attach_enabled": subject_match_auto_attach,
             "parties": party_result, "projects": project_result}
 
 

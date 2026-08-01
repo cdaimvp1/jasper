@@ -459,6 +459,94 @@ def test_cluster_and_link_new_actionable_reply_does_reopen_a_done_issue(ws_db):
     assert ws_db.get_issue(iid)["state"] == "active"
 
 
+# --- Part D: subject-match fallback (2026-08-01, real-incident follow-up) --
+
+def test_normalize_subject_for_matching_real_observed_variants_agree():
+    """The exact real thread this was built for - 4 real subject variants
+    of the same meeting, none sharing a thread_key, must normalize
+    identically."""
+    variants = [
+        "[EXTERNAL] Re: Lilly and Workday - Early Renewal Weekly Meeting",
+        "Automatic reply: Lilly and Workday - Early Renewal Weekly Meeting",
+        '[EXTERNAL] Your meeting "Lilly and Workday - Early Renewal Weekly Meeting" is starting soon...',
+        "Fw: Lilly and Workday - Early Renewal Weekly Meeting",
+    ]
+    normalized = {wc.normalize_subject_for_matching(s) for s in variants}
+    assert len(normalized) == 1
+    assert normalized == {"lilly and workday - early renewal weekly meeting"}
+
+
+def test_cluster_and_link_subject_match_shadow_counts_but_does_not_attach_when_flag_off(ws_db, monkeypatch, tmp_path):
+    config = _isolate_config(ws_db, monkeypatch, tmp_path)
+    assert config.get("grouping", "subject_match_auto_attach_enabled") in (None, False)
+
+    _pending_item(ws_db, "sm1", "Weekly Sync", from_actor="dan@workday.com")
+    wc.cluster_and_link()
+    rid = _pending_item(ws_db, "sm2", "[EXTERNAL] Re: Weekly Sync", item_class="FYI-EVIDENCE",
+                         from_actor="dan@workday.com")
+    result = wc.cluster_and_link()
+
+    assert result["subject_match_auto_attach_enabled"] is False
+    assert result["would_attach_via_subject_match"] == 1
+    assert result["attached_via_subject_match"] == 0
+    assert result["fyi_standalone_skipped"] == 1
+    assert ws_db.get_raw_item(rid)["issue_id"] is None
+
+
+def test_cluster_and_link_subject_match_attaches_when_flag_enabled_and_domain_matches(ws_db, monkeypatch, tmp_path):
+    config = _isolate_config(ws_db, monkeypatch, tmp_path)
+    config.set_value(True, "grouping", "subject_match_auto_attach_enabled")
+
+    first_rid = _pending_item(ws_db, "sm3", "Weekly Sync", from_actor="dan@workday.com")
+    wc.cluster_and_link()
+    first_issue_id = ws_db.get_raw_item(first_rid)["issue_id"]
+
+    rid = _pending_item(ws_db, "sm4", "[EXTERNAL] Re: Weekly Sync", item_class="FYI-EVIDENCE",
+                         from_actor="dan@workday.com")
+    result = wc.cluster_and_link()
+
+    assert result["attached_via_subject_match"] == 1
+    assert result["issues_created"] == 0, "must attach to the existing issue, not create/skip a second one"
+    assert ws_db.get_raw_item(rid)["issue_id"] == first_issue_id
+
+
+def test_cluster_and_link_subject_match_requires_same_domain_too(ws_db, monkeypatch, tmp_path):
+    """The exact false-positive risk a bare subject match alone can't rule
+    out: a generic recurring-meeting title reused by a completely different
+    counterparty must NOT attach, even with the flag on."""
+    config = _isolate_config(ws_db, monkeypatch, tmp_path)
+    config.set_value(True, "grouping", "subject_match_auto_attach_enabled")
+
+    _pending_item(ws_db, "sm5", "Weekly Sync", from_actor="dan@workday.com")
+    wc.cluster_and_link()
+
+    rid = _pending_item(ws_db, "sm6", "[EXTERNAL] Re: Weekly Sync", item_class="FYI-EVIDENCE",
+                         from_actor="someone@unrelated-vendor.com")
+    result = wc.cluster_and_link()
+
+    assert result["attached_via_subject_match"] == 0
+    assert result["would_attach_via_subject_match"] == 0
+    assert result["fyi_standalone_skipped"] == 1
+    assert ws_db.get_raw_item(rid)["issue_id"] is None
+
+
+def test_cluster_and_link_writes_breadcrumb_evidence_when_attached_via_subject_match(ws_db, monkeypatch, tmp_path):
+    config = _isolate_config(ws_db, monkeypatch, tmp_path)
+    config.set_value(True, "grouping", "subject_match_auto_attach_enabled")
+
+    _pending_item(ws_db, "sm7", "Weekly Sync", from_actor="dan@workday.com")
+    wc.cluster_and_link()
+    rid = _pending_item(ws_db, "sm8", "[EXTERNAL] Re: Weekly Sync", item_class="FYI-EVIDENCE",
+                         from_actor="dan@workday.com")
+    wc.cluster_and_link()
+
+    issue_id = ws_db.get_raw_item(rid)["issue_id"]
+    evidence = ws_db.list_evidence(issue_id)
+    matching = [e for e in evidence if e["raw_item_id"] == rid]
+    assert len(matching) == 1
+    assert "[auto-attached via matching subject + sender]" in matching[0]["summary"]
+
+
 def test_cluster_and_link_creates_new_issue_when_no_reference_match(ws_db):
     _pending_item(ws_db, "ck1", "A brand new ask with nothing structured in it")
     result = wc.cluster_and_link()

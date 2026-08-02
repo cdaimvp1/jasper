@@ -273,10 +273,22 @@ No change to the approved autonomous sequence (#47 -> #18 -> #21 -> #34 ->
   itself (now takes both explicitly, prefers whichever actually HAS
   suggested_actions). 2 new regression tests, full suite green, server
   restarted and live-verified.
-- #34 — design/scope per-checklist-item Aristotle gating. Design-only
-  document, no live code change. (Real finding already in the task
-  description: `check_prerequisites()` loops per-raw_item internally but
-  stops at the first match and doesn't expose which raw_item triggered it.)
+- #34 — [DONE, design doc committed] `docs/design/ARISTOTLE_PER_ROW_GATING.md`.
+  Confirmed the real gap by reading `check_prerequisites()`: it stops at
+  the first unsatisfied rule and never returns which raw_item triggered
+  it. Proposed a new `check_prerequisites_all()` that collects every
+  match (not just the first), with `check_prerequisites()` becoming a
+  thin wrapper over it (`all_checks[0] if all_checks else None`) so the
+  two can't drift - zero risk to existing callers (score_issue,
+  gate_board), same first-match value for the same input. Covers wiring
+  into the issue-detail endpoint (new `gated_raw_items` map, same pattern
+  as this session's `checklistByRawItem`), frontend consumption (a badge
+  on the specific checklist row, not replacing the issue-level "Cleared
+  to act" zone), the important "badge goes on the trigger, not a
+  nonexistent 'missing' item" framing, edge cases (same rule/multiple
+  raw_items, no-raw_item General rows), and a concrete test plan. No live
+  code changed - the build is task #49, gated behind Marc reviewing this
+  doc.
 - #36 — build the email reference-tag mechanism. Design already written
   in the task description (short quiet text token in the signature/
   subject, e.g. "Ref: JW-<issue-id>", NOT a fully-invisible header/comment

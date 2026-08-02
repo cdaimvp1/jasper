@@ -289,12 +289,22 @@ No change to the approved autonomous sequence (#47 -> #18 -> #21 -> #34 ->
   raw_items, no-raw_item General rows), and a concrete test plan. No live
   code changed - the build is task #49, gated behind Marc reviewing this
   doc.
-- #36 — build the email reference-tag mechanism. Design already written
-  in the task description (short quiet text token in the signature/
-  subject, e.g. "Ref: JW-<issue-id>", NOT a fully-invisible header/comment
-  approach). Build: append the tag when drafting/composing via
-  outlook_actions.py; have the ingest/classify path check for the pattern
-  as a fallback matching signal.
+- #36 — [DONE, committed `8400be5`] built the email reference-tag
+  mechanism end to end: `workgraph_signals.JASPER_REF_RE` extracts a
+  candidate issue id from any text; `classify_item` persists it to a new
+  `raw_items.jasper_ref_issue_id` column (same deferred-validation split
+  pr_number/pr_number_base already use); `cluster_and_link` checks it
+  FIRST, ahead of the PR/PO match, validates the referenced issue is real
+  and still open, gated behind a new `jasper_ref_auto_attach_enabled`
+  config flag (ships off, same report-only-first discipline as the two
+  existing auto-attach flags). `outlook_actions.draft_reply/draft_forward`
+  take an optional `ref_tag`, threaded from `server_lean.py` (which
+  already resolves the real issue_id from the raw_item), through to both
+  PowerShell scripts, which prepend "Ref: JW-<id>" to the draft's
+  HTMLBody before Display(). Same format the stakeholder mailto: compose
+  already used from piece #6. New tests across 3 test files; live-
+  verified the new column/index exist in the real production DB and the
+  flag defaults off; server restarted, /cockpit confirmed 200.
 - #45 — write the AI-native SME panel + synthesis design doc for
   contract_review. Design-only, no build. Real grounding already gathered
   this session: `references/sme-matrix.md` (18-person real SME matrix),

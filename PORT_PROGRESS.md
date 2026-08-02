@@ -305,12 +305,17 @@ No change to the approved autonomous sequence (#47 -> #18 -> #21 -> #34 ->
   already used from piece #6. New tests across 3 test files; live-
   verified the new column/index exist in the real production DB and the
   flag defaults off; server restarted, /cockpit confirmed 200.
-- #45 — write the AI-native SME panel + synthesis design doc for
-  contract_review. Design-only, no build. Real grounding already gathered
-  this session: `references/sme-matrix.md` (18-person real SME matrix),
-  `references/playbook.md` (Position/Hard-Stop/Acceptable-fallback ladder),
-  `references/risk-scoring.md` (existing multi-pass architecture) inside
-  `documents/reference/skills/lilly-contract-review-1c344a/`.
+- #45 — [DONE, committed `362a8d0`] `docs/design/CONTRACT_REVIEW_SME_PANEL.md`.
+  Read the real reference files first (found only in old scratchpad
+  copies, NOT in the live app's `skill_dir` - flagged that gap
+  separately) and found the skill is already a mandatory 4-pass pipeline
+  with 12 named real SMEs, a documented conflict-escalation protocol, and
+  a locked v3.2 dashboard spec - much more structured than the original
+  "break into 15-20 reviewers" framing assumed. Scoped the panel to just
+  Pass 3 (finding generation) as 13 domain-scoped sub-agents behind a
+  keyword pre-filter, reconciling into the exact PASS_3_ANALYSIS shape
+  Pass 4 already consumes unchanged.
+- #48 — research/design the leadership telemetry + time-saved page.
 - #48 — research/design the leadership telemetry + time-saved page.
   Design-only. Audit `nba_choice_log`, `issue_state_history` (actor
   column), and bus.db for what's already logged before assuming new

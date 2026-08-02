@@ -206,7 +206,18 @@ def recommend_for_evidence(ev: dict, has_attachment: bool, now: float) -> list[d
         # when market_rate_benchmark already covered this row — an approval/
         # sign-off match for a DIFFERENT reason (e.g. "please sign off",
         # unrelated to rates) still adds its own, independent recommendation.
-        if _APPROVAL_RE.search(summary) and not market_matched:
+        # Bug fix (2026-08-02, Marc's real live screenshot): ALSO suppressed
+        # when the raw_item already has a recognized automated signal_type
+        # (workgraph_signals.classify_signal - Ariba/DocuSign/etc.). A real
+        # example that surfaced this: an SAP Ariba requisition-approval
+        # auto-notification (signal_type "ariba_pr_approval_needed") matched
+        # "approv\w*" and got "Summarize the thread" as its suggested action
+        # - nonsensical for a single-message automated notification that
+        # isn't a thread at all, and Jasper already knows precisely what it
+        # is (a structured signal, not free text needing a generic
+        # summary). No signal_type -> this is a real human-written email/
+        # Teams message, where "summarize" still makes sense as a fallback.
+        if _APPROVAL_RE.search(summary) and not market_matched and not ev.get("signal_type"):
             recs.append({
                 "kind": "summarize",
                 "label": "Summarize the thread",

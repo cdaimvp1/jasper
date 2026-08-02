@@ -105,7 +105,18 @@ different jobs.
    where it stands now, informed by the prior synthesis plus what's new), `next_steps` grounded in
    the sourcing-process phase model where applicable, and `suggested_actions` tied to SPECIFIC
    tasks with a one-line rationale each (never a bare label with no "why" — Marc's explicit
-   "in-depth, not oversimplified" requirement). Each `next_steps` item MAY also carry a duration
+   "in-depth, not oversimplified" requirement).
+
+   **`label` is rendered verbatim as a button's visible text in the real UI — keep it a short,
+   imperative call-to-action (2-5 words: "Go to Ariba", "Confirm with Legal", "Approve the SOW"),
+   never a full descriptive sentence.** Put the specific, "in-depth" detail (which PR/PO number,
+   which supplier, the dollar amount) in `rationale` instead, where there's room for it and it
+   won't get visually truncated. Real bug this fixes (2026-08-02, Marc's live screenshot):
+   a label like "Approve or reject PR1149359 in Ariba" rendered as a button and got cut off
+   mid-PR-number ("Approve or reject PR114935…") - the label was doing the rationale's job.
+   `rationale` still needs the "why," same requirement as before; only `label` itself gets shorter.
+
+   Each `next_steps` item MAY also carry a duration
    estimate (see step 5) — omit `estimate_*` fields entirely on a step rather than guessing one:
    ```
    POST /api/workgraph/{entity_type}/{entity_id}/synthesis

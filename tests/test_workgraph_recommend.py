@@ -208,3 +208,27 @@ def test_approval_language_independent_of_benchmark_still_adds_summarize(tmp_pat
     recs = wr.recommend_for_evidence(ev, has_attachment=False, now=0)
     assert len(recs) == 1
     assert recs[0]["kind"] == "summarize"
+
+
+def test_approval_language_suppressed_when_raw_item_has_known_signal_type(tmp_path, monkeypatch):
+    # Real bug (2026-08-02, Marc's live screenshot): an SAP Ariba
+    # requisition-approval auto-notification matched "approv\w*" and got
+    # "Summarize the thread" as its suggested action - nonsensical for a
+    # single-message automated notification Jasper already knows exactly
+    # what to call by its real signal_type, not a free-text thread.
+    monkeypatch.setattr(skills_registry, "REGISTRY_PATH", tmp_path / "no_such_registry.json")
+    ev = {"type": "email", "summary": "Action required: Approve the Requisition",
+          "signal_type": "ariba_pr_approval_needed"}
+    recs = wr.recommend_for_evidence(ev, has_attachment=False, now=0)
+    assert recs == []
+
+
+def test_approval_language_still_fires_without_signal_type(tmp_path, monkeypatch):
+    # A real human-written email (no recognized automated signal_type) with
+    # approval language must still get "summarize" - only known automated
+    # notifications are suppressed, not every approval-adjacent message.
+    monkeypatch.setattr(skills_registry, "REGISTRY_PATH", tmp_path / "no_such_registry.json")
+    ev = {"type": "email", "summary": "please approve the attached amendment", "signal_type": None}
+    recs = wr.recommend_for_evidence(ev, has_attachment=False, now=0)
+    assert len(recs) == 1
+    assert recs[0]["kind"] == "summarize"

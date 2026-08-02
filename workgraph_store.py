@@ -1719,7 +1719,8 @@ def list_evidence(issue_id: str) -> list[dict]:
         conn = _connect()
         try:
             rows = conn.execute(
-                """SELECT evidence.*, raw_items.thread_key AS thread_key
+                """SELECT evidence.*, raw_items.thread_key AS thread_key,
+                          raw_items.signal_type AS signal_type
                    FROM evidence
                    LEFT JOIN raw_items ON raw_items.id = evidence.raw_item_id
                    WHERE evidence.issue_id = ?
@@ -1741,7 +1742,8 @@ def list_evidence_for_issues(issue_ids: list[str]) -> dict[str, list[dict]]:
         try:
             placeholders = ",".join("?" * len(issue_ids))
             rows = conn.execute(
-                f"""SELECT evidence.*, raw_items.thread_key AS thread_key
+                f"""SELECT evidence.*, raw_items.thread_key AS thread_key,
+                           raw_items.signal_type AS signal_type
                     FROM evidence
                     LEFT JOIN raw_items ON raw_items.id = evidence.raw_item_id
                     WHERE evidence.issue_id IN ({placeholders})

@@ -931,6 +931,28 @@ def mark_link_checked(raw_item_id: int, ts: float) -> None:
             conn.close()
 
 
+def oldest_never_checked_unlinked_ts() -> Optional[float]:
+    """occurred_ts of the OLDEST raw_item that is classified, unlinked, AND
+    has never been examined by cluster_and_link() at all (last_link_check_ts
+    IS NULL) - or None if there isn't one. Added for health_check.py (task
+    #30, 2026-08-01): get_items_pending_link's never-checked-first ordering
+    (this same day's earlier fix) means a genuinely never-yet-examined item
+    should never wait long - if one this old exists, cluster_and_link() has
+    stopped running entirely (a scheduling failure, an exception, or
+    something else), not a normal backlog effect. This is the exact real
+    incident that motivated that fix, made checkable going forward."""
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT MIN(occurred_ts) FROM raw_items "
+                "WHERE classified = 1 AND issue_id IS NULL AND last_link_check_ts IS NULL"
+            ).fetchone()
+        finally:
+            conn.close()
+    return row[0] if row and row[0] is not None else None
+
+
 def get_unclassified_raw_items(limit: int = 200) -> list[dict]:
     with _lock:
         conn = _connect()

@@ -124,6 +124,64 @@ def test_process_count_flags_real_doubling(ws_db):
     assert result["ok"] is False
 
 
+# --- check_classify_link_progressing (task #30, 2026-08-01) --------------
+
+def test_classify_link_ok_when_no_unlinked_items(ws_db):
+    result = hc.check_classify_link_progressing(time.time())
+    assert result["ok"] is True
+
+
+def test_classify_link_ok_when_never_checked_item_is_fresh(ws_db):
+    now = time.time()
+    ws_db.insert_raw_item(source="outlook_mail", stable_key="hc1", thread_key="hc1", dedupe_key="hc1",
+                           occurred_ts=now - 3600, subject="fresh", from_actor="a@example.com", participants_json="[]")
+    conn = ws_db._connect()
+    conn.execute("UPDATE raw_items SET classified = 1 WHERE stable_key = 'hc1'")
+    conn.close()
+
+    result = hc.check_classify_link_progressing(now)
+
+    assert result["ok"] is True
+
+
+def test_classify_link_flags_a_stale_never_checked_item(ws_db):
+    """Exact real incident reproduction: a classified, unlinked item that
+    has NEVER been examined by cluster_and_link() at all (last_link_check_ts
+    IS NULL), old enough that today's never-checked-first ordering (task
+    #25) should have reached it by now - meaning cluster_and_link() has
+    stopped running entirely, not a normal backlog effect."""
+    now = time.time()
+    ws_db.insert_raw_item(source="outlook_mail", stable_key="hc2", thread_key="hc2", dedupe_key="hc2",
+                           occurred_ts=now - (hc.STALE_LINK_HOURS + 5) * 3600,
+                           subject="stuck", from_actor="a@example.com", participants_json="[]")
+    conn = ws_db._connect()
+    conn.execute("UPDATE raw_items SET classified = 1 WHERE stable_key = 'hc2'")
+    conn.close()
+
+    result = hc.check_classify_link_progressing(now)
+
+    assert result["ok"] is False
+    assert result["oldest_unlinked_age_hours"] > hc.STALE_LINK_HOURS
+
+
+def test_classify_link_ignores_items_already_examined_and_skipped(ws_db):
+    """An item that HAS been checked (stamped by cluster_and_link, even if
+    it resulted in a skip) is not this check's concern, no matter how old -
+    that's the normal, expected permanent-skip backlog, not a stall."""
+    now = time.time()
+    rid = ws_db.insert_raw_item(source="outlook_mail", stable_key="hc3", thread_key="hc3", dedupe_key="hc3",
+                                 occurred_ts=now - (hc.STALE_LINK_HOURS + 100) * 3600,
+                                 subject="old skip", from_actor="a@example.com", participants_json="[]")
+    conn = ws_db._connect()
+    conn.execute("UPDATE raw_items SET classified = 1 WHERE id = ?", (rid,))
+    conn.close()
+    ws_db.mark_link_checked(rid, now - 3600)
+
+    result = hc.check_classify_link_progressing(now)
+
+    assert result["ok"] is True
+
+
 def test_daily_gate_runs_once_per_day(ws_db):
     struct = time.localtime()
     now = time.mktime((struct.tm_year, struct.tm_mon, struct.tm_mday, 12, 0, 0, 0, 0, -1))

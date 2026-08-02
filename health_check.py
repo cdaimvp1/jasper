@@ -18,6 +18,11 @@ Checks:
   4. the daily backup snapshot actually ran recently
   5. raw_ingest_failed non-empty (signal something upstream is broken)
   6. no runaway count of claude.exe processes (coarse orphan-process signal)
+  7. classify/link pipeline actually linking (task #30, 2026-08-01) - the
+     exact real incident this closes: cluster_and_link() silently stopped
+     linking anything new for 3 days with zero error anywhere, because
+     classification (a separate step) kept advancing fine and nothing
+     watched linking specifically
 
 Each check returns {"ok": bool, "detail": str, ...check-specific fields}.
 """
@@ -36,6 +41,7 @@ import retention
 STALE_CURSOR_HOURS = 48.0
 STALE_LOG_HOURS = 30.0
 STALE_BACKUP_HOURS = 36.0
+STALE_LINK_HOURS = 24.0  # tighter than STALE_CURSOR_HOURS - classify/link runs every scheduled_refresh pass (5x/day)
 ABNORMAL_GROWTH_MULTIPLIER = 2.0  # flag if a tracked size more than doubles in one day
 PROCESS_GROWTH_MULTIPLIER = 2.0   # flag if the claude.exe count more than doubles day-over-day
 
@@ -201,6 +207,28 @@ def check_claude_process_count(now: float) -> dict:
     return {"ok": not grew_abnormally, "count": count, "yesterday_count": yesterday_count}
 
 
+def check_classify_link_progressing(now: float) -> dict:
+    """Real incident, 2026-08-01: get_items_pending_link's oldest-first
+    query let an ever-growing pool of permanently-skipped rows crowd out
+    everything newer than whenever that pool first exceeded its LIMIT -
+    cluster_and_link() hadn't linked a single new item in 3 days, with no
+    error anywhere, because classification (a separate step) kept
+    advancing fine and nothing watched linking specifically.
+
+    Fixed same day (task #25): get_items_pending_link now orders never-
+    checked items first, so a genuinely new classified item should never
+    wait long for its turn. That means this check is simple and exact: if
+    workgraph_store.oldest_never_checked_unlinked_ts() is older than
+    STALE_LINK_HOURS, cluster_and_link() has stopped running entirely
+    (a scheduling failure, an exception, or something else) - not a normal
+    backlog effect, since the backlog itself can no longer explain it."""
+    oldest_ts = ws.oldest_never_checked_unlinked_ts()
+    if oldest_ts is None:
+        return {"ok": True, "detail": "no never-checked classified-but-unlinked items"}
+    age_hours = (now - oldest_ts) / 3600.0
+    return {"ok": age_hours <= STALE_LINK_HOURS, "oldest_unlinked_age_hours": round(age_hours, 1)}
+
+
 def run(now: float | None = None) -> dict:
     if now is None:
         now = time.time()
@@ -211,6 +239,7 @@ def run(now: float | None = None) -> dict:
         "backup_recent": check_backup_recent(now),
         "raw_ingest_failed": check_raw_ingest_failed(),
         "claude_process_count": check_claude_process_count(now),
+        "classify_link_progressing": check_classify_link_progressing(now),
     }
     # persist today's disk snapshot for TOMORROW's growth comparison
     ws.set_cursor(_SNAPSHOT_CURSOR_SOURCE, _SNAPSHOT_CURSOR_KEY, json.dumps(retention.disk_usage_report()))

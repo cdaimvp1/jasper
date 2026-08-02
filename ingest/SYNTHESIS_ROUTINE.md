@@ -32,16 +32,27 @@ different jobs.
    - For a project: every issue in it (`GET /api/workgraph/projects/{project_id}` gives you the
      issue list). For a standalone issue: just that one issue
      (`GET /api/workgraph/issues/{issue_id}`).
-   - The evidence and raw_items for those issue(s) — but only what's NEW since `previous_marker`
-     (parse the `count:`/`max_ts:` out of both markers; anything with `ts`/`occurred_ts` newer than
-     the previous `max_ts` is new). If `previous_marker` is null, this entity has never been
-     synthesized — treat everything as new, but this only happens once per entity.
-   - Each new raw_item's existing `raw_item_extractions` row, if one already exists.
+   - The evidence rows for those issue(s), from that same response — but only what's NEW since
+     `previous_marker` (parse the `count:`/`max_ts:` out of both markers; anything with
+     `ts`/`occurred_ts` newer than the previous `max_ts` is new). If `previous_marker` is null,
+     this entity has never been synthesized — treat everything as new, but this only happens once
+     per entity.
+   - **`evidence[].summary` is subject-line-only by construction (`classify_item`'s own summary
+     field falls back to body only when there's no subject at all, which is nearly never) — it is
+     NOT the communication's content, just a label for the Progress-timeline list. Never write an
+     extraction from `summary` alone.** For each new evidence row's `raw_item_id`, call
+     `GET /api/workgraph/raw_items/{raw_item_id}` (added 2026-08-01, task #33 — this route didn't
+     exist before, so there was previously no way for this routine to read a communication's real
+     content at all) to get `full_text` (the real body, quoted-reply stripped, task #29's full-text
+     pipeline) and `attachments[].extracted_text` (PDF/XLSX content, also task #29). That response
+     also returns `extraction` — the existing `raw_item_extractions` row for that raw_item, if one
+     was already written; skip straight to step 4 for any raw_item that already has one rather than
+     re-reading its `full_text` for nothing.
 
 3. **Extract any newly-seen raw_item that doesn't have an extraction yet.** This is real LLM
-   judgment — reading the item and pulling out `asks`, `decisions`, `dates_mentioned`,
-   `commitments`, `key_facts` — deterministic code cannot do this part, that's why it's yours.
-   Write each one via:
+   judgment on the `full_text`/`attachments` you just read — pulling out `asks`, `decisions`,
+   `dates_mentioned`, `commitments`, `key_facts` — deterministic code cannot do this part, that's
+   why it's yours. Write each one via:
    ```
    POST /api/workgraph/raw_items/{raw_item_id}/extraction
    {"extracted_json": {"asks": [...], "decisions": [...],

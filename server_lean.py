@@ -83,6 +83,7 @@ import health_check
 import workgraph_suppliers
 import workgraph_digest
 import workgraph_party_review
+import text_extract
 
 
 PORT = int(os.environ.get("TEAM_PORT", "8700"))  # born-local default (Tia's live-review catch, 2026-07-23):
@@ -1903,6 +1904,36 @@ async def api_prerequisite_rule_suggestion_resolve(suggestion_id: int, body: Pre
 # Synthesis applies to Projects (aggregating every constituent issue's
 # evidence) and standalone Issues alike via the same entity_type/entity_id
 # mechanism - no separate routes per entity type, per the build constraint.
+
+@app.get("/api/workgraph/raw_items/{raw_item_id}")
+async def api_raw_item_detail(raw_item_id: int):
+    """The one place curator's synthesis routine (task #33) can actually read
+    a communication's real content. evidence.summary (returned by the issue
+    detail endpoint) is subject-line-only by design - fine for the Progress
+    timeline's compact list, useless for real extraction judgment. Before
+    this endpoint existed there was no GET route for raw_items at all, so
+    curator had no way to read a body or an attachment even though
+    text_extract.resolve_item_text and attachment_extract's stored
+    extracted_text (task #29) already had the real content sitting in the
+    DB/filesystem, unused for this purpose."""
+    item = wg.get_raw_item(raw_item_id)
+    if item is None:
+        raise HTTPException(404, f"no such raw_item: {raw_item_id}")
+    attachments = wg.list_attachments("raw_item", str(raw_item_id))
+    return JSONResponse({
+        "raw_item": sanitize_surrogates({
+            "id": item["id"], "source": item.get("source"), "subject": item.get("subject"),
+            "from_actor": item.get("from_actor"), "occurred_ts": item.get("occurred_ts"),
+            "participants": item.get("participants_json"),
+        }),
+        "full_text": sanitize_surrogates(text_extract.resolve_item_text(item)),
+        "attachments": sanitize_surrogates([
+            {"id": a["id"], "filename": a.get("filename"), "extracted_text": a.get("extracted_text")}
+            for a in attachments
+        ]),
+        "extraction": sanitize_surrogates(wg.get_extraction(raw_item_id)),
+    })
+
 
 class ExtractionBody(BaseModel):
     extracted_json: dict

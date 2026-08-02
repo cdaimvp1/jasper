@@ -2753,6 +2753,10 @@ html[data-theme="dark"]{
   box-shadow:inset 0 0 0 1px var(--lk-line2);border:none;text-transform:none}
 .mqw-chip.status-blocked{color:var(--lk-danger);box-shadow:inset 0 0 0 1px rgba(180,30,22,.35)}
 .mqw-chip.company{color:var(--lk-mut);box-shadow:none;background:var(--lk-nested)}
+/* Task #53: honest "this row is N issues collapsed into one" signal - the
+   one chip that should read as distinct from the plain status/company
+   chips, so it's obvious at a glance this isn't a single-issue row. */
+.mqw-chip.pcc-group-badge{color:var(--lk-emph);box-shadow:inset 0 0 0 1px var(--lk-emph);font-weight:700}
 .mqwage{font-family:var(--mono);font-size:10.5px;color:var(--lk-mut)}
 .mqw-flag svg{stroke:var(--lk-emph)}
 .mqwic{background:var(--lk-nested);color:var(--lk-flag);border-radius:var(--lk-r-c)}
@@ -6091,6 +6095,16 @@ html[data-theme="dark"]{
   let pccSearchQuery = "";
   let pccProjectNameById = {};      // project_id -> name, loaded once (search needs it - see pccLoadProjectNames)
   let pccProjectHaystackById = {};  // project_id -> combined searchable text of every member issue (recomputed alongside pccIssues)
+  // Task #53: Inbox rows collapse to one per project when 2+ open issues
+  // share a project_id, so a correctly-grouped duplicate (e.g. an Ariba
+  // approval notice + the real negotiation thread for the same PR) shows
+  // once, not twice. Rebuilt on every pccGroupByProject() call - maps the
+  // synthetic group row's id ("__pgroup_<project_id>") to its real
+  // project_id and member issue ids, so the handful of functions that key
+  // off a real issue id (pccLastTs, the "pending" icon filter, row click)
+  // can special-case a group row without every other call site needing to
+  // know groups exist at all.
+  let pccProjectGroupMembers = {};
   const pccSelectedIds = new Set();  // task #63 (bulk triage) - checkbox selection, separate from pccSelectedId (detail-pane focus)
   const pccIconFilterState = new Set();  // subset of "priority" | "lowconf" | "pending"
 
@@ -6304,6 +6318,14 @@ html[data-theme="dark"]{
     return d ? (d.evidence || []).map(e => e.type) : [];
   }
   function pccLastTs(id) {
+    // Task #53: a project-group row's id isn't a real issue - resolve to the
+    // MOST RECENT activity across every member instead (recency should
+    // reflect whichever member issue was touched last, not "no activity").
+    const g = pccProjectGroupMembers[id];
+    if (g) {
+      const memberTs = g.memberIds.map(pccLastTs).filter(Boolean);
+      return memberTs.length ? Math.max(...memberTs) : null;
+    }
     const d = pccDetailCache[id];
     if (!d) return null;
     const ts = [...(d.evidence || []).map(e => e.ts), ...(d.state_history || []).map(h => h.changed_ts)].filter(Boolean);
@@ -6319,6 +6341,67 @@ html[data-theme="dark"]{
       return t.includes("email") || t.includes("teams");
     });
     return [];   // handover/projects aren't row-shaped - the board swaps out entirely for those
+  }
+
+  // Task #53: collapse 2+ open issues sharing a project_id into one Inbox
+  // row. A project with exactly one open member issue here isn't collapsed -
+  // there's nothing to collapse, and it should behave exactly as it always
+  // has. Aggregation choices, all deliberately the "most urgent wins" rule
+  // rather than an average: state prefers active > blocked > waiting so a
+  // project with anything still needing action never reads as merely
+  // waiting; priority_score/priority/has_hard_deadline/confidence_tier all
+  // take whichever member is most urgent/least certain, since the point of
+  // a single row is "does ANYTHING in this project need me," not a blended
+  // number nobody asked for.
+  function pccGroupByProject(issues) {
+    const byProject = {};
+    const standalone = [];
+    issues.forEach(iss => {
+      if (!iss.project_id) { standalone.push(iss); return; }
+      (byProject[iss.project_id] = byProject[iss.project_id] || []).push(iss);
+    });
+    pccProjectGroupMembers = {};
+    const groups = [];
+    Object.keys(byProject).forEach(pid => {
+      const members = byProject[pid];
+      if (members.length < 2) { standalone.push(members[0]); return; }
+      const groupId = "__pgroup_" + pid;
+      pccProjectGroupMembers[groupId] = { projectId: pid, memberIds: members.map(m => m.id) };
+      const byScore = members.slice().sort((a, b) => (b.priority_score || 0) - (a.priority_score || 0));
+      const top = byScore[0];
+      const stateRank = { active: 0, blocked: 1, waiting: 2 };
+      const state = members.slice().sort((a, b) => (stateRank[a.state] ?? 3) - (stateRank[b.state] ?? 3))[0].state;
+      const confRank = { L: 0, M: 1, H: 2 };
+      const lowestConf = members.slice().sort((a, b) => (confRank[a.confidence_tier] ?? 1) - (confRank[b.confidence_tier] ?? 1))[0];
+      const withDeadline = members.filter(m => m.due_date_info).sort((a, b) => a.due_date_info.days_out - b.due_date_info.days_out);
+      const projectName = pccProjectNameById[pid];
+      const title = projectName || top.display_title || top.title;
+      groups.push({
+        id: groupId, __isProjectGroup: true, __memberCount: members.length,
+        project_id: pid, display_title: title, title: title,
+        preview: `${members.length} items in this project — most recent: ${top.display_title || top.title}`,
+        state,
+        priority: members.some(m => m.priority === "high") ? "high" : "med",
+        priority_score: Math.max(...members.map(m => m.priority_score || 0)),
+        confidence_tier: lowestConf.confidence_tier,
+        has_hard_deadline: members.some(m => m.has_hard_deadline),
+        due_date_info: withDeadline.length ? withDeadline[0].due_date_info : null,
+        has_unmet_prerequisite: members.some(m => m.has_unmet_prerequisite),
+        nba_reason: `${members.length} items in this project`,
+        external_companies: [...new Set(members.flatMap(m => (m.external_companies || "").split(",").filter(Boolean)))].join(","),
+      });
+    });
+    return standalone.concat(groups);
+  }
+
+  function pccOpenRow(id) {
+    const g = pccProjectGroupMembers[id];
+    if (g) {
+      if (window.pjShowView) window.pjShowView();
+      if (window.pjSelectProject) window.pjSelectProject(g.projectId);
+      return;
+    }
+    pccSelectIssue(id);
   }
 
   function pccSortIssues(list) {
@@ -6513,8 +6596,14 @@ html[data-theme="dark"]{
     if (pccIconFilterState.has("priority") && iss.priority !== "high") return false;
     if (pccIconFilterState.has("lowconf") && iss.confidence_tier !== "L") return false;
     if (pccIconFilterState.has("pending")) {
-      const d = pccDetailCache[iss.id];
-      const hasPending = d && (d.pending_actions || []).some(p => p.status !== "done");
+      // Task #53: a project-group row's id has no pccDetailCache entry of
+      // its own - true when ANY member has a real pending action.
+      const g = pccProjectGroupMembers[iss.id];
+      const ids = g ? g.memberIds : [iss.id];
+      const hasPending = ids.some(id => {
+        const d = pccDetailCache[id];
+        return d && (d.pending_actions || []).some(p => p.status !== "done");
+      });
       if (!hasPending) return false;
     }
     if (pccIconFilterState.has("harddeadline") && !iss.has_hard_deadline) return false;
@@ -6576,6 +6665,9 @@ html[data-theme="dark"]{
       // visible for every issue, not just that one path.
       reason: iss.nba_reason || "",
       unmetPrereq: !!iss.has_unmet_prerequisite,
+      // Task #53: visible, honest signal that this row represents more than
+      // one issue - never hide the collapsing, just don't show it as N rows.
+      groupBadge: iss.__isProjectGroup ? `${iss.__memberCount} items` : "",
     };
   }
 
@@ -6589,8 +6681,13 @@ html[data-theme="dark"]{
       const f = pccRowFields(iss);
       const active = iss.id === pccSelectedId ? " is-active" : "";
       const checked = pccSelectedIds.has(iss.id) ? " checked" : "";
+      // Task #53: a project-group row has no single real issue to bulk-act
+      // on (which member would "Mark done" even apply to?) - omit the
+      // checkbox for it rather than let it silently no-op against a fake id.
+      const checkboxHtml = iss.__isProjectGroup ? "" :
+        `<input type="checkbox" class="pcc-bulk-check" data-id="${pccEsc(iss.id)}" aria-label="Select ${pccEsc(f.title)}"${checked}>`;
       return `<div class="mqwrow-shell${f.staleRowCls}" data-id="${pccEsc(iss.id)}">
-        <input type="checkbox" class="pcc-bulk-check" data-id="${pccEsc(iss.id)}" aria-label="Select ${pccEsc(f.title)}"${checked}>
+        ${checkboxHtml}
         <button type="button" class="mqwrow${active}" data-id="${pccEsc(iss.id)}" title="${pccEsc(f.stale.label)}">
           <div class="mqwic ${f.icCls}">${f.icSvg}</div>
           <div class="mqwmid">
@@ -6600,6 +6697,7 @@ html[data-theme="dark"]{
             <div class="mqwrowmeta">
               <span class="mqw-chip ${f.statusCls}">${pccEsc(f.statusLabel)}</span>
               ${f.company ? `<span class="mqw-chip company">${pccEsc(f.company)}</span>` : ""}
+              ${f.groupBadge ? `<span class="mqw-chip pcc-group-badge">${pccEsc(f.groupBadge)}</span>` : ""}
             </div>
           </div>
           <div class="mqwend"><span class="mqwage">${pccFmtDate(f.lastTs)}</span></div>
@@ -6607,7 +6705,7 @@ html[data-theme="dark"]{
       </div>`;
     }).join("");
     listEl.querySelectorAll(".mqwrow").forEach(row => {
-      row.addEventListener("click", () => pccSelectIssue(row.getAttribute("data-id")));
+      row.addEventListener("click", () => pccOpenRow(row.getAttribute("data-id")));
     });
     pccWireBulkCheckboxes(listEl);
   }
@@ -6618,10 +6716,12 @@ html[data-theme="dark"]{
       const f = pccRowFields(iss);
       const active = iss.id === pccSelectedId ? " is-active" : "";
       const checked = pccSelectedIds.has(iss.id) ? " checked" : "";
+      const checkCellHtml = iss.__isProjectGroup ? "" :
+        `<input type="checkbox" class="pcc-bulk-check" data-id="${pccEsc(iss.id)}" aria-label="Select ${pccEsc(f.title)}"${checked}>`;
       return `<tr class="${active.trim()}" data-id="${pccEsc(iss.id)}" title="${pccEsc(f.stale.label)}">
-        <td class="pcc-table-check-cell"><input type="checkbox" class="pcc-bulk-check" data-id="${pccEsc(iss.id)}" aria-label="Select ${pccEsc(f.title)}"${checked}></td>
+        <td class="pcc-table-check-cell">${checkCellHtml}</td>
         <td><span class="pcc-table-state ${f.statusCls}">${pccEsc(f.statusLabel)}</span></td>
-        <td><div class="row-title">${f.priorityFlag}${pccEsc(f.title)}</div><div class="row-desc">${pccEsc(pccDescriptionFor(iss))}</div>${f.reason ? `<div class="mqw-reason${f.unmetPrereq ? " mqw-reason-warn" : ""}">${pccEsc(f.reason)}</div>` : ""}</td>
+        <td><div class="row-title">${f.priorityFlag}${pccEsc(f.title)}${f.groupBadge ? ` <span class="mqw-chip pcc-group-badge">${pccEsc(f.groupBadge)}</span>` : ""}</div><div class="row-desc">${pccEsc(pccDescriptionFor(iss))}</div>${f.reason ? `<div class="mqw-reason${f.unmetPrereq ? " mqw-reason-warn" : ""}">${pccEsc(f.reason)}</div>` : ""}</td>
         <td>${f.company ? pccEsc(f.company) : "—"}</td>
         <td>${pccFmtAgeDays(f.lastTs)}</td>
       </tr>`;
@@ -6633,7 +6733,7 @@ html[data-theme="dark"]{
     listEl.querySelectorAll("tbody tr").forEach(row => {
       row.addEventListener("click", (e) => {
         if (e.target.closest(".pcc-bulk-check")) return;  // let the checkbox handle its own click
-        pccSelectIssue(row.getAttribute("data-id"));
+        pccOpenRow(row.getAttribute("data-id"));
       });
     });
     pccWireBulkCheckboxes(listEl);
@@ -6693,7 +6793,12 @@ html[data-theme="dark"]{
 
   function pccRenderList() {
     const listEl = document.getElementById("pccList");
-    const issues = pccSortIssues(pccLaneIssues(pccLane).filter(pccMatchesFilters));
+    // Task #53: group BEFORE the search/icon filters run, not after - a
+    // filter checks the collapsed row's own aggregated fields (priority/
+    // confidence_tier/has_hard_deadline already take "most urgent member,"
+    // search already covers every member via pccProjectHaystackById), so a
+    // project row matches whenever ANY member would have.
+    const issues = pccSortIssues(pccGroupByProject(pccLaneIssues(pccLane)).filter(pccMatchesFilters));
     if (!issues.length) {
       listEl.innerHTML = '<div class="pcc-empty">Nothing matches right now.</div>';
       return;
@@ -8724,6 +8829,7 @@ html[data-theme="dark"]{
     }
   }
   window.pjShowView = pjShowView;  // exposed for the left-rail nav script (separate scope)
+  window.pjSelectProject = pjSelectProject;  // task #53: an Inbox project-group row (separate PCC scope) opens straight into this project's detail
   document.getElementById("cpViewProjectsBtn").addEventListener("click", pjShowView);
 
   // ---- SETTINGS ADD: fourth sibling view — reached via the rail gear icon or

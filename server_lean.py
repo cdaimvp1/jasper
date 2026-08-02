@@ -1222,6 +1222,35 @@ async def api_workgraph_issue_detail(issue_id: str, log_choice: bool = False):
     checklist_decisions = workgraph_asks_decisions.list_decisions_for_issue(issue_id)
     checklist_commitments = workgraph_commitments.list_commitments_for_issue(issue_id)
     checklist_repeat_signals = workgraph_repeat_signals.list_repeat_signals_for_issue(issue_id)
+    # Real duplicate caught by Marc's live screenshot: curator's own synthesis
+    # suggested_actions has no raw_item_id (candidate_actions' own docstring -
+    # "synthesis is project/issue-aggregate"), so a synthesis candidate that
+    # just restates "approve PR<n>" ends up as its own unscoped "general"
+    # checklist row, duplicating the real ask that already says the same
+    # thing with the actual requester/amount. Suppress a synthesis candidate
+    # whose label references the SAME PR/PO (version-insensitive) as an
+    # already-real ask/decision/commitment/repeat-signal row - the real row
+    # already tells Marc what to do; the restatement adds nothing.
+    def _reference_bases_from(items: list, text_field: str) -> set:
+        bases = set()
+        for it in items:
+            m = workgraph_signals.REFERENCE_ID_RE.search(it.get(text_field) or "")
+            if m:
+                bases.add(workgraph_signals.reference_base(m.group(0).upper()))
+        return bases
+    covered_reference_bases = (
+        _reference_bases_from(checklist_asks, "text")
+        | _reference_bases_from(checklist_decisions, "text")
+        | _reference_bases_from(checklist_commitments, "text")
+        | _reference_bases_from(checklist_repeat_signals, "ask_text")
+    )
+    if covered_reference_bases:
+        def _duplicates_existing_reference(c: dict) -> bool:
+            if c.get("source_surface") != "synthesis" or c.get("raw_item_id"):
+                return False
+            m = workgraph_signals.REFERENCE_ID_RE.search(c.get("label") or "")
+            return bool(m) and workgraph_signals.reference_base(m.group(0).upper()) in covered_reference_bases
+        issue["candidate_actions"] = [c for c in issue["candidate_actions"] if not _duplicates_existing_reference(c)]
     # Task #44: drop any row a dismissed item_key still matches, so a real
     # dismissal actually stops the item from reappearing (the "negative
     # signal" the recommend/checklist engine needs to respect) rather than

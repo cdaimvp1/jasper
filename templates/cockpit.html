@@ -2816,7 +2816,7 @@ html[data-theme="dark"]{
 .pcc-xrow .chev{width:13px;height:13px;stroke:var(--lk-mut);fill:none;stroke-width:2.4;
   transition:transform .15s;flex:none;margin-top:3px}
 .pcc-xrow-left.open .chev{transform:rotate(180deg)}
-.pcc-xrow-right{display:flex;flex-direction:column;align-items:flex-end;gap:6px}
+.pcc-xrow-right{display:flex;flex-direction:column;align-items:flex-end;gap:6px;min-width:0}
 .pcc-xrow-icons{display:flex;gap:5px;margin-bottom:2px}
 .pcc-micro-btn{width:23px;height:23px;border-radius:6px;border:1px solid var(--lk-line2);background:var(--lk-surface);
   color:var(--lk-mut2);font-size:12px;font-weight:800;display:flex;align-items:center;justify-content:center;
@@ -2827,7 +2827,8 @@ html[data-theme="dark"]{
 .pcc-micro-btn.msnooze:hover{background:var(--amber-t);color:var(--amber-d);border-color:var(--amber-d)}
 .pcc-micro-btn.mclose:hover{background:var(--lk-pri-t);color:var(--lk-danger);border-color:var(--lk-danger)}
 .pcc-xact-btn{flex:none;border:none;background:var(--lk-pri);color:#fff;font:700 11.5px var(--sans);
-  padding:8px 13px;border-radius:var(--lk-r-c);cursor:pointer;white-space:nowrap;width:100%}
+  padding:8px 13px;border-radius:var(--lk-r-c);cursor:pointer;white-space:normal;text-align:center;
+  width:100%;box-sizing:border-box}
 .pcc-xact-btn.ghost{background:none;border:1.5px solid var(--lk-line2);color:var(--lk-ink)}
 .pcc-xrow-body{display:none;grid-column:1 / -1;padding:6px 4px 2px 26px}
 .pcc-xrow-body.on{display:block}
@@ -7091,7 +7092,6 @@ html[data-theme="dark"]{
 
     const keyFactsRowsHtml = keyFacts.map(t => `
       <div class="pcc-radar-row" style="cursor:default">
-        <span class="pcc-deadline-badge" style="background:var(--bg);color:var(--mut2)">Key fact</span>
         <span class="pcc-radar-mention-text">${pccEsc(t)}</span>
       </div>`).join("");
     const keyFactsZoneHtml = keyFactsRowsHtml ? `
@@ -7293,8 +7293,9 @@ html[data-theme="dark"]{
     // Visual-fidelity pass (2026-08-02): Dismiss + Open email/Draft reply/
     // Draft forward were in the mockup's Actions rail but got dropped
     // during the port - restoring them here as real .pcc-actbtn rows.
-    // Dismiss is visual-only, same honesty pattern as the checklist rows'
-    // icons (no real issue-level "dismissed" state exists yet - task #44).
+    // Dismiss is real (task #44). Review contract/Summarize thread/Archive
+    // as noise moved here from the now-removed kebab menu (Marc's direct
+    // call, 2026-08-02) - same data-gen/data-act handlers, just relocated.
     // The mail actions reuse the SAME deep-link data already wired for
     // Progress rows (pccDeepLinkHtml's data-open-action/data-raw-item-id),
     // taken from the first evidence item that actually has any - never
@@ -7313,6 +7314,9 @@ html[data-theme="dark"]{
           <button class="pcc-actbtn" type="button" data-act="snooze"><span class="ic">${PCC_BELL_SVG}</span>Snooze 3d</button>
           <button class="pcc-actbtn" type="button" style="border-color:var(--lk-danger);color:var(--lk-danger)" data-act="dismiss"><span class="ic">&#10005;</span>Dismiss</button>
           ${primaryMailActionsHtml}
+          <button class="pcc-actbtn" type="button" data-gen="review_contract">Review contract</button>
+          <button class="pcc-actbtn" type="button" data-gen="summarize">Summarize thread</button>
+          <button class="pcc-actbtn" type="button" data-act="archive">Archive as noise</button>
         </div>
       </div>`;
 
@@ -7403,21 +7407,6 @@ html[data-theme="dark"]{
           ${precedentHtml}
           ${supplierGateHtml}
         </div>
-        <div class="pcc-actions-row pcc-detail-hd-actions">
-          <!-- 2026-08-02 port: the dynamic primary-candidate button and the
-               Mark done/Snooze buttons are gone from here - they duplicated
-               the sidebar's Actions block exactly (same data-act/data-gen,
-               same handlers, both visible on screen at once). The kebab's
-               3 items aren't duplicated anywhere else, so it stays. -->
-          <div class="pcc-kebab-wrap">
-            <button type="button" class="pcc-kebab-btn" id="pccDetailKebab" aria-label="More actions" aria-haspopup="true" aria-expanded="false">&#8942;</button>
-            <div class="pcc-kebab-menu" id="pccDetailKebabMenu">
-              <button type="button" data-gen="review_contract">Review contract</button>
-              <button type="button" data-gen="summarize">Summarize thread</button>
-              <button type="button" data-act="archive">Archive as noise</button>
-            </div>
-          </div>
-        </div>
       </div>
       ${abstainHtml}
       <div class="pcc-detail-grid">
@@ -7494,20 +7483,9 @@ html[data-theme="dark"]{
         setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 2500);
       }
     }));
-    const kebabBtn = document.getElementById("pccDetailKebab");
-    const kebabMenu = document.getElementById("pccDetailKebabMenu");
-    if (kebabBtn && kebabMenu) {
-      kebabBtn.addEventListener("click", e => {
-        e.stopPropagation();
-        const open = !kebabMenu.classList.contains("open");
-        kebabMenu.classList.toggle("open", open);
-        kebabBtn.setAttribute("aria-expanded", String(open));
-      });
-      kebabMenu.querySelectorAll("button").forEach(b => b.addEventListener("click", () => {
-        kebabMenu.classList.remove("open");
-        kebabBtn.setAttribute("aria-expanded", "false");
-      }));
-    }
+    // Kebab menu removed (2026-08-02, Marc's direct call) - its 3 actions
+    // (Review contract/Summarize thread/Archive as noise) moved into the
+    // sidebar Actions rail above instead of being deleted.
   }
 
   // ═════════════════════════════════════════════════════════════════════
@@ -7661,28 +7639,37 @@ html[data-theme="dark"]{
     });
   };
 
-  // Registered ONCE (not per-render, unlike the listeners above which must be
-  // re-attached since innerHTML replaces the elements each time) - looks the
-  // menu/button up fresh on every click rather than closing over a stale ref.
-  document.addEventListener("click", () => {
-    const menu = document.getElementById("pccDetailKebabMenu");
-    const btn = document.getElementById("pccDetailKebab");
-    if (menu) menu.classList.remove("open");
-    if (btn) btn.setAttribute("aria-expanded", "false");
-  });
-
   async function pccRunDeterministic(issueId, act) {
     // Task #44: "dismissed" is a real, distinct terminal state from "done" -
     // this was wrong/not needed, not actually resolved, so it must never be
     // recorded as a successful completion for whatever learns from outcomes.
     const body = act === "done" ? { state: "done" } : act === "archive" ? { state: "noise-archived" }
       : act === "dismiss" ? { state: "dismissed" } : { state: "waiting" };
+    // Marc's direct report: Mark done/Archive/Dismiss all remove this issue
+    // from the Inbox - capture whichever issue sits next to it in the
+    // CURRENTLY visible list before it disappears, so triage continues
+    // straight into the next one instead of trying to reselect an issue
+    // that's no longer there. #pccList holds either card or table rows;
+    // some rows carry data-id on more than one element (e.g. a bulk-select
+    // checkbox alongside the row itself), so de-dupe before indexing.
+    let nextId = null;
+    if (act === "done" || act === "archive" || act === "dismiss") {
+      const visibleIds = [...new Set(
+        Array.from(document.querySelectorAll("#pccList [data-id]")).map(el => el.getAttribute("data-id"))
+      )];
+      const idx = visibleIds.indexOf(issueId);
+      if (idx >= 0) nextId = visibleIds[idx + 1] || visibleIds[idx - 1] || null;
+    }
     await fetch(`/api/workgraph/issues/${encodeURIComponent(issueId)}/status`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
     });
     delete pccDetailCache[issueId];
     await pccLoadIssues();
-    if (issueId === pccSelectedId) pccSelectIssue(issueId);
+    if (nextId) {
+      pccSelectIssue(nextId);
+    } else if (issueId === pccSelectedId) {
+      pccSelectIssue(issueId);
+    }
   }
   async function pccRunGenerative(issueId, actionKind, instructions) {
     // Part E2 (2026-07-30): instructions is optional (undefined/null for

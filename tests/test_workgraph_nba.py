@@ -421,6 +421,25 @@ def test_candidate_actions_includes_evidence_row_recommendation():
     assert "contract_review" in kinds
 
 
+def test_candidate_actions_evidence_row_candidate_carries_raw_item_id():
+    # 2026-08-02, detail-panel port: lets the checklist UI scope this action
+    # to the specific ask/decision sharing this same raw_item_id.
+    issue = {"nba_reason": None, "state": "active", "priority_score": 0.5}
+    evidence = [{"raw_item_id": 469, "recommendations": [
+        {"kind": "contract_review", "label": "Review the attached document", "rationale": "has an attachment"},
+    ]}]
+    result = nba.candidate_actions(issue, evidence)
+    match = next(c for c in result if c["kind"] == "contract_review")
+    assert match["raw_item_id"] == 469
+
+
+def test_candidate_actions_nba_surface_has_no_raw_item_id():
+    issue = {"nba_reason": "your move", "state": "active", "priority_score": 0.5}
+    result = nba.candidate_actions(issue, [])
+    match = next(c for c in result if c["source_surface"] == "nba")
+    assert "raw_item_id" not in match
+
+
 def test_candidate_actions_includes_multiple_recommendations_from_one_row():
     # task #15: a single evidence row can carry more than one genuine
     # recommendation (e.g. an attachment matching both invoice-audit and SOW

@@ -428,6 +428,13 @@ def candidate_actions(issue: dict, evidence: list[dict], synthesis: Optional[dic
                 "kind": rec["kind"], "label": rec.get("label") or rec["kind"],
                 "rationale": rec.get("rationale") or "",
                 "score": min(0.5, _GENERIC_CEILING), "source_surface": "evidence_row",
+                # 2026-08-02, detail-panel port: the ONLY source_surface with a
+                # real single raw_item_id to point to (nba is issue-level,
+                # synthesis is project/issue-aggregate) - lets the checklist UI
+                # scope this action to the specific ask/decision/etc. that
+                # shares this same raw_item_id, instead of every candidate
+                # landing in the unscoped "General" bucket.
+                "raw_item_id": ev.get("raw_item_id"),
             })
 
     if synthesis:

@@ -151,3 +151,22 @@ def test_attach_deep_links_missing_raw_item_id_is_safe(ws_db):
 
 def test_attach_deep_links_empty_list():
     assert deep_links.attach_deep_links([]) == []
+
+
+def test_attach_deep_links_attaches_real_occurred_ts(ws_db):
+    row_id = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key="conv-9", thread_key="conv-9",
+        dedupe_key="dk-mail-9", occurred_ts=1_785_000_000.0, subject="Confirm scheduling",
+        from_actor="vendor@example.com", participants_json="[]", body_preview="hello",
+    )
+    evidence = [{"raw_item_id": row_id, "text": "an ask"}]
+
+    out = deep_links.attach_deep_links(evidence)
+
+    assert out[0]["occurred_ts"] == 1_785_000_000.0
+
+
+def test_attach_deep_links_occurred_ts_none_when_raw_item_missing():
+    evidence = [{"raw_item_id": None, "text": "an ask"}]
+    out = deep_links.attach_deep_links(evidence)
+    assert out[0]["occurred_ts"] is None

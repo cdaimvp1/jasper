@@ -112,10 +112,18 @@ def attach_deep_links(evidence: list[dict]) -> list[dict]:
     (client-side link) or a {"kind":"action",...} row (a button that calls a
     server endpoint). Batches the raw_item lookup - one query for the whole
     evidence list via get_raw_items_by_ids, not one query per row (same N+1
-    fix already applied to list_evidence_for_issues this session)."""
+    fix already applied to list_evidence_for_issues this session).
+
+    Also attaches "occurred_ts" (2026-08-02, detail-panel port) - checklist
+    rows (asks/decisions/commitments/repeat_signals) carry a real
+    raw_item_id but never surfaced the underlying message's real date, so
+    the new per-row date in the checklist UI had nothing to read. Piggybacks
+    on the SAME raw_item lookup this function already does for deep links -
+    zero extra queries, not a second batch fetch."""
     raw_item_ids = [ev["raw_item_id"] for ev in evidence if ev.get("raw_item_id") is not None]
     raw_items_by_id = ws.get_raw_items_by_ids(raw_item_ids)
     for ev in evidence:
         raw_item = raw_items_by_id.get(ev.get("raw_item_id"))
         ev["deep_links"] = _links_for_raw_item(raw_item) if raw_item else []
+        ev["occurred_ts"] = raw_item.get("occurred_ts") if raw_item else None
     return evidence

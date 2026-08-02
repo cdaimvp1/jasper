@@ -2084,7 +2084,7 @@
    (dark, below) - Marc's pick from the 2026-08-02 color-scheme mockup round, replacing
    the prior neutral olive/beige dark palette. Buttons/icons recolor with the theme now
    (--red/--bblue are the theme's primary/secondary accents, not a fixed brand pair). */
-html[data-theme="dark"]{--header:#0A0A0A;--tint-8fb3f0:#19253a;--tint-9fb4d2:#172232;--tint-d7e2ef:#162434;--tint-f6d79a:#1E302D;--tint-ff8e85:#3e1d1b;--surface:#2E2119;color-scheme:dark;--red:#F0916A;--red-d:#D97A50;--ink:#F3E7D4;--mut:#B29A78;--mut2:#B29A78;--line:#4A3626;--line2:#5C4630;--bg:#231A12;--pink-t:#5A2A22;--teal-t:#1E4A42;--teal-d:#6FD6C4;--amber-t:#4F3A14;--amber-d:#F2C368;--blue-t:#1E4A42;--blue-d:#6FD6C4;--ai:#B7CE7C;--ai-t:#3B4420;--bblue:#F2C368;--shadow:0 1px 2px rgba(0,0,0,.5),0 1px 3px rgba(0,0,0,.4);--muted:var(--mut);--border:var(--line);--accent:var(--bblue);}
+html[data-theme="dark"]{--header:#231A12;--tint-8fb3f0:#19253a;--tint-9fb4d2:#172232;--tint-d7e2ef:#162434;--tint-f6d79a:#1E302D;--tint-ff8e85:#3e1d1b;--surface:#2E2119;color-scheme:dark;--red:#F0916A;--red-d:#D97A50;--ink:#F3E7D4;--mut:#B29A78;--mut2:#B29A78;--line:#4A3626;--line2:#5C4630;--bg:#231A12;--pink-t:#5A2A22;--teal-t:#1E4A42;--teal-d:#6FD6C4;--amber-t:#4F3A14;--amber-d:#F2C368;--blue-t:#1E4A42;--blue-d:#6FD6C4;--ai:#B7CE7C;--ai-t:#3B4420;--bblue:#F2C368;--shadow:0 1px 2px rgba(0,0,0,.5),0 1px 3px rgba(0,0,0,.4);--muted:var(--mut);--border:var(--line);--accent:var(--bblue);}
 
 /* ════════════════════════════════════════════════════════════════════════
    PCC ADD — page-level view toggle + Personal Command Center board.
@@ -2418,7 +2418,13 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
 .sectitle.is-collapsed .chev{transform:rotate(-90deg)}
 .toast{position:fixed;left:50%;transform:translateX(-50%) translateY(20px);bottom:24px;background:#1B1A19;color:#fff;padding:11px 18px;border-radius:30px;font-weight:600;font-size:var(--fz-sm);opacity:0;transition:.3s;z-index:60;pointer-events:none;box-shadow:var(--shadow-lg)}.toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
 </style>
-<script>/*theo-theme*/(function(){try{var t=localStorage.getItem('theo-theme');if(t==='dark'||t==='light')document.documentElement.setAttribute('data-theme',t);}catch(e){}})();window.theoTheme=window.theoTheme||function(){try{return localStorage.getItem('theo-theme')||'light';}catch(e){return 'light';}};window.theoSetTheme=window.theoSetTheme||function(t){t=(t==='dark')?'dark':'light';try{document.documentElement.setAttribute('data-theme',t);localStorage.setItem('theo-theme',t);}catch(e){}try{if(window.theoReflectTheme)window.theoReflectTheme();}catch(e){}};</script>
+<script>/*theo-theme*/(function(){try{var t=localStorage.getItem('theo-theme');if(t==='dark'||t==='light')document.documentElement.setAttribute('data-theme',t);}catch(e){}})();window.theoTheme=window.theoTheme||function(){try{return localStorage.getItem('theo-theme')||'light';}catch(e){return 'light';}};window.theoSetTheme=window.theoSetTheme||function(t){t=(t==='dark')?'dark':'light';try{document.documentElement.setAttribute('data-theme',t);localStorage.setItem('theo-theme',t);}catch(e){}try{window.theoReflectTheme();}catch(e){}};
+/* theme-reflector registry: more than one UI control (Settings toggle, header
+   icon) needs to hear "theme changed" without clobbering each other's hook -
+   each registers instead of overwriting window.theoReflectTheme directly. */
+window._theoThemeReflectors=window._theoThemeReflectors||[];
+window.theoRegisterThemeReflector=window.theoRegisterThemeReflector||function(fn){window._theoThemeReflectors.push(fn);try{fn();}catch(e){}};
+window.theoReflectTheme=window.theoReflectTheme||function(){window._theoThemeReflectors.forEach(function(fn){try{fn();}catch(e){}});};</script>
 <style>
 /* ═══════════════════════════════════════════════════════════════════════════
    LOCKED HOME-SURFACE DESIGN (integrated 2026-07-28)
@@ -3671,8 +3677,7 @@ html[data-theme="dark"]{
         });
       }catch(e){}
     }
-    themeToggleReflect();
-    window.theoReflectTheme=themeToggleReflect;
+    if(window.theoRegisterThemeReflector){window.theoRegisterThemeReflector(themeToggleReflect);}else{themeToggleReflect();}
   </script>
 
   <!-- ── You (the operator) · Settings #5d ─────────────────────────────── -->
@@ -5166,6 +5171,31 @@ html[data-theme="dark"]{
   var ICON_BELL = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 8a6 6 0 00-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>';
   // (Help "?" icon is injected by theo-help.js, which opens the Help Center drawer.)
   var ICON_GEAR ='<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82z"/></svg>';
+  var ICON_SUN ='<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.5"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>';
+  var ICON_MOON ='<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8.5 8.5 0 119.5 4a7 7 0 0010.5 10.5z"/></svg>';
+
+  // Header light/dark toggle - single icon button, sun when dark (tap to go
+  // light) / moon when light (tap to go dark). Uses the same theoSetTheme()/
+  // theoRegisterThemeReflector() plumbing as the Settings > Appearance toggle;
+  // neither control owns theme state, both just reflect + request changes.
+  function buildThemeToggleBtn() {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.id = 'theo-theme-toggle';
+    b.className = 'theo-iconbtn';
+    b.setAttribute('aria-label', 'Toggle light/dark theme');
+    b.onclick = function () {
+      var next = ((window.theoTheme && window.theoTheme()) === 'dark') ? 'light' : 'dark';
+      window.theoSetTheme(next);
+    };
+    function reflect() {
+      var cur = (window.theoTheme && window.theoTheme()) || 'light';
+      b.innerHTML = cur === 'dark' ? ICON_SUN : ICON_MOON;
+      b.title = cur === 'dark' ? 'Switch to light theme' : 'Switch to dark theme';
+    }
+    if (window.theoRegisterThemeReflector) window.theoRegisterThemeReflector(reflect); else reflect();
+    return b;
+  }
 
   // Build / reorder the header action cluster on whatever page this is.
   function setupHeaderActions() {
@@ -5184,6 +5214,10 @@ html[data-theme="dark"]{
     //    in case alerting resurfaces elsewhere; there's just no header icon for
     //    it anymore.
 
+    // 1b) Light/dark theme toggle icon, added per Marc's direct request - one
+    //     tap between Sunset Harvest (light) and Walnut Night (dark).
+    var themeBtn = roleBar.querySelector('#theo-theme-toggle') || buildThemeToggleBtn();
+
     // 3) Settings + Help now live in the avatar dropdown (built below) rather than as
     //    standalone header icons, so the header stays decluttered (notifications + avatar).
     //    theo-help.js no longer injects a header "?" (the '?' keyboard shortcut still works).
@@ -5199,10 +5233,12 @@ html[data-theme="dark"]{
     if (dinoBtn && mastheadGreet) mastheadGreet.insertBefore(dinoBtn, mastheadGreet.firstChild);
 
     // 5) Enforce the exact left->right order inside the role cluster:
-    //    Switch role · Help+Settings. (Dino moved to the masthead, above; avatar
-    //    removed entirely 2026-08-01, Settings is rail-gear-only now.)
+    //    Switch role · theme toggle · Help+Settings. (Dino moved to the
+    //    masthead, above; avatar removed entirely 2026-08-01, Settings is
+    //    rail-gear-only now.)
     var order = [
       sw,
+      themeBtn,
       roleBar.querySelector('.theo-acts')
     ];
     for (var i = 0; i < order.length; i++) { if (order[i]) roleBar.appendChild(order[i]); }
@@ -5578,8 +5614,8 @@ html[data-theme="dark"]{
       var s = document.createElement('style');
       s.id = 'theo-brand-css';
       s.textContent =
-        ':root{--header:#E2E6E1;--topbar-fg:#1A1A1A;--topbar-fg-mut:#505A64;--topbar-line:#C7C2B8;--topbar-divider:rgba(0,0,0,.20);--topbar-ctrl-bd:rgba(0,0,0,.43);--topbar-ctrl-hover:rgba(0,0,0,.06);--topbar-av-bg:#1A1A1A;--topbar-av-fg:#F1F3F0;--topbar-shadow:0 1px 0 var(--topbar-line),0 3px 6px -2px rgba(38,30,20,.10);--brand-logo-filter:brightness(0);--dino-filter:brightness(0)}' +
-        'html[data-theme="dark"]{--header:#0A0A0A;--topbar-fg:#ECECEC;--topbar-fg-mut:#B0B0B0;--topbar-line:#2A2A2A;--topbar-divider:rgba(255,255,255,.34);--topbar-ctrl-bd:rgba(255,255,255,.5);--topbar-ctrl-hover:rgba(255,255,255,.14);--topbar-av-bg:#E8EAE6;--topbar-av-fg:#0A0A0A;--topbar-shadow:0 2px 6px rgba(0,0,0,.5);--brand-logo-filter:none;--dino-filter:brightness(0) invert(.92)}' +
+        ':root{--header:#EEDCC0;--topbar-fg:#22160A;--topbar-fg-mut:#87643A;--topbar-line:#CBA85E;--topbar-divider:rgba(34,22,10,.20);--topbar-ctrl-bd:rgba(34,22,10,.43);--topbar-ctrl-hover:rgba(34,22,10,.08);--topbar-av-bg:#22160A;--topbar-av-fg:#FBF2E1;--topbar-shadow:0 1px 0 var(--topbar-line),0 3px 6px -2px rgba(34,22,10,.12);--brand-logo-filter:brightness(0);--dino-filter:brightness(0)}' +
+        'html[data-theme="dark"]{--header:#231A12;--topbar-fg:#F3E7D4;--topbar-fg-mut:#B29A78;--topbar-line:#5C4630;--topbar-divider:rgba(255,255,255,.30);--topbar-ctrl-bd:rgba(255,255,255,.5);--topbar-ctrl-hover:rgba(255,255,255,.12);--topbar-av-bg:#F3E7D4;--topbar-av-fg:#231A12;--topbar-shadow:0 2px 6px rgba(0,0,0,.5);--brand-logo-filter:none;--dino-filter:brightness(0) invert(.92)}' +
         '.topbar{color:var(--topbar-fg)!important;box-shadow:var(--topbar-shadow)}' +
         '.topbar .brand img{filter:var(--brand-logo-filter)}' +
         '.topbar .switch{color:var(--topbar-fg)!important;border-color:var(--topbar-ctrl-bd)!important}' +
@@ -5594,7 +5630,7 @@ html[data-theme="dark"]{
         '.theomark .ttag{font-family:var(--sans,system-ui,sans-serif);font-size:11px;font-weight:500;color:var(--topbar-fg-mut);white-space:nowrap;letter-spacing:0}' +
         '.theo-dino{display:inline-block;vertical-align:middle}' +
         '.theo-acts{display:inline-flex;align-items:center;gap:11px;margin-left:0}' +
-        '.theo-iconbtn{display:inline-flex;align-items:center;justify-content:center;color:#fff;background:transparent;border:none;padding:4px;cursor:pointer;text-decoration:none;opacity:.84}' +
+        '.theo-iconbtn{display:inline-flex;align-items:center;justify-content:center;color:var(--topbar-fg);background:transparent;border:none;padding:4px;cursor:pointer;text-decoration:none;opacity:.84}' +
         '.theo-iconbtn:hover{opacity:1;background:transparent}' +
         '.theo-iconbtn svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}' +
         '.rail .nav{text-decoration:none}' +

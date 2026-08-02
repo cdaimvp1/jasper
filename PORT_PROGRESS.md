@@ -63,23 +63,40 @@ Real decisions already made this session (don't re-litigate):
    with a real single raw_item to point to). Real tests added
    (`test_candidate_actions_evidence_row_candidate_carries_raw_item_id`,
    `..._nba_surface_has_no_raw_item_id`). Full suite green before commit.
-4. [NEXT - not started as of this writing] Checklist row rewrite (CSS+JS
-   in cockpit.html): date-left column (using the new occurred_ts), 3-icon
-   toolbar (mark done / snooze / dismiss - visual only, see caveat above),
-   scoped action slot on the right (match candidate_actions by
-   raw_item_id to the specific ask/decision/commitment/repeat row sharing
-   it; unmatched candidates become "General" rows in the same list, no
-   separate zone), collapsed by default with expand-for-rationale,
-   attachment display (name/type/date/description two-column layout) when
-   a row's raw_item has a real attachment.
-5. [NOT STARTED] Progress timeline: strip per-row action rendering
-   (`pccTlRowHtml` currently may render `ev.recommendations` inline on a
-   timeline row - this is the SAME duplication problem found in the
-   standalone mockup work: an evidence_row recommendation can show once via
-   candidate_actions/checklist AND again via the Progress timeline. Make
-   Progress action-free, full width, date-left layout, matching the
-   mockup's "history only" rule for real this time, not just in a scratch
-   file).
+4. [DONE, not yet committed as of this writing - committing alongside #5]
+   Checklist row rewrite (CSS+JS in cockpit.html): date-left column (using
+   occurred_ts), 3-icon toolbar (mark done/snooze/dismiss - visual only,
+   see caveat above), scoped action slot matching candidate_actions to the
+   specific ask/decision/commitment/repeat row sharing a raw_item_id
+   (unmatched candidates become "General" rows in the same list, no
+   separate zone), collapsed-by-default rows. Also found and removed two
+   more real live duplications while doing this: (a) a standalone
+   nextActionsZoneHtml zone that duplicated the same candidate_actions now
+   folded into the checklist - removed, along with the now-dead
+   primaryCandidate/primaryLabel/primaryKind/primaryInstructions variables;
+   (b) a standalone suggestZoneHtml zone rendering
+   activeSynth.suggested_actions, which the server already merges into
+   candidate_actions via the same synthesis/project_synthesis fallback -
+   removed. Also deduped the header's actions row against the sidebar's
+   sideActionsHtml (they rendered the exact same primary/mark-done/snooze
+   buttons twice) - header now only keeps its kebab menu.
+5. [DONE, not yet committed as of this writing - committing alongside #4]
+   Progress timeline: stripped `pccTlRowHtml`'s inline
+   `item.recommendations` rendering (`.pcc-tl-rec-list`/`.pcc-tl-rec`/"Run
+   this" - all removed) - this was the SAME duplication problem found in
+   the standalone mockup work, an evidence_row recommendation showing once
+   via candidate_actions/checklist AND again via the Progress timeline row.
+   `.pcc-tl-row`/`.pcc-tl-thread-hd` CSS changed from a 2-column grid
+   (content + 210px action column) to full-width/flex since there's no
+   action column left; the thread-header's empty rec-spacer div removed
+   too. Progress is now history-only, full width, date-right via
+   `.pcc-tl-age`'s existing `margin-left:auto` (matches mockup's "history
+   only" rule for real this time).
+   Verified: grepped the whole file for `pcc-tl-rec`, `primaryCandidate`,
+   `nextActionsZoneHtml`, `suggestZoneHtml`, `otherCandidates`,
+   `altActionsHtml` - zero live references left, only one explanatory
+   comment. Full test suite green (`pytest -q`, all passing, no failures)
+   before this commit.
 6. [NOT STARTED] Stakeholder redesign: real parties grouped by
    affiliation/company (not flat pills), dot-toggle multi-select, mailto:
    compose (interim, see caveat above).
@@ -89,6 +106,18 @@ Real decisions already made this session (don't re-litigate):
 8. [NOT STARTED] Final full-suite test run + live server verification of
    the WHOLE panel end to end (not just piecewise) before marking #47
    complete. Commit + push.
+
+### Task-list additions since this file was first written (2026-08-02)
+
+Marc asked for a commercial-value gut-check and a full task-list audit
+mid-run. Three new build-follow-on tasks were added to the tracker (not
+part of this autonomous run - each is gated behind its design task landing
+and Marc reviewing it):
+- #49 - build Aristotle gating, gated behind #34.
+- #50 - build the SME panel, gated behind #45.
+- #51 - build the telemetry page, gated behind #48.
+No change to the approved autonomous sequence (#47 -> #18 -> #21 -> #34 ->
+#36 -> #45 -> #48) - these three are follow-on, not inserted into it.
 
 ## Then, in order, once #47 is fully done/stable/pushed:
 

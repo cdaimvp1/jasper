@@ -3267,10 +3267,11 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
 .pcc-suggest-label{font-size:12.5px;font-weight:700;color:var(--lk-ink)}
 .pcc-suggest-rationale{font-size:11.5px;line-height:1.45;color:var(--lk-mut);margin-top:4px}
 
-/* ── Progress: event left, what can be done about it right ── */
+/* ── Progress: history only (piece #5, port #47) - no per-row actions here
+   any more, those live in Checklist now, matched by raw_item_id. Full
+   width, date-left via .pcc-tl-age's margin-left:auto. ── */
 .pcc-tl{padding:6px 8px 14px}
-.pcc-tl-row{display:grid;grid-template-columns:minmax(0,1fr) 210px;gap:15px;
-  align-items:start;padding:11px 10px;border-radius:var(--lk-r-c);border:none}
+.pcc-tl-row{padding:11px 10px;border-radius:var(--lk-r-c);border:none}
 .pcc-tl-row + .pcc-tl-row{border-top:1px solid var(--lk-line);border-radius:0}
 .pcc-tl-row:hover{background:var(--lk-panel)}
 .pcc-tl-top{display:flex;gap:8px;align-items:baseline;margin-bottom:4px}
@@ -3286,19 +3287,10 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
 .pcc-tl-deeplink-btn{background:none;border:none;padding:0;font-family:inherit;cursor:pointer}
 .pcc-tl-deeplink-btn:disabled{opacity:.6;cursor:default}
 .pcc-tl-learned{display:block;margin-top:6px;font-size:11px;font-style:italic;color:var(--lk-mut2)}
-.pcc-tl-rec-list{display:flex;flex-direction:column;gap:12px}
-.pcc-tl-rec{border-left:3px solid var(--lk-pri);padding-left:11px}
-.pcc-tl-rec-none{border-left-color:var(--lk-line)}
-.pcc-tl-rec-label{font-size:12.5px;font-weight:700;color:var(--lk-ink);line-height:1.35}
-.pcc-tl-rec-why{font-size:11.5px;line-height:1.45;color:var(--lk-mut);margin:4px 0 8px}
-.pcc-tl-rec-run{font:600 11.5px var(--sans);background:none;border:1px solid var(--lk-line2);
-  color:var(--lk-ink);padding:4px 10px;border-radius:var(--lk-r-c);cursor:pointer}
-.pcc-tl-rec-run:hover{background:var(--lk-nested)}
 .pcc-tl-thread{border-top:1px solid var(--lk-line)}
 .pcc-tl-thread:first-child{border-top:none}
-.pcc-tl-thread-hd{display:grid;grid-template-columns:minmax(0,1fr) 210px;gap:15px;
-  align-items:start;padding:11px 10px;width:100%;text-align:left;background:none;
-  border:none;cursor:pointer;font:inherit;color:inherit}
+.pcc-tl-thread-hd{display:flex;gap:8px;align-items:flex-start;padding:11px 10px;width:100%;
+  text-align:left;background:none;border:none;cursor:pointer;font:inherit;color:inherit}
 .pcc-tl-thread-hd:hover{background:var(--lk-panel)}
 .pcc-tl-thread-count{font-size:10.5px;font-weight:700;color:var(--lk-pri)}
 .pcc-tl-thread-hd .chev{width:14px;height:14px;stroke:var(--lk-mut);fill:none;stroke-width:2.4;
@@ -3308,7 +3300,6 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
 .pcc-tl-thread-body.on{display:block}
 .pcc-doc-row{padding:9px 18px;border-bottom:1px solid var(--lk-line);font-size:12.5px}
 .pcc-doc-row:hover{background:var(--lk-panel)}
-@media(max-width:1200px){.pcc-tl-row{grid-template-columns:1fr}.pcc-tl-rec-none{display:none}}
 
 /* ── Detail Panel, Refined (task #124 follow-on): 3-tab issue view ── */
 .pcc-detail-grid{display:grid;grid-template-columns:1fr 260px;gap:0}
@@ -5843,6 +5834,44 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
       "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
     }[c]));
   }
+  // 2026-08-02 port: real bell-solid glyph (currentColor, no PNG/emoji) for
+  // the checklist snooze icon and the sidebar's static Snooze button.
+  const PCC_BELL_SVG = '<svg viewBox="0 0 24 24" fill="none" style="width:13px;height:13px">' +
+    '<path d="M3.95 16.75c1.1-1.4 1.7-3.2 1.7-5.35V9.6a4.45 4.45 0 0 1 8.9 0v1.8c0 2.15.6 3.95 1.7 5.35H3.95Z" fill="currentColor"/>' +
+    '<path d="M8 19a2.35 2.35 0 0 0 4.2 0H8Z" fill="currentColor"/>' +
+    '<g stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">' +
+    '<path d="M16.7 4.25h4.2L16.7 8.4h4.2M14.4 1.65h2.75l-2.75 2.7h2.75"/></g></svg>';
+  // Checklist row expand/collapse. An existing generic toggle (mqWgTog,
+  // line ~4842) does the same job but hardcodes a "wg-" id prefix specific
+  // to its own original use case - a small local duplicate here is a
+  // smaller risk than coupling checklist rows to an unrelated prefix
+  // convention (same tradeoff ingest/normalize.py's _dedupe_key duplicate
+  // already makes in this codebase, for the same reason).
+  function pccXTog(headerEl, bodyId) {
+    const b = document.getElementById(bodyId);
+    if (b) b.classList.toggle("on");
+    headerEl.classList.toggle("open");
+  }
+  // Mark done / snooze / dismiss on a checklist row - deliberately visual
+  // only right now (task #44 - a real "dismissed" state distinct from
+  // "done" doesn't exist in the backend yet). Shows an honest inline note
+  // rather than silently no-op-ing behind a convincing-looking button, or
+  // worse, faking persistence by hiding/fading the row as if something
+  // real happened.
+  function pccChecklistIconNote(evt, btn) {
+    evt.stopPropagation();
+    const row = btn.closest(".pcc-xrow");
+    const body = row.querySelector(".pcc-xrow-body");
+    const left = row.querySelector(".pcc-xrow-left");
+    if (!body.classList.contains("on")) left.click();
+    let note = body.querySelector(".pcc-not-real-note");
+    if (!note) {
+      note = document.createElement("div");
+      note.className = "pcc-not-real-note";
+      note.textContent = "Not wired to anything real yet - this button doesn't save anything (task #44).";
+      body.prepend(note);
+    }
+  }
   function pccFmtAge(ts) {
     if (!ts) return "";
     const days = Math.floor((Date.now() / 1000 - ts) / 86400);
@@ -6661,22 +6690,19 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
     const commitments = d.commitments || [];
     const repeatSignals = d.repeat_signals || [];
     const relatedByReference = d.related_by_reference || [];
-    const candidateActions = issue.candidate_actions || [];
-    // 2026-07-31: bind the real primary action button to the actual
-    // top-ranked candidate instead of a hardcoded draft_reply/nudge pair -
-    // confirmed via real adversarial review that the two could disagree
-    // (a top-ranked contract_review/synthesis candidate was silently
-    // discarded), and that a Low-confidence "abstain" issue still showed a
-    // live primary action button that contradicted its own abstain
-    // framing just below it. Suppress the primary button entirely while
-    // abstaining; every candidate (not just the alternatives) then still
-    // surfaces in the "other suggested actions" list below rather than
-    // being silently dropped.
-    const primaryCandidate = issue.confidence_tier === "L" ? null : (candidateActions[0] || null);
-    const primaryLabel = primaryCandidate ? primaryCandidate.label : "Draft a reply";
-    const primaryKind = primaryCandidate ? primaryCandidate.kind : "draft_reply";
-    const primaryInstructions = primaryCandidate
-      ? (primaryCandidate.label + (primaryCandidate.rationale ? " - " + primaryCandidate.rationale : "")) : "";
+    // 2026-08-02 port: "Next actions" as its own zone is gone, along with
+    // the separate dynamic primary-action button that used to appear in
+    // BOTH the header AND the sidebar simultaneously (a real, live
+    // duplication - not just the mockup's synthetic example). Every real
+    // candidate now becomes a checklist row instead (scoped to the ask/
+    // decision/etc. sharing its raw_item_id, or a "General" row when it
+    // isn't tied to one specific item) - see the checklist section below.
+    // Low-confidence "abstain" issues suppress ALL candidates, not just
+    // the old primary-only case (2026-07-31's fix only went halfway - real
+    // alternatives still leaked into "other suggested actions" even while
+    // abstaining, which is the same contradiction that fix was meant to
+    // close).
+    const candidateActions = issue.confidence_tier === "L" ? [] : (issue.candidate_actions || []);
     const body = document.getElementById("pccDetail");
     const timeline = pccBuildTimeline(evidence, stateHistory);
     const lastTs = timeline.length ? timeline[0].ts : null;
@@ -6769,21 +6795,12 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
       commitment: { label: "Commitment", bg: "var(--teal-t)", fg: "var(--teal-d)" },
       repeat: { label: "Repeat", bg: "var(--bg)", fg: "var(--mut2)" },
       escalated: { label: "Escalated", bg: "var(--pink-t)", fg: "var(--red-d)" },
-    };
-    const pccCheckRowHtml = (kind, text, deepLinks) => {
-      const badge = PCC_CHECK_BADGE[kind];
-      const linkHtml = (deepLinks && deepLinks.length)
-        ? `<span class="pcc-check-link">${pccDeepLinkHtml(deepLinks)}</span>`
-        : '<span class="pcc-check-link pcc-nolink">no deep link yet</span>';
-      return `<div class="pcc-check-row">
-        <span class="pcc-deadline-badge" style="background:${badge.bg};color:${badge.fg}">${badge.label}</span>
-        <span class="pcc-check-text">${pccEsc(text)}${linkHtml}</span>
-      </div>`;
+      general: { label: "General", bg: "var(--lk-nested)", fg: "var(--lk-mut2)" },
     };
     const checklistItems = [
-      ...asks.map(a => ({ kind: "ask", text: a.text, deepLinks: a.deep_links || [] })),
-      ...decisions.map(a => ({ kind: "decision", text: a.text, deepLinks: a.deep_links || [] })),
-      ...commitments.map(a => ({ kind: "commitment", text: a.text, deepLinks: a.deep_links || [] })),
+      ...asks.map(a => ({ kind: "ask", text: a.text, deepLinks: a.deep_links || [], occurredTs: a.occurred_ts, rawItemId: a.raw_item_id })),
+      ...decisions.map(a => ({ kind: "decision", text: a.text, deepLinks: a.deep_links || [], occurredTs: a.occurred_ts, rawItemId: a.raw_item_id })),
+      ...commitments.map(a => ({ kind: "commitment", text: a.text, deepLinks: a.deep_links || [], occurredTs: a.occurred_ts, rawItemId: a.raw_item_id })),
       // Part D (2026-07-30): curator only writes a repeat signal when a new
       // ask genuinely restates a prior one on this issue - never a guess
       // rendered as if it were one.
@@ -6793,11 +6810,68 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
         return {
           kind: r.escalated ? "escalated" : "repeat",
           text: r.ask_text + (note ? ` (${note})` : ""),
-          deepLinks: r.deep_links || [],
+          deepLinks: r.deep_links || [], occurredTs: r.occurred_ts, rawItemId: r.raw_item_id,
         };
       }),
     ];
-    const checklistRowsHtml = checklistItems.map(it => pccCheckRowHtml(it.kind, it.text, it.deepLinks)).join("");
+    // 2026-08-02 port: attach each real candidate_actions entry to the
+    // checklist row sharing its raw_item_id (the same real evidence
+    // produced both) - a candidate with no raw_item_id, or no matching row,
+    // becomes its own "General" row instead of a separate "Next actions"
+    // zone. This is also what fixes the real, LIVE duplication found this
+    // session: an evidence_row recommendation used to render here in
+    // "Next actions" AND again inline on that same evidence's Progress
+    // timeline row (pccTlRowHtml, now stripped of action rendering below -
+    // Progress is history-only).
+    checklistItems.forEach(it => { it.actions = []; });
+    const checklistByRawItem = new Map();
+    checklistItems.forEach(it => {
+      if (it.rawItemId == null) return;
+      if (!checklistByRawItem.has(it.rawItemId)) checklistByRawItem.set(it.rawItemId, []);
+      checklistByRawItem.get(it.rawItemId).push(it);
+    });
+    const generalRows = [];
+    candidateActions.forEach(c => {
+      const matches = c.raw_item_id != null ? checklistByRawItem.get(c.raw_item_id) : null;
+      if (matches && matches.length) {
+        matches.forEach(it => it.actions.push(c));
+      } else {
+        generalRows.push({ kind: "general", text: c.label, deepLinks: [], occurredTs: null, rawItemId: null, actions: [c] });
+      }
+    });
+    const allChecklistRows = [...checklistItems, ...generalRows];
+    let pccCheckRowSeq = 0;
+    const pccCheckRowHtml = (it) => {
+      const badge = PCC_CHECK_BADGE[it.kind] || PCC_CHECK_BADGE.general;
+      const rowId = "pcccheck" + (pccCheckRowSeq++);
+      const dateLabel = it.occurredTs ? pccFmtAge(it.occurredTs) : (it.kind === "general" ? "general" : "—");
+      const linkHtml = (it.deepLinks && it.deepLinks.length) ? pccDeepLinkHtml(it.deepLinks) : "";
+      const actionsHtml = it.actions.map(c => `
+        <button type="button" class="pcc-xact-btn" data-gen="${pccEsc(c.kind)}"${c.kind === "custom" ? ` data-instructions="${pccEsc(c.label + (c.rationale ? " - " + c.rationale : ""))}"` : ""}>${pccEsc(c.label)}</button>`).join("");
+      const rationaleHtml = it.actions.map(c => c.rationale
+        ? `<div class="pcc-xact-why"><b>${pccEsc(c.label)}:</b> ${pccEsc(c.rationale)}</div>` : "").join("");
+      return `<div class="pcc-xrow">
+        <div class="pcc-xrow-date">${pccEsc(dateLabel)}</div>
+        <div class="pcc-xrow-left" onclick="pccXTog(this,'${rowId}')">
+          <span class="pcc-deadline-badge" style="background:${badge.bg};color:${badge.fg}">${badge.label}</span>
+          <span class="pcc-xrow-text">${pccEsc(it.text)}</span>
+          <svg class="chev" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
+        </div>
+        <div class="pcc-xrow-right">
+          <div class="pcc-xrow-icons">
+            <button type="button" class="pcc-micro-btn mdone" title="Mark done" onclick="pccChecklistIconNote(event,this)">&#10003;</button>
+            <button type="button" class="pcc-micro-btn msnooze" title="Snooze" onclick="pccChecklistIconNote(event,this)">${PCC_BELL_SVG}</button>
+            <button type="button" class="pcc-micro-btn mclose" title="Dismiss" onclick="pccChecklistIconNote(event,this)">&#10005;</button>
+          </div>
+          ${actionsHtml}
+        </div>
+        <div class="pcc-xrow-body" id="${rowId}">
+          ${rationaleHtml}
+          ${linkHtml ? `<div class="pcc-check-link">${linkHtml}</div>` : '<div class="pcc-nolink">no deep link yet</div>'}
+        </div>
+      </div>`;
+    };
+    const checklistRowsHtml = allChecklistRows.map(pccCheckRowHtml).join("");
     // Checklist rework: another open issue sharing a real PR/PO reference
     // with this one (workgraph_projects.related_open_issues_by_reference) -
     // a relationship fact, never a claim about which one blocks which
@@ -6810,7 +6884,7 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
     const checklistZoneHtml = (checklistRowsHtml || relatedNoteHtml) ? `
       <div class="pcc-zone">
         <div class="pcc-zone-hd"><span>Checklist</span>
-          <span class="pcc-zone-note">${asks.length} ask${asks.length === 1 ? "" : "s"} &middot; ${decisions.length} decision${decisions.length === 1 ? "" : "s"} &middot; ${commitments.length} commitment${commitments.length === 1 ? "" : "s"}${repeatSignals.length ? ` &middot; ${repeatSignals.length} repeat signal${repeatSignals.length === 1 ? "" : "s"}` : ""}</span>
+          <span class="pcc-zone-note">${asks.length} ask${asks.length === 1 ? "" : "s"} &middot; ${decisions.length} decision${decisions.length === 1 ? "" : "s"} &middot; ${commitments.length} commitment${commitments.length === 1 ? "" : "s"}${repeatSignals.length ? ` &middot; ${repeatSignals.length} repeat signal${repeatSignals.length === 1 ? "" : "s"}` : ""}${generalRows.length ? ` &middot; ${generalRows.length} general` : ""}</span>
         </div>
         ${relatedNoteHtml}
         ${checklistRowsHtml}
@@ -6827,57 +6901,21 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
         ${keyFactsRowsHtml}
       </div>` : "";
 
-    // Part E2 (2026-07-30): the top-ranked candidate (index 0) is already
-    // effectively represented by the existing why-line/primary action
-    // buttons above - this renders the REST (real alternatives, never
-    // previously visible anywhere) as a compact clickable list. "custom"
-    // (synthesis-sourced) candidates carry their own label/rationale
-    // through as instructions, since they have no fixed action_kind.
-    const otherCandidates = primaryCandidate ? candidateActions.slice(1) : candidateActions;
-    const altActionsHtml = otherCandidates.map(c => `
-      <button type="button" class="pcc-suggest-row" style="width:100%;text-align:left;cursor:pointer;border:none;background:none"
-              data-gen="${pccEsc(c.kind)}" ${c.kind === "custom" ? `data-instructions="${pccEsc(c.label + (c.rationale ? ' - ' + c.rationale : ''))}"` : ""}>
-        <div class="pcc-suggest-label">${pccEsc(c.label)}</div>
-        ${c.rationale ? `<div class="pcc-suggest-rationale">${pccEsc(c.rationale)}</div>` : ""}
-      </button>`).join("");
-    // task #124 follow-on ("Detail Panel, Refined"): the primary candidate
-    // used to only show as the header's action button, with everything else
-    // ranked below in "Other suggested actions" - this folds both into one
-    // "Next actions" zone (every real candidate Jasper considered, top pick
-    // called out), matching the approved mockup. Still real candidate_actions
-    // data throughout, nothing new computed.
-    const nextActionsZoneHtml = (primaryCandidate || altActionsHtml) ? `
-      <div class="pcc-zone" style="margin-top:0">
-        <div class="pcc-zone-hd"><span>Next actions</span><span class="pcc-zone-note">every candidate considered, not just the one picked</span></div>
-        ${primaryCandidate ? `
-        <button type="button" class="pcc-nba-card" data-gen="${pccEsc(primaryKind)}" data-instructions="${pccEsc(primaryInstructions)}">
-          <div class="pcc-nba-tag">Jasper's pick &mdash; ${pccEsc(primaryKind)}</div>
-          <div class="pcc-nba-label">${pccEsc(primaryLabel)}</div>
-          ${primaryCandidate.rationale ? `<div class="pcc-nba-why">${pccEsc(primaryCandidate.rationale)}</div>` : ""}
-        </button>` : ""}
-        ${altActionsHtml}
-      </div>` : "";
-
     // Progress pairs each event with what the system can do about it. The
     // recommendation column is optional and stays empty when the event carries
     // none - "if any", per the locked design. A row can carry more than one
     // genuine recommendation (task #15, e.g. an attachment matching both
     // invoice-audit and SOW language) - every one renders its own card,
     // stacked, instead of only ever showing the first.
+    // piece #5 (port #47): Progress is history-only now - recommendations
+    // no longer render inline here. They already surface once via
+    // candidate_actions/checklist (matched by raw_item_id); rendering them
+    // a second time here was the same duplication bug found in the
+    // standalone mockup work, just live this time.
     function pccTlRowHtml(item) {
-      const recs = item.recommendations || [];
-      const recHtml = recs.length
-        ? `<div class="pcc-tl-rec-list">${recs.map(rec => `
-             <div class="pcc-tl-rec">
-               <div class="pcc-tl-rec-label">${pccEsc(rec.label)}</div>
-               ${rec.rationale ? `<div class="pcc-tl-rec-why">${pccEsc(rec.rationale)}</div>` : ""}
-               <button type="button" class="pcc-tl-rec-run" data-gen="${pccEsc(rec.kind || "summarize")}">Run this</button>
-             </div>`).join("")}</div>`
-        : '<div class="pcc-tl-rec pcc-tl-rec-none"></div>';
       if (item.kind === "state") {
         return `<div class="pcc-tl-row">
           <div class="pcc-tl-main"><span class="pcc-tl-sum">${pccEsc(item.summary)}</span><span class="pcc-tl-age">${pccFmtAge(item.ts)}</span></div>
-          ${recHtml}
         </div>`;
       }
       const meta = PCC_CHANNEL_META[item.channel] || { label: item.channel, cls: "blue" };
@@ -6892,7 +6930,6 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
           ${pccDeepLinkHtml(item.deepLinks)}
           ${item.learnedCitation ? `<div class="pcc-tl-learned">${pccEsc(item.learnedCitation.note)}</div>` : ""}
         </div>
-        ${recHtml}
       </div>`;
     }
     // task #124: contiguous 3+ same-thread runs render as one collapsed
@@ -6917,7 +6954,6 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
             </div>
             <span class="pcc-tl-sum">${pccEsc(first.summary)}</span>
           </div>
-          <div class="pcc-tl-rec pcc-tl-rec-none"></div>
         </button>
         <div class="pcc-tl-thread-body" id="${pccEsc(gid)}">${g.items.map(pccTlRowHtml).join("")}</div>
       </div>`;
@@ -7003,15 +7039,20 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
         <div class="pcc-datestat"><span>Gate status</span><b style="color:${issue.has_unmet_prerequisite ? "var(--lk-danger)" : "var(--blue-d)"}">${issue.has_unmet_prerequisite ? "gated" : "clear"}</b></div>
         <div class="pcc-datestat"><span>Precedent</span><b style="color:var(--lk-mut2)">${precedent ? pccEsc(precedent.title) : "none found"}</b></div>
       </div>`;
-    const sideActionsHtml = (primaryCandidate || true) ? `
+    // 2026-08-02 port: the dynamic top-candidate button is gone from here -
+    // it used to appear in BOTH this sidebar block AND the header action
+    // row simultaneously (a real, live duplication), and the top-ranked
+    // candidate is now just whichever checklist row sorts first (candidate_
+    // actions is already score-sorted server-side). This block keeps only
+    // the static, always-useful, issue-level actions.
+    const sideActionsHtml = `
       <div class="pcc-side-block">
         <div class="pcc-side-hd">Actions</div>
         <div class="pcc-actions-row" style="flex-direction:column;align-items:stretch;gap:6px">
-          ${primaryCandidate ? `<button class="mqb primary" type="button" data-gen="${pccEsc(primaryKind)}" data-instructions="${pccEsc(primaryInstructions)}">${pccEsc(primaryLabel)}</button>` : ""}
           <button class="mqb ghost" type="button" data-act="done">Mark done</button>
-          <button class="mqb ghost" type="button" data-act="snooze">Snooze 3d</button>
+          <button class="mqb ghost" type="button" data-act="snooze">${PCC_BELL_SVG} Snooze 3d</button>
         </div>
-      </div>` : "";
+      </div>`;
 
     // Header redesign (2026-08-02, ported from the Detail-Panel mockup): title
     // first, ONE pill for status (was two competing "your move"/"your move"-
@@ -7060,7 +7101,13 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
     const displayTitle = (synth && synth.derived_title) || issue.title;
 
     let summaryZoneHtml = "";
-    let suggestZoneHtml = "";
+    // suggestZoneHtml removed (2026-08-02 port) - it rendered
+    // activeSynth.suggested_actions as its own zone, but the server already
+    // merges that exact same list into issue.candidate_actions (synthesis
+    // or project_synthesis is passed into workgraph_nba.candidate_actions
+    // server-side, same fallback as activeSynth here) - so it was showing
+    // up a second time as a checklist General row too. One real duplication
+    // less, not a feature removed.
     if (activeSynth && activeSynth.summary) {
       const steps = Array.isArray(activeSynth.next_steps) ? activeSynth.next_steps : [];
       const stepRows = steps.map(s => `
@@ -7069,12 +7116,6 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
           <span>${pccEsc(s.step || "")}</span>
           ${pccEstimateChip(s)}
         </div>`).join("");
-      const suggested = Array.isArray(activeSynth.suggested_actions) ? activeSynth.suggested_actions : [];
-      const suggestRows = suggested.map(a => `
-        <div class="pcc-suggest-row">
-          <div class="pcc-suggest-label">${pccEsc(a.label || "")}</div>
-          ${a.rationale ? `<div class="pcc-suggest-rationale">${pccEsc(a.rationale)}</div>` : ""}
-        </div>`).join("");
       summaryZoneHtml = `
         <div class="pcc-zone" style="margin-top:0">
           <div class="pcc-zone-hd"><span>Summary</span>${synthFromProject ? '<span class="why-chip">From project synthesis</span>' : ""}</div>
@@ -7082,13 +7123,6 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
           ${pccEstimatedCompletionHtml(activeSynth.estimated_completion)}
           ${stepRows ? `<div class="pcc-synth-sub">Next steps</div>${stepRows}` : ""}
         </div>`;
-      if (suggestRows) {
-        suggestZoneHtml = `
-        <div class="pcc-zone" style="margin-top:0">
-          <div class="pcc-zone-hd"><span>Suggested actions</span></div>
-          ${suggestRows}
-        </div>`;
-      }
     }
 
     body.innerHTML = `
@@ -7105,9 +7139,11 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
           ${supplierGateHtml}
         </div>
         <div class="pcc-actions-row pcc-detail-hd-actions">
-          ${primaryCandidate ? `<button class="mqb primary" type="button" data-gen="${pccEsc(primaryKind)}" data-instructions="${pccEsc(primaryInstructions)}">${primaryKind === "nudge" ? "✉ " : ""}${pccEsc(primaryLabel)}</button>` : ""}
-          <button class="mqb ghost" type="button" data-act="done">✓ Mark done</button>
-          <button class="mqb ghost" type="button" data-act="snooze">Snooze 3d</button>
+          <!-- 2026-08-02 port: the dynamic primary-candidate button and the
+               Mark done/Snooze buttons are gone from here - they duplicated
+               the sidebar's Actions block exactly (same data-act/data-gen,
+               same handlers, both visible on screen at once). The kebab's
+               3 items aren't duplicated anywhere else, so it stays. -->
           <div class="pcc-kebab-wrap">
             <button type="button" class="pcc-kebab-btn" id="pccDetailKebab" aria-label="More actions" aria-haspopup="true" aria-expanded="false">&#8942;</button>
             <div class="pcc-kebab-menu" id="pccDetailKebabMenu">
@@ -7129,8 +7165,6 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
           <div class="pcc-detail-subpane on" data-pane="overview">
             <div class="pcc-detail-stack">
               ${summaryZoneHtml}
-              ${suggestZoneHtml}
-              ${nextActionsZoneHtml}
               ${deadlinesZoneHtml}
               ${checklistZoneHtml}
               ${keyFactsZoneHtml}

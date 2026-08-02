@@ -23,6 +23,11 @@ Checks:
      linking anything new for 3 days with zero error anywhere, because
      classification (a separate step) kept advancing fine and nothing
      watched linking specifically
+  8. pending project-suggestion queue not growing unboundedly (task #31,
+     2026-08-01) - a review-capacity bottleneck, not a correctness bug:
+     one fix shipped the same day added 63 pending suggestions in one run,
+     with no visibility anywhere into how many exist or how stale the
+     oldest one is
 
 Each check returns {"ok": bool, "detail": str, ...check-specific fields}.
 """
@@ -42,6 +47,7 @@ STALE_CURSOR_HOURS = 48.0
 STALE_LOG_HOURS = 30.0
 STALE_BACKUP_HOURS = 36.0
 STALE_LINK_HOURS = 24.0  # tighter than STALE_CURSOR_HOURS - classify/link runs every scheduled_refresh pass (5x/day)
+SUGGESTION_GROWTH_MULTIPLIER = 2.0  # same day-over-day pattern as PROCESS_GROWTH_MULTIPLIER - no "right" absolute count
 ABNORMAL_GROWTH_MULTIPLIER = 2.0  # flag if a tracked size more than doubles in one day
 PROCESS_GROWTH_MULTIPLIER = 2.0   # flag if the claude.exe count more than doubles day-over-day
 
@@ -229,6 +235,42 @@ def check_classify_link_progressing(now: float) -> dict:
     return {"ok": age_hours <= STALE_LINK_HOURS, "oldest_unlinked_age_hours": round(age_hours, 1)}
 
 
+def check_suggestion_queue_not_unboundedly_growing(now: float) -> dict:
+    """Task #31 (2026-08-01): real, live proof this risk isn't hypothetical
+    - the relationship-link fix shipped earlier the same day added 63 new
+    pending suggestions in one run. pending_project_suggestions had no
+    visibility anywhere - a backlog outpacing Marc's real review capacity
+    would grow silently forever.
+
+    No fixed "right" count exists here (same reasoning as
+    check_claude_process_count - a healthy install can legitimately carry
+    a real, large baseline), so this compares against YESTERDAY's count
+    and flags ABNORMAL growth (more than doubling), not an absolute
+    threshold. count and oldest_pending_age_hours are always returned,
+    even when ok - the point of this check is making the number visible
+    at all, not just alarming past some arbitrary line."""
+    pending = ws.list_project_suggestions(status="pending")
+    count = len(pending)
+    oldest_age_hours = round((now - min(s["created_ts"] for s in pending)) / 3600.0, 1) if pending else None
+
+    raw = ws.get_cursor("health_check", "last_suggestion_count")
+    ws.set_cursor("health_check", "last_suggestion_count", str(count))
+    if raw is None:
+        return {"ok": True, "count": count, "oldest_pending_age_hours": oldest_age_hours,
+                "detail": "no prior count yet - nothing to compare"}
+    try:
+        yesterday_count = int(raw)
+    except ValueError:
+        return {"ok": True, "count": count, "oldest_pending_age_hours": oldest_age_hours,
+                "detail": "prior count unreadable, skipping comparison"}
+    if yesterday_count == 0:
+        return {"ok": True, "count": count, "yesterday_count": yesterday_count,
+                "oldest_pending_age_hours": oldest_age_hours}
+    grew_abnormally = count > yesterday_count * SUGGESTION_GROWTH_MULTIPLIER
+    return {"ok": not grew_abnormally, "count": count, "yesterday_count": yesterday_count,
+            "oldest_pending_age_hours": oldest_age_hours}
+
+
 def run(now: float | None = None) -> dict:
     if now is None:
         now = time.time()
@@ -240,6 +282,7 @@ def run(now: float | None = None) -> dict:
         "raw_ingest_failed": check_raw_ingest_failed(),
         "claude_process_count": check_claude_process_count(now),
         "classify_link_progressing": check_classify_link_progressing(now),
+        "suggestion_queue_depth": check_suggestion_queue_not_unboundedly_growing(now),
     }
     # persist today's disk snapshot for TOMORROW's growth comparison
     ws.set_cursor(_SNAPSHOT_CURSOR_SOURCE, _SNAPSHOT_CURSOR_KEY, json.dumps(retention.disk_usage_report()))

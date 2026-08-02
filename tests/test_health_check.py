@@ -182,6 +182,71 @@ def test_classify_link_ignores_items_already_examined_and_skipped(ws_db):
     assert result["ok"] is True
 
 
+# --- check_suggestion_queue_not_unboundedly_growing (task #31) -----------
+
+def _pending_suggestion(ws_db, a, b, created_ts=None):
+    sugg_id = ws_db.create_project_suggestion(issue_id_a=a, issue_id_b=b, reason="test", suggestion_kind="link")
+    if created_ts is not None:
+        conn = ws_db._connect()
+        conn.execute("UPDATE pending_project_suggestions SET created_ts = ? WHERE id = ?", (created_ts, sugg_id))
+        conn.close()
+    return sugg_id
+
+
+def test_suggestion_queue_no_false_alarm_on_first_run(ws_db):
+    """Same reasoning as claude_process_count - a real, large baseline is
+    not itself a problem; only comparing against yesterday tells us
+    anything. First run has nothing to compare against yet."""
+    for i in range(50):
+        _pending_suggestion(ws_db, f"issue-a{i}", f"issue-b{i}")
+    result = hc.check_suggestion_queue_not_unboundedly_growing(time.time())
+    assert result["ok"] is True
+    assert result["count"] == 50
+
+
+def test_suggestion_queue_flags_real_doubling(ws_db):
+    now = time.time()
+    for i in range(10):
+        _pending_suggestion(ws_db, f"issue-c{i}", f"issue-d{i}")
+    hc.check_suggestion_queue_not_unboundedly_growing(now)  # establishes yesterday's baseline (10)
+
+    for i in range(30):
+        _pending_suggestion(ws_db, f"issue-e{i}", f"issue-f{i}")
+    result = hc.check_suggestion_queue_not_unboundedly_growing(now)
+
+    assert result["count"] == 40
+    assert result["ok"] is False
+
+
+def test_suggestion_queue_ok_on_normal_growth(ws_db):
+    now = time.time()
+    for i in range(10):
+        _pending_suggestion(ws_db, f"issue-g{i}", f"issue-h{i}")
+    hc.check_suggestion_queue_not_unboundedly_growing(now)
+
+    _pending_suggestion(ws_db, "issue-i1", "issue-j1")  # +1, nowhere near doubling
+    result = hc.check_suggestion_queue_not_unboundedly_growing(now)
+
+    assert result["ok"] is True
+
+
+def test_suggestion_queue_reports_oldest_pending_age(ws_db):
+    now = time.time()
+    _pending_suggestion(ws_db, "issue-k1", "issue-k2", created_ts=now - 5 * 3600)
+    _pending_suggestion(ws_db, "issue-k3", "issue-k4", created_ts=now - 50 * 3600)
+
+    result = hc.check_suggestion_queue_not_unboundedly_growing(now)
+
+    assert result["oldest_pending_age_hours"] == pytest.approx(50.0, abs=0.1)
+
+
+def test_suggestion_queue_empty_is_ok_with_no_age(ws_db):
+    result = hc.check_suggestion_queue_not_unboundedly_growing(time.time())
+    assert result["ok"] is True
+    assert result["count"] == 0
+    assert result["oldest_pending_age_hours"] is None
+
+
 def test_daily_gate_runs_once_per_day(ws_db):
     struct = time.localtime()
     now = time.mktime((struct.tm_year, struct.tm_mon, struct.tm_mday, 12, 0, 0, 0, 0, -1))

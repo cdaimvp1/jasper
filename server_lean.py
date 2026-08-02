@@ -1182,9 +1182,12 @@ async def api_workgraph_issue_detail(issue_id: str, log_choice: bool = False):
     issue["value_found"] = workgraph_nba.value_amount_for_issue(issue_id)
     # Part E1 (2026-07-30): unified ranked candidate actions - read-time
     # only, see workgraph_nba.candidate_actions' own docstring. Falls back
-    # to project_synthesis's suggested_actions the same way the frontend
-    # already does when this issue has no synthesis of its own.
-    issue["candidate_actions"] = workgraph_nba.candidate_actions(issue, evidence, synthesis or project_synthesis)
+    # to project_synthesis's suggested_actions when this issue's own
+    # synthesis has none of its own - task #21 moved the actual fallback
+    # decision (prefer synthesis only when it has real suggested_actions,
+    # not just when the dict itself is truthy) into candidate_actions()
+    # itself so it's unit-tested there instead of as inline call-site logic.
+    issue["candidate_actions"] = workgraph_nba.candidate_actions(issue, evidence, synthesis, project_synthesis)
     # Part E2 (2026-07-30): log what was offered - ONLY when the caller is
     # a real, intentional detail-pane view (log_choice=true), never the
     # Inbox/Project-detail background bucketing prefetch, which calls this

@@ -360,7 +360,10 @@ def recompute_all(now: float | None = None) -> dict:
     return {"scored": updated, "as_of": now}
 
 
-def candidate_actions(issue: dict, evidence: list[dict], synthesis: Optional[dict] = None) -> list[dict]:
+def candidate_actions(
+    issue: dict, evidence: list[dict], synthesis: Optional[dict] = None,
+    project_synthesis: Optional[dict] = None,
+) -> list[dict]:
     """Part E1 of the grouping/NBA redesign (2026-07-30): unifies the 3
     previously-uncoordinated "what should Marc do next" surfaces - this
     issue's own single nba_action_kind/nba_reason verdict, workgraph_
@@ -397,8 +400,18 @@ def candidate_actions(issue: dict, evidence: list[dict], synthesis: Optional[dic
     0.5 usually beat 0.45 - confirmed live on marc-185, where "Draft a
     reply / your move" outranked "Confirm the Nintex DocGen notice is
     legitimate" and "Approve/reject PR1111865...". A reasoned candidate
-    must outrank a template one whenever both exist, not the reverse."""
+    must outrank a template one whenever both exist, not the reverse.
+
+    Fixed 2026-08-02 (task #21): the caller used to pick between issue-
+    level and project-level synthesis with a bare `synthesis or
+    project_synthesis`, which only checks whether the DICT is truthy - a
+    synthesis row with a real summary but an empty suggested_actions list
+    is still a non-empty dict, so it always won that `or` and the
+    project's own suggested_actions were never considered even when they
+    had real content. Fixed by taking both explicitly and preferring
+    synthesis only when it actually carries suggested_actions."""
     candidates = []
+    effective_synthesis = synthesis if (synthesis and synthesis.get("suggested_actions")) else project_synthesis
 
     # Generic-template ceiling: neither templated surface may outscore a
     # real synthesis candidate, no matter how high this issue's own
@@ -437,9 +450,9 @@ def candidate_actions(issue: dict, evidence: list[dict], synthesis: Optional[dic
                 "raw_item_id": ev.get("raw_item_id"),
             })
 
-    if synthesis:
+    if effective_synthesis:
         seen_labels = {c["label"] for c in candidates}
-        for idx, a in enumerate(synthesis.get("suggested_actions") or []):
+        for idx, a in enumerate(effective_synthesis.get("suggested_actions") or []):
             label = a.get("label") or ""
             if not label or label in seen_labels:
                 continue

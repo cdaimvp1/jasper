@@ -471,6 +471,28 @@ def test_candidate_actions_includes_synthesis_suggested_actions():
     assert any(c["label"] == "Build a 1-page deal summary" and c["source_surface"] == "synthesis" for c in result)
 
 
+def test_candidate_actions_falls_back_to_project_synthesis_when_issue_synthesis_has_no_actions():
+    # Task #21: a synthesis dict with a real summary but an empty
+    # suggested_actions list is still truthy - the old `synthesis or
+    # project_synthesis` at the call site always picked it and never
+    # looked at project_synthesis, even when THAT had real actions.
+    issue = {"nba_reason": None, "state": "active", "priority_score": 0.5}
+    synthesis = {"summary": "issue-level summary, no actions", "suggested_actions": []}
+    project_synthesis = {"suggested_actions": [{"label": "Project-level action", "rationale": "r"}]}
+    result = nba.candidate_actions(issue, [], synthesis, project_synthesis)
+    assert any(c["label"] == "Project-level action" and c["source_surface"] == "synthesis" for c in result)
+
+
+def test_candidate_actions_prefers_issue_synthesis_over_project_when_both_have_actions():
+    issue = {"nba_reason": None, "state": "active", "priority_score": 0.5}
+    synthesis = {"suggested_actions": [{"label": "Issue-level action", "rationale": "r"}]}
+    project_synthesis = {"suggested_actions": [{"label": "Project-level action", "rationale": "r"}]}
+    result = nba.candidate_actions(issue, [], synthesis, project_synthesis)
+    labels = {c["label"] for c in result}
+    assert "Issue-level action" in labels
+    assert "Project-level action" not in labels
+
+
 def test_candidate_actions_never_empty_even_with_no_real_signal():
     issue = {"nba_reason": None, "state": "active", "priority_score": None}
     result = nba.candidate_actions(issue, [])

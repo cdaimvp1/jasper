@@ -133,6 +133,110 @@ def test_absorb_body_returns_none_when_no_staged_dir(ws_db, isolated_paths):
                              text_file="body.txt", html_file="body.html") is None
 
 
+# --- attachment dedup + extraction (task #29, 2026-08-01) -----------------
+
+def _staged_attachment(staging_dir: Path, filename: str, content: bytes) -> dict:
+    path = staging_dir / filename
+    path.write_bytes(content)
+    return {"filename": filename, "staged_path": str(path), "size_bytes": len(content)}
+
+
+def test_absorb_attachments_extracts_text_from_a_real_xlsx(ws_db, isolated_paths, tmp_path):
+    import openpyxl
+    staging_dir = tmp_path / "att_staging_1"
+    staging_dir.mkdir()
+    xlsx_path = staging_dir / "pricing.xlsx"
+    wb = openpyxl.Workbook()
+    wb.active["A1"] = "Total contract value"
+    wb.active["B1"] = 53702143
+    wb.save(xlsx_path)
+    staged = [{"filename": "pricing.xlsx", "staged_path": str(xlsx_path), "size_bytes": xlsx_path.stat().st_size}]
+
+    absorbed = oci._absorb_attachments(101, staged)
+
+    assert absorbed == 1
+    rows = ws_db.list_attachments("raw_item", "101")
+    assert len(rows) == 1
+    assert "Total contract value" in rows[0]["extracted_text"]
+    assert "53702143" in rows[0]["extracted_text"]
+
+
+def test_absorb_attachments_dedupes_byte_identical_files_across_raw_items(ws_db, isolated_paths, tmp_path):
+    """The exact real gap: the same real document forwarded across several
+    emails used to get copied and text-extracted once per email. A second
+    raw_item with a byte-identical attachment must reuse the first's stored
+    file and extracted text, not duplicate either."""
+    import openpyxl
+    content_dir = tmp_path / "att_staging_2"
+    content_dir.mkdir()
+    xlsx_path_1 = content_dir / "order_form_v1.xlsx"
+    wb = openpyxl.Workbook()
+    wb.active["A1"] = "shared content"
+    wb.save(xlsx_path_1)
+    original_bytes = xlsx_path_1.read_bytes()
+
+    staged_1 = [_staged_attachment(content_dir, "order_form_copy1.xlsx", original_bytes)]
+    absorbed_1 = oci._absorb_attachments(102, staged_1)
+    assert absorbed_1 == 1
+    first_row = ws_db.list_attachments("raw_item", "102")[0]
+    assert "shared content" in first_row["extracted_text"]
+
+    # Second raw_item, byte-identical file content, different filename (a
+    # real-world forward often renames slightly) - same hash either way.
+    staged_2 = [_staged_attachment(content_dir, "order_form_copy2.xlsx", original_bytes)]
+    absorbed_2 = oci._absorb_attachments(103, staged_2)
+    assert absorbed_2 == 1
+    second_row = ws_db.list_attachments("raw_item", "103")[0]
+
+    assert second_row["stored_path"] == first_row["stored_path"], "must reuse the SAME stored file, not copy again"
+    assert second_row["extracted_text"] == first_row["extracted_text"], "must reuse the cached extraction, not re-run it"
+
+    # Only ONE physical copy of the document ever landed in the document library.
+    doc_files = list((isolated_paths.DOCUMENTS_RAW_ITEMS_DIR / "102").glob("*.xlsx"))
+    assert len(doc_files) == 1
+    assert not (isolated_paths.DOCUMENTS_RAW_ITEMS_DIR / "103").exists(), "the second raw_item's own dir was never created - nothing new to store there"
+
+
+def test_absorb_attachments_different_content_same_name_stores_both(ws_db, isolated_paths, tmp_path):
+    """A genuinely different version (v2 of the same document) must NOT be
+    deduped just because the filename matches - only a real hash match
+    counts as "the same file"."""
+    import openpyxl
+    staging_dir = tmp_path / "att_staging_3"
+    staging_dir.mkdir()
+
+    path_v1 = staging_dir / "order_form_v1_src.xlsx"
+    wb1 = openpyxl.Workbook()
+    wb1.active["A1"] = "version 1 content"
+    wb1.save(path_v1)
+    staged_1 = [_staged_attachment(staging_dir, "order_form.xlsx", path_v1.read_bytes())]
+    oci._absorb_attachments(104, staged_1)
+
+    path_v2 = staging_dir / "order_form_v2_src.xlsx"
+    wb2 = openpyxl.Workbook()
+    wb2.active["A1"] = "version 2 content, genuinely different"
+    wb2.save(path_v2)
+    staged_2 = [_staged_attachment(staging_dir, "order_form.xlsx", path_v2.read_bytes())]
+    oci._absorb_attachments(105, staged_2)
+
+    row_v1 = ws_db.list_attachments("raw_item", "104")[0]
+    row_v2 = ws_db.list_attachments("raw_item", "105")[0]
+    assert row_v1["stored_path"] != row_v2["stored_path"]
+    assert "version 1" in row_v1["extracted_text"]
+    assert "version 2" in row_v2["extracted_text"]
+
+
+def test_absorb_attachments_unsupported_extension_stores_null_extracted_text(ws_db, isolated_paths, tmp_path):
+    staging_dir = tmp_path / "att_staging_4"
+    staging_dir.mkdir()
+    staged = [_staged_attachment(staging_dir, "notes.docx", b"some docx bytes, not really parsed")]
+
+    oci._absorb_attachments(106, staged)
+
+    row = ws_db.list_attachments("raw_item", "106")[0]
+    assert row["extracted_text"] is None
+
+
 def test_sweep_unread_also_persists_entry_id_and_body(ws_db, isolated_paths, monkeypatch, tmp_path):
     item, staged_dir = _stage_item(tmp_path, "d", "entryid-DDD", "unread body", "<p>unread</p>")
 

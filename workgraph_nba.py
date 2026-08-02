@@ -139,11 +139,21 @@ def _extract_item_candidates(item: dict) -> list[tuple[float, bool, bool]]:
     that specific case as proof. This closes the general, forward-looking
     version of the same gap: any real figure that lands PAST character 500
     of a longer real email, which the old code could never have reached no
-    matter what else was fixed."""
+    matter what else was fixed.
+
+    Also now scans this raw_item's own attachments' extracted_text (task
+    #29's other half, attachment_extract.py) - a real order-form PDF or
+    pricing XLSX sitting on disk was structurally invisible to this
+    function before today, no matter what the email text itself said."""
     key = item.get("id")
     if key is not None and key in _value_cache:
         return _value_cache[key]
-    text = " ".join(filter(None, [item.get("subject"), text_extract.resolve_item_text(item)]))
+    text_parts = [item.get("subject"), text_extract.resolve_item_text(item)]
+    if key is not None:
+        for att in ws.list_attachments("raw_item", str(key)):
+            if att.get("extracted_text"):
+                text_parts.append(att["extracted_text"])
+    text = " ".join(filter(None, text_parts))
     candidates: list[tuple[float, bool, bool]] = []
     for match in _DOLLAR_RE.finditer(text):
         suffix = (match.group(3) or "").lower()

@@ -734,6 +734,17 @@ def init_workgraph() -> None:
                 conn.execute("ALTER TABLE raw_items ADD COLUMN last_link_check_ts REAL")
             except sqlite3.OperationalError:
                 pass
+            try:
+                # Task #29 (2026-08-01): attachments were stored on disk but
+                # never read by any extraction function - a real order-form
+                # PDF or pricing XLSX sitting right there was structurally
+                # invisible to the value/asks extraction that only ever
+                # scanned email subject+body. Extracted once at absorb time
+                # (attachment_extract.py, text-layer/cell-value only, no
+                # OCR), cached here rather than re-extracted on every read.
+                conn.execute("ALTER TABLE attachments ADD COLUMN extracted_text TEXT")
+            except sqlite3.OperationalError:
+                pass
 
             # Personal Response Learning (task #45) - deliberately its OWN
             # table, not folded into lessons/signal_treatment_overrides: this
@@ -3637,20 +3648,41 @@ def set_derived_title(entity_type: str, entity_id: str, derived_title: str) -> N
 def create_attachment(
     *, entity_type: str, entity_id: Optional[str], kind: str, filename: str,
     stored_path: str, content_type: Optional[str], size_bytes: int,
-    sha256_hex: Optional[str], uploaded_by: str,
+    sha256_hex: Optional[str], uploaded_by: str, extracted_text: Optional[str] = None,
 ) -> int:
     with _lock:
         conn = _connect()
         try:
             cur = conn.execute(
                 """INSERT INTO attachments
-                   (entity_type, entity_id, kind, filename, stored_path, content_type, size_bytes, sha256, uploaded_by, uploaded_ts)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (entity_type, entity_id, kind, filename, stored_path, content_type, size_bytes, sha256_hex, uploaded_by, time.time()),
+                   (entity_type, entity_id, kind, filename, stored_path, content_type, size_bytes, sha256, uploaded_by, uploaded_ts, extracted_text)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (entity_type, entity_id, kind, filename, stored_path, content_type, size_bytes, sha256_hex, uploaded_by, time.time(), extracted_text),
             )
             return cur.lastrowid
         finally:
             conn.close()
+
+
+def find_attachment_by_hash(sha256_hex: str) -> Optional[dict]:
+    """The first already-stored attachment (any entity) with this exact
+    content hash, or None. Task #29 (2026-08-01): the same real document
+    forwarded across several emails used to get stored as N separate
+    byte-identical copies and N separate extraction passes - sha256 was
+    always captured but never checked against what's already there. A
+    caller that finds a match should reuse its stored_path/extracted_text
+    rather than copying the file or re-extracting again."""
+    if not sha256_hex:
+        return None
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM attachments WHERE sha256 = ? LIMIT 1", (sha256_hex,)
+            ).fetchone()
+        finally:
+            conn.close()
+    return dict(row) if row else None
 
 
 def list_attachments(entity_type: str, entity_id: str) -> list[dict]:

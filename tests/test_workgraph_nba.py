@@ -127,6 +127,26 @@ def test_extract_value_amount_finds_a_figure_past_the_old_500char_cutoff(isolate
     assert nba._extract_value_amount([with_ref_item]) == 12_345_678.0
 
 
+def test_extract_value_amount_reads_attachment_extracted_text(ws_db, isolated_paths):
+    """The other half of task #29: a real dollar figure sitting only in an
+    attachment (a PDF order form, an XLSX pricing sheet) - never in the
+    email subject or body at all - was structurally invisible before
+    today. Real attachments row, not a mock, via the real store function."""
+    item = {"id": 200, "subject": "Order form attached", "body_preview": "see attached", "raw_ref": None}
+    nba._value_cache.clear()
+    assert nba._extract_value_amount([item]) == 0.0  # nothing in the email text itself
+
+    ws_db.create_attachment(
+        entity_type="raw_item", entity_id="200", kind="reference", filename="order_form.pdf",
+        stored_path="raw_items/200/order_form.pdf", content_type=None, size_bytes=1234,
+        sha256_hex="deadbeef", uploaded_by="test",
+        extracted_text="The total contract value is $30,500,000 for this term.",
+    )
+    nba._value_cache.clear()  # the item id is unchanged, but the negative result above is now stale
+
+    assert nba._extract_value_amount([item]) == 30_500_000.0
+
+
 def test_default_weights_is_immutable():
     with pytest.raises(TypeError):
         nba.DEFAULT_WEIGHTS["value"] = 999

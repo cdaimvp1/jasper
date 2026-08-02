@@ -34,6 +34,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import workgraph_store as ws
 import paths
+import attachment_extract
 
 _SCRIPT = Path(__file__).resolve().parent / "outlook_scan.ps1"
 _SOURCE = "outlook_mail"
@@ -80,25 +81,49 @@ def _absorb_body(row_id: int, item_staged_dir: str | None, text_file: str | None
 def _absorb_attachments(row_id: int, staged: list[dict]) -> int:
     """Move each staged file (saved by outlook_scan.ps1 via Outlook COM) into
     the real document library under this raw_item's id, and register one
-    attachments row per file. Returns how many were absorbed."""
+    attachments row per file. Returns how many were absorbed.
+
+    Fixed 2026-08-01 (task #29): sha256 was always captured but never
+    checked against what's already stored - the same real document
+    forwarded across several emails used to get copied and text-extracted
+    once per email instead of once, period. Now checks
+    find_attachment_by_hash() first: a byte-identical match reuses the
+    EXISTING file (no new copy) and its already-extracted text (no
+    re-extraction) - only a genuinely new file gets copied and extracted."""
     if not staged:
         return 0
     dest_dir = paths.DOCUMENTS_RAW_ITEMS_DIR / str(row_id)
-    dest_dir.mkdir(parents=True, exist_ok=True)
     absorbed = 0
     for att in staged:
         src = Path(att.get("staged_path") or "")
         if not src.is_file():
             continue  # PowerShell reported it but it's not actually there - skip, don't fail the batch
         digest = hashlib.sha256(src.read_bytes()).hexdigest()
+        existing = ws.find_attachment_by_hash(digest)
+        if existing:
+            src.unlink(missing_ok=True)
+            ws.create_attachment(
+                entity_type="raw_item", entity_id=str(row_id), kind="reference",
+                filename=att.get("filename") or src.name,
+                stored_path=existing["stored_path"],
+                content_type=existing.get("content_type"),
+                size_bytes=existing.get("size_bytes") or att.get("size_bytes") or 0,
+                sha256_hex=digest, uploaded_by="outlook_ingest",
+                extracted_text=existing.get("extracted_text"),
+            )
+            absorbed += 1
+            continue
+        dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / f"{digest[:16]}_{src.name}"
         shutil.move(str(src), str(dest))
+        extracted_text = attachment_extract.extract_text(dest) or None
         ws.create_attachment(
             entity_type="raw_item", entity_id=str(row_id), kind="reference",
             filename=att.get("filename") or src.name,
             stored_path=str(dest.relative_to(paths.DOCUMENTS_DIR)),
             content_type=None, size_bytes=att.get("size_bytes") or dest.stat().st_size,
             sha256_hex=digest, uploaded_by="outlook_ingest",
+            extracted_text=extracted_text,
         )
         absorbed += 1
     return absorbed

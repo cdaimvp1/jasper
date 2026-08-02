@@ -315,12 +315,33 @@ No change to the approved autonomous sequence (#47 -> #18 -> #21 -> #34 ->
   Pass 3 (finding generation) as 13 domain-scoped sub-agents behind a
   keyword pre-filter, reconciling into the exact PASS_3_ANALYSIS shape
   Pass 4 already consumes unchanged.
-- #48 — research/design the leadership telemetry + time-saved page.
-- #48 — research/design the leadership telemetry + time-saved page.
-  Design-only. Audit `nba_choice_log`, `issue_state_history` (actor
-  column), and bus.db for what's already logged before assuming new
-  instrumentation is needed - see the task's own description for the full
-  brief.
+- #48 — [DONE, committed `1d45e07`] `docs/design/LEADERSHIP_TELEMETRY_PAGE.md`
+  + a published mockup Artifact. Queried every candidate source table
+  LIVE against the real production DB before designing anything -
+  `pending_actions`/`nba_choice_log`/`issue_state_history`/`issues`/
+  `raw_items` are all real and sufficient, no new instrumentation needed;
+  `bus.db` turned out to be the cohort's general message bus, not Jasper
+  usage data, ruled out. The finding that reshaped the design: every one
+  of those tables has ZERO rows right now (verified live) - this
+  installation has no real usage history yet. Design keeps "Usage"
+  (fully observed) and "Time saved" (real count x a stated assumption)
+  strictly separate and labeled; the mockup uses hypothetical numbers
+  explicitly marked as such, never presented as real.
+
+## Batch complete (2026-08-02)
+
+The full approved autonomous sequence (#47 -> #18 -> #21 -> #34 -> #36 ->
+#45 -> #48) is done, tested, committed, and pushed. #47 required a
+correction mid-stream after Marc caught that the initial port didn't
+actually match the mockup - see the "Post-completion correction" section
+above for the full account; the corrected version is what's live now.
+Three new build-follow-on tasks (#49/#50/#51) are queued behind Marc
+reviewing the three design docs (#34/#45/#48's outputs) - none of them
+started, per instructions.
+
+Not part of this batch, still pending, no autonomous work done on them:
+#5, #6 (awaiting Marc's call), #17, #19, #20, #35, #37, #38-44 ([Future
+phase]), #46.
 
 ## Discipline reminders (from this session, don't relearn the hard way)
 

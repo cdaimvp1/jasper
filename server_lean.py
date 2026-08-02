@@ -1772,6 +1772,27 @@ async def api_project_detail(project_id: str):
                         }) if top_issue and top_issue.get("nba_reason") else None})
 
 
+class WorkgraphProjectStatusBody(BaseModel):
+    status: str
+    actor: Optional[str] = None
+
+
+@app.post("/api/workgraph/projects/{project_id}/status")
+async def api_workgraph_project_status(project_id: str, body: WorkgraphProjectStatusBody):
+    """Task #62: real project-level Mark done/Dismiss/Archive - there was no
+    endpoint at all for this before (the generic Symphony /api/projects/
+    {id}/status a couple routes above belongs to a completely different,
+    unrelated `projects` module - George's cohort-wide tracker, not this
+    workgraph). Same shape as the issue-level /status endpoint."""
+    if wg.get_project(project_id) is None:
+        raise HTTPException(404, f"no such project: {project_id}")
+    try:
+        wg.set_project_status(project_id, body.status)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return JSONResponse({"ok": True, "project": sanitize_surrogates(wg.get_project(project_id))})
+
+
 class IssueProjectBody(BaseModel):
     project_id: Optional[str] = None  # null = detach from any project
     reason: Optional[str] = None

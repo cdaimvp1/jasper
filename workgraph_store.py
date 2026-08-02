@@ -449,11 +449,45 @@ def init_workgraph() -> None:
                     id         TEXT PRIMARY KEY,
                     name       TEXT NOT NULL,
                     category   TEXT,
-                    status     TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','waiting','done','archived')),
+                    status     TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','waiting','done','archived','dismissed')),
                     opened_at  REAL NOT NULL,
                     updated_at REAL NOT NULL
                 )
             """)
+            # Task #62: real project-level "dismissed" state (same distinct-
+            # from-done reasoning as issues.state's task #44) - there was
+            # previously no way to dismiss a whole project at all, backend or
+            # UI. Same detect+rebuild migration pattern as #44's issues.state
+            # widening - schema confirmed against the LIVE database first
+            # (exactly 6 columns, no later ALTER TABLE ADD COLUMNs unlike
+            # issues) specifically to avoid repeating that bug.
+            existing_projects_sql = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='projects'"
+            ).fetchone()
+            if existing_projects_sql and "'dismissed'" not in (existing_projects_sql["sql"] or ""):
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    conn.execute("ALTER TABLE projects RENAME TO projects_pre_task62")
+                    conn.execute("""
+                        CREATE TABLE projects (
+                            id         TEXT PRIMARY KEY,
+                            name       TEXT NOT NULL,
+                            category   TEXT,
+                            status     TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','waiting','done','archived','dismissed')),
+                            opened_at  REAL NOT NULL,
+                            updated_at REAL NOT NULL
+                        )
+                    """)
+                    cols = [r["name"] for r in conn.execute("PRAGMA table_info(projects_pre_task62)").fetchall()]
+                    col_list = ", ".join(cols)
+                    conn.execute(f"INSERT INTO projects ({col_list}) SELECT {col_list} FROM projects_pre_task62")
+                    conn.execute("DROP TABLE projects_pre_task62")
+                    conn.execute("COMMIT")
+                except sqlite3.OperationalError:
+                    try:
+                        conn.execute("ROLLBACK")
+                    except sqlite3.OperationalError:
+                        pass  # no transaction was actually open (e.g. BEGIN itself failed) - nothing to roll back
 
             try:
                 conn.execute("ALTER TABLE issues ADD COLUMN project_id TEXT REFERENCES projects(id)")
@@ -2741,8 +2775,11 @@ def set_project_status(project_id: str, status: str) -> None:
     fix leaves with zero member issues, rather than hard-deleting the row
     (no delete_project function exists, deliberately not added for a
     one-off cleanup - archiving is reversible, a hard delete of a project
-    row with real history/synthesis attached is not)."""
-    if status not in ("active", "waiting", "done", "archived"):
+    row with real history/synthesis attached is not).
+
+    'dismissed' added task #62 - a real, distinct-from-'done' outcome at
+    the project level, same reasoning as issues.state's task #44."""
+    if status not in ("active", "waiting", "done", "archived", "dismissed"):
         raise ValueError(f"invalid project status: {status!r}")
     with _lock:
         conn = _connect()

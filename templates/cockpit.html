@@ -5996,6 +5996,14 @@ html[data-theme="dark"]{
       pccPersistChecklistOutcome("dismiss", issueId, btn);
     }
   }
+  // Task #62: the Project Detail view (separate "pj" scope) needs these same
+  // checklist-row interactions for its own asks/decisions/commitments rows,
+  // rather than a second copy of this logic - exported once, here, right
+  // after the last of the group is defined.
+  window.pccXTog = pccXTog;
+  window.pccDotToggle = pccDotToggle;
+  window.pccRowIcon = pccRowIcon;
+  window.PCC_BELL_SVG = PCC_BELL_SVG;
   // Sidebar Dismiss (issue-level) is now real - task #44 - wired the same
   // way Mark done/Snooze already were, via data-act="dismiss" + the
   // delegated [data-act] listener calling pccRunDeterministic (see below).
@@ -6845,6 +6853,7 @@ html[data-theme="dark"]{
       : `<a class="pcc-tl-deeplink" href="${pccEsc(link.url)}" target="_blank" rel="noopener">${pccEsc(link.label)} &#8594;</a>`
     ).join("");
   }
+  window.pccDeepLinkHtml = pccDeepLinkHtml;  // task #62: the Project Detail view's checklist rows need the same deep links the issue-level ones already show
 
   function pccBuildTimeline(evidence, stateHistory) {
     const evItems = (evidence || []).map(e => ({
@@ -7571,6 +7580,17 @@ html[data-theme="dark"]{
     // throw on every issue selection.
     body.querySelectorAll("[data-act]").forEach(btn => btn.addEventListener("click", () => pccRunDeterministic(issue.id, btn.getAttribute("data-act"))));
     body.querySelectorAll("[data-gen]").forEach(btn => btn.addEventListener("click", () => pccRunGenerative(issue.id, btn.getAttribute("data-gen"), btn.getAttribute("data-instructions"))));
+    pccWireOpenActionButtons(body);
+    // Kebab menu removed (2026-08-02, Marc's direct call) - its 3 actions
+    // (Review contract/Summarize thread/Archive as noise) moved into the
+    // sidebar Actions rail above instead of being deleted.
+  }
+
+  // Task #62: extracted so the Project Detail ("pj") scope's own checklist
+  // rows - which reuse pccDeepLinkHtml's exact same [data-open-action]
+  // buttons - actually get this wired too, instead of rendering an inert
+  // button a second time (the same class of bug the Dismiss button had).
+  function pccWireOpenActionButtons(body) {
     body.querySelectorAll("[data-open-action]").forEach(btn => btn.addEventListener("click", async () => {
       const endpoint = btn.getAttribute("data-open-action");
       const rawItemId = parseInt(btn.getAttribute("data-raw-item-id"), 10);
@@ -7588,10 +7608,8 @@ html[data-theme="dark"]{
         setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 2500);
       }
     }));
-    // Kebab menu removed (2026-08-02, Marc's direct call) - its 3 actions
-    // (Review contract/Summarize thread/Archive as noise) moved into the
-    // sidebar Actions rail above instead of being deleted.
   }
+  window.pccWireOpenActionButtons = pccWireOpenActionButtons;
 
   // ═════════════════════════════════════════════════════════════════════
   // Detail Panel, Refined (task #124 follow-on) - Thread & Web / Project
@@ -8656,7 +8674,7 @@ html[data-theme="dark"]{
     }
 
     const pjStatusCls = project.status === "waiting" ? "status-waiting" : project.status === "done" ? "status-done"
-      : project.status === "archived" ? "status-noise-archived" : "status-active";
+      : (project.status === "archived" || project.status === "dismissed") ? "status-noise-archived" : "status-active";
 
     // "Milestones and unresolved dependencies" (design brief) - gated/hard-
     // deadline counts and value-in-play were already being computed by
@@ -8688,17 +8706,66 @@ html[data-theme="dark"]{
     // its own issue_id/issue_title (added server-side just for this - see
     // api_project_detail) since "which issue" is no longer implied by
     // context once a project has more than one member issue.
-    const pjExtractionRow = (label, entry) => `
-      <div class="pcc-radar-row pcc-radar-row-mentioned" data-id="${pjEsc(entry.issue_id)}">
-        <span class="pcc-deadline-badge" style="background:var(--bg);color:var(--mut2);flex:none">${label}</span>
-        <span class="pcc-radar-title">${pjEsc(entry.issue_title)}</span>
-        <span class="pcc-radar-mention-text">${pjEsc(entry.text)}</span>
+    //
+    // Task #62 (Marc's direct report): this was a plain read-only row -
+    // no dot, no icons, no expand - so Dismiss/Mark done did nothing and
+    // there was nothing to expand, at the project level specifically (the
+    // issue-level Detail Panel's own checklist already had all of this).
+    // Reuses the SAME pccXTog/pccDotToggle/pccRowIcon/pccDeepLinkHtml the
+    // issue-level panel uses (exported to window, see their definitions)
+    // rather than a second copy of this logic. Key facts stay plain/
+    // read-only here too, same as the issue-level panel (task #44's own
+    // comment: "reference material," never part of the actionable
+    // checklist) - only ask/decision/commitment/repeat rows get the
+    // interactive treatment, and only they have a real raw_item_id to key
+    // a dismissal on.
+    const PJ_CHECK_BADGE = {
+      ask: { label: "Ask", bg: "var(--bg)", fg: "var(--mut2)" },
+      decision: { label: "Decision", bg: "var(--blue-t)", fg: "var(--bblue)" },
+      commitment: { label: "Commitment", bg: "var(--teal-t)", fg: "var(--teal-d)" },
+      repeat: { label: "Repeat", bg: "var(--bg)", fg: "var(--mut2)" },
+      escalated: { label: "Escalated", bg: "var(--pink-t)", fg: "var(--red-d)" },
+    };
+    let pjCheckRowSeq = 0;
+    // kind: "ask" | "decision" | "commitment" | "repeat" | "escalated" | null
+    // (null = key facts, plain/non-interactive). dismissKind, when set, is
+    // the server-side kind vocabulary (repeat/escalated both dismiss as
+    // "repeat" - same collapsing the issue-level panel already does).
+    const pjExtractionRow = (kind, entry, text) => {
+      if (!kind) {
+        return `<div class="pcc-radar-row pcc-radar-row-mentioned" data-id="${pjEsc(entry.issue_id)}">
+          <span class="pcc-deadline-badge" style="background:var(--bg);color:var(--mut2);flex:none">Key fact</span>
+          <span class="pcc-radar-title">${pjEsc(entry.issue_title)}</span>
+          <span class="pcc-radar-mention-text">${pjEsc(text)}</span>
+        </div>`;
+      }
+      const badge = PJ_CHECK_BADGE[kind] || PJ_CHECK_BADGE.ask;
+      const dismissKind = kind === "escalated" ? "repeat" : kind;
+      const rowId = "pjcheck" + (pjCheckRowSeq++);
+      const links = (entry.deep_links && entry.deep_links.length) ? window.pccDeepLinkHtml(entry.deep_links) : "";
+      return `<div class="pcc-xrow" id="${rowId}-wrap" style="grid-template-columns:1fr auto">
+        <div class="pcc-xrow-left" data-id="${pjEsc(entry.issue_id)}" style="cursor:pointer" onclick="event.stopPropagation();window.pccXTog(this,'${rowId}')">
+          <span class="pcc-check-dot" onclick="event.stopPropagation();window.pccDotToggle(event,this)"></span>
+          <span class="pcc-deadline-badge" style="background:${badge.bg};color:${badge.fg}">${badge.label}</span>
+          <span class="pcc-radar-title pj-check-title" data-id="${pjEsc(entry.issue_id)}" onclick="event.stopPropagation();window.pccShowView&&window.pccShowView('pcc');window.pccSelectIssue&&window.pccSelectIssue('${pjEsc(entry.issue_id)}')">${pjEsc(entry.issue_title)}</span>
+          <span class="pcc-xrow-text">${pjEsc(text)}</span>
+          <svg class="chev" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
+        </div>
+        <div class="pcc-xrow-icons">
+          <button type="button" class="pcc-micro-btn mdone" title="Mark done" data-dismiss-kind="${pjEsc(dismissKind)}" data-raw-item-id="${entry.raw_item_id != null ? pjEsc(String(entry.raw_item_id)) : ""}" data-dismiss-text="${pjEsc(text)}" onclick="event.stopPropagation();window.pccRowIcon(event,'${rowId}-wrap','done','${pjEsc(entry.issue_id)}',this)">&#10003;</button>
+          <button type="button" class="pcc-micro-btn msnooze" title="Snooze" onclick="event.stopPropagation();window.pccRowIcon(event,'${rowId}-wrap','snooze')">${window.PCC_BELL_SVG}</button>
+          <button type="button" class="pcc-micro-btn mclose" title="Dismiss" data-dismiss-kind="${pjEsc(dismissKind)}" data-raw-item-id="${entry.raw_item_id != null ? pjEsc(String(entry.raw_item_id)) : ""}" data-dismiss-text="${pjEsc(text)}" onclick="event.stopPropagation();window.pccRowIcon(event,'${rowId}-wrap','dismiss','${pjEsc(entry.issue_id)}',this)">&#10005;</button>
+        </div>
+        <div class="pcc-xrow-body" id="${rowId}" style="grid-column:1/-1">
+          ${links ? `<div class="pcc-check-link">${links}</div>` : '<div class="pcc-nolink">no deep link yet</div>'}
+        </div>
       </div>`;
+    };
     const projExtractionRowsHtml = [
-      ...asks.map(e => pjExtractionRow("Ask", e)),
-      ...decisions.map(e => pjExtractionRow("Decision", e)),
-      ...keyFacts.map(e => pjExtractionRow("Key fact", e)),
-      ...commitments.map(e => pjExtractionRow("Commitment", e)),
+      ...asks.map(e => pjExtractionRow("ask", e, e.text)),
+      ...decisions.map(e => pjExtractionRow("decision", e, e.text)),
+      ...keyFacts.map(e => pjExtractionRow(null, e, e.text)),
+      ...commitments.map(e => pjExtractionRow("commitment", e, e.text)),
     ].join("");
     const extractionZoneHtml = projExtractionRowsHtml ? `
       <div class="pcc-zone" style="margin-top:0">
@@ -8713,15 +8780,9 @@ html[data-theme="dark"]{
     // issue each one belongs to, for the same reason as the zone above.
     const projRepeatRowsHtml = repeatSignals.map(r => {
       const daysNote = r.days_since_first_ask != null ? `${r.days_since_first_ask}d since first ask` : "";
-      const escBadge = r.escalated
-        ? '<span class="pcc-deadline-badge" style="background:var(--pink-t);color:var(--red-d);flex:none">Escalated</span>'
-        : '<span class="pcc-deadline-badge" style="background:var(--bg);color:var(--mut2);flex:none">Repeat</span>';
       const note = [daysNote, r.escalated ? (r.escalation_note || "") : ""].filter(Boolean).join(" — ");
-      return `<div class="pcc-radar-row pcc-radar-row-mentioned" data-id="${pjEsc(r.issue_id)}">
-        ${escBadge}
-        <span class="pcc-radar-title">${pjEsc(r.issue_title)}</span>
-        <span class="pcc-radar-mention-text">${pjEsc(r.ask_text)}${note ? ` (${pjEsc(note)})` : ""}</span>
-      </div>`;
+      const text = `${r.ask_text}${note ? ` (${note})` : ""}`;
+      return pjExtractionRow(r.escalated ? "escalated" : "repeat", r, text);
     }).join("");
     const repeatZoneHtml = projRepeatRowsHtml ? `
       <div class="pcc-zone" style="margin-top:0">
@@ -8740,6 +8801,11 @@ html[data-theme="dark"]{
           </div>
           <div class="pcc-detail-title">${pjEsc((synth && synth.derived_title) || project.name)}</div>
           ${topActionHtml}
+        </div>
+        <div class="pcc-detail-hd-actions pcc-actions-row">
+          <button class="mqb ghost" type="button" data-proj-act="done">Mark done</button>
+          <button class="mqb ghost" type="button" data-proj-act="archive">Archive</button>
+          <button class="mqb ghost" type="button" style="border-color:var(--lk-danger);color:var(--lk-danger)" data-proj-act="dismiss">Dismiss</button>
         </div>
       </div>
       ${summaryZones}
@@ -8768,6 +8834,39 @@ html[data-theme="dark"]{
         if (window.pccSelectIssue) window.pccSelectIssue(issueId);
       });
     });
+    // Task #62: the checklist rows above render pccDeepLinkHtml's own
+    // [data-open-action] buttons - without this they're inert here too,
+    // same bug class as Dismiss/Mark done were.
+    if (window.pccWireOpenActionButtons) window.pccWireOpenActionButtons(body);
+    body.querySelectorAll("[data-proj-act]").forEach(btn => {
+      btn.addEventListener("click", () => pjRunProjectAction(project.id, btn.getAttribute("data-proj-act")));
+    });
+  }
+
+  // Task #62: real project-level Mark done/Dismiss/Archive - there was no
+  // way to change a project's own status from this view at all before (see
+  // POST /api/workgraph/projects/{id}/status, added server-side for this).
+  // Unlike the issue-level Detail Panel, a project stays visible in
+  // pjProjectList regardless of status (the list has no status filter) -
+  // so rather than guessing at a "next project" to jump to, this just
+  // refreshes the list (for its status badge) and re-renders this same
+  // project's detail in place (forceRefresh, so the new status actually
+  // shows in its own header badge).
+  async function pjRunProjectAction(projectId, act) {
+    const statusByAct = { done: "done", dismiss: "dismissed", archive: "archived" };
+    const status = statusByAct[act];
+    if (!status) return;
+    try {
+      const r = await fetch(`/api/workgraph/projects/${encodeURIComponent(projectId)}/status`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status }),
+      });
+      if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.detail || "failed"); }
+      await pjLoadProjects();
+      await pjSelectProject(projectId, true);
+    } catch (e) {
+      window.alert("Couldn't update this project's status - please try again.");
+    }
   }
 
   // ---- Parties lane: standalone review list ------------------------------

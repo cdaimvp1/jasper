@@ -2993,18 +2993,29 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
    red reserved for real blockers" is retired as a rule, not just for this
    panel, since --lk-pri is a shared :root token read by the chat composer
    and the inbox list's active-row indicator too, not only pcc-detail-*.
-   --lk-danger is untouched - it was already byte-identical to --red-d.
+   CORRECTION, same day: the first pass only moved --lk-pri and left
+   --lk-danger "untouched" reasoning it was already byte-identical to
+   --red-d - wrong: Marc's actual instruction was the mockup's WHOLE light
+   palette ("the other colors", plural), not just the accent, and a live
+   audit against the mockup confirmed --lk-danger sitting this close to
+   --lk-pri recreates the exact "blocked reads as just another button"
+   failure the mockup's own legend warns about. Every --lk-* surface/ink/
+   danger token below now matches the mockup's :root exactly (its PMS-
+   derived warm/pink theme, not the old neutral olive/beige one). Still
+   NOT touching the mockup's dark-mode block, per "not the dark mode" -
+   --lk-* has no dark override anywhere in this file (confirmed via grep),
+   so nothing here needs a dark-mode counterpart added or preserved.
    ═════════════════════════════════════════════════════════════════════════ */
 :root{
-  --lk-canvas:#E2E6E1; --lk-surface:#FFFFFF; --lk-panel:#F5F2ED;
-  --lk-nested:#EDEAE3; --lk-line:#E3DED6; --lk-line2:#D3CDC3;
-  --lk-ink:#1A1A1A; --lk-ink2:#3A362F; --lk-mut:#505A64; --lk-mut2:#564F48;
+  --lk-canvas:#E2E6E1; --lk-surface:#FFFFFF; --lk-panel:#FCEEEA;
+  --lk-nested:#F5E4DE; --lk-line:#F0D8D3; --lk-line2:#E3C4BD;
+  --lk-ink:#212121; --lk-ink2:#3A2A26; --lk-mut:#8A969E; --lk-mut2:#8A969E;
   --lk-pri:#E1251B; --lk-pri-t:#FBCFC8;
   --lk-emph:#C15E19;
-  --lk-flag:#403A33; --lk-danger:#B41E16;
+  --lk-flag:#403A33; --lk-danger:#521207;
   --lk-bubble-me:#403A33; --lk-bubble-me-fg:#F1EEE8;
   --lk-r-s:8px; --lk-r-c:4px; --lk-r-x:12px;
-  --lk-elev:0 1px 2px rgba(38,30,20,.06),0 2px 6px rgba(38,30,20,.07);
+  --lk-elev:0 1px 2px rgba(82,18,7,.06),0 2px 6px rgba(82,18,7,.07);
 }
 
 /* ── masthead: the 30px greeting collapses to one line ── */
@@ -3206,7 +3217,7 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
    real danger colors, not amber - red is the pill's own DEFAULT color now
    that --lk-pri is brand red, so "gated" needs a color that still reads as
    distinctly worse than "normal," not the same hue. */
-.pcc-headline-pill{font:800 12px/1 var(--mono);text-transform:uppercase;letter-spacing:.03em;
+.pcc-headline-pill{font:800 12.5px/1 var(--mono);text-transform:uppercase;letter-spacing:.03em;
   color:var(--lk-pri);background:var(--lk-pri-t);border-radius:20px;padding:6px 14px;
   display:inline-flex;align-items:center;margin-top:6px;width:fit-content}
 .pcc-headline-pill.mqw-reason-warn{color:var(--lk-danger);background:var(--pink-t)}
@@ -3235,8 +3246,8 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
    that replaced the raw pending-action line. */
 .pcc-detail-stack{display:block}
 .pcc-detail-hd{padding:15px 18px 14px;border-bottom:1px solid var(--lk-line);background:var(--lk-surface)}
-.pcc-detail-title{font-size:16.5px;font-weight:700;line-height:1.3;letter-spacing:-.012em}
-.pcc-meta-line{font-size:11.5px;color:var(--lk-mut2)}
+.pcc-detail-title{font-size:17px;font-weight:700;line-height:1.3;letter-spacing:-.012em}
+.pcc-meta-line{font-size:12px;color:var(--lk-mut2)}
 .pcc-status-badge{font-size:11px;font-weight:600;border-radius:999px;padding:2px 9px;
   background:var(--lk-nested);color:var(--lk-flag);text-transform:none;letter-spacing:0}
 .pcc-status-badge.status-blocked{color:var(--lk-danger)}
@@ -3249,6 +3260,67 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
 .pcc-zone-note{font-weight:400;font-size:11.5px;color:var(--lk-mut)}
 .pcc-stale-pill{margin-left:auto;font-family:var(--mono);font-size:10px;font-weight:600;
   background:none;color:var(--lk-mut);border:1px solid var(--lk-line2);border-radius:999px;padding:2px 8px}
+/* Visual-fidelity pass against the mockup (2026-08-02, Marc flagged the
+   port didn't actually match): the mockup's zone header is a plain,
+   understated flex row with margin-bottom only - no band/border/fill -
+   and just its first span gets the small-caps mono label treatment; the
+   note span keeps its own separate style. Scoped to .pcc-detail-main so
+   this doesn't also reskin the Project tab's zone headers, which reuse
+   the bare .pcc-zone-hd class above ("ported idioms, not reinvented") and
+   weren't part of what Marc asked to match here. */
+.pcc-detail-main .pcc-zone-hd{
+  display:flex;align-items:baseline;gap:8px;padding:0;margin:0 18px 10px;
+  border:none;background:none;font-size:inherit;font-weight:inherit;color:inherit}
+.pcc-detail-main .pcc-zone-hd span:first-child{
+  font:700 10px/1 var(--mono);text-transform:uppercase;letter-spacing:.04em;color:var(--lk-mut2)}
+.pcc-detail-main .pcc-zone-note{font-weight:400;font-size:11px;color:var(--lk-mut2)}
+/* Checklist rows (.pcc-xrow family) - this CSS never existed for real; the
+   JS already emitted these class names (pccCheckRowHtml) but nothing
+   styled them, so every row rendered as unstyled stacked divs. Ported
+   from the mockup's :root-adjacent .pcc-xrow rules verbatim, swapping its
+   --red (mockup's own stand-in for its danger maroon, same value as its
+   --lk-danger) for --lk-danger directly, and --pink-t for --lk-pri-t
+   (identical value in both files already) to stay inside the --lk-*
+   namespace rather than touching the old, app-wide-shared --pink-t/--red
+   tokens for a Detail-Panel-only hover color. */
+.pcc-xrow{display:grid;grid-template-columns:76px minmax(0,1fr) 168px;gap:14px;align-items:start;
+  padding:10px 4px;border-bottom:1px solid var(--lk-line);transition:opacity .2s}
+.pcc-xrow:last-child{border-bottom:none}
+.pcc-xrow-date{font-family:var(--mono);font-size:11px;font-weight:700;color:var(--lk-mut);padding-top:4px}
+.pcc-xrow-left{display:flex;align-items:flex-start;gap:10px;min-width:0;cursor:pointer}
+.pcc-xrow-text{flex:1;min-width:0;line-height:1.5;font-size:13px}
+.pcc-xrow .chev{width:13px;height:13px;stroke:var(--lk-mut);fill:none;stroke-width:2.4;
+  transition:transform .15s;flex:none;margin-top:3px}
+.pcc-xrow-left.open .chev{transform:rotate(180deg)}
+.pcc-xrow-right{display:flex;flex-direction:column;align-items:flex-end;gap:6px}
+.pcc-xrow-icons{display:flex;gap:5px;margin-bottom:2px}
+.pcc-micro-btn{width:23px;height:23px;border-radius:6px;border:1px solid var(--lk-line2);background:var(--lk-surface);
+  color:var(--lk-mut2);font-size:12px;font-weight:800;display:flex;align-items:center;justify-content:center;
+  cursor:pointer;padding:0;line-height:1}
+.pcc-micro-btn svg{width:13px;height:13px}
+.pcc-micro-btn:hover{background:var(--lk-nested)}
+.pcc-micro-btn.mdone:hover{background:var(--blue-t);color:var(--bblue);border-color:var(--bblue)}
+.pcc-micro-btn.msnooze:hover{background:var(--amber-t);color:var(--amber-d);border-color:var(--amber-d)}
+.pcc-micro-btn.mclose:hover{background:var(--lk-pri-t);color:var(--lk-danger);border-color:var(--lk-danger)}
+.pcc-xact-btn{flex:none;border:none;background:var(--lk-pri);color:#fff;font:700 11.5px var(--sans);
+  padding:8px 13px;border-radius:var(--lk-r-c);cursor:pointer;white-space:nowrap;width:100%}
+.pcc-xact-btn.ghost{background:none;border:1.5px solid var(--lk-line2);color:var(--lk-ink)}
+.pcc-xrow-body{display:none;grid-column:1 / -1;padding:6px 4px 2px 26px}
+.pcc-xrow-body.on{display:block}
+.pcc-xact-why{font-size:11px;color:var(--lk-mut);line-height:1.45;margin-bottom:6px}
+.pcc-not-real-note{font-size:11px;color:var(--lk-mut2);font-style:italic;margin-top:6px}
+/* Per-row attachment card, real raw_item_id match (see checklistItems
+   construction) - two-column, name/date/type left, description right. */
+.pcc-attach-row2{display:flex;gap:18px;align-items:flex-start}
+.pcc-attach-left{flex:none;width:190px}
+.pcc-attach-name{color:var(--lk-pri);font-weight:700;text-decoration:none;font-size:13px;display:block}
+.pcc-attach-name:hover{text-decoration:underline}
+.pcc-attach-meta{font-size:10.5px;color:var(--lk-mut2);font-family:var(--mono);margin-top:2px}
+.pcc-attach-desc{font-size:11.5px;color:var(--lk-mut);line-height:1.5;flex:1;min-width:0}
+/* "Cleared to act" - always-visible Aristotle gate status, not just the
+   conditional Procurement-detail box (mockup shows this for every issue). */
+.pcc-gate-clear{display:flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600;color:var(--bblue)}
+.pcc-gate-blocked{display:flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600;color:var(--lk-danger)}
 .pcc-synth-summary{
   font-size:13.5px;line-height:1.6;color:var(--lk-ink);margin:14px 18px 0;
   background:var(--lk-panel);border-left:3px solid var(--lk-pri);
@@ -3302,7 +3374,7 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
 .pcc-doc-row:hover{background:var(--lk-panel)}
 
 /* ── Detail Panel, Refined (task #124 follow-on): 3-tab issue view ── */
-.pcc-detail-grid{display:grid;grid-template-columns:1fr 260px;gap:0}
+.pcc-detail-grid{display:grid;grid-template-columns:1fr 280px;gap:0}
 .pcc-detail-main{padding:16px 20px;border-right:1px solid var(--lk-line);min-width:0}
 .pcc-detail-side{padding:16px 14px;background:var(--lk-panel)}
 @media(max-width:1000px){.pcc-detail-grid{grid-template-columns:1fr}.pcc-detail-side{border-top:1px solid var(--lk-line)}}
@@ -3370,9 +3442,17 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
 .star{color:var(--lk-pri);font-size:10px;margin-left:2px}
 
 /* Sidebar */
-.pcc-side-block{margin-bottom:20px}
-.pcc-side-hd{font:700 10px/1 var(--mono);text-transform:uppercase;color:var(--lk-mut2);margin:0 0 8px;letter-spacing:.04em}
-.pcc-side-sub{font:700 9.5px/1 var(--mono);text-transform:uppercase;color:var(--lk-mut2);margin:0 0 6px;letter-spacing:.03em}
+.pcc-actrail{display:flex;flex-direction:column;gap:7px}
+.pcc-actbtn{display:flex;align-items:center;gap:8px;width:100%;text-align:left;border:1px solid var(--lk-line2);
+  background:var(--lk-surface);color:var(--lk-ink);font:700 12.5px var(--sans);padding:9px 12px;
+  border-radius:var(--lk-r-s);cursor:pointer;text-decoration:none;box-sizing:border-box}
+.pcc-actbtn:hover{background:var(--lk-nested)}
+.pcc-actbtn .ic{width:15px;text-align:center;flex:none;font-size:12px}
+.pcc-side-block{margin-bottom:22px}
+.pcc-side-hd{display:flex;align-items:center;justify-content:space-between;
+  font:700 10px/1 var(--mono);text-transform:uppercase;color:var(--lk-mut2);margin:0 0 8px;letter-spacing:.04em}
+.pcc-side-sub{font:700 9.5px/1 var(--mono);text-transform:uppercase;color:var(--lk-mut2);margin:10px 0 4px;letter-spacing:.03em}
+.pcc-side-sub:first-child{margin-top:0}
 
 /* Stakeholders (piece #6, port #47): grouped-by-company list with a
    toggleable dot, not flat pills - click names to select, envelope
@@ -3396,7 +3476,7 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
 .pcc-stake-hint{font-size:10.5px;color:var(--lk-mut2);margin-top:6px;font-style:italic}
 .pcc-src-tag{display:inline-block;font:800 8.5px/1 var(--mono);text-transform:uppercase;letter-spacing:.03em;
   padding:2px 6px;border-radius:4px;vertical-align:middle}
-.pcc-src-real{background:var(--blue-t);color:var(--blue-d)}
+.pcc-src-real{background:var(--blue-t);color:var(--bblue)}
 .pcc-datestat{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--lk-line);font-size:12px}
 .pcc-datestat:last-child{border-bottom:none}
 .pcc-datestat b{font-family:var(--mono);font-weight:700}
@@ -3534,9 +3614,12 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
            silently stop working (the chat script's element lookups will find
            nothing and bail out before the drawer ever gets built). -->
       <aside class="cp-chat-panel" id="cpChatPanel" style="display:none">
-        <div class="cp-chat-hd">
-          <div class="cp-chat-title">Back Office</div>
-        </div>
+        <!-- task #18: the .cp-chat-hd "Back Office" title lived here AND the
+             drawer that mounts this panel (buildAmbientAssistant, line
+             ~5457) already renders its own "Back Office" header above this
+             one - a real, live duplicate label. This panel is never shown
+             docked outside the drawer any more (see the comment above), so
+             the drawer's header is the only one that needs to say it. -->
         <div class="cp-chat-cmd">
           <input type="search" id="cpChatSearch" class="cp-chat-search" placeholder="Search messages…" aria-label="Search messages">
         </div>
@@ -5896,6 +5979,18 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
       body.prepend(note);
     }
   }
+  // Sidebar Dismiss (issue-level) - same honesty pattern as
+  // pccChecklistIconNote above, just without a collapsible body to prepend
+  // into (the sidebar Actions block isn't a toggle row), so the note is
+  // appended once, right after the button itself.
+  function pccSideDismissNote(evt, btn) {
+    evt.stopPropagation();
+    if (btn.nextElementSibling && btn.nextElementSibling.classList.contains("pcc-not-real-note")) return;
+    const note = document.createElement("div");
+    note.className = "pcc-not-real-note";
+    note.textContent = "Not wired to anything real yet - this button doesn't save anything (task #44).";
+    btn.insertAdjacentElement("afterend", note);
+  }
   // Stakeholder multi-select + interim mailto: compose (piece #6, port
   // #47). Real Outlook-COM compose-to-recipients action is task #35, not
   // built yet - this is a plain client-only mailto: link, same as the
@@ -6886,6 +6981,24 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
       }
     });
     const allChecklistRows = [...checklistItems, ...generalRows];
+    // Visual-fidelity pass (2026-08-02): per-row attachment card, matched
+    // to the row sharing its raw_item_id - real join, same relationship
+    // list_attachments_for_issue already establishes server-side (a
+    // "reference"-kind attachment's entity_id IS the raw_item id). Issue-
+    // scoped attachments (worker outputs/uploads, kind output/upload) have
+    // no single row to attach to and stay in Related documents below;
+    // filtering those out of the per-row map here is what lets Related
+    // documents exclude only the ones actually shown per-row, not all of
+    // them - see matchedAttachmentIds below.
+    const PCC_ATTACH_KIND_LABEL = { reference: "From email", output: "Worker output", upload: "Uploaded" };
+    const attachmentsByRawItem = new Map();
+    (d.attachments || []).forEach(a => {
+      if (a.entity_type !== "raw_item") return;
+      const key = String(a.entity_id);
+      if (!attachmentsByRawItem.has(key)) attachmentsByRawItem.set(key, []);
+      attachmentsByRawItem.get(key).push(a);
+    });
+    const matchedAttachmentIds = new Set();
     let pccCheckRowSeq = 0;
     const pccCheckRowHtml = (it) => {
       const badge = PCC_CHECK_BADGE[it.kind] || PCC_CHECK_BADGE.general;
@@ -6896,6 +7009,18 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
         <button type="button" class="pcc-xact-btn" data-gen="${pccEsc(c.kind)}"${c.kind === "custom" ? ` data-instructions="${pccEsc(c.label + (c.rationale ? " - " + c.rationale : ""))}"` : ""}>${pccEsc(c.label)}</button>`).join("");
       const rationaleHtml = it.actions.map(c => c.rationale
         ? `<div class="pcc-xact-why"><b>${pccEsc(c.label)}:</b> ${pccEsc(c.rationale)}</div>` : "").join("");
+      const rowAttachments = it.rawItemId != null ? (attachmentsByRawItem.get(String(it.rawItemId)) || []) : [];
+      rowAttachments.forEach(a => matchedAttachmentIds.add(a.id));
+      const attachHtml = rowAttachments.map(a => {
+        const desc = (a.extracted_text || "").trim().slice(0, 160);
+        return `<div class="pcc-attach-row2">
+          <div class="pcc-attach-left">
+            <a class="pcc-attach-name" href="/api/attachments/${a.id}/download" target="_blank" rel="noopener">${pccEsc(a.filename)}</a>
+            <div class="pcc-attach-meta">${a.uploaded_ts ? pccFmtDate(a.uploaded_ts) + " &middot; " : ""}${pccEsc(PCC_ATTACH_KIND_LABEL[a.kind] || a.kind)}</div>
+          </div>
+          ${desc ? `<div class="pcc-attach-desc">${pccEsc(desc)}${a.extracted_text.length > 160 ? "…" : ""}</div>` : ""}
+        </div>`;
+      }).join("");
       return `<div class="pcc-xrow">
         <div class="pcc-xrow-date">${pccEsc(dateLabel)}</div>
         <div class="pcc-xrow-left" onclick="pccXTog(this,'${rowId}')">
@@ -6913,6 +7038,7 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
         </div>
         <div class="pcc-xrow-body" id="${rowId}">
           ${rationaleHtml}
+          ${attachHtml}
           ${linkHtml ? `<div class="pcc-check-link">${linkHtml}</div>` : '<div class="pcc-nolink">no deep link yet</div>'}
         </div>
       </div>`;
@@ -7011,8 +7137,11 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
     // "reference") plus anything a worker produces or Marc uploads for this
     // issue directly (kind "output"/"upload") - see workgraph_store.
     // list_attachments_for_issue and GET /api/workgraph/issues/{id}.
-    const attachments = d.attachments || [];
-    const PCC_ATTACH_KIND_LABEL = { reference: "From email", output: "Worker output", upload: "Uploaded" };
+    // Excludes matchedAttachmentIds (visual-fidelity pass, 2026-08-02) -
+    // those already rendered inline on the checklist row that shares their
+    // raw_item_id; showing them again here would be the same duplication
+    // bug found and fixed elsewhere this session.
+    const attachments = (d.attachments || []).filter(a => !matchedAttachmentIds.has(a.id));
     const docRows = attachments.map(a => `
       <a class="pcc-doc-row" href="/api/attachments/${a.id}/download" target="_blank" rel="noopener">
         <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/></svg>
@@ -7036,9 +7165,18 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
             ${(issue.reference_ids || []).map(r => `<span class="pcc-procbox-ref">${pccEsc(r)}</span>`).join("")}
             ${issue.value_found ? `<span class="pcc-procbox-money">${pccEsc(window.hoFmtMoney(issue.value_found))}</span>` : ""}
           </div>
-          <div class="pcc-procbox-gate" style="color:${issue.has_unmet_prerequisite ? "var(--lk-danger)" : "var(--blue-d)"}">${issue.has_unmet_prerequisite ? "&#9940; Aristotle prerequisite unmet" : "&#10003; No unmet Aristotle prerequisite right now"}</div>
+          <div class="pcc-procbox-gate" style="color:${issue.has_unmet_prerequisite ? "var(--lk-danger)" : "var(--bblue)"}">${issue.has_unmet_prerequisite ? "&#9940; Aristotle prerequisite unmet" : "&#10003; No unmet Aristotle prerequisite right now"}</div>
         </div>
       </div>` : "";
+    // "Cleared to act" (visual-fidelity pass, 2026-08-02): the mockup shows
+    // this always, for every issue, not only financial requisitions with a
+    // reference id/value - added as its own zone rather than folded into
+    // Procurement detail so non-procurement issues get a gate status too.
+    const clearedToActZoneHtml = `
+      <div class="pcc-zone">
+        <div class="pcc-zone-hd"><span>Cleared to act</span></div>
+        <div class="${issue.has_unmet_prerequisite ? "pcc-gate-blocked" : "pcc-gate-clear"}">${issue.has_unmet_prerequisite ? "&#9940; Aristotle prerequisite unmet" : "&#10003; No unmet Aristotle prerequisite right now"}</div>
+      </div>`;
 
     // task #124 follow-on: "Related" - conditional exactly like the mockup's
     // fixed version (real evidence deep link if any exist, real supplier
@@ -7108,8 +7246,8 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
       <div class="pcc-side-block">
         <div class="pcc-side-hd">At a glance</div>
         ${issue.value_found ? `<div class="pcc-datestat"><span>Value found</span><b>${pccEsc(window.hoFmtMoney(issue.value_found))}</b></div>` : ""}
-        <div class="pcc-datestat"><span>Gate status</span><b style="color:${issue.has_unmet_prerequisite ? "var(--lk-danger)" : "var(--blue-d)"}">${issue.has_unmet_prerequisite ? "gated" : "clear"}</b></div>
-        <div class="pcc-datestat"><span>Precedent</span><b style="color:var(--lk-mut2)">${precedent ? pccEsc(precedent.title) : "none found"}</b></div>
+        <div class="pcc-datestat"><span>Gate status</span><b style="color:${issue.has_unmet_prerequisite ? "var(--lk-danger)" : "var(--bblue)"}">${issue.has_unmet_prerequisite ? "gated" : "clear"}</b></div>
+        <div class="pcc-datestat"><span>Precedent</span><b style="color:${precedent && precedent.days_to_close <= 1 ? "var(--bblue)" : "var(--lk-mut2)"}">${precedent ? `${pccEsc(precedent.days_to_close)}d, ${pccEsc(precedent.title)}` : "none found"}</b></div>
       </div>`;
     // 2026-08-02 port: the dynamic top-candidate button is gone from here -
     // it used to appear in BOTH this sidebar block AND the header action
@@ -7117,12 +7255,29 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
     // candidate is now just whichever checklist row sorts first (candidate_
     // actions is already score-sorted server-side). This block keeps only
     // the static, always-useful, issue-level actions.
+    // Visual-fidelity pass (2026-08-02): Dismiss + Open email/Draft reply/
+    // Draft forward were in the mockup's Actions rail but got dropped
+    // during the port - restoring them here as real .pcc-actbtn rows.
+    // Dismiss is visual-only, same honesty pattern as the checklist rows'
+    // icons (no real issue-level "dismissed" state exists yet - task #44).
+    // The mail actions reuse the SAME deep-link data already wired for
+    // Progress rows (pccDeepLinkHtml's data-open-action/data-raw-item-id),
+    // taken from the first evidence item that actually has any - never
+    // fabricated, and omitted entirely (not faked) when no evidence has
+    // deep links yet.
+    const primaryEvidenceLinks = evidence.map(e => e.deep_links || []).find(links => links.length) || [];
+    const primaryMailActionsHtml = primaryEvidenceLinks.map(link => link.kind === "action"
+      ? `<button type="button" class="pcc-actbtn" data-open-action="${pccEsc(link.endpoint)}" data-raw-item-id="${pccEsc(link.raw_item_id)}"><span class="ic">&#8618;</span>${pccEsc(link.label)}</button>`
+      : `<a class="pcc-actbtn" href="${pccEsc(link.url)}" target="_blank" rel="noopener"><span class="ic">&#8618;</span>${pccEsc(link.label)}</a>`
+    ).join("");
     const sideActionsHtml = `
       <div class="pcc-side-block">
         <div class="pcc-side-hd">Actions</div>
-        <div class="pcc-actions-row" style="flex-direction:column;align-items:stretch;gap:6px">
-          <button class="mqb ghost" type="button" data-act="done">Mark done</button>
-          <button class="mqb ghost" type="button" data-act="snooze">${PCC_BELL_SVG} Snooze 3d</button>
+        <div class="pcc-actrail">
+          <button class="pcc-actbtn" type="button" data-act="done"><span class="ic">&#10003;</span>Mark done</button>
+          <button class="pcc-actbtn" type="button" data-act="snooze"><span class="ic">${PCC_BELL_SVG}</span>Snooze 3d</button>
+          <button class="pcc-actbtn" type="button" style="border-color:var(--lk-danger);color:var(--lk-danger)" onclick="pccSideDismissNote(event,this)"><span class="ic">&#10005;</span>Dismiss</button>
+          ${primaryMailActionsHtml}
         </div>
       </div>`;
 
@@ -7239,6 +7394,7 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
               ${summaryZoneHtml}
               ${deadlinesZoneHtml}
               ${checklistZoneHtml}
+              ${clearedToActZoneHtml}
               ${keyFactsZoneHtml}
               ${procurementZoneHtml}
               ${relatedZoneHtml}
@@ -7256,9 +7412,9 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
           <div class="pcc-detail-subpane" data-pane="project" id="pccProjectPane">${project ? '<div class="pcc-empty">Loading&hellip;</div>' : '<div class="pcc-empty">This issue isn&rsquo;t part of a project yet.</div>'}</div>
         </div>
         <div class="pcc-detail-side">
+          ${sideActionsHtml}
           ${sideStakeholdersHtml}
           ${sideGlanceHtml}
-          ${sideActionsHtml}
         </div>
       </div>`;
       // Tasks and Routing zones removed per the locked design. The raw

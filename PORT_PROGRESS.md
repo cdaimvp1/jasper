@@ -149,6 +149,95 @@ Real decisions already made this session (don't re-litigate):
    references to anything removed. #47 is complete - committing/pushing
    final state now.
 
+### Post-completion correction (2026-08-02): visual-fidelity audit
+
+Marc flagged, after #47 was marked done, that the port did not actually
+look like the mockup he'd iterated on - a real, valid complaint. Instead
+of trusting my own summary of the work, ran a mechanical, line-by-line
+diff (Explore agent) of the mockup file against the real CSS/JS, with
+instructions to report concrete discrepancies only, not opinions. Findings
+and fixes, ranked by what the audit found highest-impact:
+
+1. Only `--lk-pri`/`--lk-danger`-adjacent tokens had moved to the mockup's
+   palette - `--lk-panel`/`--lk-nested`/`--lk-line`/`--lk-line2`/`--lk-ink`/
+   `--lk-ink2`/`--lk-mut`/`--lk-mut2`/`--lk-elev` were still the old
+   neutral olive/beige theme. Ported the mockup's full :root block
+   verbatim. Also caught and fixed: `--lk-danger` had been left at
+   `--red-d` (byte-identical to the primary), recreating exactly the
+   "blocked reads as just another button" problem the mockup's palette
+   was designed to avoid - now the mockup's actual `#521207` deep maroon.
+2. The entire `.pcc-xrow` checklist-row CSS family was missing - the JS
+   (`pccCheckRowHtml`) already emitted `.pcc-xrow`/`.pcc-xrow-date`/
+   `.pcc-micro-btn`/`.chev`/etc, but NOTHING styled them, so every
+   checklist row rendered as unstyled stacked divs. This was probably the
+   single biggest visible gap. Ported the full rule set from the mockup.
+3. Sidebar Actions was missing 4 of 6 mockup buttons (Dismiss, Open email,
+   Draft reply, Draft forward) and used the wrong button component
+   (`.mqb.ghost` instead of `.pcc-actbtn`, which didn't exist in CSS
+   either). Restored all 6 using real data: Dismiss is visual-only (same
+   honesty pattern as checklist icons, new `pccSideDismissNote`), the mail
+   actions pull from the first evidence item that actually has deep links
+   (never fabricated, simply absent when no evidence has any yet).
+4. "Cleared to act" - an always-visible Aristotle gate zone in the mockup
+   - only existed conditionally inside "Procurement detail" (gated behind
+   having a reference id or dollar value). Added as its own always-shown
+   zone; left the conditional Procurement-detail box in place rather than
+   removing it (that's real informational content, not just styling -
+   changing what data shows, not just how, felt like the wrong call to
+   make unilaterally after already being told once this session not to
+   change more than asked).
+5. Zone headers (`.pcc-zone-hd`) were still the old bold/banded/bordered
+   "HOME-SURFACE" style, not the mockup's plain small-caps-mono label.
+   Fixed via a `.pcc-detail-main .pcc-zone-hd` override (scoped so it
+   doesn't also reskin the Project tab's zone headers, which share the
+   bare class and weren't part of what Marc asked to match here).
+6. Sidebar block order was Stakeholders/At a glance/Actions; mockup is
+   Actions/Stakeholders/At a glance. Reordered.
+7. `.pcc-src-real` and the gate-status/precedent colors used `--blue-d`
+   instead of `--bblue` (mockup's actual "cleared" blue - already existed
+   in the real file at the correct value, just unused by these rules).
+   Fixed. Precedent stat now highlights blue when `days_to_close <= 1`
+   (mockup's "fast precedent" emphasis), shows the real day count.
+8. Per-row attachment card (two-column, name/date/type left + description
+   right) was entirely gone from checklist rows - attachments had been
+   generalized into a separate "Related documents" zone instead. Restored
+   the per-row card via a real join (a "reference"-kind attachment's
+   entity_id IS its raw_item_id, same relationship
+   list_attachments_for_issue already uses server-side) - and filtered
+   Related documents to exclude whatever's now shown per-row, so the same
+   attachment doesn't render twice.
+9. Minor spacing/font-size drift fixed: detail title 17px, meta-line 12px,
+   headline-pill 12.5px, side column 280px, side-block margin 22px,
+   side-sub margin 10px/4px, envelope button now right-aligned via
+   `.pcc-side-hd{display:flex;justify-content:space-between}`, added
+   missing `.pcc-not-real-note` styling.
+
+Deliberately NOT changed, and why:
+- Amber/teal token values (`--amber-t`/`--amber-d`/`--teal-t`/`--teal-d`)
+  drift slightly from the mockup's exact PMS values, but these are old,
+  app-wide-shared tokens used in badges/tags far outside the Detail Panel
+  - remapping them globally for a Detail-Panel-only hover-color match was
+  a bigger blast radius than the ask warranted. Low visual impact anyway
+  (amber is a near-miss; teal isn't even used by anything the real
+  Detail Panel currently renders).
+- The mockup's "Run Contract Review" completed/re-run-warning flow
+  (View Redlined DOCX link, re-run confirmation) is a real feature gap,
+  not ported - it needs a real "already ran" signal per checklist row
+  that doesn't exist in the data model yet. Flagging rather than faking
+  it with a fake timer, consistent with this app's own honesty rule.
+- Progress's channel-tag taxonomy (`.pcc-chan-chip`) vs. the mockup's
+  kind-tag taxonomy (`.pcc-kind-decision`/etc), and the missing
+  stakeholder "primary contact" star, are BOTH already-made, correct
+  decisions from earlier this session (Checklist absorbed decision/
+  escalation semantics per Marc's own confirmed choice; per-issue parties
+  genuinely have no is_primary field) - not misses, listed here so a
+  future session doesn't "fix" them back into duplicating something.
+
+Full pytest suite green; all 17 real inline `<script>` blocks pass
+`node --check` (only the expected Jinja `{{ }}` tag flags); server
+restarted and curl-verified against `/cockpit` for every new class/value
+and zero dangling references to anything removed.
+
 ### Task-list additions since this file was first written (2026-08-02)
 
 Marc asked for a commercial-value gut-check and a full task-list audit

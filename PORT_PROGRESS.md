@@ -252,13 +252,27 @@ No change to the approved autonomous sequence (#47 -> #18 -> #21 -> #34 ->
 
 ## Then, in order, once #47 is fully done/stable/pushed:
 
-- #18 — remove duplicate "Back Office" label (2 known lines:
-  cockpit.html:3504 and :5423 per the original task note - RE-VERIFY these
-  line numbers live before editing, this file has moved a lot during the
-  port; do not trust the cached line numbers blindly).
-- #21 — fix `candidate_actions()`'s project-synthesis fallback
-  truthy-empty-dict bug. Read the real code first to confirm the bug is
-  exactly what the task title implies before fixing it.
+- #18 — [DONE, committed `53e5773`] remove duplicate "Back Office" label.
+  Live line numbers had moved (as warned) - the real duplicate was the
+  `.cp-chat-title` div inside `#cpChatPanel` (docked markup, moved into
+  the ambient drawer at drawer-build time) rendering "Back Office" a
+  second time right below the drawer's own `.theo-amb-h` header that
+  already says it. Removed the inner one - the panel's never shown
+  docked outside the drawer any more, so the drawer's header is the only
+  one that needs to say it. Verified: exactly one `>Back Office<` render
+  left (was 2), full suite green, landed inside the same commit as the
+  visual-fidelity correction above (was mid-edit when Marc's fidelity
+  complaint came in, so it got bundled rather than committed separately).
+- #21 — [DONE, committed `5db933d`] fixed `candidate_actions()`'s
+  project-synthesis fallback. Real bug, confirmed by reading the code
+  first: `server_lean.py` picked `synthesis or project_synthesis` - a
+  synthesis row with a real summary but an EMPTY suggested_actions list
+  is still a non-empty dict, so it always won that `or` and
+  project_synthesis's own suggested_actions never got a look, even when
+  they had real content. Moved the decision into `candidate_actions()`
+  itself (now takes both explicitly, prefers whichever actually HAS
+  suggested_actions). 2 new regression tests, full suite green, server
+  restarted and live-verified.
 - #34 — design/scope per-checklist-item Aristotle gating. Design-only
   document, no live code change. (Real finding already in the task
   description: `check_prerequisites()` loops per-raw_item internally but

@@ -2075,13 +2075,16 @@
 
 </script>
 <style>
-:root{--surface:#FFFFFF;--red:#E1251B;--red-d:#B41E16;--ink:#1A1A1A;--mut:#4A443C;--mut2:#4A443C;--line:#E1E0DC;--line2:#CECCC7;--bg:#E2E6E1;--pink-t:#FBE7E3;--teal-t:#DCEBE9;--teal-d:#2F6E6B;--amber-t:#FBF1DA;--amber-d:#8A5A00;--blue-t:#E4EBF1;--blue-d:#2E5E8C;--cci-green:#1F7A5A;--cci-yellow:#C9A227;--cci-orange:#D2691E;--cci-red:#C0392B;--ai:#5C2B50;--ai-t:#EDDFE9;--bblue:#0F3A85;--blue-mut:#8FA3BE;--shadow:0 1px 4px rgba(38,30,20,.08);--shadow-lg:0 12px 34px rgba(38,30,20,.12);--glow:0 8px 24px rgba(225,37,27,.28);--sans:'Libre Franklin',system-ui,Arial,sans-serif;--mono:'Roboto Mono',ui-monospace,monospace;--fz-h:30px;--fz-title:16px;--fz-body:14px;--fz-sm:13px;--fz-meta:11.5px;--fz-mono:10.5px;
+:root{--surface:#FBF2E1;--red:#CC5A22;--red-d:#A8471A;--ink:#22160A;--mut:#87643A;--mut2:#87643A;--line:#E0C48D;--line2:#CBA85E;--bg:#EEDCC0;--pink-t:#F1D2C4;--teal-t:#C9E6E0;--teal-d:#146B62;--amber-t:#F1DFA4;--amber-d:#B4841B;--blue-t:#C9E6E0;--blue-d:#146B62;--cci-green:#5C7A2E;--cci-yellow:#B4841B;--cci-orange:#CC5A22;--cci-red:#8B2013;--ai:#5C7A2E;--ai-t:#DCE7BD;--bblue:#146B62;--blue-mut:#87643A;--shadow:0 1px 4px rgba(70,40,8,.08);--shadow-lg:0 12px 34px rgba(70,40,8,.12);--glow:0 8px 24px rgba(204,90,34,.28);--sans:'Libre Franklin',system-ui,Arial,sans-serif;--mono:'Roboto Mono',ui-monospace,monospace;--fz-h:30px;--fz-title:16px;--fz-body:14px;--fz-sm:13px;--fz-meta:11.5px;--fz-mono:10.5px;
 /* Settings view (grafted from the former standalone settings.html) authored against
    --muted/--border/--accent token names that don't exist on this page - alias them
    onto the real tokens rather than rewriting ~330 lines of inline styles. */
 --muted:var(--mut);--border:var(--line);--accent:var(--bblue);}
-/* dark theme, additive token override; light byte-identical */
-html[data-theme="dark"]{--header:#0A0A0A;--tint-8fb3f0:#19253a;--tint-9fb4d2:#172232;--tint-d7e2ef:#162434;--tint-f6d79a:#1E302D;--tint-ff8e85:#3e1d1b;--surface:#262626;color-scheme:dark;--red:#F0574C;--red-d:#D2453A;--ink:#ECECEC;--mut:#B0B0B0;--mut2:#8A8A8A;--line:#3A3A3A;--line2:#484848;--bg:#1C1C1C;--pink-t:#3A211E;--teal-t:#1E302D;--teal-d:#5FBAAE;--amber-t:#2E2713;--amber-d:#DBAA50;--blue-t:#2E2E2E;--blue-d:#7CA6E2;--ai:#C99BD1;--ai-t:#33253B;--bblue:#6E9AD8;--shadow:0 1px 2px rgba(0,0,0,.5),0 1px 3px rgba(0,0,0,.4);--muted:var(--mut);--border:var(--line);--accent:var(--bblue);}
+/* dark theme, additive token override. Sunset Harvest (light, above) / Walnut Night
+   (dark, below) - Marc's pick from the 2026-08-02 color-scheme mockup round, replacing
+   the prior neutral olive/beige dark palette. Buttons/icons recolor with the theme now
+   (--red/--bblue are the theme's primary/secondary accents, not a fixed brand pair). */
+html[data-theme="dark"]{--header:#0A0A0A;--tint-8fb3f0:#19253a;--tint-9fb4d2:#172232;--tint-d7e2ef:#162434;--tint-f6d79a:#1E302D;--tint-ff8e85:#3e1d1b;--surface:#2E2119;color-scheme:dark;--red:#F0916A;--red-d:#D97A50;--ink:#F3E7D4;--mut:#B29A78;--mut2:#B29A78;--line:#4A3626;--line2:#5C4630;--bg:#231A12;--pink-t:#5A2A22;--teal-t:#1E4A42;--teal-d:#6FD6C4;--amber-t:#4F3A14;--amber-d:#F2C368;--blue-t:#1E4A42;--blue-d:#6FD6C4;--ai:#B7CE7C;--ai-t:#3B4420;--bblue:#F2C368;--shadow:0 1px 2px rgba(0,0,0,.5),0 1px 3px rgba(0,0,0,.4);--muted:var(--mut);--border:var(--line);--accent:var(--bblue);}
 
 /* ════════════════════════════════════════════════════════════════════════
    PCC ADD — page-level view toggle + Personal Command Center board.
@@ -2444,21 +2447,42 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
    --lk-pri recreates the exact "blocked reads as just another button"
    failure the mockup's own legend warns about. Every --lk-* surface/ink/
    danger token below now matches the mockup's :root exactly (its PMS-
-   derived warm/pink theme, not the old neutral olive/beige one). Still
-   NOT touching the mockup's dark-mode block, per "not the dark mode" -
-   --lk-* has no dark override anywhere in this file (confirmed via grep),
-   so nothing here needs a dark-mode counterpart added or preserved.
+   derived warm/pink theme, not the old neutral olive/beige one).
+
+   SUPERSEDED same day (2026-08-02), Marc's later direct call: after
+   reviewing a fresh set of app-wide color-scheme mockups he picked
+   "Sunset Harvest" (light) + "Walnut Night" (dark) - a warm-tan/burnt-
+   orange/deep-teal family, replacing the red/burnt-orange pair above.
+   --lk-pri is now the mockup's burnt orange (was brand red); --lk-emph
+   is now deep teal (was a narrower burnt-orange emphasis) - buttons/
+   icons are meant to recolor with the theme now, not stay fixed. The
+   "--lk-* has no dark override" gap called out above is CLOSED here:
+   see the html[data-theme="dark"] block immediately below, which is
+   Walnut Night. window.theoSetTheme('dark'|'light') (defined earlier
+   in <head>) already existed but had no UI control wired to it before
+   now - see the Settings toggle added the same round.
    ═════════════════════════════════════════════════════════════════════════ */
 :root{
-  --lk-canvas:#E2E6E1; --lk-surface:#FFFFFF; --lk-panel:#FCEEEA;
-  --lk-nested:#F5E4DE; --lk-line:#F0D8D3; --lk-line2:#E3C4BD;
-  --lk-ink:#212121; --lk-ink2:#3A2A26; --lk-mut:#8A969E; --lk-mut2:#8A969E;
-  --lk-pri:#E1251B; --lk-pri-t:#FBCFC8;
-  --lk-emph:#C15E19;
-  --lk-flag:#403A33; --lk-danger:#521207;
-  --lk-bubble-me:#403A33; --lk-bubble-me-fg:#F1EEE8;
+  --lk-canvas:#EEDCC0; --lk-surface:#FBF2E1; --lk-panel:#F5E7CB;
+  --lk-nested:#EEDAAE; --lk-line:#E0C48D; --lk-line2:#CBA85E;
+  --lk-ink:#22160A; --lk-ink2:#48331B; --lk-mut:#87643A; --lk-mut2:#87643A;
+  --lk-pri:#CC5A22; --lk-pri-t:#F7D8BC;
+  --lk-emph:#146B62;
+  --lk-flag:#48331B; --lk-danger:#8B2013;
+  --lk-bubble-me:#3D2A16; --lk-bubble-me-fg:#F8F1DC;
   --lk-r-s:8px; --lk-r-c:4px; --lk-r-x:12px;
-  --lk-elev:0 1px 2px rgba(82,18,7,.06),0 2px 6px rgba(82,18,7,.07);
+  --lk-elev:0 1px 2px rgba(70,40,8,.08),0 2px 6px rgba(70,40,8,.10);
+}
+/* Walnut Night - the dark pair of the Sunset Harvest palette above. */
+html[data-theme="dark"]{
+  --lk-canvas:#231A12; --lk-surface:#2E2119; --lk-panel:#2A1F17;
+  --lk-nested:#36271C; --lk-line:#4A3626; --lk-line2:#5C4630;
+  --lk-ink:#F3E7D4; --lk-ink2:#D9C7AA; --lk-mut:#B29A78; --lk-mut2:#B29A78;
+  --lk-pri:#F0916A; --lk-pri-t:#5A2C18;
+  --lk-emph:#F2C368;
+  --lk-flag:#D9C7AA; --lk-danger:#F0483A;
+  --lk-bubble-me:#F0916A; --lk-bubble-me-fg:#241207;
+  --lk-elev:0 1px 3px rgba(0,0,0,.5),0 2px 8px rgba(0,0,0,.45);
 }
 
 /* ── masthead: the 30px greeting collapses to one line ── */
@@ -3624,6 +3648,32 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
          separate page. See pccShowSettings() / CANON_RAIL / the avatar menu. ════ -->
     <div id="cp-view-settings" style="display:none">
     <div style="max-width:760px;margin:0 auto;padding:8px 4px">
+
+  <!-- ── Appearance · Settings, theme toggle ─────────────────────────────── -->
+  <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:6px 0 10px">Appearance</div>
+  <div style="background:var(--surface,#fff);border:1px solid var(--border,#e5e7eb);border-radius:12px;padding:14px 16px;margin-bottom:26px">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+      <div style="color:var(--muted,#667);font-size:13px">Light (Sunset Harvest) or dark (Walnut Night). Buttons, icons, and badges recolor with the theme.</div>
+      <div id="theme-toggle-group" role="group" aria-label="Color theme" style="display:inline-flex;border:1px solid var(--border,#ddd);border-radius:9px;overflow:hidden;flex:none">
+        <button type="button" data-theme-btn="light" onclick="window.theoSetTheme('light');themeToggleReflect();" style="border:none;background:transparent;padding:8px 16px;font:600 13px sans-serif;color:inherit;cursor:pointer">Light</button>
+        <button type="button" data-theme-btn="dark" onclick="window.theoSetTheme('dark');themeToggleReflect();" style="border:none;background:transparent;padding:8px 16px;font:600 13px sans-serif;color:inherit;cursor:pointer;border-left:1px solid var(--border,#ddd)">Dark</button>
+      </div>
+    </div>
+  </div>
+  <script>
+    function themeToggleReflect(){
+      try{
+        var cur=(window.theoTheme&&window.theoTheme())||'light';
+        document.querySelectorAll('#theme-toggle-group [data-theme-btn]').forEach(function(b){
+          var on=b.getAttribute('data-theme-btn')===cur;
+          b.style.background=on?'var(--accent,#0f766e)':'transparent';
+          b.style.color=on?'#fff':'inherit';
+        });
+      }catch(e){}
+    }
+    themeToggleReflect();
+    window.theoReflectTheme=themeToggleReflect;
+  </script>
 
   <!-- ── You (the operator) · Settings #5d ─────────────────────────────── -->
   <div style="font:700 12px/1 var(--mono,monospace);text-transform:uppercase;letter-spacing:.06em;color:var(--muted,#667);margin:6px 0 10px">You</div>

@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <title>JASPER gecko icon — favicon (theme-adaptive)</title>
+  <!-- Same technique as jasper-focus-favicon-adaptive.svg: renders the black
+       gecko PNG on a light browser tab, the white one on a dark tab, via
+       prefers-color-scheme on this stylesheet - no JS, no duplicate <link>
+       tags. The gecko pack ships raster-only assets (no vector master), so
+       both PNGs are embedded as data URIs and toggled with opacity/display
+       rather than swapping <path> fill colors like the focus version did. -->
+  <style>
+    .jg-light { display: block; }
+    .jg-dark { display: none; }
+    @media (prefers-color-scheme: dark) {
+      .jg-light { display: none; }
+      .jg-dark { display: block; }
+    }
+  </style>
+  <image class="jg-light" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAADCklEQVRYw7XXS4hdRRAG4G/ujdFoMERR8R0xGkQEUQPxtYiQhQiuFARBJIKJJAjBjQ8UF4LiTrNwoRhRdCXqRvCBOxEVREUcXUSJ8RGJmUWiqJMxc110Fbfv4c59zZ2Cps/p7lP111/V1X2YXGbQXmKuPY6SSaWFRWzGbbgYB7EPByoQJ5ZhYyjw59GJ9gcOYwE7q3XLcbKvpGePV8bfwzW4GW/F2MfY1gA8Nc/PwhGF3g524WHM4ukYO4zfcEsDeI+sGhNAK4xejzMVulvYHW0N7oq18zgF506LhTZOiucHw8uF6BcD2H+6YZnHs8OUjsrATBhIGs+OvhP9QXyEo/gF3+FzzMW3nRHt9DUsqHwdl8b79w0GfsVqXIXHYk0rAA+kfhgDnVA0H/02PIRNQXsysg534rpoG7E91gyU1ghz14bHP+EF3IM/Yz6pnVPyYlHJ/n0V+IklqVunZP1r2BNj7zdCcBRXxNxGnN7QMRV5OeiFvRWArAU/YMMIzE7ERMY6c+amMJrGc/t9FYxN3Xu6GZ3evaI3DMejf3UlWGgyAqfi6yWYyDNg3Eo7svELcC+uxL8ViATwzkqxUAP4DLfjkLL9/tYtw8dwHs7H2mkYbiuVDm4I489Vnh9TjuQ6DHfjXd3q2Tcph1GUSXdCSTbYr9wF1uABXB4MfKEUoXYAeFEJz/2xtu95MGqMtiiJdVoY+SCUfqvs/yfD2P4K+BtKEh7AP+NSnnStxpu6sc3j9eSGA5dgq3ILyrWP4mqsH9c43e3zRCg7pCRcKsvQzFTv6/FzBWB75cRE3sOXoeypBrBaskreqLcmbG7M95VBObAWZ8Tz8SWU1WV6R6XzR3wT70OP5EGSDMwqCZggVkVL43foLceZKxNXwvzwGd2YfogLK8+z36HsgKR+DheNwPBASQPn6CbWIv5SCs5evKTc/dLz9P6+iqllSaLfEl4liE6jLVTjj0zLeBPEBryt99pdA5rFrZMYH+XSkHe/jnLd2orLlH+E3/EJPg0m2lboZzSv2IMcmYj2/wE9uNsIAu+8zQAAAABJRU5ErkJggg==" width="32" height="32"/>
+  <image class="jg-dark" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAADjElEQVRYw62XS4hdRRCGv3NnEqMJCVFUlKiRxBciiBpIjC4SyEIEVwqCIBIkMSgBceODiAtByU43LkQURVeiLhR84MrgC0VFHIOOEuOT0UFGRTMZM5+LU+1U2ntn5lyn4dC369Tt+uuvR/dp6DjU8rMBesCxPmojtbxpmr779ZcubJwwPgtsAq4FzgEOA08ChwIEGcggEJ0AxNPE/Khz42d1Qp1Rb0t6Rff/GU8ARmLel4y/ql6mXq2+ELID6o4MeCmMF29OVX9Rj4Wx29W71TH1oZBNqD+o2wvwfvuOLmS0GiXptgCnADMhuyOeE4EbQ3caWAGcEevuCZBiXqhfFr/3hpczMc8GG3+nsEyr+/MenRio/tCE54XG04pazIeBN4Ep4Dvgc+B9YDL+2z0BqpivUJ9VN8T6YMXA9+py9RL1vtDpBWvNUAwkD3sRzx6wA7gLuIC2BxRG1gA3AFfEsxHYGTothQN6QG8e4+Xd5cBB4BvgMeBm4Pd4X9yaBPaGwQnaZlTAD9eAEnVr1C3qM+qdIXutCsGUelG826iuLiFcyM5ABpqmKd5NAe/QltxbIfsiqc4Cq4GXgfXAOPDHnB9DNqCq7ZbuNxrzVeF5aUSl/D4Oxlgo+bqCIGV0L9ZPVWE4GvPTqQqWFEBdmiepnwxgopwBoy7QiLqCKcbXqbeoF6tHEogC4KWahUEgekNgKWMPsAH4lbbkppnrC9uBM2nPgVVLQf1IdDrUK9X31EeS57/FkZzDcJP6SuqefUtyIQbytWsmZOPAPtqTbw9wPm0pfkjbhEaCkceBI8Cu0HVRIRiQLJtp2/DKMPJ6bPoZ8BXwQBgbT8Cfo231h4C/utJfkm25+nw6YsvxekKVZOeq22xvQWXcq16qru1UBVX53B+b/ahelzYr/aBJ67XqtwnAzuTE4ksxdzD1o9jswX51nRIUdWvVEzZV7/vamy8JVwEnx++jMdf3uibJdqc9vwY+jfUsdDgRK+8KA2PqyuTRaDzFu+urdrw/M9ZpVFQ/nGL6hnpWlaSNuju6YaF+Uj07J+l8o+kHgLl73OnAB8C6WP8JHAC+pC3DrcCFzPWIZcCtwBOkz7NOF5JEfymxzeGVtrffeswk+T114g0bghrEevVFj792Z0Bj6jXDGG8GgUij3P2kvWxuA84Lun8C3gbejTAc91W8GOoHavQBUb4N/t086fznU32xcf8HJWcsbkQRbuwAAAAASUVORK5CYII=" width="32" height="32"/>
+</svg>

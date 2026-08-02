@@ -7,10 +7,10 @@
   "theme_color": "#E2E6E1",
   "background_color": "#E2E6E1",
   "icons": [
-    { "src": "/static/jasper-desktop-256x256.png", "sizes": "256x256", "type": "image/png", "purpose": "any" },
-    { "src": "/static/jasper-desktop-512x512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
-    { "src": "/static/jasper-focus-icon-transparent.png", "sizes": "1024x1024", "type": "image/png", "purpose": "any" },
-    { "src": "/static/jasper-desktop-white-512x512.png", "sizes": "512x512", "type": "image/png", "purpose": "monochrome" },
-    { "src": "/static/jasper-desktop-512x512.png", "sizes": "512x512", "type": "image/png", "purpose": "monochrome" }
+    { "src": "/static/jasper-gecko-256x256.png", "sizes": "256x256", "type": "image/png", "purpose": "any" },
+    { "src": "/static/jasper-gecko-512x512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/static/jasper-gecko-1024x1024.png", "sizes": "1024x1024", "type": "image/png", "purpose": "any" },
+    { "src": "/static/jasper-gecko-white-512x512.png", "sizes": "512x512", "type": "image/png", "purpose": "monochrome" },
+    { "src": "/static/jasper-gecko-white-256x256.png", "sizes": "256x256", "type": "image/png", "purpose": "monochrome" }
   ]
 }

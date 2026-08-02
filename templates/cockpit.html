@@ -9,9 +9,11 @@
      picked the wrong icon. adaptive.svg embeds a prefers-color-scheme rule so the
      tab favicon itself switches black/white with the tab's theme; favicon.ico is
      the fallback for contexts that don't fetch SVG favicons; the manifest is what
-     the install/pin flow reads for the desktop/taskbar icon. -->
-<link rel="icon" href="/static/favicon.ico" sizes="any">
-<link rel="icon" href="/static/jasper-focus-favicon-adaptive.svg" type="image/svg+xml">
+     the install/pin flow reads for the desktop/taskbar icon.
+     Switched 2026-08-02 to the gecko mark as primary - jasper-focus-* kept on disk
+     as backup, unreferenced, nothing deleted. -->
+<link rel="icon" href="/static/jasper-gecko-favicon.ico" sizes="any">
+<link rel="icon" href="/static/jasper-gecko-favicon-adaptive.svg" type="image/svg+xml">
 <link rel="manifest" href="/static/site.webmanifest">
 <meta name="theme-color" content="#E2E6E1">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -2980,18 +2982,24 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
 
    Colour follows theo-color.css, not an invented palette:
      · the NEUTRAL SHADE LADDER carries the hierarchy, all of it;
-     · THREE-COLOUR RULE - one primary (plum, shades) + one emphasis (burnt
-       orange); nothing else in the chrome gets a hue;
-     · STATUS IS MONOCHROME graphite, Lilly red reserved for real blockers;
+     · THREE-COLOUR RULE - one primary + one emphasis (burnt orange); nothing
+       else in the chrome gets a hue;
      · NO pale tint fills for attention - transparent ground + an orange rule;
      · PER-WORKER IDENTITY is the sanctioned exception, on its own axis, via
        the --w-hue custom property painted per slug by paintWorkerHues().
+   Updated 2026-08-02, Marc's direct call: primary switched from plum to the
+   real Lilly brand red (PMS 485, same hex the file's OWN --red token already
+   used elsewhere) per the detail-panel redesign - "status is monochrome,
+   red reserved for real blockers" is retired as a rule, not just for this
+   panel, since --lk-pri is a shared :root token read by the chat composer
+   and the inbox list's active-row indicator too, not only pcc-detail-*.
+   --lk-danger is untouched - it was already byte-identical to --red-d.
    ═════════════════════════════════════════════════════════════════════════ */
 :root{
   --lk-canvas:#E2E6E1; --lk-surface:#FFFFFF; --lk-panel:#F5F2ED;
   --lk-nested:#EDEAE3; --lk-line:#E3DED6; --lk-line2:#D3CDC3;
   --lk-ink:#1A1A1A; --lk-ink2:#3A362F; --lk-mut:#505A64; --lk-mut2:#564F48;
-  --lk-pri:#5C2B50; --lk-pri-t:#EDDFE9;
+  --lk-pri:#E1251B; --lk-pri-t:#FBCFC8;
   --lk-emph:#C15E19;
   --lk-flag:#403A33; --lk-danger:#B41E16;
   --lk-bubble-me:#403A33; --lk-bubble-me-fg:#F1EEE8;
@@ -3191,6 +3199,17 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .mqw-reason-warn{color:var(--amber-d)}
 .pcc-why-line{font-size:12px;color:var(--lk-mut2);margin-top:8px;font-family:var(--mono);line-height:1.4}
+/* pcc-headline-pill: the merged status+reason pill (2026-08-02 header port).
+   Deliberately its own class, not pcc-why-line - see the JS comment where
+   this is built. Format/color of the old small pcc-status-badge, place/size
+   of the old pcc-why-line box. mqw-reason-warn (gated) overrides to the
+   real danger colors, not amber - red is the pill's own DEFAULT color now
+   that --lk-pri is brand red, so "gated" needs a color that still reads as
+   distinctly worse than "normal," not the same hue. */
+.pcc-headline-pill{font:800 12px/1 var(--mono);text-transform:uppercase;letter-spacing:.03em;
+  color:var(--lk-pri);background:var(--lk-pri-t);border-radius:20px;padding:6px 14px;
+  display:inline-flex;align-items:center;margin-top:6px;width:fit-content}
+.pcc-headline-pill.mqw-reason-warn{color:var(--lk-danger);background:var(--pink-t)}
 .mqwrowmeta{margin-top:7px;gap:7px}
 /* task #63 (bulk triage) - scoped to match this view's --lk- surface/line tokens */
 .mqwrow-shell{border-bottom:1px solid var(--lk-line);background:var(--lk-surface)}
@@ -6686,8 +6705,12 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
     // labels it plainly so Marc doesn't have to visit the Gate Board to
     // recognize what kind of reason this is.
     const gatedBadgeHtml = issue.has_unmet_prerequisite ? '<span class="pcc-deadline-badge" style="margin-right:6px;background:var(--pink-t);color:var(--red-d)">Gated</span>' : "";
-    const whyLineHtml = (issue.confidence_tier !== "L" && issue.nba_reason)
-      ? `<div class="pcc-why-line${issue.has_unmet_prerequisite ? " mqw-reason-warn" : ""}">${gatedBadgeHtml}${pccEsc(issue.nba_reason)}</div>` : "";
+    // whyLineHtml itself is built further down, once statusLabel exists -
+    // see the merged-pill block near "One clean status badge" below. It used
+    // to render unconditionally from issue.nba_reason with no relationship to
+    // the separate status-badge chip - the two frequently said the literal
+    // same word ("your move") right next to each other for any "active"
+    // issue with a generic reason, which is the common case, not an edge one.
     const learnedHtml = window.mqLearn ? window.mqLearn(issue) : "";
 
     // task #77: supplier precedent ("last time with this supplier") - the
@@ -6990,19 +7013,32 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
         </div>
       </div>` : "";
 
-    // One clean status badge + a single plain meta line, instead of a row of
-    // competing colored chips (category/project/nba-reason/due/confidence all
-    // fighting for attention) - confirmed against Marc's reference screenshots
-    // that a calmer header reads much better than a "chip zoo."
+    // Header redesign (2026-08-02, ported from the Detail-Panel mockup): title
+    // first, ONE pill for status (was two competing "your move"/"your move"-
+    // shaped elements - the small status-badge and the separate why-line both
+    // rendered issue.nba_reason verbatim whenever it happened to equal
+    // PCC_STATE_LABEL[state], which is the common case for "active" issues -
+    // see mergedHeadlineText below), then a trimmed meta line underneath.
     const statusLabel = PCC_STATE_LABEL[issue.state] || issue.state;
+    // One slot, never a literal duplicate: prefer the specific nba_reason
+    // over the generic state label, but only when they actually differ -
+    // otherwise just show the state label once, not the same word twice.
+    const nbaReasonText = (issue.confidence_tier !== "L" && issue.nba_reason) ? issue.nba_reason : null;
+    const headlineIsRedundant = nbaReasonText && nbaReasonText.trim().toLowerCase() === statusLabel.trim().toLowerCase();
+    const headlineText = (nbaReasonText && !headlineIsRedundant) ? nbaReasonText : statusLabel;
+    // pcc-headline-pill is its OWN class, not a reuse of pcc-why-line - that
+    // class is shared with the Project tab's plain-text "Top priority" line
+    // (line ~8261), which must stay small mono text, not become a big pill.
+    const whyLineHtml = `<div class="pcc-headline-pill${issue.has_unmet_prerequisite ? " mqw-reason-warn" : ""}">${gatedBadgeHtml}${pccEsc(headlineText)}</div>`;
     const primaryChannel = evidence.length ? (PCC_CHANNEL_META[evidence[0].type] || { label: evidence[0].type }).label : null;
     // Enhancement #90: category isn't shown anywhere in the detail panel
     // today despite driving Total Recall matching and NBA scoring - a quiet
     // label here explains WHY a precedent/lesson badge appeared.
     const pccCategoryLabel = c => c ? c.replace(/-/g, " ").replace(/\b\w/g, ch => ch.toUpperCase()) : "";
+    // "EMAIL" / "Thread of N" dropped from the meta line (Marc's direct call,
+    // 2026-08-02) - channel+thread-count read as noise ahead of the more
+    // useful project/value bits that follow.
     const metaBits = [];
-    if (primaryChannel) metaBits.push(primaryChannel.toUpperCase());
-    metaBits.push(`Thread of ${evidence.length || 1}`);
     metaBits.push(`Owner ${pccEsc(issue.owner === "marc" ? "Marc Lane" : (issue.owner || "Marc Lane"))}`);
     if (issue.category) metaBits.push(pccEsc(pccCategoryLabel(issue.category)));
     if (project) metaBits.push(`Project: ${pccEsc(project.name)}`);
@@ -7058,13 +7094,12 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
     body.innerHTML = `
       <div class="pcc-detail-hd">
         <div class="pcc-detail-hd-main">
+          <div class="pcc-detail-title">${pccEsc(displayTitle)}</div>
+          ${whyLineHtml}
           <div class="pcc-detail-meta">
-            <span class="pcc-status-badge status-${issue.state}">${pccEsc(statusLabel)}</span>
             ${(issue.reference_ids || []).map(r => `<span class="pcc-deadline-badge" style="background:var(--bg);color:var(--mut2)">${pccEsc(r)}</span>`).join("")}
             <span class="pcc-meta-line">${metaLine}</span>
           </div>
-          <div class="pcc-detail-title">${pccEsc(displayTitle)}</div>
-          ${whyLineHtml}
           ${learnedHtml}
           ${precedentHtml}
           ${supplierGateHtml}

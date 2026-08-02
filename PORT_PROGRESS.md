@@ -327,6 +327,16 @@ No change to the approved autonomous sequence (#47 -> #18 -> #21 -> #34 ->
   (fully observed) and "Time saved" (real count x a stated assumption)
   strictly separate and labeled; the mockup uses hypothetical numbers
   explicitly marked as such, never presented as real.
+  REVISED (`37358bd`) after Marc's follow-up: added a merged per-skill +
+  per-NBA telemetry table (one row per shared action_kind, searchable/
+  filterable, collapsed by default), resolved a real double-counting
+  trap in "whole assisted journey" attribution via atomic-per-action
+  counting + a row-level chain drill-down instead of bundled numbers,
+  and added one real schema piece - `time_saved_assumptions`
+  (action_kind, seconds_saved_per_exec, set_by, set_ts) - so a future
+  assumption change doesn't retroactively rewrite an already-reported
+  historical total. Executor-agnostic by construction (works the same
+  for a future Cowork-executed skill's pending_actions row).
 
 ## Batch complete (2026-08-02)
 

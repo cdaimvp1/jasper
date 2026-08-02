@@ -15,7 +15,11 @@
 <link rel="icon" href="/static/jasper-gecko-favicon.ico" sizes="any">
 <link rel="icon" href="/static/jasper-gecko-favicon-adaptive.svg" type="image/svg+xml">
 <link rel="manifest" href="/static/site.webmanifest">
-<meta name="theme-color" content="#E2E6E1">
+<!-- Static fallback for the instant before the theme-bootstrap script (in this
+     same <head>, see "theo-theme") runs; that script immediately overwrites this
+     content= to match whichever theme (explicit choice or OS default) is active,
+     keeping the installed Edge PWA's title bar in sync with the in-app theme. -->
+<meta name="theme-color" id="theo-meta-theme-color" content="#EEDCC0">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Libre+Franklin:wght@300;400;500;600;700;800&family=Roboto+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
@@ -2418,13 +2422,36 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
 .sectitle.is-collapsed .chev{transform:rotate(-90deg)}
 .toast{position:fixed;left:50%;transform:translateX(-50%) translateY(20px);bottom:24px;background:#1B1A19;color:#fff;padding:11px 18px;border-radius:30px;font-weight:600;font-size:var(--fz-sm);opacity:0;transition:.3s;z-index:60;pointer-events:none;box-shadow:var(--shadow-lg)}.toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
 </style>
-<script>/*theo-theme*/(function(){try{var t=localStorage.getItem('theo-theme');if(t==='dark'||t==='light')document.documentElement.setAttribute('data-theme',t);}catch(e){}})();window.theoTheme=window.theoTheme||function(){try{return localStorage.getItem('theo-theme')||'light';}catch(e){return 'light';}};window.theoSetTheme=window.theoSetTheme||function(t){t=(t==='dark')?'dark':'light';try{document.documentElement.setAttribute('data-theme',t);localStorage.setItem('theo-theme',t);}catch(e){}try{window.theoReflectTheme();}catch(e){}};
+<script>/*theo-theme*/(function(){
+  // Effective theme: an explicit prior choice (the Settings/header toggle)
+  // always wins; otherwise follow the OS/browser's own light-vs-dark setting
+  // (matchMedia), so a machine that's in dark mode opens Jasper in Walnut
+  // Night on first load instead of defaulting to light regardless of the OS.
+  function osPrefersDark(){try{return window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches;}catch(e){return false;}}
+  function effectiveTheme(){
+    try{var t=localStorage.getItem('theo-theme');if(t==='dark'||t==='light')return t;}catch(e){}
+    return osPrefersDark()?'dark':'light';
+  }
+  document.documentElement.setAttribute('data-theme',effectiveTheme());
+  window.theoTheme=window.theoTheme||effectiveTheme;
+  window.theoSetTheme=window.theoSetTheme||function(t){t=(t==='dark')?'dark':'light';try{document.documentElement.setAttribute('data-theme',t);localStorage.setItem('theo-theme',t);}catch(e){}try{window.theoReflectTheme();}catch(e){}};
+})();
 /* theme-reflector registry: more than one UI control (Settings toggle, header
-   icon) needs to hear "theme changed" without clobbering each other's hook -
-   each registers instead of overwriting window.theoReflectTheme directly. */
+   icon, this script's own PWA meta-theme-color updater) needs to hear "theme
+   changed" without clobbering each other's hook - each registers instead of
+   overwriting window.theoReflectTheme directly. */
 window._theoThemeReflectors=window._theoThemeReflectors||[];
 window.theoRegisterThemeReflector=window.theoRegisterThemeReflector||function(fn){window._theoThemeReflectors.push(fn);try{fn();}catch(e){}};
-window.theoReflectTheme=window.theoReflectTheme||function(){window._theoThemeReflectors.forEach(function(fn){try{fn();}catch(e){}});};</script>
+window.theoReflectTheme=window.theoReflectTheme||function(){window._theoThemeReflectors.forEach(function(fn){try{fn();}catch(e){}});};
+/* Keep the installed Edge PWA's title-bar color (theme-color) in sync with
+   whichever theme is actually active - Marc's direct ask, "the header needs
+   to match the background color of the mode." A static manifest/meta value
+   can't react to the in-app toggle at all, so this mirrors the adaptive-
+   favicon pattern with JS instead of a CSS media query. */
+window.theoRegisterThemeReflector(function(){
+  var m=document.getElementById('theo-meta-theme-color');
+  if(m)m.setAttribute('content',(window.theoTheme&&window.theoTheme())==='dark'?'#231A12':'#EEDCC0');
+});</script>
 <style>
 /* ═══════════════════════════════════════════════════════════════════════════
    LOCKED HOME-SURFACE DESIGN (integrated 2026-07-28)

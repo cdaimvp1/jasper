@@ -80,7 +80,7 @@ def _first_external_company(issue_id: str) -> Optional[str]:
     candidates = [
         p for p in ws.list_parties_for_issue(issue_id)
         if p.get("affiliation") == "external" and p.get("company")
-        and not workgraph_signals._SYSTEM_SENDER.match(p.get("primary_email") or "")
+        and not workgraph_signals.is_automated_sender(p.get("primary_email") or "")
     ]
     candidates.sort(key=lambda p: p.get("first_seen_ts") or 0)
     return candidates[0]["company"] if candidates else None

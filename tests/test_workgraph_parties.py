@@ -3,6 +3,7 @@
 - name-suffix stripping in bare-name resolution (task #30 enhancement)
 """
 import workgraph_parties as wp
+import workgraph_signals
 
 
 def test_normalize_person_name_strips_generational_suffixes():
@@ -43,6 +44,8 @@ def test_ambiguous_exact_match_abstains_rather_than_guessing(ws_db):
 
 
 def test_machine_signal_domain_never_gets_a_company_name():
-    assert wp._is_machine_signal_domain("no-reply@ansmtp.ariba.com") is True
-    assert wp._is_machine_signal_domain("EmailReminderService@concursolutions.com") is True
-    assert wp._is_machine_signal_domain("real.person@acme.com") is False
+    # Moved to workgraph_signals.py (task #53, 2026-08-02) so workgraph_
+    # projects.py's grouping code could use the same combined check.
+    assert workgraph_signals._is_machine_signal_domain("no-reply@ansmtp.ariba.com") is True
+    assert workgraph_signals._is_machine_signal_domain("EmailReminderService@concursolutions.com") is True
+    assert workgraph_signals._is_machine_signal_domain("real.person@acme.com") is False

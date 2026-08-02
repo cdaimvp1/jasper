@@ -145,3 +145,26 @@ def test_is_ooo_subject_false_for_ordinary_meeting():
 
 def test_is_ooo_subject_false_for_none():
     assert sig.is_ooo_subject(None) is False
+
+
+def test_is_automated_sender_covers_local_part_pattern():
+    assert sig.is_automated_sender("no-reply@ansmtp.ariba.com") is True
+    assert sig.is_automated_sender("notifications@github.com") is True
+
+
+def test_is_automated_sender_covers_machine_signal_domains():
+    """Task #53: a real live over-merge (proj-012 "Adobesign," 15 unrelated
+    issues wrongly combined) traced to workgraph_projects.py's grouping code
+    only ever checking _SYSTEM_SENDER, never this domain list - fixed by
+    consolidating both into this one combined check."""
+    assert sig.is_automated_sender("adobesign@adobesign.com") is True
+    assert sig.is_automated_sender("EmailReminderService@concursolutions.com") is True
+
+
+def test_is_automated_sender_false_for_a_real_person():
+    assert sig.is_automated_sender("real.person@acme.com") is False
+
+
+def test_is_automated_sender_false_for_none_or_empty():
+    assert sig.is_automated_sender(None) is False
+    assert sig.is_automated_sender("") is False

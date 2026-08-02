@@ -189,7 +189,7 @@ def related_open_issues_by_reference(issue_id: str) -> list[dict]:
 
 def _project_name_for(issue: dict, category: str, parties: list) -> str:
     external = [p for p in parties if p.get("affiliation") == "external" and p.get("company")
-                and not workgraph_signals._SYSTEM_SENDER.match(p.get("primary_email") or "")]
+                and not workgraph_signals.is_automated_sender(p.get("primary_email") or "")]
     if external:
         # Fixed 2026-07-30 (hardening pass #2): workgraph_store.
         # list_parties_for_issue has no ORDER BY, so picking a bare [0]
@@ -218,7 +218,7 @@ def _shared_external_party(issue_id: str):
     scale (dozens to low hundreds of issues)."""
     parties = ws.list_parties_for_issue(issue_id)
     for party in parties:
-        if party.get("affiliation") != "external" or workgraph_signals._SYSTEM_SENDER.match(party.get("primary_email") or ""):
+        if party.get("affiliation") != "external" or workgraph_signals.is_automated_sender(party.get("primary_email") or ""):
             continue
         for sibling_id in ws.list_issues_for_party(party["id"]):
             if sibling_id == issue_id:
@@ -239,7 +239,7 @@ def _shared_external_company(issue_id: str):
     parties = ws.list_parties_for_issue(issue_id)
     for party in parties:
         if (party.get("affiliation") != "external" or not party.get("company")
-                or workgraph_signals._SYSTEM_SENDER.match(party.get("primary_email") or "")):
+                or workgraph_signals.is_automated_sender(party.get("primary_email") or "")):
             continue
         for sibling_id in ws.list_issues_for_company(party["company"]):
             if sibling_id == issue_id:
@@ -262,7 +262,7 @@ def _external_companies_for_issue(issue_id: str) -> set:
     return {
         p["company"].lower() for p in ws.list_parties_for_issue(issue_id)
         if p.get("affiliation") == "external" and p.get("company")
-        and not workgraph_signals._SYSTEM_SENDER.match(p.get("primary_email") or "")
+        and not workgraph_signals.is_automated_sender(p.get("primary_email") or "")
     }
 
 
@@ -488,7 +488,7 @@ def _issue_signal_snapshot(issue_id: str, issue: Optional[dict] = None) -> dict:
     companies = {
         p["company"].lower() for p in parties
         if p.get("affiliation") == "external" and p.get("company")
-        and not workgraph_signals._SYSTEM_SENDER.match(p.get("primary_email") or "")
+        and not workgraph_signals.is_automated_sender(p.get("primary_email") or "")
     }
     internal = {p["id"] for p in parties if p.get("affiliation") == "internal"}
     has_external = any(p.get("affiliation") == "external" for p in parties)
@@ -1009,14 +1009,14 @@ def find_relationship_links_for_grouped_issues() -> dict:
         parties = ws.list_parties_for_issue(issue["id"])
         candidates = []  # (kind, detail, sibling_id), party candidates before company
         for party in parties:
-            if party.get("affiliation") != "external" or workgraph_signals._SYSTEM_SENDER.match(party.get("primary_email") or ""):
+            if party.get("affiliation") != "external" or workgraph_signals.is_automated_sender(party.get("primary_email") or ""):
                 continue
             for sibling_id in ws.list_issues_for_party(party["id"]):
                 if sibling_id != issue["id"]:
                     candidates.append(("party", party["id"], sibling_id))
         for party in parties:
             if (party.get("affiliation") != "external" or not party.get("company")
-                    or workgraph_signals._SYSTEM_SENDER.match(party.get("primary_email") or "")):
+                    or workgraph_signals.is_automated_sender(party.get("primary_email") or "")):
                 continue
             for sibling_id in ws.list_issues_for_company(party["company"]):
                 if sibling_id != issue["id"]:

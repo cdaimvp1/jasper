@@ -60,24 +60,13 @@ _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 # INTO the parties table in the first place, not just skipped later by title
 # generation.
 
-# Known automated-system DOMAINS (Ariba, Adobe Sign, DocuSign, ContractPodAI,
-# Concur) whose local part does NOT always match _SYSTEM_SENDER above -
-# "adobesign@adobesign.com" and "EmailReminderService@concursolutions.com"
-# both slipped through the local-part-only guard and were showing up as real
-# "external companies" (Adobesign: 9 issues, Concursolutions: 5 issues) in
-# production before this fix. Same domain list as workgraph_classify's
-# MACHINE_SIGNAL_DOMAINS; uses workgraph_signals.domain_matches (real
-# domain-boundary matching, not substring containment - a bare regex
-# alternation would match a spoofed/lookalike domain identically to a real
-# one, confirmed exploitable 2026-07-29).
-_MACHINE_SIGNAL_DOMAINS = ["ansmtp.ariba.com", "ariba.com", "adobesign.com",
-                           "docusign.net", "contractpodai.com", "concursolutions.com"]
-
-
-def _is_machine_signal_domain(email: str) -> bool:
-    if "ironclad" in email.lower():
-        return True
-    return any(workgraph_signals.domain_matches(email, d) for d in _MACHINE_SIGNAL_DOMAINS)
+# _MACHINE_SIGNAL_DOMAINS/_is_machine_signal_domain moved to workgraph_signals.py
+# (2026-08-02, task #53), folded into workgraph_signals.is_automated_sender()
+# used below - workgraph_projects.py's grouping code needed the same
+# combined check this module already did (see that function's docstring for
+# why: a real live over-merge, proj-012 "Adobesign," 15 unrelated issues
+# wrongly combined, because the grouping code only ever checked
+# _SYSTEM_SENDER, never this domain list).
 
 INTERNAL_DOMAIN = "lilly.com"
 
@@ -124,7 +113,7 @@ def classify_affiliation(email: str) -> dict:
     if domain == INTERNAL_DOMAIN:
         return {"affiliation": "internal", "affiliation_confidence": "M",
                 "affiliation_source": "domain_heuristic", "company": None}
-    if workgraph_signals._SYSTEM_SENDER.match(email) or _is_machine_signal_domain(email):
+    if workgraph_signals.is_automated_sender(email):
         # A machine relay's domain label (e.g. "ansmtp" from
         # no-reply@ansmtp.ariba.com, or "adobesign"/"concursolutions" from
         # senders that don't happen to start with "no-reply") is not a
@@ -301,7 +290,7 @@ def backfill_clear_machine_signal_companies() -> dict:
     parties = ws.list_all_parties()
     cleared = 0
     for p in parties:
-        if p.get("company") and (workgraph_signals._SYSTEM_SENDER.match(p["primary_email"]) or _is_machine_signal_domain(p["primary_email"])):
+        if p.get("company") and workgraph_signals.is_automated_sender(p["primary_email"]):
             ws.clear_party_company(p["id"], affiliation_source="system_sender")
             cleared += 1
     return {"checked": len(parties), "companies_cleared": cleared}

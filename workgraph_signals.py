@@ -182,6 +182,39 @@ _RULES: list[tuple[str, Optional[str], "re.Pattern[str]", str]] = [
 # that needs this now imports it from here instead of redefining it.
 _SYSTEM_SENDER = re.compile(r"^(no-?reply|do-?not-?reply|notifications?|automated|system|admin)@", re.I)
 
+# Known automated-system DOMAINS (Ariba, Adobe Sign, DocuSign, ContractPodAI,
+# Concur) whose local part does NOT always match _SYSTEM_SENDER above -
+# "adobesign@adobesign.com" and "EmailReminderService@concursolutions.com"
+# both slip past the local-part-only guard. Moved here from workgraph_
+# parties.py (2026-08-02, task #53 investigation) so every module that needs
+# to recognize an automated sender - not just party/company naming - can use
+# ONE combined check. Real live bug this fixes: workgraph_projects.py's
+# grouping-relevant party-exclusion checks only ever tested _SYSTEM_SENDER,
+# never this domain list, so adobesign@adobesign.com kept being treated as a
+# real shared-party GROUPING signal even though the parties table itself
+# already knew better - proj-012 ended up with 15 unrelated issues wrongly
+# merged purely because every Adobe Sign envelope notification shares this
+# one address.
+_MACHINE_SIGNAL_DOMAINS = ["ansmtp.ariba.com", "ariba.com", "adobesign.com",
+                           "docusign.net", "contractpodai.com", "concursolutions.com"]
+
+
+def _is_machine_signal_domain(email: str) -> bool:
+    if "ironclad" in (email or "").lower():
+        return True
+    return any(domain_matches(email, d) for d in _MACHINE_SIGNAL_DOMAINS)
+
+
+def is_automated_sender(email: str) -> bool:
+    """The one combined "is this a no-reply/automated system sender, not a
+    real person" check - _SYSTEM_SENDER (local-part pattern) OR a known
+    machine-signal domain (whose local part varies). Use this everywhere a
+    sender needs to be excluded from party/company/grouping signals - never
+    _SYSTEM_SENDER alone, which misses adobesign@/concursolutions@-shaped
+    addresses entirely."""
+    email = email or ""
+    return bool(_SYSTEM_SENDER.match(email)) or _is_machine_signal_domain(email)
+
 
 def _escalation_target_is_owner(subject: str) -> bool:
     m = re.search(r"escalated to (.+?) for approval", subject or "", re.I)

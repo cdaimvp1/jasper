@@ -432,7 +432,7 @@ def compute_deterministic_title(issue_id: str) -> Optional[str]:
     # A no-reply/system sender's domain-derived "company" (e.g. 'Ansmtp' from
     # no-reply@ansmtp.ariba.com) isn't a real supplier name - skip those.
     external = [p for p in parties if p.get("affiliation") == "external"
-                and not workgraph_signals._SYSTEM_SENDER.match(p.get("primary_email") or "")]
+                and not workgraph_signals.is_automated_sender(p.get("primary_email") or "")]
     requestor = internal[0]["display_name"] if internal else None
     supplier = None
     if external:

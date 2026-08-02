@@ -3111,8 +3111,9 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
    the detail card gets overflow-y:auto directly in its own rule instead
    of fighting a comma-shared one for the same property. */
 .pcc-board>.card.pcc-detail-card{
-  background:var(--lk-surface);border:1px solid var(--lk-line2);
-  border-radius:var(--lk-r-s);box-shadow:var(--lk-elev);overflow-y:auto;overflow-x:hidden;min-height:0}
+  background:var(--lk-surface);border:1px solid var(--lk-line);
+  border-radius:14px;box-shadow:0 1px 4px rgba(82,18,7,.08),0 12px 34px rgba(82,18,7,.10);
+  overflow-y:auto;overflow-x:hidden;min-height:0}
 .pcc-board{background:none;border:none;gap:10px;grid-template-columns:minmax(480px,620px) 1fr}
 .card.pcc-list-card{display:flex;flex-direction:column;border-right:1px solid var(--lk-line2)}
 .card.pcc-detail-card{padding:0;overflow-y:auto}
@@ -3304,6 +3305,10 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
 .pcc-xrow-date{font-family:var(--mono);font-size:11px;font-weight:700;color:var(--lk-mut);padding-top:4px}
 .pcc-xrow-age{display:block;font-size:9.5px;font-weight:400;font-family:var(--sans);color:var(--lk-mut2);margin-top:2px}
 .pcc-xrow-left{display:flex;align-items:flex-start;gap:10px;min-width:0;cursor:pointer}
+.pcc-check-dot{width:16px;height:16px;border-radius:50%;border:2px solid var(--lk-pri);flex:none;margin-top:2px;
+  cursor:pointer;background:var(--lk-surface)}
+.pcc-check-dot.done{background:var(--bblue);border-color:var(--bblue)}
+.pcc-dismiss-note{font-size:11px;color:var(--lk-mut2);font-style:italic;margin-top:6px}
 .pcc-xrow-text{flex:1;min-width:0;line-height:1.5;font-size:13px}
 .pcc-xrow .chev{width:13px;height:13px;stroke:var(--lk-mut);fill:none;stroke-width:2.4;
   transition:transform .15s;flex:none;margin-top:3px}
@@ -6371,30 +6376,42 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
     if (b) b.classList.toggle("on");
     headerEl.classList.toggle("open");
   }
-  // Mark done / snooze / dismiss on a checklist row - deliberately visual
-  // only right now (task #44 - a real "dismissed" state distinct from
-  // "done" doesn't exist in the backend yet). Shows an honest inline note
-  // rather than silently no-op-ing behind a convincing-looking button, or
-  // worse, faking persistence by hiding/fading the row as if something
-  // real happened.
-  function pccChecklistIconNote(evt, btn) {
+  // Mark done / snooze / dismiss on a checklist row - ported verbatim from
+  // the mockup's own pccDotToggle/pccRowIcon (2026-08-02, Marc's direct
+  // instruction to match the mockup exactly, not a toned-down version).
+  // Still visual only - no real "dismissed" state distinct from "done"
+  // exists in the backend yet (task #44) - but the mockup's own dismiss
+  // copy already says so honestly ("recorded separately from 'done'"),
+  // so porting it verbatim doesn't claim anything false.
+  function pccDotToggle(evt, dot) {
     evt.stopPropagation();
-    const row = btn.closest(".pcc-xrow");
-    const body = row.querySelector(".pcc-xrow-body");
-    const left = row.querySelector(".pcc-xrow-left");
-    if (!body.classList.contains("on")) left.click();
-    let note = body.querySelector(".pcc-not-real-note");
-    if (!note) {
-      note = document.createElement("div");
-      note.className = "pcc-not-real-note";
-      note.textContent = "Not wired to anything real yet - this button doesn't save anything (task #44).";
-      body.prepend(note);
+    dot.classList.toggle("done");
+  }
+  function pccRowIcon(evt, rowWrapId, kind) {
+    evt.stopPropagation();
+    const row = document.getElementById(rowWrapId);
+    if (!row) return;
+    if (kind === "done") {
+      const dot = row.querySelector(".pcc-check-dot");
+      if (dot) dot.classList.add("done");
+    } else if (kind === "snooze") {
+      row.style.opacity = "0.55";
+      setTimeout(() => { row.style.opacity = "1"; }, 400);
+    } else if (kind === "dismiss") {
+      row.style.opacity = "0.35";
+      row.querySelectorAll("button, .pcc-check-dot").forEach(el => { el.style.pointerEvents = "none"; });
+      if (!row.querySelector(".pcc-dismiss-note")) {
+        const note = document.createElement("div");
+        note.className = "pcc-dismiss-note";
+        note.style.gridColumn = "1 / -1";
+        note.textContent = "Dismissed as not needed - recorded separately from \"done,\" so this never counts as a successful resolution for what Jasper learns.";
+        row.appendChild(note);
+      }
     }
   }
-  // Sidebar Dismiss (issue-level) - same honesty pattern as
-  // pccChecklistIconNote above, just without a collapsible body to prepend
-  // into (the sidebar Actions block isn't a toggle row), so the note is
-  // appended once, right after the button itself.
+  // Sidebar Dismiss (issue-level) - the mockup has no distinct interactive
+  // behavior for this one (only the per-row checklist icons above), so it
+  // keeps the plain honest note, appended once right after the button.
   function pccSideDismissNote(evt, btn) {
     evt.stopPropagation();
     if (btn.nextElementSibling && btn.nextElementSibling.classList.contains("pcc-not-real-note")) return;
@@ -7449,18 +7466,19 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
           ${desc ? `<div class="pcc-attach-desc">${pccEsc(desc)}${a.extracted_text.length > 160 ? "…" : ""}</div>` : ""}
         </div>`;
       }).join("");
-      return `<div class="pcc-xrow">
+      return `<div class="pcc-xrow" id="${rowId}-wrap">
         <div class="pcc-xrow-date">${pccEsc(dateLabel)}${ageLabel ? `<span class="pcc-xrow-age">${pccEsc(ageLabel)}</span>` : ""}</div>
         <div class="pcc-xrow-left" onclick="pccXTog(this,'${rowId}')">
+          <span class="pcc-check-dot" onclick="pccDotToggle(event,this)"></span>
           <span class="pcc-deadline-badge" style="background:${badge.bg};color:${badge.fg}">${badge.label}</span>
           <span class="pcc-xrow-text">${pccEsc(it.text)}</span>
           <svg class="chev" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
         </div>
         <div class="pcc-xrow-right">
           <div class="pcc-xrow-icons">
-            <button type="button" class="pcc-micro-btn mdone" title="Mark done" onclick="pccChecklistIconNote(event,this)">&#10003;</button>
-            <button type="button" class="pcc-micro-btn msnooze" title="Snooze" onclick="pccChecklistIconNote(event,this)">${PCC_BELL_SVG}</button>
-            <button type="button" class="pcc-micro-btn mclose" title="Dismiss" onclick="pccChecklistIconNote(event,this)">&#10005;</button>
+            <button type="button" class="pcc-micro-btn mdone" title="Mark done" onclick="pccRowIcon(event,'${rowId}-wrap','done')">&#10003;</button>
+            <button type="button" class="pcc-micro-btn msnooze" title="Snooze" onclick="pccRowIcon(event,'${rowId}-wrap','snooze')">${PCC_BELL_SVG}</button>
+            <button type="button" class="pcc-micro-btn mclose" title="Dismiss" onclick="pccRowIcon(event,'${rowId}-wrap','dismiss')">&#10005;</button>
           </div>
           ${actionsHtml}
         </div>

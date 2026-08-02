@@ -391,6 +391,25 @@ def test_recompute_issue_state_new_item_not_actionable_respects_manual_close(ws_
     assert ws_db.get_issue(iid)["state"] == "done"
 
 
+def test_recompute_issue_state_respects_manual_dismiss(ws_db):
+    """Task #44: 'dismissed' is a real, distinct terminal state and must get
+    the exact same "don't silently reopen" protection as done/noise-archived -
+    a stray later FYI reply must not flip a dismissed issue back to active."""
+    iid = ws_db.create_issue_with_new_id(title="Old ask", state="dismissed", category="other")
+    rid = ws_db.insert_raw_item(source="outlook_mail", stable_key="k1b", thread_key="k1b", dedupe_key="k1b",
+                                 occurred_ts=time.time(), subject="please approve", from_actor="a@example.com",
+                                 participants_json="[]")
+    ws_db.classify_raw_item(rid, item_class="ACTIONABLE-ASK", direction="inbound", direction_inferred=False,
+                             topic="other", topic_inferred=True, sentiment="neutral", sentiment_inferred=True,
+                             anomaly_flag=False)
+    ws_db.link_raw_item_to_issue(rid, iid)
+
+    result = wc.recompute_issue_state(iid, new_item_is_actionable=False)
+
+    assert result == "dismissed"
+    assert ws_db.get_issue(iid)["state"] == "dismissed"
+
+
 def test_recompute_issue_state_default_still_reopens_from_full_history(ws_db):
     """Callers with no specific new-item context (backfill_reclassify's
     ruleset-change re-derivation, the manual bulk-recompute path) keep

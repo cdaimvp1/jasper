@@ -211,6 +211,17 @@ def test_due_date_naive_timestamp_uses_utc_not_local():
 # NameError - caught only by a live, real-data check, not by this suite.
 # These close that gap.
 
+def test_score_issue_dismissed_scores_as_closed(ws_db):
+    """Task #44: 'dismissed' is a real, distinct terminal state, and must be
+    treated the same as done/noise-archived for scoring - a dismissed issue
+    should never re-surface with a nonzero priority score."""
+    issue_id = ws_db.create_issue_with_new_id(title="X", state="dismissed", category="other")
+    issue = ws_db.get_issue(issue_id)
+    score, reason, lesson_id = nba.score_issue(issue, time.time())
+    assert score == 0.0
+    assert reason == "closed"
+
+
 def test_score_issue_active_no_rules_produces_a_sane_reason(ws_db):
     issue_id = ws_db.create_issue_with_new_id(title="X", state="active", category="other")
     issue = ws_db.get_issue(issue_id)

@@ -5946,7 +5946,7 @@ html[data-theme="dark"]{
     evt.stopPropagation();
     dot.classList.toggle("done");
   }
-  function pccRowIcon(evt, rowWrapId, kind) {
+  function pccRowIcon(evt, rowWrapId, kind, issueId, btn) {
     evt.stopPropagation();
     const row = document.getElementById(rowWrapId);
     if (!row) return;
@@ -5966,19 +5966,30 @@ html[data-theme="dark"]{
         note.textContent = "Dismissed as not needed - recorded separately from \"done,\" so this never counts as a successful resolution for what Jasper learns.";
         row.appendChild(note);
       }
+      // Task #44: asks/decisions/commitments/repeat-signal rows have a real
+      // dismissKind (server-side kind vocabulary) and persist for real, so
+      // the row stops reappearing on the next load. "General" rows (NBA/
+      // synthesis candidates, no stable per-item id - see the exploration
+      // this task was built against) keep the prior visual-only fade; their
+      // dismissal is covered by nba_choice_log at the issue-NBA-offer level,
+      // not per-row.
+      const dismissKind = btn && btn.dataset ? btn.dataset.dismissKind : "";
+      if (dismissKind) {
+        const rawItemIdStr = btn.dataset.rawItemId || "";
+        fetch(`/api/workgraph/issues/${encodeURIComponent(issueId)}/checklist/dismiss`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            kind: dismissKind,
+            raw_item_id: rawItemIdStr ? Number(rawItemIdStr) : null,
+            text: btn.dataset.dismissText || "",
+          }),
+        }).catch(() => {});
+      }
     }
   }
-  // Sidebar Dismiss (issue-level) - the mockup has no distinct interactive
-  // behavior for this one (only the per-row checklist icons above), so it
-  // keeps the plain honest note, appended once right after the button.
-  function pccSideDismissNote(evt, btn) {
-    evt.stopPropagation();
-    if (btn.nextElementSibling && btn.nextElementSibling.classList.contains("pcc-not-real-note")) return;
-    const note = document.createElement("div");
-    note.className = "pcc-not-real-note";
-    note.textContent = "Not wired to anything real yet - this button doesn't save anything (task #44).";
-    btn.insertAdjacentElement("afterend", note);
-  }
+  // Sidebar Dismiss (issue-level) is now real - task #44 - wired the same
+  // way Mark done/Snooze already were, via data-act="dismiss" + the
+  // delegated [data-act] listener calling pccRunDeterministic (see below).
   // Stakeholder multi-select + interim mailto: compose (piece #6, port
   // #47). Real Outlook-COM compose-to-recipients action is task #35, not
   // built yet - this is a plain client-only mailto: link, same as the
@@ -6926,10 +6937,16 @@ html[data-theme="dark"]{
       escalated: { label: "Escalated", bg: "var(--pink-t)", fg: "var(--red-d)" },
       general: { label: "General", bg: "var(--lk-nested)", fg: "var(--lk-mut2)" },
     };
+    // dismissKind/dismissText (task #44) mirror exactly what server_lean.py's
+    // issue-detail endpoint uses to derive each row's checklist_item_key, so
+    // a dismiss call here matches the same key the server re-derives on the
+    // next read to filter the row back out. Kept separate from the display
+    // kind/text (which append a note or fold "escalated" in) on purpose -
+    // those must never leak into the key or a dismissal silently never matches.
     const checklistItems = [
-      ...asks.map(a => ({ kind: "ask", text: a.text, deepLinks: a.deep_links || [], occurredTs: a.occurred_ts, rawItemId: a.raw_item_id })),
-      ...decisions.map(a => ({ kind: "decision", text: a.text, deepLinks: a.deep_links || [], occurredTs: a.occurred_ts, rawItemId: a.raw_item_id })),
-      ...commitments.map(a => ({ kind: "commitment", text: a.text, deepLinks: a.deep_links || [], occurredTs: a.occurred_ts, rawItemId: a.raw_item_id })),
+      ...asks.map(a => ({ kind: "ask", text: a.text, deepLinks: a.deep_links || [], occurredTs: a.occurred_ts, rawItemId: a.raw_item_id, dismissKind: "ask", dismissText: a.text })),
+      ...decisions.map(a => ({ kind: "decision", text: a.text, deepLinks: a.deep_links || [], occurredTs: a.occurred_ts, rawItemId: a.raw_item_id, dismissKind: "decision", dismissText: a.text })),
+      ...commitments.map(a => ({ kind: "commitment", text: a.text, deepLinks: a.deep_links || [], occurredTs: a.occurred_ts, rawItemId: a.raw_item_id, dismissKind: "commitment", dismissText: a.text })),
       // Part D (2026-07-30): curator only writes a repeat signal when a new
       // ask genuinely restates a prior one on this issue - never a guess
       // rendered as if it were one.
@@ -6940,6 +6957,7 @@ html[data-theme="dark"]{
           kind: r.escalated ? "escalated" : "repeat",
           text: r.ask_text + (note ? ` (${note})` : ""),
           deepLinks: r.deep_links || [], occurredTs: r.occurred_ts, rawItemId: r.raw_item_id,
+          dismissKind: "repeat", dismissText: r.ask_text,
         };
       }),
     ];
@@ -7037,7 +7055,7 @@ html[data-theme="dark"]{
           <div class="pcc-xrow-icons">
             <button type="button" class="pcc-micro-btn mdone" title="Mark done" onclick="pccRowIcon(event,'${rowId}-wrap','done')">&#10003;</button>
             <button type="button" class="pcc-micro-btn msnooze" title="Snooze" onclick="pccRowIcon(event,'${rowId}-wrap','snooze')">${PCC_BELL_SVG}</button>
-            <button type="button" class="pcc-micro-btn mclose" title="Dismiss" onclick="pccRowIcon(event,'${rowId}-wrap','dismiss')">&#10005;</button>
+            <button type="button" class="pcc-micro-btn mclose" title="Dismiss" data-dismiss-kind="${pccEsc(it.dismissKind || "")}" data-raw-item-id="${it.rawItemId != null ? pccEsc(String(it.rawItemId)) : ""}" data-dismiss-text="${pccEsc(it.dismissText || "")}" onclick="pccRowIcon(event,'${rowId}-wrap','dismiss','${pccEsc(issue.id)}',this)">&#10005;</button>
           </div>
           ${actionsHtml}
         </div>
@@ -7289,7 +7307,7 @@ html[data-theme="dark"]{
         <div class="pcc-actrail">
           <button class="pcc-actbtn" type="button" data-act="done"><span class="ic">&#10003;</span>Mark done</button>
           <button class="pcc-actbtn" type="button" data-act="snooze"><span class="ic">${PCC_BELL_SVG}</span>Snooze 3d</button>
-          <button class="pcc-actbtn" type="button" style="border-color:var(--lk-danger);color:var(--lk-danger)" onclick="pccSideDismissNote(event,this)"><span class="ic">&#10005;</span>Dismiss</button>
+          <button class="pcc-actbtn" type="button" style="border-color:var(--lk-danger);color:var(--lk-danger)" data-act="dismiss"><span class="ic">&#10005;</span>Dismiss</button>
           ${primaryMailActionsHtml}
         </div>
       </div>`;
@@ -7650,7 +7668,11 @@ html[data-theme="dark"]{
   });
 
   async function pccRunDeterministic(issueId, act) {
-    const body = act === "done" ? { state: "done" } : act === "archive" ? { state: "noise-archived" } : { state: "waiting" };
+    // Task #44: "dismissed" is a real, distinct terminal state from "done" -
+    // this was wrong/not needed, not actually resolved, so it must never be
+    // recorded as a successful completion for whatever learns from outcomes.
+    const body = act === "done" ? { state: "done" } : act === "archive" ? { state: "noise-archived" }
+      : act === "dismiss" ? { state: "dismissed" } : { state: "waiting" };
     await fetch(`/api/workgraph/issues/${encodeURIComponent(issueId)}/status`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
     });

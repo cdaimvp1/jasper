@@ -285,7 +285,7 @@ def score_issue(issue: dict, now: float, weights: dict = DEFAULT_WEIGHTS) -> tup
     raw_items for the value regex, and looking up a matching Total Recall
     lesson (both just DB reads, still zero LLM calls).
     Returns (priority_score, nba_reason, lesson_id_cited)."""
-    if issue["state"] in ("done", "noise-archived"):
+    if issue["state"] in ("done", "noise-archived", "dismissed"):
         return 0.0, "closed", None
 
     raw_items = ws.get_raw_items_for_issue(issue["id"])

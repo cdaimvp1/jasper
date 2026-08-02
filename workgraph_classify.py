@@ -534,8 +534,8 @@ def recompute_issue_state(issue_id: str, *, new_item_is_actionable: bool = True)
     if issue is None:
         return None
     current = issue["state"]
-    if current in ("done", "noise-archived") and (target != "active" or not new_item_is_actionable):
-        return current  # respect a manual close/archive unless a genuinely new ask justifies reopening
+    if current in ("done", "noise-archived", "dismissed") and (target != "active" or not new_item_is_actionable):
+        return current  # respect a manual close/archive/dismiss unless a genuinely new ask justifies reopening
     if current != target:
         ws.update_issue(issue_id, state=target)
     return target

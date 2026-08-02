@@ -490,6 +490,104 @@ def test_alerts_migration_is_crash_safe(ws_db, monkeypatch):
     assert orphan_check is None  # no orphaned table left behind either
 
 
+# --- task #44: real 'dismissed' state + checklist-item dismissal ----------
+
+def test_issues_table_accepts_dismissed_state(ws_db):
+    """Confirms the CHECK constraint migration in init_workgraph() actually
+    took effect for issues.state, same shape as the alerts.kind migration."""
+    issue_id = ws_db.create_issue_with_new_id(title="X", state="active", category="other")
+    ws_db.update_issue(issue_id, state="dismissed")
+    assert ws_db.get_issue(issue_id)["state"] == "dismissed"
+
+
+def test_issues_migration_preserves_existing_rows_from_old_schema(ws_db):
+    """Simulates a real pre-task-#44 database: an issues table with the OLD,
+    narrower CHECK constraint and a real row already in it. Calling
+    init_workgraph() again must migrate the constraint AND keep that row.
+
+    Deliberately includes project_id/lesson_id_cited/has_unmet_prerequisite -
+    three columns added to the REAL table by later ALTER TABLEs, well after
+    the base CREATE TABLE this migration rebuilds from. A real bug caught
+    live against production (not by this test, the first time it was
+    written without these three columns - fixed after): the rebuilt CREATE
+    TABLE in the migration omitted them, so the INSERT...SELECT failed with
+    "no such column", silently caught and rolled back every single time,
+    meaning the constraint never actually widened in production despite the
+    migration looking correct and every other test passing."""
+    conn = ws_db._connect()
+    conn.execute("DROP TABLE issues")
+    conn.execute("""
+        CREATE TABLE issues (
+            id               TEXT PRIMARY KEY,
+            title            TEXT NOT NULL,
+            category         TEXT,
+            state            TEXT NOT NULL CHECK (state IN ('active','waiting','blocked','done','noise-archived')),
+            priority         TEXT NOT NULL DEFAULT 'med' CHECK (priority IN ('high','med','low')),
+            priority_score   REAL,
+            nba_action_kind  TEXT CHECK (nba_action_kind IN ('draft','review','approve','chase','wait','read','none')),
+            nba_reason       TEXT,
+            owner            TEXT NOT NULL DEFAULT 'marc',
+            due              TEXT,
+            opened_at        REAL NOT NULL,
+            updated_at       REAL NOT NULL,
+            confidence_tier  TEXT CHECK (confidence_tier IN ('H','M','L')),
+            project_id       TEXT REFERENCES projects(id),
+            lesson_id_cited  INTEGER REFERENCES lessons(id),
+            has_unmet_prerequisite INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    conn.execute(
+        "INSERT INTO issues (id, title, category, state, priority, owner, opened_at, updated_at, has_unmet_prerequisite) "
+        "VALUES ('pre-existing-1', 'pre-existing issue', 'other', 'active', 'med', 'marc', 1.0, 1.0, 0)"
+    )
+    conn.close()
+
+    ws_db.init_workgraph()  # re-run the migration
+
+    assert ws_db.get_issue("pre-existing-1")["title"] == "pre-existing issue"
+    ws_db.update_issue("pre-existing-1", state="dismissed")
+    assert ws_db.get_issue("pre-existing-1")["state"] == "dismissed"
+
+
+def test_checklist_item_key_is_deterministic_and_kind_sensitive(ws_db):
+    k1 = ws_db.checklist_item_key("ask", 42, "Please approve the PO")
+    k2 = ws_db.checklist_item_key("ask", 42, "please approve the po")  # case/whitespace-insensitive
+    k3 = ws_db.checklist_item_key("decision", 42, "Please approve the PO")  # different kind
+    k4 = ws_db.checklist_item_key("ask", 43, "Please approve the PO")  # different raw_item_id
+    assert k1 == k2
+    assert k1 != k3
+    assert k1 != k4
+
+
+def test_dismiss_checklist_item_round_trip(ws_db):
+    issue_id = ws_db.create_issue_with_new_id(title="X", state="active", category="other")
+    item_key = ws_db.dismiss_checklist_item(
+        issue_id=issue_id, kind="ask", raw_item_id=7, text="Approve the requisition", actor="marc",
+    )
+    assert item_key == ws_db.checklist_item_key("ask", 7, "Approve the requisition")
+    dismissed = ws_db.list_dismissed_checklist_keys(issue_id)
+    assert item_key in dismissed
+    # a different issue's set must not see this issue's dismissal
+    other_issue_id = ws_db.create_issue_with_new_id(title="Y", state="active", category="other")
+    assert ws_db.list_dismissed_checklist_keys(other_issue_id) == set()
+
+
+def test_dismiss_checklist_item_is_idempotent(ws_db):
+    """Re-dismissing the same item_key must not raise (INSERT OR REPLACE),
+    and must not create a second row for the same (issue_id, item_key)."""
+    issue_id = ws_db.create_issue_with_new_id(title="X", state="active", category="other")
+    ws_db.dismiss_checklist_item(issue_id=issue_id, kind="ask", raw_item_id=7, text="Same ask", actor="marc")
+    ws_db.dismiss_checklist_item(issue_id=issue_id, kind="ask", raw_item_id=7, text="Same ask", actor="marc")
+    conn = ws_db._connect()
+    try:
+        count = conn.execute(
+            "SELECT COUNT(*) AS n FROM checklist_dismissals WHERE issue_id = ?", (issue_id,)
+        ).fetchone()["n"]
+    finally:
+        conn.close()
+    assert count == 1
+
+
 # --- merge_issues_txn (meeting-grouping/related-project identity pass) ----
 
 def test_merge_issues_txn_creates_new_project_when_neither_has_one(ws_db):

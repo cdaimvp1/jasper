@@ -27,6 +27,7 @@ alerts         — curated, deterministic attention-worthy events surfaced above
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import random
 import re
@@ -111,6 +112,63 @@ def init_workgraph() -> None:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_issues_state ON issues(state)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_issues_priority ON issues(priority_score DESC)")
 
+            # Task #44: a real 'dismissed' outcome, distinct from 'done' - using
+            # "done" for "this was wrong/not needed" would corrupt whatever
+            # learning signal comes from resolution outcomes. Same detect+
+            # rebuild-via-sqlite_master migration already used for alerts.kind
+            # (task #55) - SQLite has no ALTER TABLE for widening a CHECK
+            # constraint, and a table created before this migration still
+            # enforces the OLD constraint even though CREATE TABLE IF NOT
+            # EXISTS above is a no-op against it.
+            existing_issues_sql = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='issues'"
+            ).fetchone()
+            if existing_issues_sql and "'dismissed'" not in (existing_issues_sql["sql"] or ""):
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    conn.execute("ALTER TABLE issues RENAME TO issues_pre_task44")
+                    conn.execute("""
+                        CREATE TABLE issues (
+                            id                      TEXT PRIMARY KEY,
+                            title                   TEXT NOT NULL,
+                            category                TEXT,
+                            state                   TEXT NOT NULL CHECK (state IN ('active','waiting','blocked','done','noise-archived','dismissed')),
+                            priority                TEXT NOT NULL DEFAULT 'med' CHECK (priority IN ('high','med','low')),
+                            priority_score          REAL,
+                            nba_action_kind         TEXT CHECK (nba_action_kind IN ('draft','review','approve','chase','wait','read','none')),
+                            nba_reason              TEXT,
+                            owner                   TEXT NOT NULL DEFAULT 'marc',
+                            due                     TEXT,
+                            opened_at               REAL NOT NULL,
+                            updated_at              REAL NOT NULL,
+                            confidence_tier         TEXT CHECK (confidence_tier IN ('H','M','L')),
+                            project_id              TEXT REFERENCES projects(id),
+                            lesson_id_cited         INTEGER REFERENCES lessons(id),
+                            has_unmet_prerequisite  INTEGER NOT NULL DEFAULT 0
+                        )
+                    """)
+                    # Column list driven by whatever issues_pre_task44 ACTUALLY
+                    # has (not a hardcoded guess) - three columns
+                    # (project_id/lesson_id_cited/has_unmet_prerequisite) were
+                    # added to this table by later ALTER TABLEs after the base
+                    # CREATE TABLE above was first written, and a real bug here
+                    # (missing them from the rebuilt table, caught live against
+                    # production before this migration ever committed) would
+                    # have made every INSERT below fail with "no such column",
+                    # caught by the except clause, silently rolling back and
+                    # leaving the OLD constraint in place forever - never
+                    # corrupting data, but never actually migrating either.
+                    cols = [r["name"] for r in conn.execute("PRAGMA table_info(issues_pre_task44)").fetchall()]
+                    col_list = ", ".join(cols)
+                    conn.execute(f"INSERT INTO issues ({col_list}) SELECT {col_list} FROM issues_pre_task44")
+                    conn.execute("DROP TABLE issues_pre_task44")
+                    conn.execute("COMMIT")
+                except sqlite3.OperationalError:
+                    try:
+                        conn.execute("ROLLBACK")
+                    except sqlite3.OperationalError:
+                        pass  # no transaction was actually open (e.g. BEGIN itself failed) - nothing to roll back
+
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS issue_state_history (
                     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -131,6 +189,31 @@ def init_workgraph() -> None:
                 SELECT id, NULL, state, opened_at FROM issues
                 WHERE id NOT IN (SELECT DISTINCT issue_id FROM issue_state_history)
             """)
+
+            # Task #44, checklist-item-level half: individual ask/decision/
+            # commitment/repeat-signal rows have no stable id of their own
+            # (they're strings inside a JSON array column, keyed only by the
+            # parent extraction's raw_item_id - many-to-one). item_key is a
+            # derived, deterministic fingerprint (kind + raw_item_id + a hash
+            # of the item's own text) - "stable enough" rather than a true
+            # id. Disclosed limitation: if curator re-extracts and reorders or
+            # rewords the same underlying ask, the hash changes and an old
+            # dismissal silently stops matching (the item reappears) - there
+            # is no way to do better without minting a real id at extraction
+            # time, which is a bigger change than this task scoped.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS checklist_dismissals (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    issue_id      TEXT NOT NULL REFERENCES issues(id),
+                    item_key      TEXT NOT NULL,
+                    kind          TEXT NOT NULL,
+                    text_snippet  TEXT NOT NULL,
+                    dismissed_ts  REAL NOT NULL,
+                    actor         TEXT,
+                    UNIQUE(issue_id, item_key)
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_checklist_dismissals_issue ON checklist_dismissals(issue_id)")
 
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS work_tasks (
@@ -1357,11 +1440,56 @@ def list_issues_with_unmet_prerequisite() -> list[dict]:
         try:
             rows = conn.execute(
                 """SELECT * FROM issues WHERE has_unmet_prerequisite = 1
-                   AND state NOT IN ('done','noise-archived')"""
+                   AND state NOT IN ('done','noise-archived','dismissed')"""
             ).fetchall()
         finally:
             conn.close()
     return [dict(r) for r in rows]
+
+
+def checklist_item_key(kind: str, raw_item_id: Any, text: str) -> str:
+    """Deterministic fingerprint for a checklist row that has no real id of
+    its own (see the checklist_dismissals table comment). Same (kind,
+    raw_item_id, text) always produces the same key; a reworded/reordered
+    re-extraction produces a different one (disclosed limitation, not a bug)."""
+    norm_text = (text or "").strip().lower()
+    digest = hashlib.sha1(norm_text.encode("utf-8")).hexdigest()[:12]
+    return f"{kind}:{raw_item_id}:{digest}"
+
+
+def dismiss_checklist_item(*, issue_id: str, kind: str, raw_item_id: Any, text: str,
+                            actor: Optional[str] = None) -> str:
+    """Persist a checklist-item-level dismissal. Idempotent (re-dismissing the
+    same item_key just refreshes dismissed_ts/actor, via INSERT OR REPLACE)."""
+    item_key = checklist_item_key(kind, raw_item_id, text)
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                """INSERT OR REPLACE INTO checklist_dismissals
+                   (issue_id, item_key, kind, text_snippet, dismissed_ts, actor)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (issue_id, item_key, kind, (text or "")[:280], time.time(), actor),
+            )
+        finally:
+            conn.close()
+    return item_key
+
+
+def list_dismissed_checklist_keys(issue_id: str) -> set[str]:
+    """All item_keys dismissed for this issue - checked against a fresh
+    checklist_item_key() computed for each row at read time, so a dismissed
+    item stops reappearing without the caller needing to store anything
+    beyond the set membership check."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT item_key FROM checklist_dismissals WHERE issue_id = ?", (issue_id,)
+            ).fetchall()
+        finally:
+            conn.close()
+    return {r["item_key"] for r in rows}
 
 
 def next_task_id(issue_id: str) -> str:

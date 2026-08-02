@@ -1222,6 +1222,21 @@ async def api_workgraph_issue_detail(issue_id: str, log_choice: bool = False):
     checklist_decisions = workgraph_asks_decisions.list_decisions_for_issue(issue_id)
     checklist_commitments = workgraph_commitments.list_commitments_for_issue(issue_id)
     checklist_repeat_signals = workgraph_repeat_signals.list_repeat_signals_for_issue(issue_id)
+    # Task #44: drop any row a dismissed item_key still matches, so a real
+    # dismissal actually stops the item from reappearing (the "negative
+    # signal" the recommend/checklist engine needs to respect) rather than
+    # just fading it out client-side for the current page view only.
+    dismissed_keys = wg.list_dismissed_checklist_keys(issue_id)
+    if dismissed_keys:
+        def _not_dismissed(items: list, kind: str, text_field: str) -> list:
+            return [
+                it for it in items
+                if wg.checklist_item_key(kind, it.get("raw_item_id"), it.get(text_field, "")) not in dismissed_keys
+            ]
+        checklist_asks = _not_dismissed(checklist_asks, "ask", "text")
+        checklist_decisions = _not_dismissed(checklist_decisions, "decision", "text")
+        checklist_commitments = _not_dismissed(checklist_commitments, "commitment", "text")
+        checklist_repeat_signals = _not_dismissed(checklist_repeat_signals, "repeat", "ask_text")
     deep_links.attach_deep_links(checklist_asks)
     deep_links.attach_deep_links(checklist_decisions)
     deep_links.attach_deep_links(checklist_commitments)
@@ -1369,7 +1384,7 @@ def _closing_evidence_warning(issue_id: str, new_state: str) -> Optional[str]:
     returns an advisory string when the evidence disagrees, so the caller
     (and eventually the UI) has something to show/log instead of a silent,
     unattributed, unexplained state flip being the only trace it happened."""
-    if new_state not in ("done", "noise-archived"):
+    if new_state not in ("done", "noise-archived", "dismissed"):
         return None
     derived = workgraph_classify.derive_target_state(issue_id)
     if derived == "active":
@@ -1407,6 +1422,32 @@ async def api_workgraph_issue_status(issue_id: str, body: WorkgraphIssueStatusBo
     return JSONResponse(result)
 
 
+class ChecklistItemDismissBody(BaseModel):
+    kind: str
+    raw_item_id: Optional[int] = None
+    text: str
+    actor: Optional[str] = None
+
+
+@app.post("/api/workgraph/issues/{issue_id}/checklist/dismiss")
+async def api_workgraph_checklist_dismiss(issue_id: str, body: ChecklistItemDismissBody):
+    """Task #44: a real, persisted 'this checklist item was wrong/not needed'
+    outcome for one ask/decision/commitment/repeat-signal row, distinct from
+    marking the whole issue done. Server derives the item_key itself (never
+    trusts a client-computed key) so the dismissal is keyed exactly the same
+    way the issue-detail endpoint re-derives keys to filter dismissed rows
+    back out on the next read - see workgraph_store.checklist_item_key's
+    docstring for the "stable enough, not a real id" caveat."""
+    if wg.get_issue(issue_id) is None:
+        raise HTTPException(404, f"no such issue: {issue_id}")
+    actor = body.actor or (config.get("manager", "id") or "unknown")
+    item_key = wg.dismiss_checklist_item(
+        issue_id=issue_id, kind=body.kind, raw_item_id=body.raw_item_id,
+        text=body.text, actor=actor,
+    )
+    return JSONResponse({"ok": True, "item_key": item_key})
+
+
 class BulkIssueStatusBody(BaseModel):
     issue_ids: list[str]
     state: str
@@ -1424,7 +1465,7 @@ async def api_workgraph_issues_bulk_status(body: BulkIssueStatusBody):
     a general-purpose bulk field editor, just bulk triage. Unknown issue
     ids are skipped and reported back in `missing`, never silently dropped
     or allowed to fail the whole batch."""
-    if body.state not in ("done", "noise-archived", "waiting"):
+    if body.state not in ("done", "noise-archived", "waiting", "dismissed"):
         raise HTTPException(400, f"unsupported bulk triage state: {body.state!r}")
     if not body.issue_ids:
         raise HTTPException(400, "issue_ids must be a non-empty list")

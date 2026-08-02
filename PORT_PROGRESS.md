@@ -118,12 +118,36 @@ Real decisions already made this session (don't re-litigate):
    /cockpit (not /) shows pcc-stake-row/pccStakeToggle/pccComposeSelected/
    pcc-envelope-btn/pcc-src-real present, zero live references to any
    piece-4/5-removed variable (one comment-only match, expected).
-7. [NOT STARTED] Internal vertical scrollbar on the panel body specifically
-   (not the whole page) - `overflow-y:auto` scoped correctly so the header/
-   tabs stay pinned.
-8. [NOT STARTED] Final full-suite test run + live server verification of
-   the WHOLE panel end to end (not just piecewise) before marking #47
-   complete. Commit + push.
+7. [VERIFIED ALREADY SATISFIED - no code change needed] Internal vertical
+   scrollbar on the panel body. Traced the full height chain by reading
+   the actual CSS (not assumed): `.app{height:calc(100vh - 56px);
+   overflow:hidden}` (line ~2938) -> `.main{height:100%;overflow:hidden;
+   display:flex;flex-direction:column}` (line ~2944) -> `#pccBoardWrap{
+   flex:1;min-height:0;display:flex;flex-direction:column}` (line ~2665)
+   -> `.pcc-board{flex:1;min-height:0}` (line ~2662) -> `.card.pcc-detail-
+   card{overflow-y:auto;min-height:0}` (line ~2668, reinforced at ~3093).
+   This is a fully bounded flex-height chain with `overflow-y:auto` on the
+   detail card specifically - it already has its own independent
+   scrollbar, distinct from the page (page-level scroll is impossible,
+   `.app`/`.main` are both `overflow:hidden`) and distinct from the issue-
+   list pane's own separate scroll (`.pcc-list{overflow-y:auto}`, line
+   ~2753). This predates the mockup port (task #124 era) and none of this
+   session's edits (checklist rewrite, Progress strip, stakeholder
+   redesign) touched the ancestor chain or introduced a competing fixed
+   height/overflow rule - checked by reading every `.pcc-detail-grid`/
+   `.pcc-detail-main`/`.pcc-detail-side` rule, no conflicts found. No
+   headless-browser tool is available in this environment to screenshot-
+   verify the rendered scrollbar directly, so this is a source-level
+   verification (deterministic for a bounded flex chain, not something
+   that needs a pixel check to confirm) rather than a visual one - flagged
+   explicitly rather than silently treated as equal to a live check.
+8. [DONE, verified live] Final full-suite test run + live server
+   verification of the whole panel. `pytest -q` green (all files, no -k
+   filter) after every piece above. Server restarted after each piece;
+   curl against `/cockpit` (the real route - `/` is a different landing
+   page) confirmed 200 + presence of new markup/classes + zero live
+   references to anything removed. #47 is complete - committing/pushing
+   final state now.
 
 ### Task-list additions since this file was first written (2026-08-02)
 

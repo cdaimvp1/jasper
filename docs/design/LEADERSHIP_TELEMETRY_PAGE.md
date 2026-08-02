@@ -121,9 +121,116 @@ the one hard, real anchor available - the design should let him plug in
 his own honest number for "how long does a full manual contract read
 actually take me" rather than this doc inventing one.
 
+## Per-skill & NBA telemetry (added after Marc's review of the first draft)
+
+Marc's own follow-up sharpened this considerably: he wants a searchable,
+filterable, collapsible-by-default table - one row per skill/action kind
+- showing times executed, times offered as an NBA candidate (with
+acceptance rate), average executions/week, time saved per execution, and
+total time saved year-to-date. He also asked whether "per skill" and
+"per NBA" telemetry should just be one merged table, and whether time-
+saved-per-execution should account for the WHOLE assisted journey
+(Jasper surfaces the need + context + document, executes at request,
+presents findings, offers the follow-on draft) rather than one isolated
+action.
+
+**The merge is real, not just convenient.** NBA candidates and executed
+actions already share the same `kind` vocabulary in the live schema -
+`workgraph_nba.candidate_actions()`'s candidates and
+`pending_actions.action_kind` both use strings like `draft_reply`,
+`contract_review`, `summarize`. One row per kind, pulling two
+INDEPENDENT real counts:
+- **Offered / chosen / ignored / expired** - from `nba_choice_log`,
+  filtered to rows whose `offered_json` contains this kind, matched
+  against `chosen_action_kind`.
+- **Executed** - from `pending_actions` grouped by `action_kind`.
+
+Honest caveat to keep visible in the design, not just this doc: these
+two counts are NOT a guaranteed funnel. `nba_choice_log` is only written
+when a real, intentional detail-panel view logs the offer
+(`log_choice=true`, never the background polling prefetch - see
+`server_lean.py`'s own comment on this), so an action can be executed
+without ever having a matching "offered" row. Report both counts as what
+they are (two real, independently-sourced numbers), not as stages of one
+pipeline unless the data actually supports that read for a given kind.
+
+**The whole-chain question - yes, but it has a real double-counting
+trap.** Folding "surfaced the need" + "gathered context" + "executed" +
+"offered the follow-on draft" into ONE row's time-saved number sounds
+right until you notice: "surfaced the need" already overlaps the Usage
+section's triage metric, and "offered the follow-on draft" is a
+DIFFERENT action_kind (`draft_reply`) that gets its OWN row in this same
+table. Bundle it into `contract_review`'s number and those minutes get
+counted twice - once under Contract review, once under Drafting.
+
+**Resolution: atomic attribution, visible chains.** Every real action
+stays counted in exactly one row - no bundling, no double-counting. The
+"tell the whole story" need is met instead by a per-row drill-down (the
+row starts collapsed; expanding it shows what it actually led to): e.g.
+"22 of these 35 contract reviews had a reply drafted within an hour of
+completion - those minutes are counted under Drafting, not repeated
+here." The link is real and computable (same `issue_id`, `pending_
+actions.requested_ts` for the follow-on within a short window of the
+originating action's `updated_ts`), not asserted. This tells Marc's full
+"surfaced → executed → drafted" story through navigation, without any
+single row's number silently including someone else's minutes.
+
+**Columns, per row (kind):**
+
+| Column | Source | Real or estimate |
+|---|---|---|
+| Skill / action | `pending_actions.action_kind` (display name from `skills_registry.json` when it's a registered skill, else the raw kind string) | — |
+| Times executed | `COUNT(*)` from `pending_actions` where `status='done'` | Real |
+| Times offered · acceptance rate | `COUNT(*)`/`chosen` rate from `nba_choice_log` | Real |
+| Avg / week | Times executed ÷ weeks since this kind's first execution | Real (derived, no assumption) |
+| Time saved / execution | Marc's own assumption for this kind (see persistence below) | Estimate |
+| Time saved, YTD | (executions this calendar year) × (assumption active at each execution's time - see below) | Estimate, built from a real count |
+
+**Search bar** filters by skill/action display name. **Filters** are a
+small chip row - at minimum "All / NBA-sourced / Direct-triggered" (does
+this kind have any `nba_choice_log` rows at all) and, once
+`skills_registry.json` categories are wired in, a category filter
+(Draft / Analysis / Summarize / etc.).
+
+## Persisting this over time - the one real schema addition
+
+The raw telemetry (`pending_actions`, `nba_choice_log`) is already
+durable - SQLite, not recomputed from nothing, so every aggregate above
+can always be rebuilt from history. What's NOT persisted anywhere today
+is the assumption values themselves (the per-kind "time saved per
+execution" Marc sets). Without persisting those with a timestamp, a
+future change to an assumption would retroactively rewrite this year's
+already-reported total the next time the page recomputes it - which
+breaks exactly the "show the true value over time" goal Marc named.
+
+Proposed new table (the one piece of new schema this whole design
+needs):
+
+```sql
+CREATE TABLE time_saved_assumptions (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    action_kind  TEXT NOT NULL,       -- matches pending_actions.action_kind
+    seconds_saved_per_exec REAL NOT NULL,
+    set_by       TEXT NOT NULL,       -- 'marc', never a guessed default silently applied
+    set_ts       REAL NOT NULL,
+    note         TEXT                 -- Marc's own stated basis, shown in the UI next to the number
+)
+```
+
+Historical reporting always joins each `pending_actions` row against
+whichever `time_saved_assumptions` row was most-recently set (`set_ts <=
+requested_ts`) for that `action_kind` at the time - so raising the
+`contract_review` estimate next quarter changes future reports, not this
+year's already-locked total. This also directly answers "eventually +
+Cowork": `action_kind` is already executor-agnostic (nothing about it
+assumes Jasper's own code ran it, vs. a future Cowork-executed skill) -
+if/when a different runtime executes a registered skill, its
+`pending_actions` rows land in the exact same table under the exact same
+`action_kind`, and this whole design keeps working without modification.
+
 ## Proposed page structure
 
-Three sections, in order of how defensible the number is - most-observed
+Four sections, in order of how defensible the number is - most-observed
 first, most-assumption-dependent last, so the reader sees the real data
 before the extrapolation:
 
@@ -131,20 +238,29 @@ before the extrapolation:
    time, issues tracked, actions run by kind, NBA acceptance rate. This
    section alone already tells the "is this thing actually being used"
    story leadership needs, with no estimate required at all.
-2. **Time saved** (observed counts × stated assumptions, both shown):
-   the itemized mechanism table above, rendered as real-count ×
-   assumption = estimate, with the assumption values visibly editable/
-   labeled as inputs, not hidden constants. A running total, clearly
-   subtitled "based on the assumptions above, adjustable."
-3. **What this doesn't claim** (the caveats): the irreducible-review-
+2. **Per-skill & NBA telemetry** (mixed - real counts, estimated time):
+   the merged, searchable/filterable table from above. Starts collapsed
+   to a one-line summary ("13 skills tracked, N total executions this
+   year"); expanding it reveals the full table; expanding any one row
+   reveals its chained-follow-on drill-down.
+3. **Time saved** (observed counts × stated assumptions, both shown):
+   the itemized mechanism-level rollup (Triage/Drafting/Skill execution/
+   No dropped follow-up), rendered as real-count × assumption = estimate.
+   This is the coarser, mechanism-level view; the per-skill table above
+   is the same story at finer grain. A running total, subtitled "based on
+   the assumptions above, adjustable, versioned in time_saved_
+   assumptions."
+4. **What this doesn't claim** (the caveats): the irreducible-review-
    floor and volume-vs-free-time points from above, stated plainly, not
    as a legal disclaimer buried at the bottom - this is what makes the
-   first two sections credible rather than a sales pitch.
+   first three sections credible rather than a sales pitch.
 
 ## Mockup
 
 A static, non-wired mockup accompanies this doc (published separately,
-same pattern as the Detail Panel mockups earlier this session) - it
+same pattern as the Detail Panel mockups earlier this session, updated
+after Marc's follow-up to add the collapsed-by-default, searchable/
+filterable per-skill & NBA table with row-level chain drill-down) - it
 illustrates the layout and the assumption/estimate distinction above
 using clearly-labeled hypothetical numbers, not real data (there is none
 yet, per the finding at the top of this doc). It is not built into
@@ -153,11 +269,17 @@ Marc's explicit "do not build this now."
 
 ## What this design does NOT do
 
-- Add any new database table or logging call. Every metric reads
-  existing, already-written tables.
+- Add any new logging call to code that already runs today - every
+  count comes from tables Jasper already writes to. (Revised from the
+  first draft: one new table IS proposed, `time_saved_assumptions` above
+  - it stores Marc's own inputs with a timestamp so history doesn't get
+  silently rewritten later; it logs nothing new about Jasper's own
+  behavior, only Marc's stated assumptions.)
 - Present any number as real that isn't backed by an actual row count
   against the live database at render time.
 - Collapse an assumption and a real count into one unlabeled figure.
+- Bundle a follow-on action's time into the row that led to it - chains
+  are shown via drill-down links, never folded into one inflated number.
 - Decide the per-unit time assumptions itself - those are flagged as
   Marc's own inputs to set (or defaults he can override), not this
   design's guess presented as fact.
@@ -175,3 +297,16 @@ Marc's explicit "do not build this now."
 - Empty-state: with zero rows in every source table (today's actual
   state), the page must render an honest "not enough usage yet" state,
   never a zero dressed up as a real result or a silently blank section.
+- Per-skill/NBA merge: seeded `pending_actions` and `nba_choice_log` rows
+  for the same `action_kind` produce one merged row with both counts
+  correct and independent (executed count must not silently derive from
+  or require the offered count, or vice versa).
+- Chain drill-down: a `contract_review` pending_action followed by a
+  `draft_reply` pending_action on the same `issue_id` within the chosen
+  window is detected and linked; the linked action's minutes must NOT
+  also appear in `contract_review`'s own `time saved, YTD` total (an
+  explicit anti-double-counting assertion, not just "the link exists").
+- `time_saved_assumptions` versioning: two assumption rows for the same
+  `action_kind` at different `set_ts` values must each apply only to
+  `pending_actions` rows on their own side of the boundary - changing an
+  assumption today must not alter last month's already-computed total.

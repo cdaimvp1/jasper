@@ -93,6 +93,33 @@ def test_draft_reply_all_passes_reply_all_flag(monkeypatch):
     assert "-ReplyAll" in captured["args"]
 
 
+def test_draft_reply_passes_ref_tag_when_given(monkeypatch):
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        return _FakeCompletedProcess(returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    oa.draft_reply("entryid-ABC", ref_tag="JW-marc-308")
+
+    assert "-RefTag" in captured["args"]
+    assert "JW-marc-308" in captured["args"]
+
+
+def test_draft_reply_omits_ref_tag_when_not_given(monkeypatch):
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        return _FakeCompletedProcess(returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    oa.draft_reply("entryid-ABC")
+
+    assert "-RefTag" not in captured["args"]
+
+
 def test_draft_reply_raises_runtime_error_on_failure(monkeypatch):
     def fake_run(args, **kwargs):
         return _FakeCompletedProcess(returncode=2, stderr="stale entry id")
@@ -146,6 +173,33 @@ def test_draft_forward_calls_script_with_entry_id(monkeypatch):
     assert result == {"ok": True}
     assert "entryid-ABC" in captured["args"]
     assert str(oa._DRAFT_FORWARD_SCRIPT) in captured["args"]
+
+
+def test_draft_forward_passes_ref_tag_when_given(monkeypatch):
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        return _FakeCompletedProcess(returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    oa.draft_forward("entryid-ABC", ref_tag="JW-marc-308")
+
+    assert "-RefTag" in captured["args"]
+    assert "JW-marc-308" in captured["args"]
+
+
+def test_draft_forward_omits_ref_tag_when_not_given(monkeypatch):
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        return _FakeCompletedProcess(returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    oa.draft_forward("entryid-ABC")
+
+    assert "-RefTag" not in captured["args"]
 
 
 def test_draft_forward_raises_runtime_error_on_failure(monkeypatch):

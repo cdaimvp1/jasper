@@ -149,6 +149,18 @@ def test_classify_item_no_reference_present_is_none():
     assert result["pr_number"] is None
 
 
+def test_classify_item_extracts_jasper_ref_issue_id_from_body():
+    result = wc.classify_item(subject="Re: Workday renewal", body_preview="Sounds good.\n\nRef: JW-marc-308",
+                               from_actor="vendor@example.com")
+    assert result["jasper_ref_issue_id"] == "marc-308"
+
+
+def test_classify_item_no_jasper_ref_present_is_none():
+    result = wc.classify_item(subject="Let's grab coffee next week", body_preview="",
+                               from_actor="colleague@lilly.com")
+    assert result["jasper_ref_issue_id"] is None
+
+
 def test_classify_item_recognized_signal_pr_number_still_wins(monkeypatch):
     """A recognized automated-signal match's own (subject-only) pr_number
     is used as-is when present - this is a confirmed, real template, not a
@@ -201,7 +213,8 @@ def test_backfill_reclassify_updates_pr_number_only_change(ws_db):
 
 # --- Part C (2026-07-30): raw-item-to-issue linking via reference ID -----
 
-def _pending_item(ws_db, thread_key, subject, pr_number=None, item_class="ACTIONABLE-ASK", from_actor="a@example.com"):
+def _pending_item(ws_db, thread_key, subject, pr_number=None, item_class="ACTIONABLE-ASK", from_actor="a@example.com",
+                   jasper_ref_issue_id=None):
     """A classified-but-not-yet-linked raw_item, ready for cluster_and_link().
     Each thread_key is deliberately unique per call so thread_map_lookup
     never resolves it - the whole point is testing the NO-thread-match
@@ -215,6 +228,7 @@ def _pending_item(ws_db, thread_key, subject, pr_number=None, item_class="ACTION
         topic="other", topic_inferred=True, sentiment="neutral", sentiment_inferred=True,
         anomaly_flag=False, signal_type=None, pr_number=pr_number,
         pr_number_base=workgraph_signals.reference_base(pr_number),
+        jasper_ref_issue_id=jasper_ref_issue_id,
     )
     return rid
 
@@ -683,3 +697,83 @@ def test_cluster_and_link_reference_match_ignores_closed_issues(ws_db, monkeypat
 
     assert result["attached_via_reference"] == 0
     assert result["issues_created"] == 1
+
+
+# --- Jasper reference-tag direct match (task #36) -------------------------
+
+def test_cluster_and_link_shadow_logs_but_does_not_attach_jasper_ref_when_flag_off(ws_db, monkeypatch, tmp_path):
+    config = _isolate_config(ws_db, monkeypatch, tmp_path)
+    assert config.get("grouping", "jasper_ref_auto_attach_enabled") in (None, False)
+
+    real_issue = ws_db.create_issue_with_new_id(title="Existing issue", state="active", category="other")
+    _pending_item(ws_db, "jw1", "Re: renewal", jasper_ref_issue_id=real_issue)
+    result = wc.cluster_and_link()
+
+    assert result["jasper_ref_auto_attach_enabled"] is False
+    assert result["would_attach_via_jasper_ref"] == 1
+    assert result["attached_via_jasper_ref"] == 0
+    assert result["issues_created"] == 1, "must still create its own new issue while the flag is off"
+
+
+def test_cluster_and_link_attaches_via_jasper_ref_when_flag_enabled(ws_db, monkeypatch, tmp_path):
+    config = _isolate_config(ws_db, monkeypatch, tmp_path)
+    config.set_value(True, "grouping", "jasper_ref_auto_attach_enabled")
+
+    real_issue = ws_db.create_issue_with_new_id(title="Existing issue", state="active", category="other")
+    _pending_item(ws_db, "jw2", "Re: renewal", jasper_ref_issue_id=real_issue)
+    result = wc.cluster_and_link()
+
+    assert result["jasper_ref_auto_attach_enabled"] is True
+    assert result["attached_via_jasper_ref"] == 1
+    assert result["issues_created"] == 0
+    issues = ws_db.list_issues(states=None, limit=10000)
+    assert len(issues) == 1
+    assert issues[0]["id"] == real_issue
+
+
+def test_cluster_and_link_jasper_ref_ignores_closed_issues(ws_db, monkeypatch, tmp_path):
+    config = _isolate_config(ws_db, monkeypatch, tmp_path)
+    config.set_value(True, "grouping", "jasper_ref_auto_attach_enabled")
+
+    closed_issue = ws_db.create_issue_with_new_id(title="Closed issue", state="done", category="other")
+    _pending_item(ws_db, "jw3", "Re: renewal", jasper_ref_issue_id=closed_issue)
+    result = wc.cluster_and_link()
+
+    assert result["attached_via_jasper_ref"] == 0
+    assert result["issues_created"] == 1, "a stale tag pointing at a closed issue must not force a match"
+
+
+def test_cluster_and_link_jasper_ref_ignores_nonexistent_issue_id(ws_db, monkeypatch, tmp_path):
+    """A tag quoted from a since-deleted issue, or a copy-paste artifact -
+    get_issue() returning None must fall through cleanly, never raise."""
+    config = _isolate_config(ws_db, monkeypatch, tmp_path)
+    config.set_value(True, "grouping", "jasper_ref_auto_attach_enabled")
+
+    _pending_item(ws_db, "jw4", "Re: renewal", jasper_ref_issue_id="marc-99999")
+    result = wc.cluster_and_link()
+
+    assert result["attached_via_jasper_ref"] == 0
+    assert result["issues_created"] == 1
+
+
+def test_cluster_and_link_jasper_ref_takes_priority_over_reference_match(ws_db, monkeypatch, tmp_path):
+    """When both signals are present and both flags are on, the Jasper ref
+    tag wins - it names the exact issue directly, a stronger claim than a
+    shared PR/PO number pointing at some OTHER open issue with that same
+    number."""
+    config = _isolate_config(ws_db, monkeypatch, tmp_path)
+    config.set_value(True, "grouping", "jasper_ref_auto_attach_enabled")
+    config.set_value(True, "grouping", "reference_id_auto_attach_enabled")
+
+    jasper_target = ws_db.create_issue_with_new_id(title="Jasper target", state="active", category="other")
+    pr_target_rid = _pending_item(ws_db, "jw5a", "First notice", pr_number="PR999111", from_actor="alice@example.com")
+    wc.cluster_and_link()
+    pr_target = ws_db.get_raw_item(pr_target_rid)["issue_id"]
+    assert pr_target != jasper_target
+
+    second_rid = _pending_item(ws_db, "jw5b", "Re: renewal", pr_number="PR999111", jasper_ref_issue_id=jasper_target)
+    result = wc.cluster_and_link()
+
+    assert result["attached_via_jasper_ref"] == 1
+    assert result["attached_via_reference"] == 0
+    assert ws_db.get_raw_item(second_rid)["issue_id"] == jasper_target

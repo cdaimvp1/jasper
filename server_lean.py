@@ -1296,8 +1296,13 @@ async def api_action_draft_reply(body: DraftReplyBody):
     entry_id = raw_item.get("entry_id")
     if not entry_id:
         raise HTTPException(400, "this item has no stored EntryID (ingested before task #43, or not a mail item)")
+    # Task #36: real issue_id already resolved above - "JW-<issue-id>" is
+    # the same reference-tag format the stakeholder mailto: compose already
+    # uses; None (no tag at all) when this raw_item isn't linked to an
+    # issue yet, never a fabricated placeholder.
+    ref_tag = f"JW-{raw_item['issue_id']}" if raw_item.get("issue_id") else None
     try:
-        result = await asyncio.to_thread(outlook_actions.draft_reply, entry_id, body.reply_all)
+        result = await asyncio.to_thread(outlook_actions.draft_reply, entry_id, body.reply_all, ref_tag)
     except RuntimeError as e:
         raise HTTPException(500, str(e))
     return JSONResponse(result)
@@ -1319,8 +1324,9 @@ async def api_action_draft_forward(body: DraftForwardBody):
     entry_id = raw_item.get("entry_id")
     if not entry_id:
         raise HTTPException(400, "this item has no stored EntryID (ingested before task #43, or not a mail item)")
+    ref_tag = f"JW-{raw_item['issue_id']}" if raw_item.get("issue_id") else None  # task #36, see draft-reply above
     try:
-        result = await asyncio.to_thread(outlook_actions.draft_forward, entry_id)
+        result = await asyncio.to_thread(outlook_actions.draft_forward, entry_id, ref_tag)
     except RuntimeError as e:
         raise HTTPException(500, str(e))
     return JSONResponse(result)

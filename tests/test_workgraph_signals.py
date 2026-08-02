@@ -77,6 +77,36 @@ def test_classify_signal_includes_reference_base():
     assert result["pr_number_base"] == "PR416079"
 
 
+# --- jasper_ref_issue_id (task #36, Jasper's own outbound reference tag) ---
+
+def test_jasper_ref_issue_id_extracts_real_tag():
+    assert sig.jasper_ref_issue_id("Thanks, sounds good.\n\nRef: JW-marc-308") == "marc-308"
+
+
+def test_jasper_ref_issue_id_case_insensitive_prefix():
+    assert sig.jasper_ref_issue_id("ref: jw-marc-42") == "marc-42"
+
+
+def test_jasper_ref_issue_id_none_when_absent():
+    assert sig.jasper_ref_issue_id("just a normal reply, no tag here") is None
+
+
+def test_jasper_ref_issue_id_none_and_empty_pass_through():
+    assert sig.jasper_ref_issue_id(None) is None
+    assert sig.jasper_ref_issue_id("") is None
+
+
+def test_jasper_ref_issue_id_finds_it_inside_quoted_reply_body():
+    text = (
+        "Sure, works for me.\n\n"
+        "On Mon, Aug 3, 2026 at 9:00 AM Marc Lane wrote:\n"
+        "> Can you confirm the renewal date?\n"
+        "> \n"
+        "> Ref: JW-marc-308"
+    )
+    assert sig.jasper_ref_issue_id(text) == "marc-308"
+
+
 # --- is_personal_calendar_block / is_ooo_subject (personal/OOO filter) ---
 
 def test_is_personal_calendar_block_true_when_only_participant_is_organizer():

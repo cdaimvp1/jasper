@@ -49,6 +49,33 @@ OWNER_NAME_UPPER = "MARC LANE"
 # already uses, now the single shared source instead of two copies.
 REFERENCE_ID_RE = re.compile(r"\b(?:PR|PO)\d{4,}(?:-V\d+)?\b", re.I)
 
+# Task #36: an inconspicuous reference tag Jasper itself appends to outbound
+# drafts/compose subjects/bodies (see outlook_actions.py's draft_reply/
+# draft_forward, and the Detail Panel's stakeholder mailto: compose) - "Ref:
+# JW-<issue-id>", a plain, low-key text token chosen specifically because it
+# survives any mail client, signature block, or corporate mail-security
+# rewrite, unlike a hidden header/HTML comment a gateway could strip. When
+# this comes back on an INBOUND reply/forward, it's a much stronger signal
+# than a shared PR/PO number (which only proves "same transaction") - it
+# names the exact issue directly, because Jasper's own tooling put it there.
+# Case-insensitive on "JW" but the captured id itself is returned exactly as
+# found - real issue ids (workgraph_store.next_issue_id) are always
+# lowercase ("marc-308"), so a same-case echo-back is the overwhelmingly
+# common case; validation that the id still resolves to a real issue happens
+# at link time (workgraph_classify.cluster_and_link), never here.
+JASPER_REF_RE = re.compile(r"\bRef:\s*JW-([\w-]+)", re.I)
+
+
+def jasper_ref_issue_id(text: Optional[str]) -> Optional[str]:
+    """Extracts the raw candidate issue id from a Jasper reference tag, or
+    None if the text has none. Does NOT check the id actually exists -
+    that's a link-time concern (a stale tag quoted from an old, since-
+    deleted issue should fall through to the normal matching, not error)."""
+    if not text:
+        return None
+    m = JASPER_REF_RE.search(text)
+    return m.group(1) if m else None
+
 # 2026-07-31 (meeting-grouping/related-project identity pass): the version
 # suffix above (-V33 etc.) is real and worth keeping for display, but every
 # matching function in workgraph_projects.py used to compare the FULL

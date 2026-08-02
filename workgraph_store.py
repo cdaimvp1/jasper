@@ -668,6 +668,17 @@ def init_workgraph() -> None:
                 pass
             conn.execute("CREATE INDEX IF NOT EXISTS idx_raw_pr_number_base ON raw_items(pr_number_base)")
             try:
+                # Task #36: raw candidate issue id extracted from a Jasper-
+                # authored "Ref: JW-<id>" tag, if this item's text has one -
+                # see workgraph_signals.jasper_ref_issue_id. NOT validated
+                # against real issues here; that happens at link time
+                # (workgraph_classify.cluster_and_link), same deferred-
+                # validation split pr_number/pr_number_base already use.
+                conn.execute("ALTER TABLE raw_items ADD COLUMN jasper_ref_issue_id TEXT")
+            except sqlite3.OperationalError:
+                pass
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_raw_jasper_ref_issue_id ON raw_items(jasper_ref_issue_id)")
+            try:
                 # 2026-07-31 (meeting-grouping/related-project identity pass):
                 # auditability for the calendar thread_key fix - a heuristic
                 # synthetic series key needs to be diagnosable later, not
@@ -994,6 +1005,7 @@ def classify_raw_item(
     signal_type: Optional[str] = None,
     pr_number: Optional[str] = None,
     pr_number_base: Optional[str] = None,
+    jasper_ref_issue_id: Optional[str] = None,
 ) -> None:
     with _lock:
         conn = _connect()
@@ -1002,11 +1014,12 @@ def classify_raw_item(
                 """UPDATE raw_items SET
                        classified = 1, item_class = ?, direction = ?, direction_inferred = ?,
                        topic = ?, topic_inferred = ?, sentiment = ?, sentiment_inferred = ?,
-                       anomaly_flag = ?, signal_type = ?, pr_number = ?, pr_number_base = ?
+                       anomaly_flag = ?, signal_type = ?, pr_number = ?, pr_number_base = ?,
+                       jasper_ref_issue_id = ?
                    WHERE id = ?""",
                 (item_class, direction, int(direction_inferred), topic, int(topic_inferred),
                  sentiment, int(sentiment_inferred), int(anomaly_flag), signal_type, pr_number,
-                 pr_number_base, raw_item_id),
+                 pr_number_base, jasper_ref_issue_id, raw_item_id),
             )
         finally:
             conn.close()

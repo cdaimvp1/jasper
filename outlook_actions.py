@@ -51,28 +51,39 @@ def open_email(entry_id: str) -> dict:
     return _run_powershell(["powershell", "-NoProfile", "-File", str(_OPEN_ITEM_SCRIPT), "-EntryID", entry_id])
 
 
-def draft_reply(entry_id: str, reply_all: bool = False) -> dict:
+def draft_reply(entry_id: str, reply_all: bool = False, ref_tag: str | None = None) -> dict:
     """Creates a REAL Outlook draft reply to the exact item (by EntryID) via
     COM's own Reply()/ReplyAll() - a new draft MailItem, already addressed
     and quoting the original thread - then Display()s it for review. Never
     calls Send(): this only ever puts a draft on screen, the same as a
     person clicking Reply themselves. Raises RuntimeError (with a real
-    reason) on failure."""
+    reason) on failure.
+
+    ref_tag (task #36), when given, is prepended as a plain, quiet line at
+    the top of the draft body - "Ref: JW-<issue-id>" - a real, working
+    fallback matching signal if this draft comes back on a reply (see
+    workgraph_signals.JASPER_REF_RE / workgraph_classify.cluster_and_link).
+    Optional and additive: with no ref_tag, this behaves exactly as before."""
     if not entry_id:
         raise ValueError("entry_id is required")
     args = ["powershell", "-NoProfile", "-File", str(_DRAFT_REPLY_SCRIPT), "-EntryID", entry_id]
     if reply_all:
         args.append("-ReplyAll")
+    if ref_tag:
+        args.extend(["-RefTag", ref_tag])
     return _run_powershell(args)
 
 
-def draft_forward(entry_id: str) -> dict:
+def draft_forward(entry_id: str, ref_tag: str | None = None) -> dict:
     """Creates a REAL Outlook draft forward of the exact item (by EntryID)
     via COM's own Forward() - a new draft MailItem containing the original
     message, unaddressed - then Display()s it for review. Never calls
     Send(): this only ever puts a draft on screen, the same as a person
     clicking Forward themselves. Raises RuntimeError (with a real reason)
-    on failure."""
+    on failure. ref_tag - see draft_reply's docstring above, same idea."""
     if not entry_id:
         raise ValueError("entry_id is required")
-    return _run_powershell(["powershell", "-NoProfile", "-File", str(_DRAFT_FORWARD_SCRIPT), "-EntryID", entry_id])
+    args = ["powershell", "-NoProfile", "-File", str(_DRAFT_FORWARD_SCRIPT), "-EntryID", entry_id]
+    if ref_tag:
+        args.extend(["-RefTag", ref_tag])
+    return _run_powershell(args)

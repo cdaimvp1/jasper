@@ -5,10 +5,14 @@
 # Send(). Display() puts it on screen exactly like a person clicking Forward
 # themselves; nothing here transmits anything.
 #
+# -RefTag (task #36, optional) - see outlook_draft_reply.ps1's own comment,
+# same idea, same reasoning.
+#
 # Usage:
-#   powershell -File outlook_draft_forward.ps1 -EntryID "<entry id>"
+#   powershell -File outlook_draft_forward.ps1 -EntryID "<entry id>" [-RefTag "JW-marc-308"]
 param(
-    [Parameter(Mandatory=$true)][string]$EntryID
+    [Parameter(Mandatory=$true)][string]$EntryID,
+    [string]$RefTag
 )
 
 try {
@@ -20,6 +24,10 @@ try {
         exit 2
     }
     $draft = $item.Forward()
+    if ($RefTag) {
+        $escapedTag = [System.Net.WebUtility]::HtmlEncode("Ref: $RefTag")
+        $draft.HTMLBody = "<div style='font-size:11px;color:#888888'>$escapedTag</div>" + $draft.HTMLBody
+    }
     $draft.Display()
     Write-Output '{"ok":true}'
 } catch {

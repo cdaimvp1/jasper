@@ -5,11 +5,19 @@
 # Display() puts it on screen exactly like a person clicking Reply
 # themselves; nothing here transmits anything.
 #
+# -RefTag (task #36, optional): a plain "Ref: JW-<issue-id>" line prepended
+# at the very top of the draft body, above the quoted original - an
+# inconspicuous text token, not a hidden header, so it survives any mail
+# client/signature/security rewrite. If this draft comes back on a reply,
+# workgraph_signals.JASPER_REF_RE picks it back up as a real fallback
+# matching signal (workgraph_classify.cluster_and_link).
+#
 # Usage:
-#   powershell -File outlook_draft_reply.ps1 -EntryID "<entry id>" [-ReplyAll]
+#   powershell -File outlook_draft_reply.ps1 -EntryID "<entry id>" [-ReplyAll] [-RefTag "JW-marc-308"]
 param(
     [Parameter(Mandatory=$true)][string]$EntryID,
-    [switch]$ReplyAll
+    [switch]$ReplyAll,
+    [string]$RefTag
 )
 
 try {
@@ -21,6 +29,13 @@ try {
         exit 2
     }
     $draft = if ($ReplyAll) { $item.ReplyAll() } else { $item.Reply() }
+    if ($RefTag) {
+        # HTMLBody is populated by Reply()/ReplyAll() regardless of the
+        # original item's format, so prepending here (rather than .Body)
+        # reliably lands above the quoted chain either way.
+        $escapedTag = [System.Net.WebUtility]::HtmlEncode("Ref: $RefTag")
+        $draft.HTMLBody = "<div style='font-size:11px;color:#888888'>$escapedTag</div>" + $draft.HTMLBody
+    }
     $draft.Display()
     Write-Output '{"ok":true}'
 } catch {

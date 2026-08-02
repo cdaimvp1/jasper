@@ -368,6 +368,12 @@ def classify_item(*, subject: str, body_preview: str, from_actor: str,
     if not pr_number_base:
         pr_number_base = workgraph_signals.reference_base(pr_number)
 
+    # Task #36: same full-text scan as pr_number above - a Jasper reference
+    # tag most often shows up quoted back inside a reply's body (the
+    # original draft's signature/subject line, echoed by the reply chain),
+    # not necessarily the subject alone.
+    jasper_ref_issue_id = workgraph_signals.jasper_ref_issue_id(text)
+
     return {
         "item_class": item_class,
         "direction": direction, "direction_inferred": direction_inferred,
@@ -378,6 +384,7 @@ def classify_item(*, subject: str, body_preview: str, from_actor: str,
         "signal_type": signal["signal_type"] if signal else None,
         "pr_number": pr_number,
         "pr_number_base": pr_number_base,
+        "jasper_ref_issue_id": jasper_ref_issue_id,
     }
 
 
@@ -401,6 +408,7 @@ def run_classification(limit: int = 500) -> dict:
             anomaly_flag=result["anomaly_flag"],
             signal_type=result["signal_type"], pr_number=result["pr_number"],
             pr_number_base=result["pr_number_base"],
+            jasper_ref_issue_id=result["jasper_ref_issue_id"],
         )
         counts[result["item_class"]] = counts.get(result["item_class"], 0) + 1
     return {"classified": len(items), "by_class": counts}
@@ -593,6 +601,14 @@ def cluster_and_link(limit: int = 500) -> dict:
     ships OFF, always counted, no backtest path yet either."""
     reference_auto_attach = bool(config.get("grouping", "reference_id_auto_attach_enabled"))
     subject_match_auto_attach = bool(config.get("grouping", "subject_match_auto_attach_enabled"))
+    # Task #36: a Jasper-authored "Ref: JW-<id>" tag echoed back on an
+    # inbound reply/forward - see workgraph_signals.JASPER_REF_RE. Stronger
+    # than the PR/PO reference match above (that only proves "same
+    # transaction"; this names the exact issue), but still gated behind its
+    # own flag rather than defaulting on, same report-only-first discipline
+    # as reference_id_auto_attach_enabled/subject_match_auto_attach_enabled
+    # - this is a brand-new extraction path with no bake-in history yet.
+    jasper_ref_auto_attach = bool(config.get("grouping", "jasper_ref_auto_attach_enabled"))
     now = time.time()
     with_pending = ws.get_items_pending_link(limit)
     open_issues_by_subject: dict[str, str] = {}
@@ -608,6 +624,8 @@ def cluster_and_link(limit: int = 500) -> dict:
     would_attach_via_reference = 0
     attached_via_subject_match = 0
     would_attach_via_subject_match = 0
+    attached_via_jasper_ref = 0
+    would_attach_via_jasper_ref = 0
     touched_issues = set()
     # 2026-07-31: tracks which touched issues had a genuinely NEW
     # ACTIONABLE-ASK item land this run (vs. just an FYI/waiting reply) -
@@ -625,6 +643,25 @@ def cluster_and_link(limit: int = 500) -> dict:
         issue_id = ws.thread_map_lookup(thread_key)
         is_new_issue = False
         reference_match = None
+        jasper_ref_match = None
+        if issue_id is None:
+            # Task #36: checked FIRST, ahead of the PR/PO reference match
+            # below - a Jasper ref tag names the exact issue directly
+            # (Jasper's own tooling put it there), rather than merely
+            # sharing a transaction number with it. A stale tag (quoted
+            # from an old thread, or naming an issue that's since closed
+            # or was deleted) is never forced - it just falls through to
+            # the normal matching below, same as no tag at all.
+            jasper_ref_candidate = item.get("jasper_ref_issue_id")
+            if jasper_ref_candidate:
+                candidate_issue = ws.get_issue(jasper_ref_candidate)
+                if candidate_issue and candidate_issue["state"] in ("active", "waiting", "blocked"):
+                    jasper_ref_match = jasper_ref_candidate
+                    would_attach_via_jasper_ref += 1
+            if jasper_ref_match and jasper_ref_auto_attach:
+                issue_id = jasper_ref_match
+                ws.thread_map_set(thread_key, issue_id)
+                attached_via_jasper_ref += 1
         if issue_id is None:
             # 2026-07-31: match on pr_number_base (version-stripped), not
             # the full pr_number - see list_open_issue_ids_for_reference's
@@ -665,7 +702,9 @@ def cluster_and_link(limit: int = 500) -> dict:
                     is_new_issue = True
 
         summary = item.get("subject") or item.get("body_preview") or "(no summary)"
-        if issue_id == reference_match and reference_auto_attach:
+        if issue_id == jasper_ref_match and jasper_ref_auto_attach:
+            summary = f"{summary} [auto-attached via Jasper reference tag]"
+        elif issue_id == reference_match and reference_auto_attach:
             # Real, visible breadcrumb on the issue itself (Progress
             # timeline) - never silently fold a raw_item in without a
             # trace of why it landed here instead of a new issue.
@@ -715,6 +754,9 @@ def cluster_and_link(limit: int = 500) -> dict:
             "attached_via_subject_match": attached_via_subject_match,
             "would_attach_via_subject_match": would_attach_via_subject_match,
             "subject_match_auto_attach_enabled": subject_match_auto_attach,
+            "attached_via_jasper_ref": attached_via_jasper_ref,
+            "would_attach_via_jasper_ref": would_attach_via_jasper_ref,
+            "jasper_ref_auto_attach_enabled": jasper_ref_auto_attach,
             "parties": party_result, "projects": project_result}
 
 
@@ -772,7 +814,8 @@ def backfill_reclassify() -> dict:
                 and result["sentiment"] == item.get("sentiment")
                 and result["anomaly_flag"] == bool(item.get("anomaly_flag"))
                 and result["pr_number"] == item.get("pr_number")
-                and result["pr_number_base"] == item.get("pr_number_base")):
+                and result["pr_number_base"] == item.get("pr_number_base")
+                and result["jasper_ref_issue_id"] == item.get("jasper_ref_issue_id")):
             continue  # already correct - nothing to update
 
         if item.get("issue_id") and result["topic"] and item["issue_id"] not in issue_new_topic:
@@ -786,6 +829,7 @@ def backfill_reclassify() -> dict:
             anomaly_flag=result["anomaly_flag"],
             signal_type=result["signal_type"], pr_number=result["pr_number"],
             pr_number_base=result["pr_number_base"],
+            jasper_ref_issue_id=result["jasper_ref_issue_id"],
         )
         updated += 1
         if item.get("issue_id"):

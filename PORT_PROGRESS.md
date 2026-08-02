@@ -97,9 +97,27 @@ Real decisions already made this session (don't re-litigate):
    `altActionsHtml` - zero live references left, only one explanatory
    comment. Full test suite green (`pytest -q`, all passing, no failures)
    before this commit.
-6. [NOT STARTED] Stakeholder redesign: real parties grouped by
-   affiliation/company (not flat pills), dot-toggle multi-select, mailto:
-   compose (interim, see caveat above).
+6. [DONE, committing now] Stakeholder redesign: real parties grouped by
+   company (external, header "{company} (External)", falls back to plain
+   "External" when company is unknown) and "Lilly" (internal) - dot-toggle
+   multi-select (`pccStakeToggle`) replacing the old flat chip-pill list,
+   envelope button (`pccComposeSelected`) opens a client-only `mailto:`
+   draft to just the selected people, subject carries a "Ref: JW-<id>" tag
+   (task #36's own design, applied inline to this one interim action per
+   the mockup's own legend - task #36's real build is the separate,
+   generic inbound-matching mechanism). "confirmed" badge shown when a
+   party's affiliation_source is manual_correction (real signal - the
+   /api/workgraph/parties/{id}/correct endpoint sets this). No star/
+   primary marker - per-issue parties have no is_primary field (that's
+   project-scope only); this matches what was already true before the
+   port, not a regression. Added missing `.pcc-src-tag`/`.pcc-src-real`
+   CSS (used by the mockup but never defined in the real file) using the
+   file's existing --blue-t/--blue-d tokens, consistent with how
+   pcc-procbox-gate already mixes old-system blue into lk-scoped markup.
+   Verified live: full pytest suite green, server restarted, curl against
+   /cockpit (not /) shows pcc-stake-row/pccStakeToggle/pccComposeSelected/
+   pcc-envelope-btn/pcc-src-real present, zero live references to any
+   piece-4/5-removed variable (one comment-only match, expected).
 7. [NOT STARTED] Internal vertical scrollbar on the panel body specifically
    (not the whole page) - `overflow-y:auto` scoped correctly so the header/
    tabs stay pinned.

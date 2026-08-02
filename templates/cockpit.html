@@ -3373,6 +3373,30 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
 .pcc-side-block{margin-bottom:20px}
 .pcc-side-hd{font:700 10px/1 var(--mono);text-transform:uppercase;color:var(--lk-mut2);margin:0 0 8px;letter-spacing:.04em}
 .pcc-side-sub{font:700 9.5px/1 var(--mono);text-transform:uppercase;color:var(--lk-mut2);margin:0 0 6px;letter-spacing:.03em}
+
+/* Stakeholders (piece #6, port #47): grouped-by-company list with a
+   toggleable dot, not flat pills - click names to select, envelope
+   composes an interim mailto: draft to just the selected people. Real
+   backend compose-to-recipients action is task #35, not built yet. */
+.pcc-envelope-btn{border:1px solid var(--lk-line2);background:var(--lk-surface);color:var(--lk-mut2);border-radius:var(--lk-r-c);
+  padding:3px 7px;font-size:13px;cursor:pointer;line-height:1;margin-left:6px}
+.pcc-envelope-btn.active{background:var(--lk-pri);color:#fff;border-color:var(--lk-pri)}
+.pcc-envelope-btn:disabled{opacity:.4;cursor:default}
+.pcc-stake-list{display:flex;flex-direction:column}
+.pcc-stake-row{display:flex;align-items:center;gap:9px;padding:7px 2px;border-bottom:1px solid var(--lk-line);cursor:pointer;
+  border-radius:var(--lk-r-c);user-select:none}
+.pcc-stake-row:last-child{border-bottom:none}
+.pcc-stake-row:hover{background:var(--lk-nested)}
+.pcc-stake-dot{width:15px;height:15px;border-radius:50%;border:1.5px solid var(--lk-line2);flex:none;position:relative;background:var(--lk-surface)}
+.pcc-stake-row.selected .pcc-stake-dot{background:var(--lk-pri);border-color:var(--lk-pri)}
+.pcc-stake-row.selected .pcc-stake-dot::after{content:"";position:absolute;left:4px;top:1px;width:4px;height:8px;
+  border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg)}
+.pcc-stake-name{font-size:12.5px;font-weight:600;color:var(--lk-ink)}
+.pcc-stake-meta{font-size:10.5px;color:var(--lk-mut2);margin-left:auto}
+.pcc-stake-hint{font-size:10.5px;color:var(--lk-mut2);margin-top:6px;font-style:italic}
+.pcc-src-tag{display:inline-block;font:800 8.5px/1 var(--mono);text-transform:uppercase;letter-spacing:.03em;
+  padding:2px 6px;border-radius:4px;vertical-align:middle}
+.pcc-src-real{background:var(--blue-t);color:var(--blue-d)}
 .pcc-datestat{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--lk-line);font-size:12px}
 .pcc-datestat:last-child{border-bottom:none}
 .pcc-datestat b{font-family:var(--mono);font-weight:700}
@@ -5872,6 +5896,28 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
       body.prepend(note);
     }
   }
+  // Stakeholder multi-select + interim mailto: compose (piece #6, port
+  // #47). Real Outlook-COM compose-to-recipients action is task #35, not
+  // built yet - this is a plain client-only mailto: link, same as the
+  // mockup. The "Ref: JW-<id>" subject tag applies task #36's own design
+  // (a quiet, mail-security-safe text token) inline to this one interim
+  // action; task #36 itself is the separate, generic build (checking
+  // inbound mail for the pattern as a fallback linking signal).
+  function pccStakeToggle(row) {
+    row.classList.toggle("selected");
+    const panel = row.closest(".pcc-side-block");
+    const any = panel.querySelectorAll(".pcc-stake-row.selected").length > 0;
+    const btn = panel.querySelector("#pccEnvBtn");
+    if (btn) { btn.disabled = !any; btn.classList.toggle("active", any); }
+  }
+  function pccComposeSelected(issueId, issueTitle) {
+    const rows = document.querySelectorAll(".pcc-stake-row.selected");
+    if (!rows.length) return;
+    const emails = Array.from(rows).map(r => r.getAttribute("data-email")).filter(Boolean);
+    if (!emails.length) return;
+    const subject = encodeURIComponent(`${issueTitle} - Ref: JW-${issueId}`);
+    window.location.href = "mailto:" + emails.join(",") + "?subject=" + subject;
+  }
   function pccFmtAge(ts) {
     if (!ts) return "";
     const days = Math.floor((Date.now() / 1000 - ts) / 86400);
@@ -7024,13 +7070,39 @@ h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
     // signal only at project scope (workgraph_projects.
     // aggregate_parties_for_project) - so no star here; the Project tab
     // below is where a real primary contact gets marked.
+    // piece #6 (port #47): grouped-by-company dot-toggle list instead of
+    // flat chip pills - click names to select, envelope composes an
+    // interim mailto: draft to just the selected people (task #35's real
+    // Outlook-COM compose-to-recipients action isn't built yet). No star/
+    // primary marker at this scope - per-issue parties have no is_primary
+    // field, see the comment above (that's a project-scope-only signal).
     const sideInternal = parties.filter(p => p.affiliation === "internal");
-    const sideExternal = parties.filter(p => p.affiliation === "external");
-    const sideStakeholdersHtml = (window.renderPartyChip && parties.length) ? `
+    const sideExternalByCompany = new Map();
+    parties.filter(p => p.affiliation === "external").forEach(p => {
+      const key = p.company || "External";
+      if (!sideExternalByCompany.has(key)) sideExternalByCompany.set(key, []);
+      sideExternalByCompany.get(key).push(p);
+    });
+    const pccStakeRowHtml = p => {
+      const name = pccEsc(p.display_name || p.primary_email || p.id);
+      const confirmed = p.affiliation_source === "manual_correction"
+        ? '<span class="pcc-src-tag pcc-src-real">confirmed</span>' : "";
+      return `<div class="pcc-stake-row" data-email="${pccEsc(p.primary_email || "")}" data-name="${name}" onclick="pccStakeToggle(this)">
+        <span class="pcc-stake-dot"></span>
+        <span class="pcc-stake-name">${name}</span>
+        <span class="pcc-stake-meta">${confirmed}</span>
+      </div>`;
+    };
+    const sideStakeholdersHtml = parties.length ? `
       <div class="pcc-side-block">
-        <div class="pcc-side-hd">Stakeholders</div>
-        ${sideInternal.length ? `<div class="pcc-side-sub">Internal</div><div class="pcc-actions-row">${sideInternal.map(p => window.renderPartyChip(p)).join("")}</div>` : ""}
-        ${sideExternal.length ? `<div class="pcc-side-sub" style="margin-top:${sideInternal.length ? 10 : 0}px">External</div><div class="pcc-actions-row">${sideExternal.map(p => window.renderPartyChip(p)).join("")}</div>` : ""}
+        <div class="pcc-side-hd">Stakeholders<button type="button" class="pcc-envelope-btn" id="pccEnvBtn" disabled onclick="pccComposeSelected(${issue.id},'${pccEsc(issue.title || "")}')" title="Email selected stakeholders">&#9993;</button></div>
+        ${Array.from(sideExternalByCompany.entries()).map(([company, ps]) => `
+          <div class="pcc-side-sub">${pccEsc(company)} (External)</div>
+          <div class="pcc-stake-list">${ps.map(pccStakeRowHtml).join("")}</div>`).join("")}
+        ${sideInternal.length ? `
+          <div class="pcc-side-sub" style="margin-top:${sideExternalByCompany.size ? 10 : 0}px">Lilly</div>
+          <div class="pcc-stake-list">${sideInternal.map(pccStakeRowHtml).join("")}</div>` : ""}
+        <div class="pcc-stake-hint">Click names to select, then the envelope to draft an email to just them.</div>
       </div>` : "";
     const sideGlanceHtml = `
       <div class="pcc-side-block">

@@ -214,6 +214,18 @@ def init_workgraph() -> None:
                 )
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_checklist_dismissals_issue ON checklist_dismissals(issue_id)")
+            # Task #59: this table shipped dismissal-only (task #44); the
+            # checklist row's "Mark done" icon needs the same real persistence
+            # dismiss got. Plain ALTER TABLE ADD COLUMN (no CHECK constraint -
+            # validated in Python instead, deliberately, after the CHECK-
+            # widening migration bug caught live in task #44) rather than
+            # renaming the table; it shipped with ~zero real rows so a rename
+            # isn't worth the extra migration-crash-safety surface for a name
+            # that was never load-bearing outside this file.
+            try:
+                conn.execute("ALTER TABLE checklist_dismissals ADD COLUMN status TEXT NOT NULL DEFAULT 'dismissed'")
+            except sqlite3.OperationalError:
+                pass  # column already exists
 
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS work_tasks (
@@ -1457,30 +1469,49 @@ def checklist_item_key(kind: str, raw_item_id: Any, text: str) -> str:
     return f"{kind}:{raw_item_id}:{digest}"
 
 
-def dismiss_checklist_item(*, issue_id: str, kind: str, raw_item_id: Any, text: str,
-                            actor: Optional[str] = None) -> str:
-    """Persist a checklist-item-level dismissal. Idempotent (re-dismissing the
-    same item_key just refreshes dismissed_ts/actor, via INSERT OR REPLACE)."""
+def _set_checklist_item_status(*, issue_id: str, kind: str, raw_item_id: Any, text: str,
+                                status: str, actor: Optional[str] = None) -> str:
+    """Shared writer behind dismiss_checklist_item()/mark_checklist_item_done() -
+    identical persistence, only the recorded status differs. Idempotent
+    (re-recording the same item_key just refreshes status/dismissed_ts/actor,
+    via INSERT OR REPLACE)."""
     item_key = checklist_item_key(kind, raw_item_id, text)
     with _lock:
         conn = _connect()
         try:
             conn.execute(
                 """INSERT OR REPLACE INTO checklist_dismissals
-                   (issue_id, item_key, kind, text_snippet, dismissed_ts, actor)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (issue_id, item_key, kind, (text or "")[:280], time.time(), actor),
+                   (issue_id, item_key, kind, text_snippet, dismissed_ts, actor, status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (issue_id, item_key, kind, (text or "")[:280], time.time(), actor, status),
             )
         finally:
             conn.close()
     return item_key
 
 
+def dismiss_checklist_item(*, issue_id: str, kind: str, raw_item_id: Any, text: str,
+                            actor: Optional[str] = None) -> str:
+    """Persist a checklist-item-level dismissal - "this was wrong/not needed,"
+    never a completion (task #44)."""
+    return _set_checklist_item_status(issue_id=issue_id, kind=kind, raw_item_id=raw_item_id,
+                                       text=text, status="dismissed", actor=actor)
+
+
+def mark_checklist_item_done(*, issue_id: str, kind: str, raw_item_id: Any, text: str,
+                              actor: Optional[str] = None) -> str:
+    """Persist a checklist-item-level completion - distinct outcome from
+    dismiss, same mechanics (task #59)."""
+    return _set_checklist_item_status(issue_id=issue_id, kind=kind, raw_item_id=raw_item_id,
+                                       text=text, status="done", actor=actor)
+
+
 def list_dismissed_checklist_keys(issue_id: str) -> set[str]:
-    """All item_keys dismissed for this issue - checked against a fresh
-    checklist_item_key() computed for each row at read time, so a dismissed
-    item stops reappearing without the caller needing to store anything
-    beyond the set membership check."""
+    """All item_keys with ANY recorded status (dismissed OR done) for this
+    issue - checked against a fresh checklist_item_key() computed for each
+    row at read time, so a resolved item stops reappearing without the
+    caller needing to store anything beyond the set membership check. Name
+    kept from task #44 (dismiss-only at the time); scope widened task #59."""
     with _lock:
         conn = _connect()
         try:

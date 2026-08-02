@@ -5946,6 +5946,27 @@ html[data-theme="dark"]{
     evt.stopPropagation();
     dot.classList.toggle("done");
   }
+  // Task #44/#59: persist a checklist-row outcome (dismissed/done) for real.
+  // asks/decisions/commitments/repeat-signal rows carry a real dismissKind
+  // (server-side kind vocabulary) via data-* attributes and persist for
+  // real, so the row stops reappearing on the next load. "General" rows
+  // (NBA/synthesis candidates, no stable per-item id - see the exploration
+  // task #44 was built against) keep the prior visual-only feedback; their
+  // resolution is covered by nba_choice_log at the issue-NBA-offer level,
+  // not per-row.
+  function pccPersistChecklistOutcome(endpoint, issueId, btn) {
+    const dismissKind = btn && btn.dataset ? btn.dataset.dismissKind : "";
+    if (!dismissKind) return;
+    const rawItemIdStr = btn.dataset.rawItemId || "";
+    fetch(`/api/workgraph/issues/${encodeURIComponent(issueId)}/checklist/${endpoint}`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        kind: dismissKind,
+        raw_item_id: rawItemIdStr ? Number(rawItemIdStr) : null,
+        text: btn.dataset.dismissText || "",
+      }),
+    }).catch(() => {});
+  }
   function pccRowIcon(evt, rowWrapId, kind, issueId, btn) {
     evt.stopPropagation();
     const row = document.getElementById(rowWrapId);
@@ -5953,6 +5974,7 @@ html[data-theme="dark"]{
     if (kind === "done") {
       const dot = row.querySelector(".pcc-check-dot");
       if (dot) dot.classList.add("done");
+      pccPersistChecklistOutcome("done", issueId, btn);
     } else if (kind === "snooze") {
       row.style.opacity = "0.55";
       setTimeout(() => { row.style.opacity = "1"; }, 400);
@@ -5966,25 +5988,7 @@ html[data-theme="dark"]{
         note.textContent = "Dismissed as not needed - recorded separately from \"done,\" so this never counts as a successful resolution for what Jasper learns.";
         row.appendChild(note);
       }
-      // Task #44: asks/decisions/commitments/repeat-signal rows have a real
-      // dismissKind (server-side kind vocabulary) and persist for real, so
-      // the row stops reappearing on the next load. "General" rows (NBA/
-      // synthesis candidates, no stable per-item id - see the exploration
-      // this task was built against) keep the prior visual-only fade; their
-      // dismissal is covered by nba_choice_log at the issue-NBA-offer level,
-      // not per-row.
-      const dismissKind = btn && btn.dataset ? btn.dataset.dismissKind : "";
-      if (dismissKind) {
-        const rawItemIdStr = btn.dataset.rawItemId || "";
-        fetch(`/api/workgraph/issues/${encodeURIComponent(issueId)}/checklist/dismiss`, {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            kind: dismissKind,
-            raw_item_id: rawItemIdStr ? Number(rawItemIdStr) : null,
-            text: btn.dataset.dismissText || "",
-          }),
-        }).catch(() => {});
-      }
+      pccPersistChecklistOutcome("dismiss", issueId, btn);
     }
   }
   // Sidebar Dismiss (issue-level) is now real - task #44 - wired the same
@@ -7053,7 +7057,7 @@ html[data-theme="dark"]{
         </div>
         <div class="pcc-xrow-right">
           <div class="pcc-xrow-icons">
-            <button type="button" class="pcc-micro-btn mdone" title="Mark done" onclick="pccRowIcon(event,'${rowId}-wrap','done')">&#10003;</button>
+            <button type="button" class="pcc-micro-btn mdone" title="Mark done" data-dismiss-kind="${pccEsc(it.dismissKind || "")}" data-raw-item-id="${it.rawItemId != null ? pccEsc(String(it.rawItemId)) : ""}" data-dismiss-text="${pccEsc(it.dismissText || "")}" onclick="pccRowIcon(event,'${rowId}-wrap','done','${pccEsc(issue.id)}',this)">&#10003;</button>
             <button type="button" class="pcc-micro-btn msnooze" title="Snooze" onclick="pccRowIcon(event,'${rowId}-wrap','snooze')">${PCC_BELL_SVG}</button>
             <button type="button" class="pcc-micro-btn mclose" title="Dismiss" data-dismiss-kind="${pccEsc(it.dismissKind || "")}" data-raw-item-id="${it.rawItemId != null ? pccEsc(String(it.rawItemId)) : ""}" data-dismiss-text="${pccEsc(it.dismissText || "")}" onclick="pccRowIcon(event,'${rowId}-wrap','dismiss','${pccEsc(issue.id)}',this)">&#10005;</button>
           </div>

@@ -1448,6 +1448,28 @@ async def api_workgraph_checklist_dismiss(issue_id: str, body: ChecklistItemDism
     return JSONResponse({"ok": True, "item_key": item_key})
 
 
+class ChecklistItemDoneBody(BaseModel):
+    kind: str
+    raw_item_id: Optional[int] = None
+    text: str
+    actor: Optional[str] = None
+
+
+@app.post("/api/workgraph/issues/{issue_id}/checklist/done")
+async def api_workgraph_checklist_done(issue_id: str, body: ChecklistItemDoneBody):
+    """Task #59: real persistence for the checklist row's "Mark done" icon -
+    same mechanics as the /checklist/dismiss endpoint above, distinct
+    outcome (see workgraph_store.mark_checklist_item_done)."""
+    if wg.get_issue(issue_id) is None:
+        raise HTTPException(404, f"no such issue: {issue_id}")
+    actor = body.actor or (config.get("manager", "id") or "unknown")
+    item_key = wg.mark_checklist_item_done(
+        issue_id=issue_id, kind=body.kind, raw_item_id=body.raw_item_id,
+        text=body.text, actor=actor,
+    )
+    return JSONResponse({"ok": True, "item_key": item_key})
+
+
 class BulkIssueStatusBody(BaseModel):
     issue_ids: list[str]
     state: str

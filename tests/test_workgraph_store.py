@@ -588,6 +588,47 @@ def test_dismiss_checklist_item_is_idempotent(ws_db):
     assert count == 1
 
 
+def test_mark_checklist_item_done_round_trip(ws_db):
+    """Task #59: same mechanics as dismiss, distinct recorded status."""
+    issue_id = ws_db.create_issue_with_new_id(title="X", state="active", category="other")
+    item_key = ws_db.mark_checklist_item_done(
+        issue_id=issue_id, kind="ask", raw_item_id=9, text="Send the signed order form", actor="marc",
+    )
+    assert item_key == ws_db.checklist_item_key("ask", 9, "Send the signed order form")
+    # list_dismissed_checklist_keys covers ANY resolved status (dismissed or
+    # done) - a done item must stop reappearing exactly like a dismissed one.
+    resolved = ws_db.list_dismissed_checklist_keys(issue_id)
+    assert item_key in resolved
+    conn = ws_db._connect()
+    try:
+        row = conn.execute(
+            "SELECT status FROM checklist_dismissals WHERE issue_id = ? AND item_key = ?",
+            (issue_id, item_key),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row["status"] == "done"
+
+
+def test_dismiss_and_done_are_recorded_as_distinct_outcomes(ws_db):
+    """The whole point of task #44/#59: dismissing one item and marking a
+    different item done on the same issue must not collide or overwrite -
+    they're different item_keys, and each keeps its own recorded status."""
+    issue_id = ws_db.create_issue_with_new_id(title="X", state="active", category="other")
+    dismissed_key = ws_db.dismiss_checklist_item(issue_id=issue_id, kind="ask", raw_item_id=1, text="Ask A")
+    done_key = ws_db.mark_checklist_item_done(issue_id=issue_id, kind="ask", raw_item_id=2, text="Ask B")
+    assert dismissed_key != done_key
+    conn = ws_db._connect()
+    try:
+        rows = {r["item_key"]: r["status"] for r in conn.execute(
+            "SELECT item_key, status FROM checklist_dismissals WHERE issue_id = ?", (issue_id,)
+        ).fetchall()}
+    finally:
+        conn.close()
+    assert rows[dismissed_key] == "dismissed"
+    assert rows[done_key] == "done"
+
+
 # --- merge_issues_txn (meeting-grouping/related-project identity pass) ----
 
 def test_merge_issues_txn_creates_new_project_when_neither_has_one(ws_db):

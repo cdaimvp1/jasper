@@ -579,6 +579,30 @@ architecture exports, unrelated file shares) - correctly left unclustered,
 the same "legitimate noise-filtering" shape as calendar's 126/1123. **1/40
 is legitimate. No fix needed or built.**
 
+### 8.9 Step 6/9 findings (2026-08-03): singleton rate unchanged, scored-model backtest fails its own gate
+
+Measured against the live DB after Phase 0 + identity formalization +
+the 13 merges: **singleton rate is unchanged at 58.1% (207/356)**. Not a
+bug — every merge so far involved issues that were already in a project
+(that's why the backfill flagged them at all), so none of this work could
+have moved the singleton number; nothing yet has actually tried to attach
+an ungrouped issue to anything. This is the real reason step 9 exists.
+
+Ran `backtest_scored_model()` (read-only, no live change) as the required
+pre-check before ever enabling it: **80 different-project pairs score
+at/above the auto-merge threshold — the gate is not clean.** Most of them
+share one root cause: `marc-362` (the confirmed multi-topic Teams chat
+from the merge review) matches many unrelated issues via a shared
+internal sender/party across topics that have nothing to do with each
+other — the scored model can't tell those apart because it currently
+reads the WHOLE chat's blended signal, not the per-session signal Teams
+sessionization (step 8, already built) already computes correctly. A
+smaller number of pairs cluster around a second contact (`marc-360`) with
+the same shape. **Confirms the sequencing call in Section 7: step 8
+(wire session boundaries into live grouping) must land before step 9
+(enable the scored model) is retried** — re-run this same backtest after
+step 8 ships before deciding anything about the flag.
+
 ### 8.8 First real backfill run (2026-08-03) — findings
 
 `workgraph_identity.backfill_identity_anchors()` ran against the live DB

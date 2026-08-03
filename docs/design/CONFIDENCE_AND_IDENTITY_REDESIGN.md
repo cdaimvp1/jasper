@@ -498,3 +498,18 @@ own vocabulary rather than "it's governance":
 - **Project Deep-Dive (8.4)** is the least coupled of the three and could ship
   any time once Evidence Assembly exists — gated only by the completion-
   tracking caveat, not by Sections 3 or 8.3 at all.
+
+### 8.7 D17 resolved: SharePoint 40→1 attrition is legitimate, not a bug
+
+Investigated directly against the live DB (2026-08-03), per Blueprint 5.8's
+own instruction not to "fix" before the root cause is known. Findings: all
+40 `sharepoint` raw_items are safely stored (zero data loss - this is not a
+D5-shaped defect); 39 classify as `FYI-EVIDENCE`, 1 as `WAITING-ON-OTHERS`;
+only that 1 (`air_submissions_21Jan.xlsx`, linked to marc-122) ever gets an
+`issue_id`, and the `evidence` table requires a non-null `issue_id` by
+schema - so the other 39 structurally can't produce an evidence row, not
+because anything failed. Reading the actual 39: general corporate SharePoint
+noise unrelated to any procurement issue (IT test-tracking spreadsheets,
+architecture exports, unrelated file shares) - correctly left unclustered,
+the same "legitimate noise-filtering" shape as calendar's 126/1123. **1/40
+is legitimate. No fix needed or built.**

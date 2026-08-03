@@ -564,6 +564,25 @@ def init_workgraph() -> None:
                 pass  # already added by a prior init_workgraph() call
             conn.execute("CREATE INDEX IF NOT EXISTS idx_issues_project ON issues(project_id)")
 
+            try:
+                # Project Deep-Dive (design doc Section 10.4): set ONLY by
+                # the deterministic mark_project_deep_dived() call the
+                # routine makes when it finishes a wake - never inferred
+                # from the model's own prose, same discipline as
+                # synthesized_from_marker/claims_revision.
+                conn.execute("ALTER TABLE projects ADD COLUMN last_deep_dive_ts REAL")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                # Short, honest, freeform account of what was actually
+                # searched and found (or why the run stopped early) -
+                # Section 10.4's inspectable trail, given live M365 search
+                # has no code-verifiable success proxy the way relay's
+                # calendar-cursor check does.
+                conn.execute("ALTER TABLE projects ADD COLUMN last_deep_dive_note TEXT")
+            except sqlite3.OperationalError:
+                pass
+
             # Weak-signal candidate merges (e.g. same company guess but no
             # shared party, or same party but different category) - NOT
             # auto-applied, surfaced for confirmation. Strong-signal matches
@@ -3098,6 +3117,22 @@ def list_projects(status: Optional[list[str]] = None) -> list[dict]:
         finally:
             conn.close()
     return [dict(r) for r in rows]
+
+
+def mark_project_deep_dived(project_id: str, note: str) -> None:
+    """The one place last_deep_dive_ts/note ever changes (design doc
+    Section 10.4) - called by the Project Deep-Dive routine's completion
+    POST when it finishes a wake, never inferred from the model's own
+    prose."""
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                "UPDATE projects SET last_deep_dive_ts = ?, last_deep_dive_note = ? WHERE id = ?",
+                (time.time(), note, project_id),
+            )
+        finally:
+            conn.close()
 
 
 def list_issues_for_project(project_id: str) -> list[dict]:

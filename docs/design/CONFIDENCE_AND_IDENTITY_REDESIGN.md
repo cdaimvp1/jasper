@@ -1049,3 +1049,168 @@ against the real corpus (356 issues, 511 extractions, 2,524 raw_items):
 
 **Step 11 (Phase 3) is done.** Next per Section 7: step 12 (Project
 Deep-Dive) or step 13 (Phase 4/NBA v2), both now unblocked by this.
+
+---
+
+## 10. Project Deep-Dive: design (step 12)
+
+Authorized by Marc's "proceed" (2026-08-03), continuing the same "design
+then build" pass used for step 11. Grounded against the real code again
+before writing anything, per this doc's own discipline — and that reading
+found a real structural correction to Section 8.4's own framing, below.
+
+### 10.1 The correction: this reuses relay's ingestion path, not a new queue
+
+Section 8.4 said a Deep-Dive find "goes through the existing suggestion/
+confirm queue... never silently attached." Reading `pending_project_
+suggestions`'s real schema shows that's not quite right as stated:
+that table is pairwise — `issue_id_a`/`issue_id_b`, both **already-existing**
+issues the deterministic matcher is unsure about. A live M365 search result
+is the opposite case: content Jasper has **never seen at all** — there is no
+`issue_id_b` yet for an external Teams message or SharePoint doc that was
+never ingested.
+
+The real, corrected design: a Deep-Dive find doesn't need a new decision
+mechanism — it needs to enter Jasper through the **same front door** every
+other item already does. `ingest/GRAPH_INGEST_ROUTINE.md`'s drop-file ->
+`normalize.py` -> classify -> link pipeline already handles "is this new,
+and if so what does it match" correctly and safely (raw_item insertion is
+already idempotent on `stable_key` — "first write wins," confirmed in
+`insert_raw_item`'s own docstring, so a Deep-Dive find that turns out to
+already exist is a safe no-op, not a duplicate). Once a found item is
+written through that same path, the deterministic matcher does exactly
+what it already does for a relay-sourced item: auto-link if there's a real
+anchor, or land in the existing suggestion/hold-aside queues (task #54) if
+it's ambiguous. **Deep-Dive is a scoped, seeded variant of relay's own
+ingestion routine** — same drop-file mechanics, same downstream pipeline,
+different search seeds (one project's own identity, not a generic top-N
+recency sweep) and a different trigger (a sequential background schedule,
+not "whatever's newest").
+
+### 10.2 A real risk, inherited and named plainly: M365 auth in a headless run
+
+`GRAPH_INGEST_ROUTINE.md`'s own line 5-6: "the Teams/Calendar/SharePoint MCP
+tools only work from inside a live Claude Code session (the OAuth token
+isn't portable to a standalone process, confirmed this session)."
+`run_relay_oneshot()`'s own docstring documents a REAL prior failure: a
+headless run reported a confident, detailed, entirely fabricated success
+("5 chats, 81 messages, 25 events") while the connector's auth silently
+didn't carry over and nothing was actually pulled. Relay's mitigation is a
+code-verifiable proxy (did the calendar cursor actually advance) — Deep-Dive
+inherits the exact same underlying risk (it needs the same MCP connector,
+headless, to do a live search) but **has no equally clean proxy**: "found
+nothing new" is BOTH the honest common-case outcome (recall is bounded,
+most sweeps legitimately find nothing) AND indistinguishable, by outcome
+alone, from a silently-failed tool call.
+
+**Mitigation, honestly imperfect, stated as such rather than papered over:**
+the routine gets the same explicit honesty requirement `RELAY_PROMPT`
+already proved out ("if a tool is missing/fails/auth doesn't carry, STOP and
+say so plainly — never fabricate a search that didn't happen"), and every
+run — found something or not — writes a real, inspectable note (10.4) of
+which searches it actually attempted and what came back, so a pattern of
+silent failure is at least visible on review, even though no single run has
+a hard code-verifiable guarantee the way relay's cursor check does. This is
+a real, load-bearing risk to the piece Marc's own idea depends on — worth
+watching the first several real runs before trusting the sweep unattended.
+
+### 10.3 The design: sequential, budget-capped, one project per wake
+
+Matches Marc's own correction from earlier this session ("the on-demand
+synthesis is crap, I don't work that way, one thing at a time") — Deep-Dive
+was never going to be a manual per-click action, and this makes it literal:
+**exactly one project per scheduled_refresh wake**, same "small, bounded,
+never-unattended" shape as `run_synthesis_oneshot`/`run_relay_oneshot`.
+
+- **Scope call, stated plainly:** Projects only, not standalone issues.
+  Matches Marc's own example ("find everything on the Workday renewal") and
+  Section 8.4's text — a standalone issue with no group to chase down yet
+  is arguably lower-value for this specific mechanism; revisit if that
+  turns out wrong once real runs are reviewed.
+- **Picker:** never-deep-dived projects first, then oldest-`last_deep_
+  dive_ts` first (identical anti-starvation shape to `list_stale_entities`'
+  ranking) — scoped to `active`/`waiting` projects only (chasing evidence
+  for something already `done`/`archived`/`dismissed` has no payoff).
+- **Seeds:** the project's own `name` plus every `identity_anchors` value
+  across its member issues (reference numbers, company names) — the exact
+  seed Marc already types by hand, derived instead of retyped.
+- Uses evidence_fts (9.6) as a **free, zero-risk first pass** before ever
+  touching live search — Jasper's own corpus may already hold the answer
+  (an item ingested but never linked to this project) without any API call
+  at all.
+- Any genuinely new find is written through relay's own drop-file envelope
+  + `normalize.py` (10.1) — not a new ingestion path.
+- The two caveats Section 8.4 already named stay true and are now
+  concretely satisfied: (a) recall is bounded by what the connector can
+  retrieve, stated honestly in every run's note (10.4); (b) the "at least a
+  basic delivered-vs-verified distinction" gate is satisfied by Phase 3's
+  `claims.status` (open/done/superseded/dismissed) — real, if basic, now
+  built and live.
+
+### 10.4 Completion tracking — a real, code-verifiable act, not an LLM claim
+
+`projects.last_deep_dive_ts` (new column) is set by a deterministic POST
+the routine calls when it's done for this wake —
+`POST /api/workgraph/projects/{id}/deep_dive_complete {note}` — never
+inferred from the model's own prose, same discipline as every other write
+in this doc (`synthesized_from_marker`, `claims_revision`: the code, not the
+model's self-report, is what future runs trust). `note` is a short, honest,
+freeform account of what was actually searched and found (or why it
+stopped early) — stored as `last_deep_dive_note`, inspectable on the
+project's own detail view, the same "surface it where Marc's already
+looking, not as a new standing readout" rule as everywhere else in this
+doc (Section 1).
+
+### 10.5 Build order
+
+1. Migration: `projects.last_deep_dive_ts REAL`, `projects.last_deep_dive_
+   note TEXT` — additive.
+2. `workgraph_deepdive.py`: `list_deepdive_candidates(limit)` (the picker,
+   10.3), `derive_seeds_for_project(project_id)` (name + identity_anchors
+   rollup).
+3. Store + route: `mark_project_deep_dived(project_id, note)` and
+   `POST /api/workgraph/projects/{id}/deep_dive_complete`.
+4. `ingest/PROJECT_DEEPDIVE_ROUTINE.md`: seeds -> evidence_fts check first
+   -> live M365 search (Teams/Calendar/SharePoint/mail) -> any new find
+   through relay's existing drop-file/normalize.py path -> call the
+   completion route with an honest note. Same honesty requirement as
+   `RELAY_PROMPT` (10.2), stated explicitly.
+5. `run_deepdive_oneshot()` in `scheduled_refresh.py` — same one-shot
+   headless pattern as synthesis/relay, skipped entirely when
+   `list_deepdive_candidates` is empty, capped to one project.
+6. Tests: the picker's ranking/scope filtering, seed derivation, the
+   completion-marking store function/route — the same split this doc has
+   used throughout (deterministic scaffolding is tested; the LLM judgment
+   inside the routine doc is not, same as `SYNTHESIS_ROUTINE.md`).
+7. Wire into `scheduled_refresh.py`'s cycle. No live-DB backfill needed
+   here (nothing retroactive — this only ever affects the NEXT project it
+   picks) — but the first several real runs are worth watching directly
+   given 10.2's named risk, before trusting the sweep fully unattended.
+
+### 10.6 Step 12 done: built, migrated, wired (2026-08-03)
+
+Backed up first (labeled `pre_step12_deepdive_migration`). Migration
+applied cleanly (`projects.last_deep_dive_ts`/`last_deep_dive_note`
+present, `integrity_check: ok`). `list_deepdive_candidates()` checked
+directly against the live project list — real, active projects, all
+correctly `never-deep-dived` on this first pass (e.g. `proj-043`,
+`proj-024`, `proj-042`...). `search_evidence_fts` (9.6/10.5 step 2)
+checked directly too — real hits, including one with `issue_id: None`
+(indexed but never linked to any issue), exactly the "found but not yet
+connected" case this step exists to catch. Wired into
+`scheduled_refresh.py`'s cycle after synthesis, gated to skip entirely
+when no candidate exists, same never-block-the-rest-of-the-cycle
+discipline as every other daily/per-cycle step there. Full test suite
+green (~940 tests) — deterministic scaffolding only (picker, seed
+derivation, completion route); the routine's own live-search judgment is
+untested by design, same split as `SYNTHESIS_ROUTINE.md`.
+
+**Not yet observed: a real headless run actually exercising live M365
+search.** That's the one part of this step no test or direct DB check can
+verify — per 10.2, worth watching the first several real
+`run_deepdive_oneshot()` firings (next scheduled_refresh cycles) directly,
+checking `projects.last_deep_dive_note` for an honest account each time,
+before trusting the sweep unattended.
+
+**Step 12 is done, pending that first real-world observation.** Next per
+Section 7: step 13 (Phase 4/NBA v2), the capstone.

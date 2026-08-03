@@ -36,6 +36,7 @@ import workgraph_alerts
 import workgraph_synthesis
 import workgraph_projects
 import workgraph_identity
+import workgraph_deepdive
 import outlook_com_ingest
 import retention
 import health_check
@@ -307,6 +308,65 @@ def run_project_grouping_oneshot() -> dict:
         return {"ok": False, "pending_count": len(pending), "error": str(e)}
 
 
+PROJECT_DEEPDIVE_PROMPT = (
+    "You are curator (Colleen), a Symphony worker (planner-analyst archetype) for this cohort, "
+    "doing a PROJECT DEEP-DIVE this wake - not ingestion, not synthesis, not routine "
+    "classification (each is a separate wake). Follow the routine in "
+    "ingest/PROJECT_DEEPDIVE_ROUTINE.md exactly: GET /api/workgraph/deep-dive/next for your one "
+    "project and its search seeds, check the evidence full-text index first (free, no API risk), "
+    "then search live mail/Teams/SharePoint using the project's own name and real identity anchors "
+    "as query seeds - never an invented search term. Any genuinely new find gets written through "
+    "the exact same drop-file envelope + ingest/normalize.py path relay's own routine already "
+    "uses - never hand-attach anything directly to the project yourself; let the existing "
+    "deterministic matcher decide what happens to it. "
+    "CRITICAL HONESTY REQUIREMENT (same standard as relay's own prompt): if chat_message_search, "
+    "outlook_email_search, sharepoint_search, or read_resource is missing, unavailable, or fails "
+    "for ANY reason (including an auth/permission error you cannot resolve), your completion note "
+    "must say so plainly - name exactly which tool call failed. Do NOT write a note claiming a "
+    "search happened, and do NOT report a count of items found, unless you actually called that "
+    "tool and it returned real data this wake. Always call POST "
+    "/api/workgraph/projects/{project_id}/deep_dive_complete with an honest note before finishing, "
+    "even on a 'found nothing new' wake - that call is what lets this project rotate fairly next "
+    "time instead of being picked again immediately. Do not do anything else this wake - no "
+    "synthesis, no re-classification beyond what the normal pipeline already does automatically, "
+    "no team_room posts beyond what the routine itself calls for."
+)
+
+
+def run_deepdive_oneshot() -> dict:
+    """Scoped, one-shot headless curator wake for Project Deep-Dive (design
+    doc Section 10) - same safety pattern as the other one-shots above.
+    Skipped entirely (no subprocess spawned) when
+    workgraph_deepdive.list_deepdive_candidates() is already empty (no
+    active/waiting project exists, or - in practice, won't happen given
+    the anti-starvation ranking - literally none is eligible)."""
+    candidates = workgraph_deepdive.list_deepdive_candidates()
+    if not candidates:
+        return {"ok": True, "skipped": True, "reason": "no deep-dive candidates"}
+
+    env_prefix = {
+        "SYMPHONY_WORKER": "curator",
+        "TEAM_HOME": str(BODY),
+        "TEAM_SCRIPTS_ROOT": str(BODY / "setup"),
+        "TEAM_DATA_DIR": str(DATA_DIR),
+        "COHORT_BASE": "http://localhost:8700",
+        "TEAM_PORT": "8700",
+    }
+    import os
+    env = os.environ.copy()
+    env.update(env_prefix)
+    try:
+        proc = _run_headless_with_tree_kill(
+            ["claude", "-p", PROJECT_DEEPDIVE_PROMPT, "--allowedTools", "Bash", "--add-dir", str(BODY)],
+            cwd=str(BODY), env=env, timeout=1200,
+        )
+        return {"ok": proc.returncode == 0, "returncode": proc.returncode,
+                "project_id": candidates[0]["id"],
+                "stdout_tail": proc.stdout[-1000:], "stderr_tail": proc.stderr[-1000:]}
+    except Exception as e:
+        return {"ok": False, "project_id": candidates[0]["id"], "error": str(e)}
+
+
 def run() -> dict:
     ws.init_workgraph()
 
@@ -339,6 +399,18 @@ def run() -> dict:
     #    like step 2/4 above - comparatively expensive, and doesn't need to
     #    run twice in one cycle the way classify does).
     synthesis_result = run_synthesis_oneshot()
+
+    # 6.5. Project Deep-Dive (design doc Section 10) - one project per
+    # cycle, sequential and low-priority by design (Marc's explicit "one
+    # thing at a time" correction). Runs after synthesis, not before -
+    # this is exploratory/supplementary, never more urgent than the
+    # regular ingest+synthesis work above. Any new find it writes gets
+    # classified on the NEXT cycle's classify pass, not this one -
+    # deliberately not adding a third classify pass just for this.
+    try:
+        deepdive_result = run_deepdive_oneshot()
+    except Exception as e:
+        deepdive_result = {"ok": False, "error": str(e)}
 
     # 7. Retention + DB snapshotting - gated to once/day internally (see
     #    retention.run_daily_if_due), so calling it every one of the 5x/day
@@ -408,6 +480,7 @@ def run() -> dict:
         "alerts_final": alerts_result_2,
         "project_grouping": grouping_result,
         "synthesis": synthesis_result,
+        "deep_dive": deepdive_result,
         "retention": retention_result,
         "health_check": health_check_result,
         "personal_learning": personal_learning_result,
@@ -423,6 +496,7 @@ def run() -> dict:
         f"grouping_ok={grouping_result.get('ok')} grouping_skipped={grouping_result.get('skipped', False)} "
         f"synthesis_ok={synthesis_result.get('ok')} synthesis_skipped={synthesis_result.get('skipped', False)} "
         f"synthesis_deferred={synthesis_result.get('deferred', 0)} synthesis_skipped_immaterial={synthesis_result.get('skipped_immaterial', 0)} "
+        f"deep_dive_ok={deepdive_result.get('ok')} deep_dive_skipped={deepdive_result.get('skipped', False)} "
         f"retention_ran={retention_result is not None and 'error' not in retention_result} "
         f"health_check_ok={health_check_result.get('ok') if health_check_result else 'not-due'} "
         f"personal_learning_ran={personal_learning_result is not None and 'error' not in personal_learning_result} "

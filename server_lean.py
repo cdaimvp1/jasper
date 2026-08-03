@@ -58,6 +58,7 @@ from bus import init_bus, emit_event, query_events, latest_id, event_count
 from watchers import start_watchers, stop_watchers
 
 import workgraph_claims
+import workgraph_deepdive
 import workgraph_store as wg
 import workgraph_classify
 import workgraph_nba
@@ -2206,6 +2207,50 @@ async def api_synthesis_write(entity_type: str, entity_id: str, body: SynthesisB
                 outcome="resolved", source_issue_id=entity_id,
             )
     return JSONResponse({"ok": True, "synthesis": sanitize_surrogates(wg.get_synthesis(entity_type, entity_id))})
+
+
+@app.get("/api/workgraph/evidence-search")
+async def api_evidence_search(q: str, limit: int = 50):
+    """Design doc Section 9.6/10.5 step 2: full-text search over
+    text_extract.resolve_item_text() output, already indexed at extraction-
+    write time (and by the one-time backfill). Unscoped by design - the
+    caller (Project Deep-Dive) cross-references hits against a project's
+    own issue list itself rather than this route doing that filtering."""
+    return JSONResponse({"results": sanitize_surrogates(wg.search_evidence_fts(q, limit=limit))})
+
+
+@app.get("/api/workgraph/deep-dive/next")
+async def api_deep_dive_next():
+    """Design doc Section 10.3/10.5: the ONE project (never-deep-dived
+    first, then oldest-last_deep_dive_ts first, active/waiting projects
+    only) the Deep-Dive routine should work on this wake, plus its derived
+    search seeds (Section 10.3) - the project's own name and every real
+    identity anchor across its member issues. Empty `project` means there's
+    nothing eligible right now."""
+    candidates = workgraph_deepdive.list_deepdive_candidates(limit=1)
+    if not candidates:
+        return JSONResponse({"project": None, "seeds": None})
+    project = candidates[0]
+    seeds = workgraph_deepdive.derive_seeds_for_project(project["id"])
+    return JSONResponse({"project": sanitize_surrogates(project), "seeds": sanitize_surrogates(seeds)})
+
+
+class DeepDiveCompleteBody(BaseModel):
+    note: str
+
+
+@app.post("/api/workgraph/projects/{project_id}/deep_dive_complete")
+async def api_deep_dive_complete(project_id: str, body: DeepDiveCompleteBody):
+    """Design doc Section 10.4: the ONE place last_deep_dive_ts/note ever
+    changes - a deterministic, code-verifiable act the routine calls when
+    it finishes a wake, never inferred from the model's own prose. `note`
+    is a short, honest account of what was actually searched and found (or
+    why the run stopped early) - a genuine "found nothing new" is a normal,
+    expected value here, not a failure."""
+    if wg.get_project(project_id) is None:
+        raise HTTPException(404, f"no such project: {project_id}")
+    wg.mark_project_deep_dived(project_id, body.note)
+    return JSONResponse({"ok": True, "project": sanitize_surrogates(wg.get_project(project_id))})
 
 
 class SignalTreatmentBody(BaseModel):

@@ -611,6 +611,26 @@ instead with a direct per-issue `scored_grouping_decision` check against
 the flagged pairs. Fine as a one-time verification; worth doing properly
 if this gate needs re-running after a future change.
 
+### 8.12 Step 9's real-world result: mostly a suggestion queue, not mass auto-merge (as intended)
+
+Ran `workgraph_projects.run()` against all 207 singletons with the model
+enabled: `{"processed": 207, "auto_merged": 1, "suggested": 73,
+"no_match": 132, "already_grouped": 1, "deferred_reconciliation": 0}`.
+
+Singleton rate moved **58.1% → 57.6% (207 → 205)** from the single real
+auto-merge. That's a small number on purpose, not a shortfall: with real
+damping active, auto-merge now correctly requires a real anchor (Section
+3.3's own bucket rule), and most genuine singletons don't share one with
+anything else - that's *why* the reference-aware live model never merged
+them either. The real contribution here is the **69 new, corroborated
+merge suggestions** now sitting in the one-touch queue for Marc to
+confirm - each one backed by an actual combined signal, not the old
+2,004-row flood's single-category guesses. Confirming those by hand is
+what actually moves the singleton number meaningfully; that's a review
+task for Marc, not something to auto-resolve. Zero `deferred_
+reconciliation` (no risky established-project collisions), `integrity_
+check` clean, DB backed up beforehand.
+
 ### 8.10 Step 8 done, and a second real blocker found for step 9
 
 Wired: `workgraph_classify._effective_thread_key()` now computes a

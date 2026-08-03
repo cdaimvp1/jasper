@@ -287,28 +287,93 @@ code and DB (not against the specs' own claims):
   (741 rejected, 9 confirmed), link suggestions=70 — matches the pasted
   analysis and the Blueprint's stated baseline almost exactly.
 
-## 7. Sequencing (design order, not yet task-split)
+## 7. Sequencing (design order — full build, per Marc's 2026-08-03 direction)
 
-1. **Phase 0, corrected scope** — 5.1, 5.3, 5.4, 5.5, 5.6 (failure-path only),
-   5.7 as specified; 5.2 narrowed to "fix the shadow-only scored model's
-   party-alone branch" since the live path is already fixed. Cheap, reversible,
-   zero overlap with anything in flight, fixes confirmed live bugs (including
-   the 2,074-row dead queue). **Do this first regardless of anything else.**
-2. **Confidence spine v0** (Section 2) — ships on today's signals, no schema
-   change beyond what Section 3 needs anyway. Immediately improves NBA
-   damping, nag suppression, and Socrates hedging (fixes D14 for real).
-3. **Identity formalization** (Section 3.3, steps 1-2) — backfill, not build.
-   Low risk because it's materializing signals that already work in production.
-4. **Close real identity gaps** (Section 3.3, step 3, priority order:
-   D18 → Teams sessions → wider reference regex → attachment hashing).
-5. **Confidence spine v1** — swap in real anchor strengths (Section 2.3).
-6. **Stop and evaluate.** Sections 4's triggers decide whether Phase
-   3/4 (claims ledger, NBA v2) are worth building at all.
+Marc's instruction (2026-08-03): stop treating Phases 3/4 as strictly
+demand-driven; prioritize completing this doc's full build and sequence
+the rest. This section is the resulting order. **Done so far (1-5):**
 
-This is intentionally not yet split into numbered tasks in the tracker —
-say which stage(s) to commit to and I'll create them individually, the same
-way #49/#50 were split out from their design docs, so each one gets its own
-scoped build-and-verify pass rather than one giant commitment.
+1. ~~**Phase 0, corrected scope**~~ — done, committed, live.
+2. ~~**Confidence spine v0**~~ — done, wired into NBA/Socrates for real,
+   grouping observe-only. Committed, live.
+3. ~~**Identity formalization backfill**~~ — done. 356 containers, 558
+   anchors, live on the real DB.
+4. ~~**Close real identity gaps**~~ — D18 fixed; Teams sessions built and
+   run (16 containers, 3 real splits found, incl. marc-362); wider
+   reference regex investigated and correctly NOT built (no real pattern
+   to extract); attachment hashing still parked (still no confirmed
+   defect behind it — revisit opportunistically during step 9, not before).
+5. ~~**Confidence spine v1**~~ — real anchor_strength wired into NBA and
+   the grouping model's observe-only fields. Done, live.
+   Also done outside the original sequence, because Marc reviewed and
+   approved it directly: the 13 real reference-conflict issue merges
+   (`merge_issue_into`, built and applied).
+
+**Remaining, in the order they should be built:**
+
+6. **Measure the post-fix singleton rate.** Cheap, read-only, five minutes -
+   and it's the actual trigger condition for step 9 (Section 8.3) and the
+   real acceptance check for steps 3-5 above (target from Section 6:
+   below 35%, down from 58%). Do this before anything else below so every
+   later decision is made against a real number, not the pre-fix one.
+7. **Evidence Assembly** (Section 8.1) — next lowest-risk step: reuses the
+   confidence spine as its ranking function, no new signal type, "near-
+   zero extra design risk" per its own section. Build this before Phase 3
+   (step 10) and Project Deep-Dive (step 11), both of which want it as
+   their retrieval layer — building it once now avoids two later re-builds.
+8. **Wire Teams session boundaries into live classify/grouping.** The one
+   piece of step 4 that's still observe-only. Shadow-compare first (what
+   would session-aware grouping do differently on the real corpus vs.
+   today's flat-per-chat model), review the diff, then cut over — same
+   discipline as every structural change in this doc, because this one
+   *does* change which issue a new Teams message lands in.
+9. **Safely enable the scored grouping model** (Blueprint §7.7's gate,
+   finally actionable now that D4 is fixed and real anchors exist):
+   `backtest_scored_model()`, review the false-positive class, and only if
+   it's clean, flip `scored_model_enabled` AND let the confidence spine's
+   observe-only grouping fields become real dampers on the verdict. This
+   is the step that actually moves D1's singleton rate at scale — the
+   core of the original stated goal ("one work item per real thread of
+   work"). Opportunistically fold in attachment hashing here if a real
+   need surfaces while touching this code, not before.
+10. **Semantic identity signal** (Section 8.3) — build only if step 6's
+    (re-measured after steps 8-9) singleton number still shows a large
+    ambiguous-but-humanly-obvious middle. If steps 8-9 already close most
+    of the gap deterministically, this may turn out not to be needed at
+    all - check before building it.
+11. **Phase 3: claims + commitment/decision ledger** (Section 8, the
+    original Blueprint §8) — no longer gated on "wait for the pain," per
+    Marc's direction. Delivers the second pillar of the original goal
+    ("all the tasks, deduped, actor-attributed, honest completion").
+    Fold in the `contradicts`/`supports`/`derived_from` edge types here
+    (Section 8.2) rather than as a separate step - claims/commitments are
+    the first real consumer that needs them.
+12. **Project Deep-Dive** (Section 8.4) — slot in during or right after
+    step 11; gated only by Evidence Assembly (step 7, already done by
+    this point) and a basic delivered-vs-verified distinction (step 11).
+    Build as the sequential background sweep Marc specified, not a
+    manual per-click action.
+13. **Phase 4: NBA v2** (Section 9) — the capstone, last on purpose: it's
+    only as good as identity (steps 6-10) and commitments (step 11)
+    underneath it.
+
+**One deliberate scope call, stated plainly:** this order does NOT build
+the Blueprint's formal `work_objects` table (Section 7.1's canonical
+entity unifying issues/projects under `wo-<uuid>` ids). `merge_issue_into`
+(step 5's companion build) already delivers reversible, non-destructive
+issue consolidation directly on `issues.id`, which is the actual behavior
+work_objects existed to enable - introducing a second identity layer on
+top of a model that already works would be complexity without new
+capability. Revisit only if a real need for the abstraction itself (not
+just the behavior) shows up.
+
+Every step above keeps this doc's own discipline: additive overlay,
+shadow-before-cutover for anything touching live classify/grouping
+behavior, tested before committed, backed up before any real-DB
+migration. Steps 6-7 have no live-behavior risk at all; steps 8-9 are the
+first ones that do and get the full shadow-compare treatment; steps 11-13
+are genuinely large builds and will each get their own design-review pass
+before code, the same way this whole doc got one before Phase 0 started.
 
 ---
 

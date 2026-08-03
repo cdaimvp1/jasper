@@ -548,5 +548,139 @@ def candidate_actions(
     return candidates[:4]
 
 
+# --- NBA v2: rank actions, not issues (design doc Section 11, Phase 4) -----
+# Ranking unit is an open ask/commitment CLAIM owned by Marc (workgraph_
+# claims.py, Section 9.4's deterministic owner - never a keyword guess), not
+# an issue. Additive and observe-only (Section 11.5): does not change
+# issues.priority_score, recompute_all, or candidate_actions above - this is
+# a new, separate surface pending Marc's own review before anything wires
+# into the primary Inbox sort.
+
+DEFAULT_CLAIM_WEIGHTS = MappingProxyType(
+    {"staleness": 0.40, "due": 0.30, "value": 0.15, "escalation": 0.15})
+
+# Tiered, not decaying (Section 11.3): claims.date_kind is curator-judged
+# hard/soft, never a parsed calendar date - no free-text date parsing exists
+# to compute a real days-until-due number (same stated scope limit as
+# Section 9.7). Task #57's fix, made concrete here: this is keyed on
+# date_kind alone, never on the date claim's owner - a counterparty's own
+# hard deadline that still has real consequences for Marc counts in full,
+# never downweighted for not being "his" deadline.
+_DATE_TIER = MappingProxyType({"hard": 1.0, "soft": 0.5})
+
+# A genuinely chatty single issue with 5 open asks shouldn't fill the whole
+# ranked list on its own - a real, stated design cap (Section 11.4), not an
+# oversight.
+_MAX_ACTIONS_PER_ISSUE = 2
+
+DEFAULT_RANK_ACTIONS_LIMIT = 20
+
+
+def _issue_date_urgency(date_claims: list[dict]) -> float:
+    best = 0.0
+    for c in date_claims:
+        best = max(best, _DATE_TIER.get(c.get("date_kind"), 0.0))
+    return best
+
+
+def score_claim(claim: dict, *, date_urgency: float, value_urgency_score: float,
+                 now: float, weights: dict = DEFAULT_CLAIM_WEIGHTS) -> tuple[float, str]:
+    """Pure. staleness is keyed on the CLAIM's own first_seen_ts (how long
+    THIS specific ask has sat open) - a more precise clock than score_issue
+    has access to, which only ever sees the whole issue's updated_at.
+    escalation reuses claims.escalated (Section 9.3's real repeat/
+    escalation signal, previously computed but never consumed for
+    anything) - v1 had no equivalent. Confidence damping is applied by the
+    caller (rank_actions), not here - same issue-level context_accuracy
+    score_issue already computes, reused rather than recomputed per claim."""
+    staleness = _staleness_urgency(claim["first_seen_ts"], now)
+    escalation = 1.0 if claim.get("escalated") else 0.0
+    score = (weights["staleness"] * staleness + weights["due"] * date_urgency
+             + weights["value"] * value_urgency_score + weights["escalation"] * escalation)
+
+    reasons = []
+    if claim.get("escalated"):
+        reasons.append("escalated")
+    days_open = int(max(0.0, (now - claim["first_seen_ts"]) / DAY))
+    if days_open >= 7:
+        reasons.append(f"open {days_open}d")
+    if date_urgency >= 1.0:
+        reasons.append("hard deadline on this thread")
+    elif date_urgency >= 0.5:
+        reasons.append("soft deadline on this thread")
+    if not reasons:
+        reasons.append("open")
+
+    return score, " · ".join(reasons)
+
+
+def rank_actions(limit: int = DEFAULT_RANK_ACTIONS_LIMIT, now: float | None = None) -> list[dict]:
+    """Every open ask/commitment claim owned by Marc, across every open
+    issue, ranked globally by score_claim - the real "what should I do
+    next" list `candidate_actions` couldn't provide at anything beyond
+    single-issue scope, and v1's issue-level priority_score couldn't
+    provide at all (an issue-level score can't tell three urgent asks on
+    one thread from one middling one). decision claims are excluded from
+    the ranked list itself (owner is always None by design - a decision is
+    a joint fact, not an obligation) - see workgraph_claims.py's owner
+    derivation for why.
+
+    Batched throughout (list_open_claims_for_issues / get_raw_items_for_issues
+    / list_identity_anchors_for_issues) - one query per input across every
+    open issue, not one per issue, same N+1-avoidance discipline as
+    recompute_all/score_issue above."""
+    if now is None:
+        now = time.time()
+
+    issues = ws.list_issues(states=["active", "waiting", "blocked"], limit=1000)
+    issue_ids = [i["id"] for i in issues]
+    claims_by_issue = ws.list_open_claims_for_issues(issue_ids)
+    raw_items_by_issue = ws.get_raw_items_for_issues(issue_ids)
+    anchors_by_issue = ws.list_identity_anchors_for_issues(issue_ids)
+
+    ranked: list[dict] = []
+    for issue in issues:
+        issue_id = issue["id"]
+        claims = claims_by_issue.get(issue_id, [])
+        actionable = [c for c in claims if c["claim_type"] in ("ask", "commitment") and c.get("owner") == "marc"]
+        if not actionable:
+            continue
+
+        date_urgency = _issue_date_urgency([c for c in claims if c["claim_type"] == "date"])
+        raw_items = raw_items_by_issue.get(issue_id, [])
+        value_score = _value_urgency(_extract_value_amount(raw_items))
+
+        has_reference = any(ri.get("pr_number") for ri in raw_items)
+        present = set()
+        if issue.get("category") and issue["category"] != "other":
+            present.add("category")
+        if raw_items:
+            present.add("evidence")
+        anchors = anchors_by_issue.get(issue_id)
+        ctx = confidence.context_accuracy(
+            present_fields=present, required_fields={"category", "evidence"},
+            evidence_ts=[ri.get("occurred_ts") for ri in raw_items if ri.get("occurred_ts")], now=now,
+            match_kinds=["reference"] if has_reference else ["category"],
+            total_refs=1, unresolved_refs=0 if has_reference else 1,
+            anchor_strengths=([a["anchor_strength"] for a in anchors] if anchors else None),
+        )
+
+        issue_candidates = []
+        for claim in actionable:
+            base, reason = score_claim(claim, date_urgency=date_urgency, value_urgency_score=value_score, now=now)
+            score = confidence.effective_score(base, ctx["context_accuracy"])
+            issue_candidates.append({
+                "claim_id": claim["id"], "issue_id": issue_id, "project_id": issue.get("project_id"),
+                "text": claim["text"], "claim_type": claim["claim_type"],
+                "score": round(score, 4), "reason": reason,
+                "raw_item_id": claim.get("raw_item_id"),
+            })
+        issue_candidates.sort(key=lambda c: c["score"], reverse=True)
+        ranked.extend(issue_candidates[:_MAX_ACTIONS_PER_ISSUE])
+
+    ranked.sort(key=lambda c: c["score"], reverse=True)
+    return ranked[:limit]
+
+
 if __name__ == "__main__":
     print(json.dumps(recompute_all(), indent=2))

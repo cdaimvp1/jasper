@@ -30,6 +30,27 @@ os.environ.setdefault("TEAM_CONFIG_DIR", str(BODY / "tests" / "_pytest_scratch" 
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _clear_nba_value_cache():
+    """workgraph_nba._value_cache is intentionally process-global (see its
+    own comment) - real leakage found 2026-08-03: a test file using small,
+    sequential raw_item ids that don't happen to mention a dollar figure
+    caches an EMPTY candidate list for that id; a later test FILE (in the
+    same pytest process) that reuses the same numeric id for a real
+    dollar-figured raw_item silently inherits the stale empty entry instead
+    of computing its own (confirmed live - test_workgraph_suppliers.py
+    failing with 0.0 instead of a real $2M figure, caused by
+    test_workgraph_nba_actions_ranked.py running first alphabetically and
+    priming that same id). This used to be a `test_workgraph_nba.py`-only
+    autouse fixture, which only protected tests within that one file -
+    promoted here so every test file sharing this process-global cache
+    gets the same guarantee, regardless of collection order."""
+    import workgraph_nba as nba
+    nba._value_cache.clear()
+    yield
+    nba._value_cache.clear()
+
+
 @pytest.fixture
 def ws_db(tmp_path, monkeypatch):
     """A fresh, isolated workgraph.db for one test. Returns the workgraph_store

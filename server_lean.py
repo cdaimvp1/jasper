@@ -1601,6 +1601,18 @@ async def api_value_at_risk():
     return JSONResponse(sanitize_surrogates(workgraph_nba.value_at_risk_rollup()))
 
 
+@app.get("/api/workgraph/actions/ranked")
+async def api_actions_ranked(limit: int = workgraph_nba.DEFAULT_RANK_ACTIONS_LIMIT):
+    """Design doc Section 11 (Phase 4/NBA v2): every open ask/commitment
+    claim owned by Marc, ranked globally across every open issue - not one
+    action per issue, the real gap Section 11.1 found in the existing
+    per-issue candidate_actions. New, additive, read-only - does NOT
+    change issues.priority_score or the existing Inbox sort (Section
+    11.5): this is a new surface pending Marc's own review before
+    anything wires into the primary worklist view."""
+    return JSONResponse({"actions": sanitize_surrogates(workgraph_nba.rank_actions(limit=limit))})
+
+
 @app.get("/api/workgraph/commitments")
 async def api_commitments():
     """Task #73 (Commitments Tracker). See workgraph_commitments.py's

@@ -23,18 +23,6 @@ def _isolate_config(monkeypatch, tmp_path):
     return config
 
 
-@pytest.fixture(autouse=True)
-def _clear_value_cache():
-    """The value-extraction cache is intentionally process-global (that's the
-    whole point of it - see workgraph_nba.py's own comment), but that makes it
-    a cross-TEST leakage risk if two tests happen to reuse the same raw_item
-    id. Clearing it before each test keeps the suite deterministic regardless
-    of what other tests run in the same pytest process."""
-    nba._value_cache.clear()
-    yield
-    nba._value_cache.clear()
-
-
 def test_dollar_range_captures_higher_figure():
     item = {"id": 1, "subject": "Deal worth $2.5-3 million", "body_preview": ""}
     values = [v for v, _, _ in nba._extract_item_candidates(item)]

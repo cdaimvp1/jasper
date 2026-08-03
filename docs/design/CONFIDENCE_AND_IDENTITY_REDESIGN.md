@@ -1214,3 +1214,180 @@ before trusting the sweep unattended.
 
 **Step 12 is done, pending that first real-world observation.** Next per
 Section 7: step 13 (Phase 4/NBA v2), the capstone.
+
+---
+
+## 11. Phase 4: NBA v2 — rank actions, not issues (step 13, the capstone)
+
+Authorized by the same "proceed" as step 12, continuing the same design-
+then-build pass. Last on purpose (Section 7): this is "only as good as the
+identity and commitments beneath it" — both are now real, live, and load-
+bearing here for the first time.
+
+### 11.1 What v1 actually does today (read directly, not assumed)
+
+`workgraph_nba.py` today has two, not one, existing mechanisms, and the gap
+is narrower than "no action ranking exists at all":
+
+- **`score_issue`**: one score per **issue** — `is_your_step` (state-based) +
+  `staleness_urgency` + `due_urgency` (from `issues.due`, rarely set) +
+  `value_urgency` (regex-extracted dollar figure), confidence-damped
+  (Section 2), with a Total Recall precedent boost. Written to
+  `issues.priority_score` by `recompute_all` — this is what sorts the
+  Inbox today.
+- **`candidate_actions`**: already produces a ranked, deduped list of
+  candidate *actions* — but scoped to **one issue at a time** (called from
+  the issue-detail view), merging three surfaces (the issue's own
+  `nba_reason` template, per-evidence-row recommendations, curator's
+  synthesis `suggested_actions`).
+
+**The real gap "rank actions, not issues" closes:** there is no *global*
+ranked action list across the whole inbox. Two issues each carrying one
+middling action can't be compared against one issue carrying three
+genuinely urgent ones; a single, sharp deadline buried in an otherwise-
+quiet issue can't outrank a issue whose overall `priority_score` just
+happens to be higher. `candidate_actions` already proved the "list of
+real actions, not a bare issue verdict" idea works — this just makes it
+global instead of per-issue, using a unit `candidate_actions` never had
+access to: a real, individually-scoreable **claim**.
+
+### 11.2 The claims-shaped action unit — what Phase 3 makes possible for the first time
+
+Ranking unit: an open **`ask`/`commitment` claim with `owner == 'marc'`**
+(Section 9.4) — the concrete, individually-attributable thing Phase 3
+built and this doc's original goal actually meant by "work item"
+(Section 9.0). `decision` claims are excluded from the ranked list itself
+(`owner` is `None` by design — a decision is a joint fact, not an
+obligation Marc owes) but still surface as context on the issue.
+
+This fixes something v1 structurally could not: `workgraph_commitments.py`'s
+own finding — only 5/79 commitments mentioned Marc by name — is exactly why
+v1 never attempted a "my actions only" filter. `claims.owner` (deterministic,
+from `direction`, Section 9.4) makes that filter real for the first time,
+without a keyword guess.
+
+### 11.3 Scoring — reusing v1's real signals, extended with what claims add
+
+```
+score = w1 * staleness_urgency(claim.first_seen_ts)
+      + w2 * due_urgency_from_date_claims(issue)
+      + w3 * value_urgency(issue)          # unchanged from v1, _extract_value_amount
+      + w4 * escalation_bonus(claim)       # new - Section 9.3's real repeat/escalation signal
+```
+
+- **`staleness_urgency`** — same shape as v1's `_staleness_urgency`, keyed
+  off the CLAIM's own `first_seen_ts` (how long has THIS specific ask sat
+  open), not the issue's `updated_at` — a genuinely different, more precise
+  clock than v1 had access to.
+- **`due_urgency_from_date_claims`** — real, stated scope limit: `date`
+  claims store curator-judged `kind` (hard/soft) and `whose`, never a
+  parsed calendar date (Section 9.7 never built free-text date parsing,
+  deliberately) — so this is a **tiered** urgency (hard > soft > none), not
+  a decaying days-until-due curve like v1's `_due_urgency`. **Task #57's
+  fix, made concrete:** a `hard` date claim contributes its full urgency
+  tier regardless of `owner` — a counterparty's own deadline that still
+  affects Marc is never downweighted for being `owner: counterparty`, per
+  Marc's explicit standing decision. Real free-text date parsing (an
+  actual days-until-due number) is a stated non-goal here, same as it was
+  in 9.7 — revisit only if the tiered version proves too coarse in practice.
+- **`value_urgency`** — unchanged, reused verbatim from v1
+  (`_extract_value_amount`/`_value_urgency`) at the issue level.
+- **`escalation_bonus`** — new, real signal Phase 3 unlocked: an escalated
+  claim (`claims.escalated`, Section 9.3 — curator judged this as a
+  restated ask from a different/more senior sender) is a genuinely
+  stronger urgency signal than plain staleness alone; v1 had no equivalent
+  because the underlying repeat/escalation data existed but was never
+  consumed for anything until Phase 3.
+- Confidence damping (Section 2) applies exactly as it does in
+  `score_issue` today — same `context_accuracy` call, reused per-issue
+  (every claim on the same issue shares that issue's own damping factor,
+  no per-claim recomputation needed).
+
+### 11.4 Output shape and dedup
+
+`rank_actions(limit)` returns claims across every open issue, ranked
+globally, each entry carrying enough to render without a second
+round-trip: `claim_id`, `issue_id`, `project_id` (if grouped), `text`,
+`claim_type`, `score`, `reason` (a short, human string built the same
+"arithmetic, not prose" way `score_issue`'s `nba_reason` already is), and
+`raw_item_id` (a real deep link, same as `candidate_actions`' evidence-row
+entries already provide). **Capped per issue** (a genuinely chatty single
+thread with 5 open asks shouldn't fill the whole list) — a real, stated
+design call, not an oversight.
+
+### 11.5 Scope call: additive and observe-only, NOT a cutover — stated plainly
+
+Every structural change in this doc that touches what Marc actually sees
+got a shadow-before-cutover pass first (Section 7's own discipline: steps
+8-9 were the ones that changed live grouping/classify behavior, and both
+got a shadow-compare before flipping anything). This is the first step in
+the WHOLE build that changes the PRIMARY surface Marc looks at every day —
+higher stakes than any backend ledger or migration in this doc. So:
+
+- `rank_actions` ships as a new, additive function and a new, additive
+  read-only API route (`GET /api/workgraph/actions/ranked`) — **nothing
+  about the existing Inbox sort, `issues.priority_score`, or
+  `candidate_actions` changes.** Both mechanisms keep running exactly as
+  they do today.
+- This is genuinely, deliberately **not a full cutover** — the doc's own
+  "full build" instruction is satisfied by shipping the real, working
+  mechanism; wiring it into the primary Inbox view (replacing or merging
+  with today's issue-level sort) is a real product decision about how
+  Marc wants to see his own worklist, and belongs to Marc's own review of
+  this new list against real data first, the same way the scored grouping
+  model's backtest results got reviewed before the flag flipped.
+
+### 11.6 Build order
+
+1. `score_claim`(claim, issue, ctx, now) in `workgraph_nba.py` — the
+   per-claim scorer (11.3), reusing `_staleness_urgency`/`_value_urgency`/
+   confidence damping verbatim, adding the tiered date-claim term and the
+   escalation bonus.
+2. `rank_actions(limit)` — pulls every open `ask`/`commitment` claim with
+   `owner == 'marc'` across open issues, batches issue/context lookups
+   (same N+1-avoidance discipline as every other batched reader in this
+   doc), scores, dedupes per-issue, sorts, caps.
+3. `GET /api/workgraph/actions/ranked` — new, additive, read-only route.
+4. Tests: the scorer's own weight math (staleness/date-tier/value/
+   escalation in isolation and combined), the owner filter (decisions and
+   counterparty-owned claims correctly excluded from the ranked list
+   itself), per-issue dedup/cap, confidence damping parity with
+   `score_issue`.
+5. No live-DB migration needed (pure read, no new columns) — but worth a
+   direct check against the real corpus (does the real top-N list look
+   sane) before calling this genuinely done, same as every other step's
+   real-data verification.
+
+### 11.7 Step 13 done: built, tested, checked against the real corpus (2026-08-03)
+
+Full test suite green (~960 tests) — including a real, incidental fix found
+along the way: `workgraph_nba._value_cache` is process-global, and its
+existing cache-clearing fixture was scoped only to `test_workgraph_nba.py`,
+not the whole suite. This test file's own small, sequential raw_item ids
+(no dollar figures) primed empty cache entries that a later file
+(`test_workgraph_suppliers.py`, alphabetically after) silently inherited
+for colliding ids, corrupting its own real dollar-figure assertions.
+Promoted to a global autouse fixture in `conftest.py` — the correct, general
+fix for a process-global cache shared across files, not a one-off patch.
+
+Checked `rank_actions(limit=10)` directly against the live DB (no migration
+needed - pure read): the real top 10 are exactly the shape this step was
+built for — unresolved "approve requisition PR..." asks Marc genuinely owes
+a response to (`marc-014`, `marc-310`, `marc-267`, `marc-185`...), correctly
+excluding decisions and counterparty-owed asks. The per-issue cap (2)
+visibly fired on `marc-271` (two distinct raw_items both restating the same
+PR854779-V4 approval ask, not caught as an exact-text repeat — a real,
+minor, expected limitation of exact-match dedup, not a bug in this step).
+
+**Step 13 is done — additive and observe-only, per 11.5.** The existing
+Inbox sort, `issues.priority_score`, and `candidate_actions` are all
+unchanged; `GET /api/workgraph/actions/ranked` is a new surface for Marc to
+review against his own real worklist before any decision about wiring it
+into the primary view.
+
+**This completes the design doc's full build (Section 7, steps 1-13).**
+The three explicit non-builds remain correctly parked, not forgotten:
+attachment hashing (no confirmed defect behind it), the semantic identity
+signal (Step 10 found no real trigger condition in the actual singleton
+set), and the `work_objects` abstraction (Section 7's own scope call —
+`merge_issue_into` already delivers the behavior it existed for).

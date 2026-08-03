@@ -279,7 +279,10 @@ def init_workgraph() -> None:
                     ts          REAL NOT NULL
                 )
             """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_issue ON evidence(issue_id, ts DESC)")
+            try:
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_issue ON evidence(issue_id, ts DESC)")
+            except sqlite3.OperationalError:
+                pass  # evidence is already a view (evidence_units/evidence_unit_links have their own indices)
 
             # Identity formalization v0 (2026-08-03, docs/design/CONFIDENCE_
             # AND_IDENTITY_REDESIGN.md Section 3.3): additive overlay, empty
@@ -1119,6 +1122,114 @@ def init_workgraph() -> None:
                 CREATE TRIGGER IF NOT EXISTS trg_projects_delete INSTEAD OF DELETE ON projects
                 BEGIN
                     DELETE FROM work_objects WHERE id = OLD.id;
+                END
+            """)
+
+            # --- evidence_units (design doc Section 12.2, 2026-08-03): removes
+            # the exact structural constraint confirmed in evidence's own
+            # schema - issue_id was a MANDATORY single FK, so one raw_item's
+            # evidence could only ever belong to one work_object. Real data
+            # checked before building this: 0 of 804 real raw_item_ids already
+            # had more than one evidence row, and 0 were already linked to two
+            # different issues - the constraint was never exercised, but was
+            # still real and worth removing before it ever needed to be.
+            # evidence_unit_links.evidence_unit_id/work_object_id is a genuine
+            # many-to-many join - the same evidence can attach to more than
+            # one work_object going forward (add_evidence's own contract is
+            # unchanged: still always creates a new evidence_unit, same as it
+            # always created a new evidence row - linking ONE unit to a
+            # SECOND work_object is a new, separate capability, not automatic
+            # dedup on write).
+            evidence_units_exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='evidence_units'"
+            ).fetchone() is not None
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS evidence_units (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    raw_item_id INTEGER,
+                    type        TEXT NOT NULL CHECK (type IN ('email','teams','calendar','sharepoint','worker_action')),
+                    summary     TEXT NOT NULL,
+                    ts          REAL NOT NULL
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_units_raw_item ON evidence_units(raw_item_id)")
+            # WITHOUT ROWID, deliberately: a pure link table with a real
+            # composite key needs no synthetic rowid of its own - and
+            # confirmed empirically that giving it one would make
+            # add_evidence()'s reliance on cursor.lastrowid unreliable, since
+            # SQLite reverts last_insert_rowid() to its PRE-trigger value once
+            # an INSTEAD OF trigger finishes (documented SQLite behavior,
+            # verified directly rather than assumed) - a rowid-bearing second
+            # insert inside the same trigger would be the last thing touched
+            # and would clobber the caller's view of evidence_units' own new
+            # id. add_evidence() itself was rewritten to insert into these two
+            # real tables directly rather than through the `evidence` view,
+            # sidestepping this entirely for the one caller that needs the id
+            # back; the view+triggers below still exist for every other real
+            # caller (list_evidence, the bulk issue_id reparent in
+            # merge_issue_into, and any raw INSERT that doesn't need its id).
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS evidence_unit_links (
+                    evidence_unit_id INTEGER NOT NULL REFERENCES evidence_units(id),
+                    work_object_id   TEXT NOT NULL REFERENCES work_objects(id),
+                    PRIMARY KEY (evidence_unit_id, work_object_id)
+                ) WITHOUT ROWID
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_unit_links_wo ON evidence_unit_links(work_object_id)")
+
+            if not evidence_units_exists:
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    conn.execute("""
+                        INSERT INTO evidence_units (id, raw_item_id, type, summary, ts)
+                        SELECT id, raw_item_id, type, summary, ts FROM evidence
+                    """)
+                    conn.execute("""
+                        INSERT INTO evidence_unit_links (evidence_unit_id, work_object_id)
+                        SELECT id, issue_id FROM evidence
+                    """)
+                    conn.execute("ALTER TABLE evidence RENAME TO evidence_pre_evidenceunits")
+                    conn.execute("COMMIT")
+                except sqlite3.OperationalError:
+                    try:
+                        conn.execute("ROLLBACK")
+                    except sqlite3.OperationalError:
+                        pass
+
+            conn.execute("""
+                CREATE VIEW IF NOT EXISTS evidence AS
+                SELECT eu.id AS id, eul.work_object_id AS issue_id, eu.raw_item_id,
+                       eu.type, eu.summary, eu.ts
+                FROM evidence_units eu JOIN evidence_unit_links eul ON eul.evidence_unit_id = eu.id
+            """)
+            conn.execute("""
+                CREATE TRIGGER IF NOT EXISTS trg_evidence_insert INSTEAD OF INSERT ON evidence
+                BEGIN
+                    INSERT INTO evidence_units (raw_item_id, type, summary, ts)
+                    VALUES (NEW.raw_item_id, NEW.type, NEW.summary, NEW.ts);
+                    INSERT INTO evidence_unit_links (evidence_unit_id, work_object_id)
+                    VALUES (last_insert_rowid(), NEW.issue_id);
+                END
+            """)
+            conn.execute("""
+                CREATE TRIGGER IF NOT EXISTS trg_evidence_update INSTEAD OF UPDATE ON evidence
+                BEGIN
+                    UPDATE evidence_units SET
+                        raw_item_id = NEW.raw_item_id, type = NEW.type,
+                        summary = NEW.summary, ts = NEW.ts
+                    WHERE id = OLD.id;
+                    UPDATE evidence_unit_links SET work_object_id = NEW.issue_id
+                    WHERE evidence_unit_id = OLD.id AND work_object_id = OLD.issue_id;
+                END
+            """)
+            conn.execute("""
+                CREATE TRIGGER IF NOT EXISTS trg_evidence_delete INSTEAD OF DELETE ON evidence
+                BEGIN
+                    DELETE FROM evidence_unit_links
+                        WHERE evidence_unit_id = OLD.id AND work_object_id = OLD.issue_id;
+                    DELETE FROM evidence_units WHERE id = OLD.id
+                        AND NOT EXISTS (SELECT 1 FROM evidence_unit_links WHERE evidence_unit_id = OLD.id);
                 END
             """)
 
@@ -2193,14 +2304,32 @@ def create_issue_with_new_id(**kwargs: Any) -> str:
 # --- evidence ---------------------------------------------------------------
 
 def add_evidence(*, issue_id: str, type: str, summary: str, raw_item_id: Optional[int] = None) -> int:
+    """Inserts into evidence_units/evidence_unit_links directly rather than
+    through the `evidence` view (Section 12.2) - confirmed empirically that
+    SQLite reverts last_insert_rowid() to its pre-trigger value once an
+    INSTEAD OF trigger finishes, so a caller that needs the new row's real
+    id back (this one does - it's the contract every existing caller of
+    this function already relies on) can't get it through the view's
+    INSTEAD OF INSERT trigger. Same external contract as before: always
+    creates a new row, returns its real id."""
     with _lock:
         conn = _connect()
         try:
+            conn.execute("BEGIN IMMEDIATE")
             cur = conn.execute(
-                "INSERT INTO evidence (issue_id, raw_item_id, type, summary, ts) VALUES (?, ?, ?, ?, ?)",
-                (issue_id, raw_item_id, type, summary, time.time()),
+                "INSERT INTO evidence_units (raw_item_id, type, summary, ts) VALUES (?, ?, ?, ?)",
+                (raw_item_id, type, summary, time.time()),
             )
-            return cur.lastrowid
+            eu_id = cur.lastrowid
+            conn.execute(
+                "INSERT INTO evidence_unit_links (evidence_unit_id, work_object_id) VALUES (?, ?)",
+                (eu_id, issue_id),
+            )
+            conn.execute("COMMIT")
+            return eu_id
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
         finally:
             conn.close()
 
@@ -3661,9 +3790,21 @@ def merge_issue_into(loser_id: str, winner_id: str, *, reason: str, actor: str) 
                 raw_items_moved = conn.execute(
                     "UPDATE raw_items SET issue_id = ? WHERE issue_id = ?", (winner_id, loser_id)
                 ).rowcount
+                # Section 12.2: `evidence` is now a view over evidence_units/
+                # evidence_unit_links (an INSTEAD OF trigger does the real
+                # work) - confirmed empirically that cursor.rowcount for an
+                # UPDATE against a view reports 0 regardless of how many rows
+                # the trigger actually touched (the outer statement never
+                # directly changes a real table itself). Count first, since
+                # we already know every one of this issue's evidence rows is
+                # about to move unconditionally - no need to trust rowcount
+                # for a number we can compute directly.
                 evidence_moved = conn.execute(
+                    "SELECT COUNT(*) FROM evidence WHERE issue_id = ?", (loser_id,)
+                ).fetchone()[0]
+                conn.execute(
                     "UPDATE evidence SET issue_id = ? WHERE issue_id = ?", (winner_id, loser_id)
-                ).rowcount
+                )
                 conn.execute(
                     """INSERT OR IGNORE INTO issue_parties (issue_id, party_id, role)
                        SELECT ?, party_id, role FROM issue_parties WHERE issue_id = ?""",

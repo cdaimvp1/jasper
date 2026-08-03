@@ -1596,12 +1596,61 @@ One `evidence_unit` per raw_item (not per raw_item-per-issue like today's
 `evidence`) — `evidence_unit_links` is the many-to-many join that lets
 "attached is the SAP redline; separately, did you see the Workday invoice
 issue?" attach evidence of the SAME message to TWO real work_objects, the
-exact case the current schema structurally can't represent. Migration:
-one `evidence_unit` per distinct `raw_item_id` already in `evidence`, one
-`evidence_unit_links` row per existing `evidence` row (mechanical,
-lossless). The old `evidence` table's role as "the append-only link from
-an issue to its source" is now `evidence_unit_links`; `list_evidence`/
-`list_evidence_for_issues` become thin views over the join.
+exact case the current schema structurally can't represent.
+
+**Migration, corrected while building rather than as originally
+planned:** this section originally said "one `evidence_unit` per distinct
+`raw_item_id`" (deduped) — checked the real data before writing that
+migration and it's the wrong call. 0 of 804 real non-null `raw_item_id`s
+in `evidence` had more than one row, and 0 were already linked to two
+different issues — the dedup constraint has never once been exercised,
+so forcing it now would be solving an imagined problem while creating a
+real behavior change (`add_evidence()` calling twice for the same
+`raw_item_id` currently always creates two rows; deduping would silently
+collapse them). Migration is 1:1 instead: one `evidence_unit` per
+existing `evidence` row (same `id`, preserved exactly), one
+`evidence_unit_links` row per existing row. The new many-to-many
+capability is available going forward (a second, explicit link to a
+different `work_object_id` for the same `evidence_unit_id`), not
+retrofitted as automatic write-time dedup. `evidence` becomes a view over
+the join, same `INSTEAD OF` trigger pattern as `issues`/`projects`
+(Section 12.1) - `list_evidence`/`list_evidence_for_issues` keep working
+unchanged.
+
+**Two real, SQLite-specific bugs found and fixed while building, neither
+guessable from the design alone:**
+- `sqlite3_last_insert_rowid()` reverts to its PRE-trigger value once an
+  `INSTEAD OF` trigger finishes running — confirmed directly (not
+  assumed) with an isolated script before writing any real code. This
+  matters because `add_evidence()`'s whole external contract is
+  returning the new row's real id for later lookups (`workgraph_
+  deadlines.py`'s own tests rely on this: `add_evidence(...)` then
+  `UPDATE evidence SET ts = ? WHERE id = ?`) - going through the view's
+  `INSTEAD OF INSERT` trigger would silently return the WRONG id. Fixed
+  by having `add_evidence()` insert into `evidence_units`/
+  `evidence_unit_links` directly, bypassing the view - the one caller
+  that needs the id back is also the one caller fully under this
+  codebase's own control, so this sidesteps the SQLite limitation rather
+  than fighting it.
+- `cursor.rowcount` for an `UPDATE` against a view is `0`, regardless of
+  how many rows the `INSTEAD OF UPDATE` trigger actually touched -
+  confirmed live via `merge_issue_into`'s `evidence_moved` count
+  (previously `cur.execute(...).rowcount`, now a `SELECT COUNT(*)`
+  computed before the update, since the exact count is already knowable
+  without trusting `rowcount` at all).
+
+`evidence_unit_links` is declared `WITHOUT ROWID` - a pure link table
+with a real composite key needs no synthetic rowid, and giving it one
+would make the first bug above worse (a rowid-bearing insert as the
+LAST statement inside a trigger is exactly what clobbers the caller's
+view of `last_insert_rowid()`).
+
+**v2.2 done, built and migrated on the live DB (2026-08-03).** 832
+`evidence_units` + 832 `evidence_unit_links`, exactly matching the old
+`evidence` table's row count - lossless, `integrity_check: ok`. Verified
+live: a real `add_evidence()` call, read-back via `list_evidence`, and
+cleanup all round-tripped correctly against real production data.
+Restarted the server and confirmed the real API.
 
 ### 12.3 Claims extensions — edges, work-state taxonomy, and a real reconciler
 

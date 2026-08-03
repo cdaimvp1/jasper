@@ -2133,30 +2133,45 @@ html[data-theme="dark"]{--header:#231A12;--tint-8fb3f0:#19253a;--tint-9fb4d2:#17
    Main content to the right keeps its existing .card box-shadow untouched. */
 .cp-chat-panel{
   flex:0 0 28%;min-width:240px;max-width:45%;display:flex;flex-direction:column;
-  background:var(--cp-panel-bg);border-left:1px solid var(--line2);border-right:none;border-radius:0;box-shadow:none;
+  background:var(--surface);border-left:1px solid var(--line2);border-right:none;border-radius:0;box-shadow:none;
   height:100%;min-height:0;overflow:hidden;
 }
 .cp-resize-handle{flex:none;width:7px;align-self:stretch;cursor:col-resize;
   height:100%;background:var(--line2);border-left:1px solid var(--line);border-right:1px solid var(--line)}
 .cp-resize-handle:hover,.cp-resize-handle.dragging{background:var(--mut2)}
-.cp-chat-hd{padding:10px 12px;border-bottom:1px solid var(--line2);flex:none;background:var(--cp-panel-bg)}
+.cp-chat-hd{padding:10px 12px;border-bottom:1px solid var(--line2);flex:none;background:var(--surface)}
 .cp-chat-title{font-family:var(--sans);font-weight:800;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut2);margin-bottom:8px}
 .cp-chat-filters{display:flex;flex-wrap:wrap;gap:6px}
-.cp-chat-filter-btn{font:700 11px var(--sans,system-ui,sans-serif);color:var(--mut);background:var(--cp-panel-bg);
+.cp-chat-filter-btn{font:700 11px var(--sans,system-ui,sans-serif);color:var(--mut);background:var(--surface);
   border:1.5px solid var(--mut2);border-radius:0;padding:4px 10px;cursor:pointer}
 .cp-chat-filter-btn.on{color:#fff;border-color:transparent}
-.cp-chat-thread{flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:10px;min-height:0;background:var(--cp-panel-bg)}
+.cp-chat-thread{flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:10px;min-height:0;background:var(--surface)}
 .cp-chat-msg{display:flex;flex-direction:column;max-width:88%}
 .cp-chat-msg.mine{align-self:flex-end;align-items:flex-end}
 .cp-chat-msg.theirs{align-self:flex-start;align-items:flex-start}
 .cp-chat-bub{border-radius:0;padding:8px 11px;font-size:12.7px;line-height:1.5;border:1px solid var(--line)}
-.cp-chat-msg.mine .cp-chat-bub{background:var(--ink);color:#fff;border-color:var(--ink)}
+/* Fixed 2026-08-02 (Marc's direct report + screenshot): this rule (and every
+   background:var(--cp-panel-bg) above) is the one that actually reaches the
+   Back Office panel once buildAmbientAssistant() moves #cpChatPanel into the
+   ambient drawer (document.body.appendChild - never a descendant of
+   .cp-home-split, so --cp-panel-bg, a custom property only ever SET on
+   .cp-home-split, is simply unset there regardless of theme - hence
+   background:var(--surface) directly above, a strict drop-in equivalent
+   since --cp-panel-bg's own value has always just been var(--surface)).
+   There's a newer, correctly dark-aware version of THIS rule too
+   (--lk-bubble-me/--lk-bubble-me-fg, further down, scoped inside
+   #cp-view-pcc{}) that wins whenever #cp-view-pcc IS an ancestor - but the
+   drawer isn't a descendant of that either, so this older rule (previously
+   hardcoding color:#fff) was the one Marc actually saw - illegible white
+   text on dark mode's own light-cream --ink. Matched to the newer rule's
+   already-correct-for-both-themes tokens instead of inventing a new one. */
+.cp-chat-msg.mine .cp-chat-bub{background:var(--lk-bubble-me,var(--ink));color:var(--lk-bubble-me-fg,#fff);border-color:var(--lk-bubble-me,var(--ink))}
 .cp-chat-msg.theirs .cp-chat-bub{background:var(--surface);color:var(--ink)}
 .cp-chat-meta{display:flex;gap:6px;align-items:baseline;margin-bottom:3px}
 .cp-chat-from{font:700 9.5px var(--mono,ui-monospace,monospace);letter-spacing:.05em;text-transform:uppercase}
 .cp-chat-ts{font:500 9px var(--mono,ui-monospace,monospace);color:var(--mut2)}
-.cp-chat-hint{flex:none;padding:6px 12px;font-size:10.5px;color:var(--mut2);background:var(--cp-panel-bg);border-top:1px solid var(--line2)}
-.cp-chat-compose{flex:none;border-top:1px solid var(--line2);padding:10px 12px;background:var(--cp-panel-bg)}
+.cp-chat-hint{flex:none;padding:6px 12px;font-size:10.5px;color:var(--mut2);background:var(--surface);border-top:1px solid var(--line2)}
+.cp-chat-compose{flex:none;border-top:1px solid var(--line2);padding:10px 12px;background:var(--surface)}
 /* Claude-Desktop-style composer: textarea + send icon share one bordered box,
    the send button sits INSIDE it at the far right, not a separate sibling.
    Text-entry box itself matches the SITE background (--bg), the one lighter
@@ -2562,7 +2577,14 @@ html[data-theme="dark"]{
 #mastheadGreet .theo-dinobtn{color:var(--lk-ink)}
 #mastheadGreet .theo-dinobtn:hover{background:var(--lk-nested)}
 #mastheadGreet .theo-dinobtn:focus-visible{outline-color:var(--lk-ink)}
-#mastheadGreet .theo-dinobtn .theo-dinomark{filter:brightness(0)}
+/* Fixed 2026-08-02 (Marc's direct report): hardcoded brightness(0) predates
+   dark mode entirely - the comment above only ever reasoned about a LIGHT
+   masthead, so it forced black unconditionally. --dino-filter (theo-brand.js,
+   the same token the topbar's own dino icon already uses) already encodes
+   the correct value for both themes - black in light, near-white in dark -
+   this just stops shadowing that with a hardcoded value that only ever
+   covered one of the two themes it now needs to work in. */
+#mastheadGreet .theo-dinobtn .theo-dinomark{filter:var(--dino-filter,brightness(0))}
 
 /* Scoping fix (2026-07-29, Tia): everything below, to the matching close brace
    right before the closing style tag, was unscoped bare selectors (.pcc-board, .mqwrow,
@@ -3090,6 +3112,12 @@ html[data-theme="dark"]{
   border-radius:20px;padding:1px 7px;cursor:pointer;line-height:1.5}
 .cp-wake-btn:hover{background:var(--lk-surface);color:var(--lk-ink)}
 .cp-wake-btn:disabled{opacity:.5;cursor:default}
+/* Queued 2026-08-02 (Marc's request): a bulk wake is a bigger action than a
+   single worker's own Wake button (N real sessions, not one), so it gets a
+   touch more visual weight - solid border in the accent color instead of the
+   quiet --lk-line outline the per-worker buttons use. */
+.cp-wake-all-btn{border-color:var(--lk-pri);color:var(--lk-pri);font-weight:800;margin-right:6px}
+.cp-wake-all-btn:hover{background:var(--lk-pri);color:#fff}
 
 /* ── Telemetry page (task #48/#51) - everything scoped under #cp-view-telemetry
    so these fairly generic class names (.pill/.section/etc in the original
@@ -5385,7 +5413,13 @@ html[data-theme="dark"]{
       // rendering jammed against the literal viewport bottom instead of resting
       // above the reserved footer strip; bounding the drawer's height fixes
       // both symptoms at once, they were the same bug.
-      '.theo-amb-drawer{position:fixed;top:56px;left:58px;right:auto;bottom:32px;width:var(--amb-w,540px);max-width:calc(96vw - 58px);background:var(--card,#fff);border-right:1px solid var(--line2,#DAD5CE);box-shadow:16px 0 46px rgba(25,20,15,.20);transform:translateX(calc(-100% - 60px));transition:transform .26s cubic-bezier(.4,0,.2,1);z-index:1210;display:flex;flex-direction:column;font-family:var(--sans,system-ui,sans-serif)}' +
+      // Fixed 2026-08-02 (Marc's direct report): --card was never defined
+      // anywhere in this file - this always resolved to the literal ",#fff"
+      // fallback, a plain white box regardless of theme. --surface is the
+      // real, already dark-aware token the moved-in chat panel itself now
+      // uses (see .cp-chat-panel above), so the drawer's own chrome matches
+      // its content with no visible seam, in either theme.
+      '.theo-amb-drawer{position:fixed;top:56px;left:58px;right:auto;bottom:32px;width:var(--amb-w,540px);max-width:calc(96vw - 58px);background:var(--surface,#fff);border-right:1px solid var(--line2,#DAD5CE);box-shadow:16px 0 46px rgba(25,20,15,.20);transform:translateX(calc(-100% - 60px));transition:transform .26s cubic-bezier(.4,0,.2,1);z-index:1210;display:flex;flex-direction:column;font-family:var(--sans,system-ui,sans-serif)}' +
       '.theo-amb-drawer.on{transform:translateX(0)}' +
       '.theo-amb-grip{position:absolute;right:0;left:auto;top:0;bottom:0;width:10px;cursor:col-resize;z-index:6;touch-action:none}' +
       '.theo-amb-grip::before{content:"";position:absolute;right:2px;left:auto;top:50%;transform:translateY(-50%);width:3px;height:38px;border-radius:3px;background:var(--line2,#DAD5CE);transition:background .15s}' +
@@ -8005,9 +8039,41 @@ html[data-theme="dark"]{
     }
   }
 
+  // Task queued 2026-08-02 (Marc's request): one confirm for the whole batch
+  // rather than wakeWorker()'s own per-click confirm N times in a row - each
+  // wake still goes through the same real /wake endpoint (a real session
+  // window per stale worker), just without re-prompting for every one.
+  async function wakeAllStale(btn, staleWorkers) {
+    if (!staleWorkers.length) return;
+    const names = staleWorkers.map(w => w.display_name).join(", ");
+    if (!confirm(`Start a real Claude Code session for ${staleWorkers.length} worker${staleWorkers.length === 1 ? "" : "s"} (${names})? This opens ${staleWorkers.length} live, acting agent${staleWorkers.length === 1 ? "" : "s"} in new window${staleWorkers.length === 1 ? "" : "s"} - not a quick check.`)) return;
+    btn.disabled = true;
+    const originalText = btn.textContent;
+    btn.textContent = "Waking…";
+    const failures = [];
+    for (const w of staleWorkers) {
+      try {
+        const r = await fetch(`/api/workers/${encodeURIComponent(w.worker)}/wake`, { method: "POST" });
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({}));
+          failures.push(`${w.display_name}: ${err.detail || r.status}`);
+        }
+      } catch (e) {
+        failures.push(`${w.display_name}: ${e.message}`);
+      }
+    }
+    if (failures.length) alert(`Some workers couldn't be woken:\n${failures.join("\n")}`);
+    btn.disabled = false; btn.textContent = originalText;
+    setTimeout(loadWorkers, 4000);
+  }
+
   function renderFilters() {
     const chips = [{ worker: "all", display_name: "All" }].concat(workers);
-    filtersEl.innerHTML = chips.map(w => {
+    const staleWorkers = workers.filter(w => livenessBucket(w).bucket === "stale");
+    const wakeAllHtml = staleWorkers.length > 1
+      ? `<button type="button" class="cp-wake-btn cp-wake-all-btn" id="cpChatWakeAll" title="Wake every worker showing no recent activity">Wake all (${staleWorkers.length})</button>`
+      : "";
+    filtersEl.innerHTML = wakeAllHtml + chips.map(w => {
       const cls = w.worker === "all" ? "" : `cp-chat-w-${w.worker}`;
       const btnHtml = `<button type="button" class="cp-chat-filter-btn ${cls} ${activeFilter === w.worker ? "on" : ""}" data-worker="${esc(w.worker)}">${esc(w.display_name)}</button>`;
       if (w.worker === "all") return btnHtml;
@@ -8020,12 +8086,14 @@ html[data-theme="dark"]{
     filtersEl.querySelectorAll(".cp-chat-filter-btn").forEach(btn => {
       btn.addEventListener("click", () => { activeFilter = btn.getAttribute("data-worker"); renderThread(); renderFilters(); });
     });
-    filtersEl.querySelectorAll(".cp-wake-btn").forEach(btn => {
+    filtersEl.querySelectorAll(".cp-wake-btn:not(.cp-wake-all-btn)").forEach(btn => {
       btn.addEventListener("click", (e) => {
         e.stopPropagation();
         wakeWorker(btn.getAttribute("data-wake"), btn.getAttribute("data-wake-name"), btn);
       });
     });
+    const wakeAllBtn = document.getElementById("cpChatWakeAll");
+    if (wakeAllBtn) wakeAllBtn.addEventListener("click", (e) => { e.stopPropagation(); wakeAllStale(wakeAllBtn, staleWorkers); });
   }
 
   // Per-worker identity colour: the deliberate exception to the three-colour

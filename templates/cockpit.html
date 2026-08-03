@@ -8525,14 +8525,25 @@ html[data-theme="dark"]{
     });
   }
 
+  // Fixed 2026-08-02: confirm_suggestion() (workgraph_projects.py) was
+  // upgraded a while back to actually execute the merge/link itself -
+  // this toast was never updated to match and still told Marc a merge was
+  // "still a manual follow-up," which is stale and actively misleading
+  // now that it happens automatically. Reads the real result.action the
+  // endpoint already returns instead of guessing a single generic message.
   async function pjResolveSuggestion(id, status) {
-    await fetch(`/api/workgraph/project-suggestions/${encodeURIComponent(id)}/resolve`, {
+    const r = await fetch(`/api/workgraph/project-suggestions/${encodeURIComponent(id)}/resolve`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status }),
     });
+    const d = await r.json().catch(() => ({}));
+    const action = d.result && d.result.action;
+    const MSG = {
+      merged: "Confirmed — the two issues have been merged into one project.",
+      linked: "Confirmed — a relationship link was created between the two projects.",
+      deferred_reconciliation: "Confirmed, but this pair now conflicts with an existing project grouping — flagged for manual reconciliation.",
+    };
     if (window.toast) {
-      window.toast(status === "confirmed"
-        ? "Marked confirmed — merging the two issues into one project is still a manual follow-up (see note below)."
-        : "Suggestion rejected.");
+      window.toast(status === "confirmed" ? (MSG[action] || "Confirmed.") : "Suggestion rejected.");
     }
     pjLoadSuggestions();
   }

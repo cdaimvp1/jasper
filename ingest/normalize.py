@@ -207,22 +207,31 @@ def _process_teams_chat(payload: dict) -> list[dict]:
 def _process_sharepoint(payload: dict) -> list[dict]:
     """Real shape observed this session: file/document search results
     (id, driveId, name, webUrl, lastModifiedDateTime, summary, ...).
-    thread_key: the parent folder path (best-effort from webUrl) so items in
-    the same library/folder cluster together; falls back to the drive id."""
+
+    Identity fix (D18, 2026-08-03): thread_key used to be the parent folder
+    path (best-effort from webUrl) - the exact thing the redesign's own
+    identity principle says a folder is NOT ("SharePoint folder URL is not
+    artifact identity" - docs/design/CONFIDENCE_AND_IDENTITY_REDESIGN.md
+    Section 3.1). Keying on the folder over-collapsed distinct documents
+    that merely share a library into one container, likely a real
+    contributor to D17's 40-raw-items-to-1-evidence-row attrition pattern
+    for any future SharePoint volume. Each item is now its own container -
+    thread_key is the same drive_id:item_id already used as stable_key, not
+    a derived folder path. The parent folder becomes a `contains` relation
+    at the identity-anchor layer once that exists (Section 3.2), never
+    artifact identity itself."""
     results = payload.get("results") or []
     out = []
     for r in results:
         item_id = r.get("id") or ""
         drive_id = r.get("driveId") or ""
-        web_url = r.get("webUrl") or ""
-        thread_key = web_url.rsplit("/", 1)[0] if "/" in web_url else (drive_id or item_id)
         modified = r.get("lastModifiedDateTime") or ""
         occurred_ts = _parse_iso_to_epoch(modified) if modified else time.time()
         source_ref = f"{drive_id}:{item_id}"
         out.append({
             "source": "sharepoint",
             "stable_key": source_ref,
-            "thread_key": thread_key,
+            "thread_key": source_ref,
             "dedupe_key": _dedupe_key(occurred_ts, [], source_ref),
             "occurred_ts": occurred_ts,
             "subject": r.get("name"),

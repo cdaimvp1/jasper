@@ -226,3 +226,21 @@ def test_run_processes_real_payload_and_leaves_empty_pull_as_success(ws_db, tmp_
     assert (processed / "empty.json").exists()
     assert not (failed / "empty.json").exists()
     assert ws_db.list_alerts() == []
+
+
+# --- Identity fix (D18, 2026-08-03): SharePoint container = item, not folder --
+
+def test_process_sharepoint_thread_key_is_item_identity_not_folder():
+    """The real bug: two distinct documents in the same library/folder used
+    to share one thread_key (the folder path), over-collapsing distinct
+    artifacts into one container. Each item is now its own container."""
+    payload = {"source": "sharepoint", "results": [
+        {"id": "item1", "driveId": "drive1", "name": "a.xlsx",
+         "webUrl": "https://collab.lilly.com/sites/Foo/Shared Documents/a.xlsx"},
+        {"id": "item2", "driveId": "drive1", "name": "b.xlsx",
+         "webUrl": "https://collab.lilly.com/sites/Foo/Shared Documents/b.xlsx"},
+    ]}
+    out = normalize._process_sharepoint(payload)
+    assert out[0]["thread_key"] != out[1]["thread_key"]
+    assert out[0]["thread_key"] == out[0]["stable_key"] == "drive1:item1"
+    assert out[1]["thread_key"] == out[1]["stable_key"] == "drive1:item2"

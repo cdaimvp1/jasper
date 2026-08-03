@@ -530,8 +530,8 @@ def compute_work_object_signature(work_object_id: str, issue: Optional[dict] = N
     already read (parties/companies/references/source_containers), plus
     identity_constraints (v2.4's cannot_merge/cannot_link) for
     cannot_link_ids - a check _issue_signal_snapshot/_pairwise_score never
-    had at all. accepted_lineages stays an honest [] (artifact_lineages/
-    v2.6 doesn't exist yet, nothing to populate it with);
+    had at all - and artifact_lineages (v2.6) for accepted_lineages, a gap
+    that stayed an honest [] until that table existed to answer it.
     positive_vocabulary/negative_vocabulary stay None - no real vocabulary-
     extraction producer exists yet, same named-not-silently-dropped gap as
     identity_constraints' 8 unused types. Returns plain Python values
@@ -565,7 +565,7 @@ def compute_work_object_signature(work_object_id: str, issue: Optional[dict] = N
     })
     return {
         "definitive_ids": definitive_ids,
-        "accepted_lineages": [],
+        "accepted_lineages": sorted(ws.list_artifact_lineage_ids_for_work_object(work_object_id)),
         "containers": containers,
         "external_orgs": external_orgs,
         "participant_roles": participant_roles,

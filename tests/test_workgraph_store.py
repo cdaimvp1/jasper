@@ -1510,6 +1510,172 @@ def test_add_evidence_invalidates_cached_signature(ws_db):
     assert ws_db.get_work_object_signature(a) is None
 
 
+# --- artifact_lineages/artifact_versions (Section 12.5) --------------------
+
+def test_create_attachment_unique_hash_creates_no_lineage(ws_db):
+    """A genuinely unique hash never gets a speculative lineage - no real
+    producer could connect it to a later version by content alone."""
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    aid = ws_db.create_attachment(
+        entity_type="issue", entity_id=a, kind="upload", filename="f.pdf",
+        stored_path="f.pdf", content_type="application/pdf", size_bytes=10,
+        sha256_hex="hash1", uploaded_by="marc",
+    )
+
+    assert ws_db.find_artifact_version_by_attachment(aid) is None
+
+
+def test_create_attachment_matching_hash_creates_a_shared_lineage(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
+    aid1 = ws_db.create_attachment(
+        entity_type="issue", entity_id=a, kind="upload", filename="order_form.xlsx",
+        stored_path="p1.xlsx", content_type=None, size_bytes=10,
+        sha256_hex="sharedhash", uploaded_by="marc",
+    )
+    aid2 = ws_db.create_attachment(
+        entity_type="issue", entity_id=b, kind="upload", filename="order_form_copy.xlsx",
+        stored_path="p2.xlsx", content_type=None, size_bytes=10,
+        sha256_hex="sharedhash", uploaded_by="marc",
+    )
+
+    v1 = ws_db.find_artifact_version_by_attachment(aid1)
+    v2 = ws_db.find_artifact_version_by_attachment(aid2)
+    assert v1 is not None and v2 is not None
+    assert v1["lineage_id"] == v2["lineage_id"]
+    lineage = ws_db.get_artifact_lineage(v1["lineage_id"])
+    assert lineage["work_object_id"] == a  # anchored on the earliest (first-created) attachment
+    assert lineage["title"] == "order_form.xlsx"
+
+
+def test_create_attachment_new_lineage_invalidates_the_owning_signature(ws_db):
+    """Section 12.5/12.7 coordination: accepted_lineages is now real,
+    populated data on the cached signature - a lineage created here must
+    invalidate the owning work_object's cache the same way link_party_to_
+    issue/add_evidence/etc already do for their own fields."""
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
+    ws_db.upsert_work_object_signature(
+        a, definitive_ids_json="[]", accepted_lineages_json="[]", containers_json="[]",
+        external_orgs_json="[]", participant_roles_json="[]", active_period_start=None,
+        active_period_end=None, positive_vocabulary_json=None, negative_vocabulary_json=None,
+        cannot_link_ids_json="[]",
+    )
+
+    ws_db.create_attachment(
+        entity_type="issue", entity_id=a, kind="upload", filename="f1.pdf",
+        stored_path="p1.pdf", content_type=None, size_bytes=10, sha256_hex="hinv", uploaded_by="marc",
+    )
+    ws_db.create_attachment(
+        entity_type="issue", entity_id=b, kind="upload", filename="f2.pdf",
+        stored_path="p2.pdf", content_type=None, size_bytes=10, sha256_hex="hinv", uploaded_by="marc",
+    )
+
+    assert ws_db.get_work_object_signature(a) is None  # invalidated, not left stale
+
+
+def test_create_attachment_third_matching_hash_joins_the_same_lineage(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    aid1 = ws_db.create_attachment(
+        entity_type="issue", entity_id=a, kind="upload", filename="f1.pdf",
+        stored_path="p1.pdf", content_type=None, size_bytes=10, sha256_hex="h3", uploaded_by="marc",
+    )
+    aid2 = ws_db.create_attachment(
+        entity_type="issue", entity_id=a, kind="upload", filename="f2.pdf",
+        stored_path="p2.pdf", content_type=None, size_bytes=10, sha256_hex="h3", uploaded_by="marc",
+    )
+    aid3 = ws_db.create_attachment(
+        entity_type="issue", entity_id=a, kind="upload", filename="f3.pdf",
+        stored_path="p3.pdf", content_type=None, size_bytes=10, sha256_hex="h3", uploaded_by="marc",
+    )
+
+    lineage_id = ws_db.find_artifact_version_by_attachment(aid1)["lineage_id"]
+    assert ws_db.find_artifact_version_by_attachment(aid2)["lineage_id"] == lineage_id
+    assert ws_db.find_artifact_version_by_attachment(aid3)["lineage_id"] == lineage_id
+    assert len(ws_db.list_artifact_versions_for_lineage(lineage_id)) == 3
+
+
+def test_work_object_id_for_attachment_resolves_via_raw_item(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    rid = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key="k1", thread_key="k1", dedupe_key="k1",
+        occurred_ts=time.time(), subject="s", from_actor="a@example.com", participants_json="[]",
+    )
+    ws_db.link_raw_item_to_issue(rid, a)
+    attachment = {"entity_type": "raw_item", "entity_id": str(rid)}
+
+    assert ws_db._work_object_id_for_attachment(attachment) == a
+
+
+def test_work_object_id_for_attachment_none_for_project_scoped(ws_db):
+    p = ws_db.create_project_with_new_id(name="P", category="other")
+    attachment = {"entity_type": "project", "entity_id": p}
+
+    assert ws_db._work_object_id_for_attachment(attachment) is None
+
+
+def test_backfill_artifact_lineages_is_idempotent(ws_db):
+    """Simulates duplicate attachments that predate the feature (inserted
+    directly, bypassing create_attachment's live hook) - the real
+    scenario backfill_artifact_lineages exists for."""
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    conn = ws_db._connect()
+    conn.execute(
+        """INSERT INTO attachments (entity_type, entity_id, kind, filename, stored_path,
+           content_type, size_bytes, sha256, uploaded_by, uploaded_ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        ("issue", a, "upload", "old1.pdf", "old1.pdf", None, 10, "prehash", "marc", 100.0),
+    )
+    conn.execute(
+        """INSERT INTO attachments (entity_type, entity_id, kind, filename, stored_path,
+           content_type, size_bytes, sha256, uploaded_by, uploaded_ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        ("issue", a, "upload", "old2.pdf", "old2.pdf", None, 10, "prehash", "marc", 200.0),
+    )
+    conn.commit()
+    conn.close()
+
+    first = ws_db.backfill_artifact_lineages()
+    assert first["duplicate_groups_found"] == 1
+    assert first["lineages_created"] == 1
+
+    second = ws_db.backfill_artifact_lineages()
+    assert second["lineages_created"] == 0  # already linked - nothing new to create
+
+
+def test_backfill_artifact_lineages_invalidates_a_preexisting_cached_signature(ws_db):
+    """The real bug this regression-tests: a signature computed and
+    cached (e.g. by backtest_scored_model, run for shadow-comparison
+    purposes on every real issue) BEFORE a historical duplicate group was
+    backfilled must not keep reporting a stale, empty accepted_lineages
+    forever - only _ensure_artifact_versions' own invalidation (shared by
+    both create_attachment's live hook and this backfill) can catch it,
+    since nothing else would ever re-touch this work_object afterward."""
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    ws_db.upsert_work_object_signature(
+        a, definitive_ids_json="[]", accepted_lineages_json="[]", containers_json="[]",
+        external_orgs_json="[]", participant_roles_json="[]", active_period_start=None,
+        active_period_end=None, positive_vocabulary_json=None, negative_vocabulary_json=None,
+        cannot_link_ids_json="[]",
+    )
+    conn = ws_db._connect()
+    conn.execute(
+        """INSERT INTO attachments (entity_type, entity_id, kind, filename, stored_path,
+           content_type, size_bytes, sha256, uploaded_by, uploaded_ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        ("issue", a, "upload", "old1.pdf", "old1.pdf", None, 10, "prehash2", "marc", 100.0),
+    )
+    conn.execute(
+        """INSERT INTO attachments (entity_type, entity_id, kind, filename, stored_path,
+           content_type, size_bytes, sha256, uploaded_by, uploaded_ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        ("issue", a, "upload", "old2.pdf", "old2.pdf", None, 10, "prehash2", "marc", 200.0),
+    )
+    conn.commit()
+    conn.close()
+    assert ws_db.get_work_object_signature(a) is not None  # the stale cache exists before backfill
+
+    ws_db.backfill_artifact_lineages()
+
+    assert ws_db.get_work_object_signature(a) is None  # invalidated, not left stale
+
+
 def test_expire_stale_project_suggestions_expires_old_pending_merge(ws_db):
     """Phase 0 fix (D2): the structural backstop against the pending queue
     accumulating forever, independent of the generation flag's setting."""

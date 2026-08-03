@@ -1836,6 +1836,36 @@ backfillable from historical data with any honesty, since nothing today
 records "this PDF is a redline of that one" - left NULL/`other` for
 existing rows rather than guessed.
 
+**Done (2026-08-03):** Both tables built exactly to the schema above.
+`backfill_artifact_lineages()` (`workgraph_store.py`) is the one-time
+sweep over historical duplicate-hash groups; going forward, the real
+live producer is `create_attachment` itself, not a separate step -
+every real attachment-creation call site (`server_lean.py`'s
+`/api/attachments` upload route, `outlook_com_ingest.py`'s ingest-absorb
+function) already funnels through it, so wiring the link there the
+moment a second same-hash attachment shows up covers both for free,
+matching v2.4/v2.5's "wire the single real choke point" pattern rather
+than duplicating the check per caller. `id` is a deterministic
+`lineage-<sha256 prefix>` string (same content-derived-id convention
+`source_containers` already used, not a random UUID). A genuinely
+unique hash never gets a speculative lineage of its own - only once a
+REAL second copy exists does a lineage get created, same "build what has
+a real producer" discipline as everything else in this section;
+`document_role` stays `'other'` for every row this pass writes, exactly
+as planned, since no redline-detection producer exists yet.
+
+One real, previously-invisible gap this surfaced while building: the
+manual `/api/attachments` upload route never called
+`find_attachment_by_hash` before creating a new row - unlike
+`outlook_com_ingest.py`'s ingest path (task #29), a duplicate uploaded
+manually always got copied and re-extracted, not just left un-linked.
+Wiring the lineage check into `create_attachment` itself (rather than
+into each caller) closes that gap as a side effect, without changing
+the upload route's own file-storage behavior - a second manual upload
+of the same file still stores its own copy (unchanged), it just now also
+gets a real `artifact_versions` row pointing at the same lineage as the
+first.
+
 ### 12.6 Richer constraint model
 
 Extends `pending_project_suggestions`' existing pairwise
@@ -1943,12 +1973,34 @@ work_object, not recomputed from scratch each time.
 **Done (2026-08-03):** `work_object_signatures` built exactly to the
 schema above - `id`/`external_orgs`/`participant_roles`/`containers`/
 `definitive_ids`/`cannot_link_ids` are all real, populated fields;
-`accepted_lineages` stays an honest `[]` (artifact_lineages/v2.6 doesn't
-exist yet); `positive_vocabulary`/`negative_vocabulary` stay `NULL` - no
-real vocabulary-extraction producer exists, so topic matching stayed the
+`positive_vocabulary`/`negative_vocabulary` stay `NULL` - no real
+vocabulary-extraction producer exists, so topic matching stayed the
 existing direct title `SequenceMatcher` comparison rather than being
 folded into a field nothing populates honestly yet (named gap, same
-discipline as identity_constraints' 8 unused types).
+discipline as identity_constraints' 8 unused types). `accepted_lineages`
+started as an honest `[]` (artifact_lineages/v2.6 didn't exist yet at
+the time this subsection was first built) and was updated to a real,
+populated field once 12.5 landed a few steps later in this same build
+order - `_ensure_artifact_versions` (the one real function both
+`create_attachment`'s live hook and `backfill_artifact_lineages` share)
+now also invalidates the owning work_object's cached signature whenever
+a lineage's membership actually changes.
+
+Real bug found during 12.5's own live-DB verification, not caught by
+the test suite: the invalidation was originally written inside
+`create_attachment` only, not the shared helper. Running
+`backfill_artifact_lineages()` against the live corpus and then
+re-checking `get_or_compute_work_object_signature` for one of the 21
+now-resolved work_objects came back with `accepted_lineages: []` -
+stale, because that work_object's signature had already been computed
+and cached by 12.7's own live-verification `backtest_scored_model()`
+run BEFORE the backfill ran, and nothing had touched it since. Moved
+the invalidation into `_ensure_artifact_versions` itself (both callers
+funnel through it) and added a regression test
+(`test_backfill_artifact_lineages_invalidates_a_preexisting_cached_
+signature`) reproducing the exact sequence - a pre-existing cached
+signature, then a backfill run, then an assertion that the cache was
+actually invalidated - so this can't silently regress.
 
 Two corrections from the plan above, both made while building:
 

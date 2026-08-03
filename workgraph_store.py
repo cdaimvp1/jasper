@@ -995,6 +995,46 @@ def init_workgraph() -> None:
                 )
             """)
 
+            # artifact_lineages/artifact_versions (design doc Section 12.5):
+            # the real answer to attachment-hashing's open question - sha256
+            # was already computed on every attachment (task #29) but never
+            # read for anything beyond upload-time dedup
+            # (find_attachment_by_hash). id is deterministic
+            # (lineage-<first 16 hex chars of the sha256>), not a random
+            # UUID - same content-derived-id convention source_containers
+            # already uses. Real producer, wired live (not just backfilled):
+            # create_attachment (below) links a NEW attachment into an
+            # existing/new lineage the moment a SECOND attachment with the
+            # same hash shows up - a genuinely unique hash never gets a
+            # speculative lineage of its own, since nothing today can
+            # connect it to a later real version by content alone (no
+            # redline-detection producer exists - see create_artifact_
+            # version's own docstring on document_role).
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS artifact_lineages (
+                    id             TEXT PRIMARY KEY,
+                    work_object_id TEXT REFERENCES work_objects(id),
+                    title          TEXT NOT NULL,
+                    created_ts     REAL NOT NULL
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_artifact_lineages_work_object ON artifact_lineages(work_object_id)")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS artifact_versions (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    lineage_id      TEXT NOT NULL REFERENCES artifact_lineages(id),
+                    attachment_id   INTEGER NOT NULL REFERENCES attachments(id),
+                    document_role   TEXT NOT NULL CHECK (document_role IN
+                                       ('original','redline','counter_redline','clean_copy',
+                                        'executed_copy','exhibit','other')),
+                    derived_from_id INTEGER REFERENCES artifact_versions(id),
+                    sha256          TEXT NOT NULL,
+                    created_ts      REAL NOT NULL
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_artifact_versions_lineage ON artifact_versions(lineage_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_artifact_versions_attachment ON artifact_versions(attachment_id)")
+
             try:
                 # Bumped once per raw_item at claim-materialization time (i.e. in
                 # ingestion order, never in the item's own occurred_ts) - the
@@ -5482,6 +5522,15 @@ def create_attachment(
     stored_path: str, content_type: Optional[str], size_bytes: int,
     sha256_hex: Optional[str], uploaded_by: str, extracted_text: Optional[str] = None,
 ) -> int:
+    """Design doc Section 12.5: the moment a NEW attachment's hash matches
+    one or more already-stored attachments, all of them get linked into
+    one artifact_lineages/artifact_versions record - the real, live
+    producer, alongside backfill_artifact_lineages (below) for duplicate
+    groups that already existed before this was built. This is every real
+    attachment-creation call site's single choke point (the manual
+    /api/attachments upload route AND outlook_com_ingest.py's ingest-
+    absorb function both call this directly), so wiring it here - rather
+    than duplicating the check in each caller - covers both for free."""
     with _lock:
         conn = _connect()
         try:
@@ -5491,9 +5540,14 @@ def create_attachment(
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (entity_type, entity_id, kind, filename, stored_path, content_type, size_bytes, sha256_hex, uploaded_by, time.time(), extracted_text),
             )
-            return cur.lastrowid
+            new_id = cur.lastrowid
         finally:
             conn.close()
+    if sha256_hex:
+        group = list_attachments_by_hash(sha256_hex)
+        if len(group) >= 2:  # a genuinely unique hash never gets a speculative lineage of its own
+            _ensure_artifact_versions(group)  # also invalidates the owning signature - see its own docstring
+    return new_id
 
 
 def find_attachment_by_hash(sha256_hex: str) -> Optional[dict]:
@@ -5515,6 +5569,201 @@ def find_attachment_by_hash(sha256_hex: str) -> Optional[dict]:
         finally:
             conn.close()
     return dict(row) if row else None
+
+
+def list_attachments_by_hash(sha256_hex: str) -> list[dict]:
+    """Every attachment (any entity) sharing this exact content hash,
+    oldest first - unlike find_attachment_by_hash (LIMIT 1, for upload-
+    time dedup), this is the full group compute_work_object_signature-
+    style lineage logic needs to see."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM attachments WHERE sha256 = ? ORDER BY uploaded_ts ASC", (sha256_hex,)
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def _work_object_id_for_attachment(attachment: dict) -> Optional[str]:
+    """Resolves the work_object (issue) an attachment belongs to, if any -
+    direct for entity_type='issue', a lookup for entity_type='raw_item'
+    (email attachments are scoped to the raw_item at ingest time, before
+    classification has assigned an issue - see list_attachments_for_
+    issue's own docstring). 'project'/'chat'-scoped or unlinked raw_item
+    attachments have no single owning work_object - None, not guessed."""
+    if attachment.get("entity_type") == "issue":
+        return attachment.get("entity_id")
+    if attachment.get("entity_type") == "raw_item" and attachment.get("entity_id"):
+        with _lock:
+            conn = _connect()
+            try:
+                row = conn.execute(
+                    "SELECT issue_id FROM raw_items WHERE id = ?", (int(attachment["entity_id"]),)
+                ).fetchone()
+            finally:
+                conn.close()
+        return row["issue_id"] if row else None
+    return None
+
+
+def list_artifact_lineage_ids_for_work_object(work_object_id: str) -> list[str]:
+    """The real, now-populatable content for work_object_signatures.
+    accepted_lineages (Section 12.7) - a gap that stayed an honest `[]`
+    until artifact_lineages (this section) existed to answer it."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT id FROM artifact_lineages WHERE work_object_id = ?", (work_object_id,)
+            ).fetchall()
+        finally:
+            conn.close()
+    return [r["id"] for r in rows]
+
+
+def get_artifact_lineage(lineage_id: str) -> Optional[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute("SELECT * FROM artifact_lineages WHERE id = ?", (lineage_id,)).fetchone()
+        finally:
+            conn.close()
+    return dict(row) if row else None
+
+
+def create_artifact_lineage(*, id: str, work_object_id: Optional[str], title: str,
+                             created_ts: Optional[float] = None) -> str:
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                "INSERT INTO artifact_lineages (id, work_object_id, title, created_ts) VALUES (?, ?, ?, ?)",
+                (id, work_object_id, title, created_ts if created_ts is not None else time.time()),
+            )
+        finally:
+            conn.close()
+    return id
+
+
+def create_artifact_version(*, lineage_id: str, attachment_id: int, sha256: str,
+                             document_role: str = "other", derived_from_id: Optional[int] = None,
+                             created_ts: Optional[float] = None) -> int:
+    """document_role/derived_from_id default to 'other'/None - design doc
+    Section 12.5: nothing today can tell a redline from an identical copy
+    from content alone (no redline-detection producer exists yet), so a
+    role beyond the default is only ever set by a FUTURE real producer
+    (curator's synthesis routine, or the claudeskills redline output if
+    task #112 is ever built), never guessed here."""
+    with _lock:
+        conn = _connect()
+        try:
+            cur = conn.execute(
+                """INSERT INTO artifact_versions (lineage_id, attachment_id, document_role, derived_from_id, sha256, created_ts)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (lineage_id, attachment_id, document_role, derived_from_id, sha256,
+                 created_ts if created_ts is not None else time.time()),
+            )
+            return cur.lastrowid
+        finally:
+            conn.close()
+
+
+def find_artifact_version_by_attachment(attachment_id: int) -> Optional[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM artifact_versions WHERE attachment_id = ? LIMIT 1", (attachment_id,)
+            ).fetchone()
+        finally:
+            conn.close()
+    return dict(row) if row else None
+
+
+def list_artifact_versions_for_lineage(lineage_id: str) -> list[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM artifact_versions WHERE lineage_id = ? ORDER BY created_ts ASC", (lineage_id,)
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def _ensure_artifact_versions(attachments: list[dict]) -> str:
+    """Given 2+ attachments confirmed to share one sha256, ensures every
+    one of them has an artifact_version row in the SAME lineage - reuses
+    an existing lineage if any of them already has one (from a prior live
+    link or a previous backfill_artifact_lineages run), otherwise creates
+    a new one anchored on the earliest attachment (design doc Section
+    12.5: "this document also appears on N other threads" - the earliest
+    copy is the real origin). Idempotent per-attachment - one that already
+    has a version is left alone, so this is safe to call with a mix of
+    already-linked and not-yet-linked attachments.
+
+    Also invalidates the owning work_object's cached signature (Section
+    12.7's accepted_lineages) if a NEW lineage/version actually got
+    created - both real callers (create_attachment's live hook,
+    backfill_artifact_lineages) share this one call site, so invalidating
+    here (rather than in each caller) is the only way both stay correct.
+    A live signature computed via backtest_scored_model()/scored_grouping_
+    decision BEFORE a historical duplicate group was backfilled would
+    otherwise keep reporting a stale, empty accepted_lineages forever -
+    nothing else would ever re-touch that work_object to invalidate it."""
+    versions = {a["id"]: find_artifact_version_by_attachment(a["id"]) for a in attachments}
+    existing_lineage_id = next((v["lineage_id"] for v in versions.values() if v is not None), None)
+    changed = False
+    if existing_lineage_id is not None:
+        lineage_id = existing_lineage_id
+    else:
+        earliest = min(attachments, key=lambda a: a["uploaded_ts"])
+        lineage_id = f"lineage-{earliest['sha256'][:16]}"
+        if get_artifact_lineage(lineage_id) is None:
+            create_artifact_lineage(
+                id=lineage_id, work_object_id=_work_object_id_for_attachment(earliest),
+                title=earliest["filename"], created_ts=earliest["uploaded_ts"],
+            )
+    for a in attachments:
+        if versions[a["id"]] is None:
+            create_artifact_version(
+                lineage_id=lineage_id, attachment_id=a["id"], sha256=a["sha256"], created_ts=a["uploaded_ts"],
+            )
+            changed = True
+    if changed:
+        lineage = get_artifact_lineage(lineage_id)
+        if lineage and lineage.get("work_object_id"):
+            invalidate_work_object_signature(lineage["work_object_id"])
+    return lineage_id
+
+
+def backfill_artifact_lineages() -> dict:
+    """One-time backfill (design doc Section 12.5) for duplicate-hash
+    groups that already existed before create_attachment started linking
+    new duplicates live - the 39 real groups found in this session's own
+    analysis (all legitimate cross-work_object reuse of the same file,
+    zero same-work_object waste). Idempotent - safe to re-run; an
+    attachment that already has a version (whether from a prior backfill
+    run or from the live path having already handled its pair) is
+    skipped, so this only ever picks up what hasn't been linked yet."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT sha256 FROM attachments WHERE sha256 IS NOT NULL GROUP BY sha256 HAVING COUNT(*) >= 2"
+            ).fetchall()
+            hashes = [r["sha256"] for r in rows]
+        finally:
+            conn.close()
+    lineages_before = {h: get_artifact_lineage(f"lineage-{h[:16]}") is not None for h in hashes}
+    for sha256_hex in hashes:
+        _ensure_artifact_versions(list_attachments_by_hash(sha256_hex))
+    lineages_created = sum(1 for h in hashes if not lineages_before[h])
+    return {"duplicate_groups_found": len(hashes), "lineages_created": lineages_created}
 
 
 def list_attachments(entity_type: str, entity_id: str) -> list[dict]:

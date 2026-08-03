@@ -196,6 +196,17 @@ def test_absorb_attachments_dedupes_byte_identical_files_across_raw_items(ws_db,
     assert len(doc_files) == 1
     assert not (isolated_paths.DOCUMENTS_RAW_ITEMS_DIR / "103").exists(), "the second raw_item's own dir was never created - nothing new to store there"
 
+    # Design doc Section 12.5: the same real hash match that drives dedup
+    # is also the live producer for artifact_lineages - two byte-identical
+    # attachments across two raw_items must land in ONE lineage with TWO
+    # versions, not stay invisible the way this exact case did before v2.6.
+    version_1 = ws_db.find_artifact_version_by_attachment(first_row["id"])
+    version_2 = ws_db.find_artifact_version_by_attachment(second_row["id"])
+    assert version_1 is not None and version_2 is not None
+    assert version_1["lineage_id"] == version_2["lineage_id"]
+    versions = ws_db.list_artifact_versions_for_lineage(version_1["lineage_id"])
+    assert len(versions) == 2
+
 
 def test_absorb_attachments_different_content_same_name_stores_both(ws_db, isolated_paths, tmp_path):
     """A genuinely different version (v2 of the same document) must NOT be

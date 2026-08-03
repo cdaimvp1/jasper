@@ -1060,6 +1060,26 @@ def test_get_or_compute_work_object_signature_caches_the_result(ws_db):
     assert json.loads(cached["external_orgs"]) == ["acme"]
 
 
+def test_compute_work_object_signature_reports_real_accepted_lineages(ws_db):
+    """Section 12.5/12.7 coordination: accepted_lineages started as an
+    honest [] before artifact_lineages existed - now that it does, this
+    must be real, populated data, not left behind as a stale placeholder."""
+    a = _issue(ws_db, "A")
+    b = _issue(ws_db, "B")
+    ws_db.create_attachment(
+        entity_type="issue", entity_id=a, kind="upload", filename="f1.pdf",
+        stored_path="p1.pdf", content_type=None, size_bytes=10, sha256_hex="hlineage", uploaded_by="marc",
+    )
+    ws_db.create_attachment(
+        entity_type="issue", entity_id=b, kind="upload", filename="f2.pdf",
+        stored_path="p2.pdf", content_type=None, size_bytes=10, sha256_hex="hlineage", uploaded_by="marc",
+    )
+
+    sig = wp.compute_work_object_signature(a, ws_db.get_issue(a))
+
+    assert sig["accepted_lineages"] == ["lineage-hlineage"]
+
+
 def test_link_party_to_issue_invalidates_cached_signature(ws_db):
     a = _issue(ws_db, "A")
     wp.get_or_compute_work_object_signature(a, ws_db.get_issue(a))

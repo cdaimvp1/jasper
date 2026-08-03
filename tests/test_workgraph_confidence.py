@@ -93,6 +93,26 @@ def test_provenance_reliability_unknown_kind_gets_default_not_error():
     assert conf.provenance_reliability(["some_future_kind"]) == conf._DEFAULT_PROVENANCE
 
 
+# --- provenance_reliability_from_anchor_strengths (Section 2.3 upgrade) -
+
+def test_provenance_from_anchor_strengths_no_anchors_is_full():
+    assert conf.provenance_reliability_from_anchor_strengths([]) == 1.0
+
+
+def test_provenance_from_anchor_strengths_exact_is_strongest():
+    assert conf.provenance_reliability_from_anchor_strengths(["exact"]) == 1.0
+
+
+def test_provenance_from_anchor_strengths_removing_an_anchor_lowers_score():
+    with_exact = conf.provenance_reliability_from_anchor_strengths(["exact", "weak"])
+    without_exact = conf.provenance_reliability_from_anchor_strengths(["weak"])
+    assert without_exact < with_exact
+
+
+def test_provenance_from_anchor_strengths_negative_scores_zero():
+    assert conf.provenance_reliability_from_anchor_strengths(["negative"]) == 0.0
+
+
 # --- referential_resolution ---------------------------------------------
 
 def test_referential_resolution_no_refs_is_full():
@@ -136,6 +156,21 @@ def test_context_accuracy_deterministic_for_identical_inputs():
     a = conf.context_accuracy(**kwargs)
     b = conf.context_accuracy(**kwargs)
     assert a == b
+
+
+def test_context_accuracy_uses_real_anchor_strengths_when_given():
+    """Section 2.3 upgrade path: passing anchor_strengths must route
+    provenance through the real-anchor function, not the match_kind shim -
+    verified by a case where the two would disagree (a match_kind not in
+    the shim's vocabulary at all vs. a real 'exact' anchor)."""
+    now = 1_000_000.0
+    kwargs = dict(present_fields={"category", "evidence"}, required_fields={"category", "evidence"},
+                  evidence_ts=[now - 1 * DAY], now=now, total_refs=1, unresolved_refs=0)
+    via_shim = conf.context_accuracy(match_kinds=["nonexistent_kind"], **kwargs)
+    via_real_anchor = conf.context_accuracy(match_kinds=["nonexistent_kind"], anchor_strengths=["exact"], **kwargs)
+    assert via_real_anchor["components"]["provenance"] == 1.0
+    assert via_shim["components"]["provenance"] == conf._DEFAULT_PROVENANCE
+    assert via_real_anchor["context_accuracy"] > via_shim["context_accuracy"]
 
 
 def test_context_accuracy_strong_signal_scores_higher_than_weak():

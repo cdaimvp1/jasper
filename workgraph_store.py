@@ -3502,6 +3502,29 @@ def create_identity_anchor(*, anchor_type: str, normalized_value: str, anchor_st
             conn.close()
 
 
+def list_identity_anchors_for_issues(issue_ids: list, status: str = "active") -> dict:
+    """Batched sibling of list_identity_anchors - one query for N issues
+    instead of N queries, same shape as list_parties_for_issues/list_
+    evidence_for_issues elsewhere in this file. Returns {issue_id: [rows]},
+    with every requested issue_id present (empty list if it has none)."""
+    result = {iid: [] for iid in issue_ids}
+    if not issue_ids:
+        return result
+    placeholders = ",".join("?" for _ in issue_ids)
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                f"SELECT * FROM identity_anchors WHERE status = ? AND issue_id IN ({placeholders})",
+                (status, *issue_ids),
+            ).fetchall()
+        finally:
+            conn.close()
+    for r in rows:
+        result[r["issue_id"]].append(dict(r))
+    return result
+
+
 def list_identity_anchors(issue_id: Optional[str] = None, status: str = "active") -> list[dict]:
     with _lock:
         conn = _connect()

@@ -35,6 +35,7 @@ import workgraph_nba
 import workgraph_alerts
 import workgraph_synthesis
 import workgraph_projects
+import workgraph_identity
 import outlook_com_ingest
 import retention
 import health_check
@@ -388,6 +389,15 @@ def run() -> dict:
     except Exception as e:
         choice_log_expiry_result = {"error": str(e)}
 
+    # 13. Identity formalization v0 - same once/day gate. Keeps identity_
+    # anchors/source_containers from going stale for issues touched since
+    # the last backfill pass (see run_backfill_daily_if_due's own docstring
+    # for why this stays a periodic sweep, not a live-path write).
+    try:
+        identity_backfill_result = workgraph_identity.run_backfill_daily_if_due()
+    except Exception as e:
+        identity_backfill_result = {"error": str(e)}
+
     summary = {
         "mail": mail_result,
         "classify_after_mail": classify_result_1,
@@ -404,6 +414,7 @@ def run() -> dict:
         "aristotle_detection": aristotle_detection_result,
         "suggestion_expiry": suggestion_expiry_result,
         "choice_log_expiry": choice_log_expiry_result,
+        "identity_backfill": identity_backfill_result,
     }
     _log(f"REFRESH ok mail_inserted={mail_result.get('inserted', '?')} "
         f"relay_ok={relay_result.get('ok')} relay_calendar_advanced={relay_result.get('cursor_advanced')} "

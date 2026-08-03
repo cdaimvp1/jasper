@@ -602,10 +602,15 @@ def scored_grouping_decision(issue_id: str, issue: dict) -> dict:
     if my_snapshot["references"] or my_snapshot["party_ids"] or my_snapshot["companies"] or my_snapshot["topic_key"]:
         present.add("anchor_or_relationship")
     evidence_ts = [e["ts"] for e in ws.list_evidence(issue_id) if e.get("ts")]
+    # Confidence spine v1: real identity_anchors when the backfill has
+    # already covered this issue; falls back to the match_kind shim
+    # (best_signals) when it hasn't, via context_accuracy's own None check.
+    real_anchors = ws.list_identity_anchors(issue_id=issue_id)
     ctx = confidence.context_accuracy(
         present_fields=present, required_fields={"category", "anchor_or_relationship"},
         evidence_ts=evidence_ts, now=time.time(), match_kinds=best_signals,
         total_refs=1, unresolved_refs=0 if my_snapshot["references"] else 1,
+        anchor_strengths=([a["anchor_strength"] for a in real_anchors] if real_anchors else None),
     )
     return {"verdict": verdict, "score": round(best_score, 2),
             "sibling_id": best_sibling if verdict != "no_match" else None, "matched_signals": best_signals,

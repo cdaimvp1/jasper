@@ -1046,6 +1046,25 @@ def test_scored_grouping_decision_attaches_confidence_spine_fields_observe_only(
     assert decision["verdict"] == "suggest"  # unchanged by the spine - observe-only
 
 
+def test_scored_grouping_decision_uses_real_anchors_when_backfilled(ws_db):
+    """Confidence spine v1: once identity_anchors exist for the issue, the
+    observe-only context_accuracy field must be computed from them, not
+    the match_kind shim."""
+    a = _issue(ws_db, "A")
+    _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
+    b = _issue(ws_db, "B, unrelated subject entirely")
+    _link_party(ws_db, b, "p2", "other@acme.com", company="Acme")
+
+    without_anchors = wp.scored_grouping_decision(a, ws_db.get_issue(a))
+
+    ws_db.create_identity_anchor(anchor_type="party", normalized_value="p1", anchor_strength="exact",
+                                  exclusive=False, issue_id=a)
+    with_anchors = wp.scored_grouping_decision(a, ws_db.get_issue(a))
+
+    assert with_anchors["context_accuracy"] > without_anchors["context_accuracy"]
+    assert with_anchors["verdict"] == without_anchors["verdict"] == "suggest"  # still observe-only
+
+
 def test_scored_grouping_decision_nothing_shared_is_no_match(ws_db):
     a = _issue(ws_db, "A")
     _issue(ws_db, "Completely unrelated")

@@ -282,10 +282,20 @@ def _due_urgency(due_iso: str | None, now: float) -> float:
     return max(0.0, 1.0 - (days_until / STALENESS_SATURATION_DAYS))
 
 
-def score_issue(issue: dict, now: float, weights: dict = DEFAULT_WEIGHTS) -> tuple[float, str, Optional[int]]:
+def score_issue(issue: dict, now: float, weights: dict = DEFAULT_WEIGHTS,
+                 identity_anchors: Optional[list] = None) -> tuple[float, str, Optional[int]]:
     """Pure-ISH: the only non-arithmetic steps are reading this issue's own
     raw_items for the value regex, and looking up a matching Total Recall
     lesson (both just DB reads, still zero LLM calls).
+
+    `identity_anchors` (2026-08-03, confidence spine v1): this issue's real
+    identity_anchors rows, pre-fetched by the caller (recompute_all batches
+    this via list_identity_anchors_for_issues - one query for every issue,
+    not one per issue). Empty/None both fall back to the match_kind shim -
+    a confirmed-zero-anchors issue still gets the shim's category-only
+    0.15, not an undeserved "no anchors -> full trust" reading (see
+    context_accuracy's own docstring for why that default is right for the
+    shim's OWN empty-list case but wrong here).
     Returns (priority_score, nba_reason, lesson_id_cited)."""
     if issue["state"] in ("done", "noise-archived", "dismissed"):
         return 0.0, "closed", None
@@ -303,13 +313,14 @@ def score_issue(issue: dict, now: float, weights: dict = DEFAULT_WEIGHTS) -> tup
                   + weights["due"] * due
                   + weights["value"] * value)
 
-    # Confidence spine v0 (2026-08-03): damps base_score by how much context
-    # actually supports it - thin/stale/no-evidence issues rank lower, never
-    # higher, than well-evidenced ones. Safe to apply for real here (unlike
-    # the grouping model's hard auto-merge/suggest thresholds): priority_score
-    # is a continuous ranking input, not a calibrated pass/fail gate, so
-    # damping it can't flip a discrete decision the way it could there.
-    # Cheap by design - reuses raw_items already fetched above, no new query.
+    # Confidence spine v0/v1 (2026-08-03): damps base_score by how much
+    # context actually supports it - thin/stale/no-evidence issues rank
+    # lower, never higher, than well-evidenced ones. Safe to apply for real
+    # here (unlike the grouping model's hard auto-merge/suggest thresholds):
+    # priority_score is a continuous ranking input, not a calibrated
+    # pass/fail gate, so damping it can't flip a discrete decision the way
+    # it could there. Cheap by design - reuses raw_items already fetched
+    # above; identity_anchors, if given, was already batched by the caller.
     has_reference = any(ri.get("pr_number") for ri in raw_items)
     present = set()
     if issue.get("category") and issue["category"] != "other":
@@ -321,6 +332,12 @@ def score_issue(issue: dict, now: float, weights: dict = DEFAULT_WEIGHTS) -> tup
         evidence_ts=[ri.get("occurred_ts") for ri in raw_items if ri.get("occurred_ts")], now=now,
         match_kinds=["reference"] if has_reference else ["category"],
         total_refs=1, unresolved_refs=0 if has_reference else 1,
+        # Deliberately a truthy check, not "is not None": an issue with
+        # confirmed-zero real anchors should fall back to the match_kind
+        # shim's category-only 0.15, not the "no anchors -> full trust"
+        # default that's correct for the shim's OWN empty-list case but
+        # would wrongly read as high confidence here.
+        anchor_strengths=([a["anchor_strength"] for a in identity_anchors] if identity_anchors else None),
     )
     base_score = confidence.effective_score(base_score, ctx["context_accuracy"])
 
@@ -396,9 +413,13 @@ def recompute_all(now: float | None = None) -> dict:
     if now is None:
         now = time.time()
     issues = ws.list_issues(states=["active", "waiting", "blocked"], limit=1000)
+    # Confidence spine v1: one batched query for every issue's real
+    # identity_anchors, not one query per issue (list_identity_anchors_
+    # for_issues, same batching discipline as list_parties_for_issues).
+    anchors_by_issue = ws.list_identity_anchors_for_issues([i["id"] for i in issues])
     updated = 0
     for issue in issues:
-        score, reason, lesson_id = score_issue(issue, now)
+        score, reason, lesson_id = score_issue(issue, now, identity_anchors=anchors_by_issue.get(issue["id"]))
         action_kind = "review" if issue["state"] == "active" else "wait"
         # task #55: reason's prefix is a fixed, owned string (workgraph_
         # aristotle.WARNING_PREFIX) - checking it here avoids recomputing

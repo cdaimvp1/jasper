@@ -47,6 +47,18 @@ PROVENANCE_BY_MATCH_KIND = {
 }
 _DEFAULT_PROVENANCE = 0.2
 
+# Real upgrade path (Section 2.3): once identity_anchors exist for an issue,
+# provenance_reliability_from_anchor_strengths replaces the match_kind shim
+# above with actual anchor_strength data from that table - same [0,1] scale,
+# real input, no change needed to context_accuracy's callers beyond passing
+# anchor_strengths instead of leaving it unset.
+PROVENANCE_BY_ANCHOR_STRENGTH = {
+    "exact": 1.0,
+    "strong": 0.8,
+    "weak": 0.4,
+    "negative": 0.0,
+}
+
 
 def context_coverage(present_fields: Iterable[str], required_fields: Iterable[str]) -> float:
     """|present ∩ required| / |required|. Presence, not correctness - this
@@ -82,6 +94,18 @@ def provenance_reliability(match_kinds: Iterable[str]) -> float:
     return round(sum(PROVENANCE_BY_MATCH_KIND.get(k, _DEFAULT_PROVENANCE) for k in kinds) / len(kinds), 6)
 
 
+def provenance_reliability_from_anchor_strengths(anchor_strengths: Iterable[str]) -> float:
+    """Mean provenance strength across real identity_anchors.anchor_strength
+    values (exact/strong/weak/negative) for an issue/pair - the upgraded
+    input for provenance_reliability's role once real anchors exist. 1.0
+    when no anchors are given - context_coverage already penalizes the
+    absence of any anchor at all."""
+    strengths = list(anchor_strengths or [])
+    if not strengths:
+        return 1.0
+    return round(sum(PROVENANCE_BY_ANCHOR_STRENGTH.get(s, _DEFAULT_PROVENANCE) for s in strengths) / len(strengths), 6)
+
+
 def referential_resolution(total_refs: int, unresolved_refs: int) -> float:
     """1.0 - clamp(unresolved/total, 0, 1) - the anchor-resolved-vs-floating
     measure (ACE's Model 4; the numeric form of the Automatic-vs-One-touch
@@ -96,17 +120,25 @@ def referential_resolution(total_refs: int, unresolved_refs: int) -> float:
 def context_accuracy(*, present_fields: Iterable[str], required_fields: Iterable[str],
                       evidence_ts: list, now: float, match_kinds: Iterable[str],
                       total_refs: int = 0, unresolved_refs: int = 0,
-                      tau_days: float = TAU_FRESHNESS_DAYS) -> dict:
+                      tau_days: float = TAU_FRESHNESS_DAYS,
+                      anchor_strengths: Optional[Iterable[str]] = None) -> dict:
     """The composite: context_accuracy = mean(coverage, freshness,
     provenance, referential_resolution). This is a MULTIPLIER/floor on other
     scores (effective_score below), never a parallel axis and never itself
     a decision - low context accuracy dampens everything downstream and can
     never justify unattended action, but it doesn't decide anything here.
-    Returns {"context_accuracy": float, "components": {...}}."""
+
+    provenance is computed from real identity_anchors.anchor_strength data
+    when the caller passes `anchor_strengths` (the Section 2.3 upgrade
+    path); otherwise it falls back to the match_kind compatibility shim -
+    same call shape either way, no change needed at existing call sites
+    that haven't been upgraded yet. Returns {"context_accuracy": float,
+    "components": {...}}."""
     components = {
         "coverage": context_coverage(present_fields, required_fields),
         "freshness": freshness(evidence_ts, now, tau_days),
-        "provenance": provenance_reliability(match_kinds),
+        "provenance": (provenance_reliability_from_anchor_strengths(anchor_strengths)
+                        if anchor_strengths is not None else provenance_reliability(match_kinds)),
         "referential_resolution": referential_resolution(total_refs, unresolved_refs),
     }
     accuracy = round(sum(components.values()) / len(components), 6)

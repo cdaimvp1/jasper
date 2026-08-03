@@ -304,6 +304,38 @@ def _issue_with_matchable_lesson(ws_db):
     return ws_db.get_issue(issue_id)
 
 
+def test_score_issue_real_anchors_override_the_shim(ws_db):
+    """Confidence spine v1: an issue with only a category (no real
+    reference on its raw_items yet) but a real, backfilled 'exact' anchor
+    on file must score its provenance from that anchor, not the shim's
+    weaker category-only default."""
+    issue_id = ws_db.create_issue_with_new_id(title="X", state="active", category="rfp-sourcing")
+    issue = ws_db.get_issue(issue_id)
+    now = time.time()
+
+    score_via_shim, _, _ = nba.score_issue(issue, now)
+
+    ws_db.create_identity_anchor(anchor_type="jasper_ref", normalized_value=issue_id,
+                                  anchor_strength="exact", exclusive=True, issue_id=issue_id)
+    real_anchors = ws_db.list_identity_anchors(issue_id=issue_id)
+    score_via_real_anchor, _, _ = nba.score_issue(issue, now, identity_anchors=real_anchors)
+
+    assert score_via_real_anchor > score_via_shim
+
+
+def test_recompute_all_batches_anchor_lookup_not_one_query_per_issue(ws_db, monkeypatch):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
+    calls = []
+    real_batched = ws_db.list_identity_anchors_for_issues
+    monkeypatch.setattr(ws_db, "list_identity_anchors_for_issues", lambda ids: (calls.append(ids), real_batched(ids))[1])
+
+    nba.recompute_all()
+
+    assert len(calls) == 1
+    assert set(calls[0]) == {a, b}
+
+
 def test_score_issue_ignores_lesson_by_default(ws_db):
     """workgraph_lessons is entirely a grouping-correction store - it must
     not move NBA urgency unless the cross-engine flag is explicitly on."""

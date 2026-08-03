@@ -122,6 +122,24 @@ def backfill_identity_anchors(now: float | None = None) -> dict:
     }
 
 
+def run_backfill_daily_if_due(now: float | None = None) -> dict | None:
+    """Same once-a-day gate as retention/health_check/suggestion_expiry/
+    choice_log_expiry (ws.claim_daily_run) - piggybacks scheduled_refresh.
+    py's 5x/day cycle. This is what keeps identity_anchors/source_
+    containers from going stale for issues created or updated AFTER the
+    one-time backfill ran - nothing in the live classify/grouping path
+    writes anchors inline (deliberately: this stays a periodic maintenance
+    sweep over the real signals, not a hot-path write, same discipline as
+    every other daily gate in this codebase). Returns None on every call
+    that isn't the day's first claim."""
+    if now is None:
+        now = time.time()
+    today = time.strftime("%Y-%m-%d", time.localtime(now))
+    if not ws.claim_daily_run("identity_anchor_backfill", today):
+        return None
+    return backfill_identity_anchors(now=now)
+
+
 if __name__ == "__main__":
     import json
     print(json.dumps(backfill_identity_anchors(), indent=2))

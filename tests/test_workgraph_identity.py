@@ -109,3 +109,15 @@ def test_backfill_is_idempotent(ws_db):
 
     assert second["anchors_written"] == 0
     assert len(ws_db.list_identity_anchors(issue_id=a)) == 3  # reference + party + company, not duplicated
+
+
+def test_run_backfill_daily_if_due_gates_second_call(ws_db):
+    a = _issue(ws_db, "A")
+    _raw_item(ws_db, a, "Approve PR9999999", "k1")
+
+    first = wi.run_backfill_daily_if_due()
+    assert first is not None
+    assert first["anchors_written"] >= 1
+
+    second = wi.run_backfill_daily_if_due()
+    assert second is None

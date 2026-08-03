@@ -112,3 +112,29 @@ def test_recall_evidence_uses_real_lesson_when_flag_enabled(ws_db, monkeypatch, 
     ev, prov = wsoc._recall_evidence(None, "rfp-sourcing", "acme")
     assert ev["band"] != "none"
     assert prov and prov[0].startswith("recall:")
+
+
+def test_answer_uses_real_grounded_detail_not_a_generic_template(ws_db, monkeypatch, tmp_path):
+    """D14 fix (2026-08-03): answer() used to return a fixed 'Grounded
+    evidence found via {tier}...' sentence on any cleared tier, regardless
+    of what the retrieved evidence's own `detail` said. It must now surface
+    the real content, hedged by the tier's own confidence band."""
+    config = _isolate_config(monkeypatch, tmp_path)
+    config.set_value(True, "grouping", "legacy_lessons_cross_engine_enabled")
+
+    iid = ws_db.create_issue_with_new_id(title="X", state="active", category="rfp-sourcing")
+    ws_db.upsert_party(id="p1", primary_email="rep@acme.com", display_name="Rep",
+                        affiliation="external", affiliation_confidence="H",
+                        affiliation_source="domain", company="Acme")
+    ws_db.link_party_to_issue(iid, "p1")
+    workgraph_lessons.record_lesson(
+        situation_key_val="category:rfp-sourcing|company:acme",
+        statement="Acme RFPs of this shape usually confirm.",
+        outcome="confirmed", source_issue_id=iid,
+    )
+
+    result = wsoc.answer(question="what is the status", issue_id=iid, explicit_depth="lookup")
+
+    assert result["outcome"] == "answered"
+    assert "Acme RFPs of this shape usually confirm." in result["answer"]
+    assert "Grounded evidence found via" not in result["answer"]

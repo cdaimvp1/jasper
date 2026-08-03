@@ -1028,6 +1028,24 @@ def test_scored_grouping_decision_single_weak_signal_is_suggest_not_merge(ws_db)
     assert decision["sibling_id"] == b
 
 
+def test_scored_grouping_decision_attaches_confidence_spine_fields_observe_only(ws_db):
+    """Confidence spine v0 (2026-08-03): computed and attached for shadow-
+    log/backtest review, but must NOT change the verdict here - this
+    shadow-only model's decision is still the raw ordered score alone until
+    a real backtest reviews the damped thresholds (same discipline already
+    required before scored_model_enabled itself is ever flipped on)."""
+    a = _issue(ws_db, "A")
+    _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
+    b = _issue(ws_db, "B, unrelated subject entirely")
+    _link_party(ws_db, b, "p2", "other@acme.com", company="Acme")
+
+    decision = wp.scored_grouping_decision(a, ws_db.get_issue(a))
+
+    assert 0.0 <= decision["context_accuracy"] <= 1.0
+    assert decision["effective_score"] == round(decision["score"] * decision["context_accuracy"], 6)
+    assert decision["verdict"] == "suggest"  # unchanged by the spine - observe-only
+
+
 def test_scored_grouping_decision_nothing_shared_is_no_match(ws_db):
     a = _issue(ws_db, "A")
     _issue(ws_db, "Completely unrelated")

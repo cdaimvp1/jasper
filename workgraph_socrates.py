@@ -357,7 +357,18 @@ def answer(*, question: str, issue_id: Optional[str] = None, asker: Optional[str
     if cleared:
         outcome = "answered"
         needs_review = False
-        answer_text = f"Grounded evidence found via {stopped_at} (confidence: {best_band}). Confirm before acting."
+        # Confidence spine v0 / D14 fix (2026-08-03): this used to be a fixed
+        # template - "Grounded evidence found via {tier}..." - regardless of
+        # what the retrieved evidence's own `detail` actually said. Every
+        # tier already computes a real, specific `detail` string (a
+        # precedent statement, a synthesis summary, a research snippet) -
+        # use it. `best_band` is Socrates' own tier-appropriate confidence
+        # signal (lesson trust bands, research match strength) - a better
+        # fit for hedging this specific answer than recomputing a generic
+        # context_accuracy from scratch would be, so it's reused as-is
+        # rather than duplicated by workgraph_confidence.py here.
+        hedge = {"high": "I'm confident", "medium": "I'm fairly sure", "low": "I have weak signal, but"}.get(best_band, "Based on what I found")
+        answer_text = f"{hedge}: {ev['detail']}"
     elif best_band == "none":
         outcome = "degraded"
         needs_review = True

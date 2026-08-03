@@ -50,6 +50,7 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
 import workgraph_store as ws
+import workgraph_confidence as confidence
 import workgraph_lessons
 import workgraph_aristotle
 import text_extract
@@ -301,6 +302,27 @@ def score_issue(issue: dict, now: float, weights: dict = DEFAULT_WEIGHTS) -> tup
                   + weights["staleness"] * staleness
                   + weights["due"] * due
                   + weights["value"] * value)
+
+    # Confidence spine v0 (2026-08-03): damps base_score by how much context
+    # actually supports it - thin/stale/no-evidence issues rank lower, never
+    # higher, than well-evidenced ones. Safe to apply for real here (unlike
+    # the grouping model's hard auto-merge/suggest thresholds): priority_score
+    # is a continuous ranking input, not a calibrated pass/fail gate, so
+    # damping it can't flip a discrete decision the way it could there.
+    # Cheap by design - reuses raw_items already fetched above, no new query.
+    has_reference = any(ri.get("pr_number") for ri in raw_items)
+    present = set()
+    if issue.get("category") and issue["category"] != "other":
+        present.add("category")
+    if raw_items:
+        present.add("evidence")
+    ctx = confidence.context_accuracy(
+        present_fields=present, required_fields={"category", "evidence"},
+        evidence_ts=[ri.get("occurred_ts") for ri in raw_items if ri.get("occurred_ts")], now=now,
+        match_kinds=["reference"] if has_reference else ["category"],
+        total_refs=1, unresolved_refs=0 if has_reference else 1,
+    )
+    base_score = confidence.effective_score(base_score, ctx["context_accuracy"])
 
     # Total Recall: a bounded add-on, never folded into the weights above
     # (which already foot to 1.0 on their own) - see

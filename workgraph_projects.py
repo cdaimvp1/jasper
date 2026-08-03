@@ -41,6 +41,7 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
 import workgraph_store as ws
+import workgraph_confidence as confidence
 import workgraph_lessons
 import workgraph_signals
 
@@ -587,8 +588,29 @@ def scored_grouping_decision(issue_id: str, issue: dict) -> dict:
         verdict = "suggest"
     else:
         verdict = "no_match"
+
+    # Confidence spine v0 (2026-08-03) - OBSERVE-ONLY for this shadow-only
+    # model: computed and attached for backtest_scored_model/shadow-log
+    # review, but the verdict above is still decided on the raw ordered
+    # score alone. Damping the actual threshold decision needs the same
+    # backtest-before-trust discipline this module already requires before
+    # scored_model_enabled ever flips on (see backtest_scored_model's own
+    # docstring) - not something to wire in unreviewed.
+    present = set()
+    if my_snapshot["category"] and my_snapshot["category"] != "other":
+        present.add("category")
+    if my_snapshot["references"] or my_snapshot["party_ids"] or my_snapshot["companies"] or my_snapshot["topic_key"]:
+        present.add("anchor_or_relationship")
+    evidence_ts = [e["ts"] for e in ws.list_evidence(issue_id) if e.get("ts")]
+    ctx = confidence.context_accuracy(
+        present_fields=present, required_fields={"category", "anchor_or_relationship"},
+        evidence_ts=evidence_ts, now=time.time(), match_kinds=best_signals,
+        total_refs=1, unresolved_refs=0 if my_snapshot["references"] else 1,
+    )
     return {"verdict": verdict, "score": round(best_score, 2),
-            "sibling_id": best_sibling if verdict != "no_match" else None, "matched_signals": best_signals}
+            "sibling_id": best_sibling if verdict != "no_match" else None, "matched_signals": best_signals,
+            "context_accuracy": ctx["context_accuracy"],
+            "effective_score": confidence.effective_score(best_score, ctx["context_accuracy"])}
 
 
 def backtest_scored_model() -> dict:

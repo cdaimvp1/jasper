@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import workgraph_store as ws
 import workgraph_projects
 import workgraph_signals
+import workgraph_sessionize
 
 _CONTAINER_TYPE_BY_SOURCE = {
     "outlook_mail": "email_conversation",
@@ -48,7 +49,12 @@ def backfill_identity_anchors(now: float | None = None) -> dict:
       set the live grouping/veto logic already trusts);
     - 'party'/'company' identity_anchors (non-exclusive, weak) per real
       external, non-automated relationship already on the issue (reuses
-      the same is_automated_sender filter the live matching functions use).
+      the same is_automated_sender filter the live matching functions use);
+    - Teams sub-session boundaries (workgraph_sessionize.py) for every
+      distinct teams_chat container touched - additive/observe-only, not
+      yet consulted by the live classify/grouping path (see this module's
+      own module docstring for why that's a deliberate, separate, reviewed
+      step, not an automatic wire-in).
 
     Idempotent and safe to re-run: containers upsert on their UNIQUE key;
     anchors dedupe against an already-active identical (type, value, issue)
@@ -63,6 +69,7 @@ def backfill_identity_anchors(now: float | None = None) -> dict:
     containers_written = 0
     anchors_written = 0
     anchor_conflicts = []  # [{issue_id, anchor_type, normalized_value, held_by}]
+    teams_chat_keys = set()
 
     for issue in issues:
         issue_id = issue["id"]
@@ -76,6 +83,8 @@ def backfill_identity_anchors(now: float | None = None) -> dict:
             if not container_type or not thread_key or (source, thread_key) in seen_container_keys:
                 continue
             seen_container_keys.add((source, thread_key))
+            if source == "teams_chat":
+                teams_chat_keys.add(thread_key)
             container_id = f"sc-{source}-{thread_key}"
             ws.upsert_source_container(
                 id=container_id, source=source, container_type=container_type,
@@ -114,11 +123,32 @@ def backfill_identity_anchors(now: float | None = None) -> dict:
             ) is not None:
                 anchors_written += 1
 
+    sessions_written = 0
+    multi_session_containers = []  # [{thread_key, session_count}] - real splits found
+    for thread_key in teams_chat_keys:
+        messages = ws.list_raw_items_by_thread_key("teams_chat", thread_key)
+        sessioned = workgraph_sessionize.sessionize_teams_messages(messages)
+        container_id = f"sc-teams_chat-{thread_key}"
+        by_session = {}
+        for msg in sessioned:
+            by_session.setdefault(msg["session_sequence"], []).append(msg)
+        for seq, msgs in by_session.items():
+            ws.upsert_source_session(
+                id=f"{container_id}-s{seq}", source_container_id=container_id, session_sequence=seq,
+                started_ts=msgs[0]["occurred_ts"], ended_ts=msgs[-1]["occurred_ts"],
+                boundary_reason=msgs[0]["boundary_reason"] or "first_message",
+            )
+            sessions_written += 1
+        if len(by_session) > 1:
+            multi_session_containers.append({"thread_key": thread_key, "session_count": len(by_session)})
+
     return {
         "issues_scanned": len(issues),
         "containers_written": containers_written,
         "anchors_written": anchors_written,
         "anchor_conflicts": anchor_conflicts,
+        "teams_sessions_written": sessions_written,
+        "teams_containers_with_multiple_sessions": multi_session_containers,
     }
 
 

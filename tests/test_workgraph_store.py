@@ -1560,6 +1560,29 @@ def test_list_source_containers_filters_by_issue(ws_db):
     assert [r["id"] for r in ws_db.list_source_containers(issue_id="marc-1")] == ["sc1"]
 
 
+def test_upsert_source_session_is_idempotent_and_updates_end(ws_db):
+    ws_db.upsert_source_container(id="sc1", source="teams_chat", container_type="teams_chat",
+                                   exact_key="chat1", key_quality="exact", issue_id=None)
+    ws_db.upsert_source_session(id="ss1", source_container_id="sc1", session_sequence=0,
+                                 started_ts=100.0, ended_ts=None, boundary_reason="first_message")
+    ws_db.upsert_source_session(id="ss1", source_container_id="sc1", session_sequence=0,
+                                 started_ts=100.0, ended_ts=200.0, boundary_reason="first_message")
+    rows = ws_db.list_source_sessions("sc1")
+    assert len(rows) == 1
+    assert rows[0]["ended_ts"] == 200.0
+
+
+def test_list_source_sessions_orders_by_sequence(ws_db):
+    ws_db.upsert_source_container(id="sc1", source="teams_chat", container_type="teams_chat",
+                                   exact_key="chat1", key_quality="exact", issue_id=None)
+    ws_db.upsert_source_session(id="ss2", source_container_id="sc1", session_sequence=1,
+                                 started_ts=200.0, ended_ts=None, boundary_reason="gap_exceeds_72h")
+    ws_db.upsert_source_session(id="ss1", source_container_id="sc1", session_sequence=0,
+                                 started_ts=100.0, ended_ts=150.0, boundary_reason="first_message")
+    rows = ws_db.list_source_sessions("sc1")
+    assert [r["session_sequence"] for r in rows] == [0, 1]
+
+
 def test_create_identity_anchor_dedupes_same_issue(ws_db):
     iid = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
     first = ws_db.create_identity_anchor(anchor_type="reference", normalized_value="PR1", anchor_strength="strong",
@@ -1594,6 +1617,25 @@ def test_create_identity_anchor_non_exclusive_allows_multiple_issues(ws_db):
                                            exclusive=False, issue_id=b)
     assert first is not None
     assert second is not None
+
+
+def test_list_raw_items_by_thread_key_spans_multiple_issues(ws_db):
+    """The real reason this exists: today's flat thread_key-per-container
+    model may already have split one Teams chat's history across more
+    than one issue - get_raw_items_for_issue alone can't see the full
+    container, this can."""
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
+    r1 = ws_db.insert_raw_item(source="teams_chat", stable_key="c1:m1", thread_key="c1", dedupe_key="d1",
+                                occurred_ts=1.0, subject=None, from_actor="x", participants_json="[]")
+    r2 = ws_db.insert_raw_item(source="teams_chat", stable_key="c1:m2", thread_key="c1", dedupe_key="d2",
+                                occurred_ts=2.0, subject=None, from_actor="x", participants_json="[]")
+    ws_db.link_raw_item_to_issue(r1, a)
+    ws_db.link_raw_item_to_issue(r2, b)
+
+    rows = ws_db.list_raw_items_by_thread_key("teams_chat", "c1")
+
+    assert [r["id"] for r in rows] == [r1, r2]
 
 
 def test_get_calendar_raw_items_for_remediation_only_returns_calendar_source(ws_db):

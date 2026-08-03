@@ -260,10 +260,7 @@ def init_workgraph() -> None:
             # Deliberately simpler than the Blueprint's full schema - no
             # work_objects table exists yet, so anchors/containers point at
             # TODAY's real entity (issues.id) directly; upgradeable when/if
-            # work_objects lands. source_sessions is intentionally not built
-            # yet - it only matters once a container can hold more than one
-            # real session (Teams sessionization, not built), and an empty,
-            # unused table is not worth adding ahead of that.
+            # work_objects lands.
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS source_containers (
                     id             TEXT PRIMARY KEY,
@@ -304,6 +301,27 @@ def init_workgraph() -> None:
                 ON identity_anchors(anchor_type, normalized_value) WHERE exclusive = 1 AND status = 'active'
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_identity_anchors_issue ON identity_anchors(issue_id, status)")
+
+            # Teams sub-session boundaries (2026-08-03, workgraph_sessionize.py):
+            # a container can hold more than one real session over time (the
+            # real marc-362 shape - one Teams chat mixing several unrelated
+            # PR approvals plus ordinary conversation). Additive, observe-only
+            # for now - populated by the identity backfill, not yet consulted
+            # by the live classify/grouping path (see backfill_identity_
+            # anchors' own docstring for why that stays a deliberate, reviewed
+            # step, not an automatic wire-in).
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS source_sessions (
+                    id                   TEXT PRIMARY KEY,
+                    source_container_id  TEXT NOT NULL REFERENCES source_containers(id),
+                    session_sequence     INTEGER NOT NULL,
+                    started_ts           REAL NOT NULL,
+                    ended_ts             REAL,
+                    boundary_reason      TEXT NOT NULL,
+                    UNIQUE(source_container_id, session_sequence)
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_source_sessions_container ON source_sessions(source_container_id)")
 
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS ingest_cursors (
@@ -1910,6 +1928,25 @@ def get_raw_items_for_issue(issue_id: str) -> list[dict]:
         try:
             rows = conn.execute(
                 "SELECT * FROM raw_items WHERE issue_id = ? ORDER BY occurred_ts ASC", (issue_id,)
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def list_raw_items_by_thread_key(source: str, thread_key: str) -> list[dict]:
+    """All raw_items sharing this (source, thread_key), oldest first,
+    REGARDLESS of which issue each one currently belongs to (unlike get_
+    raw_items_for_issue) - what workgraph_sessionize.py needs to see a
+    container's full real history when sessionizing it, since today's
+    flat thread_key-per-container model may already have split some of
+    that history across more than one issue."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM raw_items WHERE source = ? AND thread_key = ? ORDER BY occurred_ts ASC",
+                (source, thread_key),
             ).fetchall()
         finally:
             conn.close()
@@ -3615,6 +3652,38 @@ def create_identity_anchor(*, anchor_type: str, normalized_value: str, anchor_st
             return cur.lastrowid
         finally:
             conn.close()
+
+
+def upsert_source_session(*, id: str, source_container_id: str, session_sequence: int,
+                           started_ts: float, ended_ts: Optional[float], boundary_reason: str) -> None:
+    """Idempotent, same pattern as upsert_source_container - re-running the
+    backfill just refreshes ended_ts/boundary_reason for an already-known
+    session rather than raising on the UNIQUE constraint."""
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                """INSERT INTO source_sessions (id, source_container_id, session_sequence, started_ts, ended_ts, boundary_reason)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(source_container_id, session_sequence)
+                   DO UPDATE SET ended_ts = excluded.ended_ts, boundary_reason = excluded.boundary_reason""",
+                (id, source_container_id, session_sequence, started_ts, ended_ts, boundary_reason),
+            )
+        finally:
+            conn.close()
+
+
+def list_source_sessions(source_container_id: str) -> list[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM source_sessions WHERE source_container_id = ? ORDER BY session_sequence",
+                (source_container_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
 
 
 def list_identity_anchors_for_issues(issue_ids: list, status: str = "active") -> dict:

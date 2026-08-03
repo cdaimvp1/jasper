@@ -99,6 +99,31 @@ def test_backfill_reports_real_reference_conflict_without_crashing(ws_db):
     assert {conflict["issue_id"], conflict["held_by"]} == {a, b}
 
 
+def test_backfill_sessionizes_teams_container_across_issues(ws_db):
+    """The real marc-362 shape: two messages on the same Teams chat, one
+    already linked to issue a, one to issue b (today's flat model can
+    already split one chat's history this way) - the sessionizer must see
+    BOTH via list_raw_items_by_thread_key, not just whichever issue's own
+    raw_items happen to be scanned first."""
+    a = _issue(ws_db, "A")
+    b = _issue(ws_db, "B")
+    r1 = _raw_item(ws_db, a, None, "c1:m1", source="teams_chat", thread_key="c1")
+    conn = ws_db._connect()
+    conn.execute("UPDATE raw_items SET occurred_ts = 0 WHERE id = ?", (r1,))
+    conn.close()
+    r2 = _raw_item(ws_db, b, None, "c1:m2", source="teams_chat", thread_key="c1")
+    conn = ws_db._connect()
+    conn.execute("UPDATE raw_items SET occurred_ts = ? WHERE id = ?", (100 * 3600.0, r2))
+    conn.close()
+
+    result = wi.backfill_identity_anchors()
+
+    assert result["teams_sessions_written"] == 2
+    sessions = ws_db.list_source_sessions("sc-teams_chat-c1")
+    assert [s["session_sequence"] for s in sessions] == [0, 1]
+    assert any(c["thread_key"] == "c1" for c in result["teams_containers_with_multiple_sessions"])
+
+
 def test_backfill_is_idempotent(ws_db):
     a = _issue(ws_db, "A")
     _raw_item(ws_db, a, "Approve PR3333333", "k1")

@@ -27,6 +27,7 @@ import re
 import time
 from typing import Optional
 
+import config
 import workgraph_store as ws
 import workgraph_lessons
 import workgraph_synthesis
@@ -166,6 +167,15 @@ def _extract_candidates(text: str) -> tuple[Optional[str], Optional[str]]:
 # ---------------------------------------------------------------------------
 
 def _recall_evidence(issue: Optional[dict], category: Optional[str], company: Optional[str]):
+    # Phase 0 fix (D11, 2026-08-03): workgraph_lessons is ENTIRELY a grouping-
+    # correction store (every row comes from record_confirmed_or_rejected,
+    # called right after a project-suggestion resolves) - it carries no
+    # valid precedent for "does this answer the question", only for
+    # grouping. An honest miss, same shape as any other empty tier, not an
+    # error - gated off by default behind config('grouping',
+    # 'legacy_lessons_cross_engine_enabled').
+    if not config.get("grouping", "legacy_lessons_cross_engine_enabled"):
+        return _no_evidence("recall tier disabled (grouping-lesson cross-engine leakage guard, D11)"), []
     if issue is not None:
         lesson = workgraph_lessons.find_matching_lesson(issue)
         if lesson is None:

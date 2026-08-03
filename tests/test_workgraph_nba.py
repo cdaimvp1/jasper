@@ -9,7 +9,18 @@ import time
 
 import pytest
 
+import workgraph_lessons
 import workgraph_nba as nba
+
+
+def _isolate_config(monkeypatch, tmp_path):
+    """Same isolation pattern as test_workgraph_projects.py's own helper -
+    config.SETTINGS_PATH is bound at import time, not per-test."""
+    import config
+    monkeypatch.setattr(config, "SETTINGS_PATH", tmp_path / "settings.json")
+    monkeypatch.setattr(config, "_cache", {})
+    monkeypatch.setattr(config, "_cache_mtime", 0.0)
+    return config
 
 
 @pytest.fixture(autouse=True)
@@ -273,6 +284,63 @@ def test_recompute_all_persists_has_unmet_prerequisite(ws_db):
     assert issue["has_unmet_prerequisite"] == 1
 
 
+# --- Phase 0 fix (D11, 2026-08-03): lessons cross-engine leakage gate ------
+
+def _issue_with_matchable_lesson(ws_db):
+    """An issue whose situation_key (category + first external company) has
+    a real, confirmed lesson recorded against it - the shape find_matching_
+    lesson/best_lesson_for_key need to actually return something rather than
+    None regardless of the flag under test."""
+    issue_id = ws_db.create_issue_with_new_id(title="X", state="active", category="rfp-sourcing")
+    ws_db.upsert_party(id="p1", primary_email="rep@acme.com", display_name="Rep",
+                        affiliation="external", affiliation_confidence="H",
+                        affiliation_source="domain", company="Acme")
+    ws_db.link_party_to_issue(issue_id, "p1")
+    workgraph_lessons.record_lesson(
+        situation_key_val="category:rfp-sourcing|company:acme",
+        statement="Acme RFPs of this shape usually confirm.",
+        outcome="confirmed", source_issue_id=issue_id,
+    )
+    return ws_db.get_issue(issue_id)
+
+
+def test_score_issue_ignores_lesson_by_default(ws_db):
+    """workgraph_lessons is entirely a grouping-correction store - it must
+    not move NBA urgency unless the cross-engine flag is explicitly on."""
+    issue = _issue_with_matchable_lesson(ws_db)
+    score, reason, lesson_id = nba.score_issue(issue, time.time())
+    assert lesson_id is None
+    assert "precedent:" not in reason
+
+
+def test_score_issue_uses_lesson_when_flag_enabled(ws_db, monkeypatch, tmp_path):
+    config = _isolate_config(monkeypatch, tmp_path)
+    config.set_value(True, "grouping", "legacy_lessons_cross_engine_enabled")
+
+    issue = _issue_with_matchable_lesson(ws_db)
+    score, reason, lesson_id = nba.score_issue(issue, time.time())
+
+    assert lesson_id is not None
+    assert "precedent:" in reason
+
+
+# --- Phase 0 fix (D12, 2026-08-03): nba_choice_log expiry gate -------------
+
+def test_run_choice_log_expiry_daily_if_due_expires_old_and_gates_second_call(ws_db):
+    iid = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    log_id = ws_db.create_nba_choice_log(issue_id=iid, offered_json="[]", scoring_inputs_json="{}")
+    conn = ws_db._connect()
+    conn.execute("UPDATE nba_choice_log SET offered_ts = ? WHERE id = ?", (time.time() - 30 * 86400, log_id))
+    conn.close()
+
+    first = nba.run_choice_log_expiry_daily_if_due()
+    assert first["expired"] == 1
+    assert ws_db.get_most_recent_open_choice_log(iid) is None
+
+    second = nba.run_choice_log_expiry_daily_if_due()
+    assert second is None
+
+
 def test_recompute_all_leaves_has_unmet_prerequisite_zero_when_no_rule_triggers(ws_db):
     issue_id = ws_db.create_issue_with_new_id(title="Normal", state="active", category="other")
     nba.recompute_all()
@@ -504,11 +572,15 @@ def test_candidate_actions_prefers_issue_synthesis_over_project_when_both_have_a
     assert "Project-level action" not in labels
 
 
-def test_candidate_actions_never_empty_even_with_no_real_signal():
+def test_candidate_actions_empty_with_no_real_signal():
+    """Phase 0 fix (D15, 2026-08-03): this used to assert the OPPOSITE - an
+    unconditional 'Draft a reply' fallback with source_surface 'fallback'
+    and zero supporting evidence, presented like a real candidate. Changed
+    because that fallback is exactly D15: no evidence should mean no
+    candidate, not a manufactured one."""
     issue = {"nba_reason": None, "state": "active", "priority_score": None}
     result = nba.candidate_actions(issue, [])
-    assert len(result) == 1
-    assert result[0]["source_surface"] == "fallback"
+    assert result == []
 
 
 def test_candidate_actions_ranked_by_score_descending():

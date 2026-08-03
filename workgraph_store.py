@@ -2241,6 +2241,27 @@ def mark_choice_log_chosen(log_id: int, *, chosen_action_kind: Optional[str],
             conn.close()
 
 
+def expire_stale_nba_choice_logs(older_than_days: float) -> int:
+    """Phase 0 fix (D12, 2026-08-03): 'ignored'/'expired' were valid states
+    in this table's own CHECK from the start, but nothing ever wrote them -
+    an 'offered' row with no matching action just sat open forever. Resolves
+    (not deletes) any still-'offered' row older than the cutoff to
+    'expired', so the offered-vs-acted-on record stays honest and open_log
+    lookups don't keep returning a stale offer that's no longer relevant.
+    Returns the number of rows resolved."""
+    cutoff = time.time() - older_than_days * 86400
+    with _lock:
+        conn = _connect()
+        try:
+            cur = conn.execute(
+                "UPDATE nba_choice_log SET status = 'expired' WHERE status = 'offered' AND offered_ts < ?",
+                (cutoff,),
+            )
+            return cur.rowcount
+        finally:
+            conn.close()
+
+
 def log_shadow_grouping_decision(*, issue_id: str, live_action: str, live_signal: Optional[str],
                                   live_sibling_id: Optional[str], scored_verdict: str, scored_score: float,
                                   scored_sibling_id: Optional[str], scored_signals_json: str) -> int:

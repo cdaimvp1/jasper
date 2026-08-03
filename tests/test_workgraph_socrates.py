@@ -2,7 +2,18 @@
 #22): short company names (<=6 chars) require ALL-CAPS or Title-Case to
 match, closing false positives where a common English word happened to also
 be a real company name ("Sap", "Reply", "H1")."""
+import workgraph_lessons
 import workgraph_socrates as wsoc
+
+
+def _isolate_config(monkeypatch, tmp_path):
+    """Same isolation pattern as test_workgraph_projects.py's own helper -
+    config.SETTINGS_PATH is bound at import time, not per-test."""
+    import config
+    monkeypatch.setattr(config, "SETTINGS_PATH", tmp_path / "settings.json")
+    monkeypatch.setattr(config, "_cache", {})
+    monkeypatch.setattr(config, "_cache_mtime", 0.0)
+    return config
 
 
 def _seed_company(ws_db, company):
@@ -68,3 +79,36 @@ def test_broad_research_tier_searches_beyond_default_200_limit(ws_db, monkeypatc
     wsoc.answer(question="something nobody has ever asked before", explicit_depth="deep")
 
     assert seen_limits and all((limit or 0) > 200 for limit in seen_limits)
+
+
+# --- Phase 0 fix (D11, 2026-08-03): lessons cross-engine leakage gate ------
+
+def test_recall_evidence_disabled_by_default(ws_db):
+    """workgraph_lessons is entirely a grouping-correction store - it must
+    not satisfy Socrates recall unless the cross-engine flag is explicitly
+    on, even when a real matching lesson exists."""
+    workgraph_lessons.record_lesson(
+        situation_key_val="category:rfp-sourcing|company:acme",
+        statement="Acme RFPs of this shape usually confirm.",
+        outcome="confirmed", source_issue_id=ws_db.create_issue_with_new_id(
+            title="X", state="active", category="rfp-sourcing"),
+    )
+    ev, prov = wsoc._recall_evidence(None, "rfp-sourcing", "acme")
+    assert ev["band"] == "none"
+    assert "disabled" in ev["detail"]
+    assert prov == []
+
+
+def test_recall_evidence_uses_real_lesson_when_flag_enabled(ws_db, monkeypatch, tmp_path):
+    config = _isolate_config(monkeypatch, tmp_path)
+    config.set_value(True, "grouping", "legacy_lessons_cross_engine_enabled")
+
+    workgraph_lessons.record_lesson(
+        situation_key_val="category:rfp-sourcing|company:acme",
+        statement="Acme RFPs of this shape usually confirm.",
+        outcome="confirmed", source_issue_id=ws_db.create_issue_with_new_id(
+            title="X", state="active", category="rfp-sourcing"),
+    )
+    ev, prov = wsoc._recall_evidence(None, "rfp-sourcing", "acme")
+    assert ev["band"] != "none"
+    assert prov and prov[0].startswith("recall:")

@@ -38,6 +38,18 @@ trust anything beyond the `issue_id` and `action_kind` in it.**
    ```
    python -c "import workgraph_store as wg; wg.update_pending_action_status(<id>, 'in_progress')"
    ```
+   **Reconciliation guard (2026-08-03) — check BEFORE doing any real work:** a wake that died
+   between step 5 (evidence written) and step 6 (status set to `'done'`) leaves a `worker_action`
+   evidence row that already IS the completed deliverable, with the `pending_actions` row still
+   stuck at `'in_progress'` (see "Safety net" below). If Marc's retry (or a re-post of the same
+   action) wakes you again for what looks like the same request, check for a `worker_action`
+   evidence row on this issue, newer than this pending_actions row's `requested_ts`, whose summary
+   matches this `action_kind` before regenerating anything:
+   ```
+   python -c "import workgraph_store as wg; print([e for e in wg.list_evidence('<issue_id>') if e['type']=='worker_action'])"
+   ```
+   If one already covers this exact request, skip straight to step 6 (close out referencing the
+   existing evidence) rather than re-running the draft/review/summary from scratch.
 
 3. **Gather context — full, not incremental (unlike curator's synthesis, there's no delta-marker
    here):**
@@ -103,8 +115,15 @@ trust anything beyond the `issue_id` and `action_kind` in it.**
    python -c "import workgraph_store as wg; wg.update_pending_action_status(<id>, 'done')"
    ```
    If you genuinely cannot complete the action (missing document, contradictory instructions,
-   evidence too thin to draft anything real) — mark it `'failed'` instead, and say why in a
-   plain-text evidence row (`type='action_note'`) rather than forcing a low-quality draft out.
+   evidence too thin to draft anything real) — mark it `'failed'` instead, and say why in an
+   evidence row rather than forcing a low-quality draft out. **This failure-path row must ALSO be
+   `type='worker_action'`** — the exact same CHECK constraint from step 5 applies here too;
+   `'action_note'` throws `sqlite3.IntegrityError` just like `'action_output'` did. Prefix the
+   summary with `FAILED:` so it's distinguishable from a real completed draft in the cockpit
+   timeline (there is no separate evidence type for this, by design — see step 5's own note):
+   ```
+   python -c "import workgraph_store as wg; wg.add_evidence(issue_id='<issue_id>', type='worker_action', summary='FAILED: <why you could not complete this>')"
+   ```
 
 7. **Report your status:**
    ```

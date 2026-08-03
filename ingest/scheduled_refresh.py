@@ -381,6 +381,13 @@ def run() -> dict:
     except Exception as e:
         suggestion_expiry_result = {"error": str(e)}
 
+    # 12. Phase 0 fix (D12) - same once/day gate, expires stale 'offered'
+    # nba_choice_log rows nothing ever resolved before.
+    try:
+        choice_log_expiry_result = workgraph_nba.run_choice_log_expiry_daily_if_due()
+    except Exception as e:
+        choice_log_expiry_result = {"error": str(e)}
+
     summary = {
         "mail": mail_result,
         "classify_after_mail": classify_result_1,
@@ -396,6 +403,7 @@ def run() -> dict:
         "personal_learning": personal_learning_result,
         "aristotle_detection": aristotle_detection_result,
         "suggestion_expiry": suggestion_expiry_result,
+        "choice_log_expiry": choice_log_expiry_result,
     }
     _log(f"REFRESH ok mail_inserted={mail_result.get('inserted', '?')} "
         f"relay_ok={relay_result.get('ok')} relay_calendar_advanced={relay_result.get('cursor_advanced')} "

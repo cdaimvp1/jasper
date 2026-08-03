@@ -1077,6 +1077,36 @@ def test_mark_choice_log_chosen_sets_all_real_fields(ws_db):
     assert row["chosen_ts"] is not None
 
 
+def test_expire_stale_nba_choice_logs_expires_old_offered(ws_db):
+    """Phase 0 fix (D12): 'expired' was a valid state from the start but
+    nothing ever wrote it - an old open offer must not sit 'offered'
+    forever once resolved by this sweep."""
+    iid = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    log_id = ws_db.create_nba_choice_log(issue_id=iid, offered_json="[]", scoring_inputs_json="{}")
+    conn = ws_db._connect()
+    conn.execute("UPDATE nba_choice_log SET offered_ts = ? WHERE id = ?", (time.time() - 30 * 86400, log_id))
+    conn.close()
+
+    expired = ws_db.expire_stale_nba_choice_logs(14)
+
+    assert expired == 1
+    assert ws_db.get_most_recent_open_choice_log(iid) is None
+    conn = ws_db._connect()
+    status = conn.execute("SELECT status FROM nba_choice_log WHERE id = ?", (log_id,)).fetchone()[0]
+    conn.close()
+    assert status == "expired"
+
+
+def test_expire_stale_nba_choice_logs_leaves_recent_offered(ws_db):
+    iid = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    log_id = ws_db.create_nba_choice_log(issue_id=iid, offered_json="[]", scoring_inputs_json="{}")
+
+    expired = ws_db.expire_stale_nba_choice_logs(14)
+
+    assert expired == 0
+    assert ws_db.get_most_recent_open_choice_log(iid)["id"] == log_id
+
+
 def test_log_shadow_grouping_decision_persists_all_fields(ws_db):
     iid = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
     log_id = ws_db.log_shadow_grouping_decision(

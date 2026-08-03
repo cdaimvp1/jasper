@@ -1442,9 +1442,22 @@ async def api_workgraph_issue_status(issue_id: str, body: WorkgraphIssueStatusBo
     # Part E2 (2026-07-30): a real, deterministic action was just taken
     # against this issue - resolve whichever candidate list was most
     # recently offered, if any.
+    # Phase 0 fix (D12, 2026-08-03): a bare state change used to mark
+    # whichever offer was most recently open "chosen" unconditionally - a
+    # generic Issue state change (e.g. Marc archiving something for an
+    # unrelated administrative reason) is NOT the same as accepting one of
+    # curator's offered candidates, and doing so corrupted nba_choice_log's
+    # whole purpose (a real record of what was offered vs. actually acted
+    # on). Only mark chosen when the new state actually names one of this
+    # offer's real candidate kinds - otherwise the offer is left untouched
+    # (still 'offered', to be resolved later by a real matching action or
+    # the expiry sweep below).
     open_log = wg.get_most_recent_open_choice_log(issue_id)
     if open_log is not None and body.state is not None:
-        wg.mark_choice_log_chosen(open_log["id"], chosen_action_kind=body.state)
+        offered = json.loads(open_log["offered_json"] or "[]")
+        offered_kinds = {c.get("kind") for c in offered if isinstance(c, dict)}
+        if body.state in offered_kinds:
+            wg.mark_choice_log_chosen(open_log["id"], chosen_action_kind=body.state)
     result = {"ok": True, "issue": sanitize_surrogates(wg.get_issue(issue_id))}
     if warning:
         result["warning"] = warning

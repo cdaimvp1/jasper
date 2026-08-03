@@ -48,6 +48,7 @@ from types import MappingProxyType
 from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import config
 import workgraph_store as ws
 import workgraph_lessons
 import workgraph_aristotle
@@ -304,7 +305,16 @@ def score_issue(issue: dict, now: float, weights: dict = DEFAULT_WEIGHTS) -> tup
     # Total Recall: a bounded add-on, never folded into the weights above
     # (which already foot to 1.0 on their own) - see
     # workgraph_lessons.apply_precedent_boost.
-    lesson = workgraph_lessons.find_matching_lesson(issue)
+    #
+    # Phase 0 fix (D11, 2026-08-03): workgraph_lessons is ENTIRELY a grouping-
+    # correction store (every row comes from record_confirmed_or_rejected,
+    # called right after a project-suggestion resolves) - it carries no
+    # valid precedent for NBA urgency, only for grouping. Gated off by
+    # default behind config('grouping','legacy_lessons_cross_engine_enabled')
+    # until Total Recall grows an NBA-scoped lesson type of its own.
+    lesson = None
+    if config.get("grouping", "legacy_lessons_cross_engine_enabled"):
+        lesson = workgraph_lessons.find_matching_lesson(issue)
     score = workgraph_lessons.apply_precedent_boost(base_score, lesson)
 
     days_quiet = int(max(0.0, (now - issue["updated_at"]) / DAY))
@@ -335,6 +345,25 @@ def score_issue(issue: dict, now: float, weights: dict = DEFAULT_WEIGHTS) -> tup
         reasons.append("waiting on someone else")
 
     return round(score, 4), " · ".join(reasons), (lesson["id"] if lesson else None)
+
+
+def run_choice_log_expiry_daily_if_due(now: float | None = None) -> Optional[dict]:
+    """Phase 0 fix (D12, 2026-08-03): same once-a-day gate as retention/
+    health_check/aristotle_detection/suggestion_expiry (ws.claim_daily_run).
+    'ignored'/'expired' were valid nba_choice_log states from the start but
+    nothing ever wrote them - an 'offered' row with no matching action just
+    sat open forever, so get_most_recent_open_choice_log kept returning an
+    offer that was no longer live. Reuses STALENESS_SATURATION_DAYS (this
+    file's own "two weeks" window) as the default TTL rather than inventing
+    a second unrelated staleness constant."""
+    if now is None:
+        now = time.time()
+    today = time.strftime("%Y-%m-%d", time.localtime(now))
+    if not ws.claim_daily_run("nba_choice_log_expiry", today):
+        return None
+    ttl_days = config.get("nba", "choice_log_ttl_days") or STALENESS_SATURATION_DAYS
+    expired = ws.expire_stale_nba_choice_logs(ttl_days)
+    return {"expired": expired, "ttl_days": ttl_days}
 
 
 def recompute_all(now: float | None = None) -> dict:
@@ -464,11 +493,13 @@ def candidate_actions(
                 "score": _SYNTHESIS_BAND - (idx * 0.01), "source_surface": "synthesis",
             })
 
-    if not candidates:
-        candidates.append({
-            "kind": "draft_reply", "label": "Draft a reply", "rationale": "",
-            "score": 0.2, "source_surface": "fallback",
-        })
+    # Phase 0 fix (D15, 2026-08-03): this used to append an unconditional
+    # "Draft a reply" fallback whenever none of the three real surfaces
+    # above (nba_reason, evidence recommendations, synthesis suggested_
+    # actions) produced anything - a candidate with literally no supporting
+    # evidence, presented exactly like a real one. Removed: no evidence,
+    # no candidate. An issue with nothing to suggest now honestly returns
+    # an empty list instead of a manufactured action.
 
     candidates.sort(key=lambda c: c["score"], reverse=True)
     return candidates[:4]

@@ -6,6 +6,8 @@
 """
 import time
 
+import pytest
+
 import workgraph_classify as wc
 import workgraph_signals
 
@@ -214,13 +216,13 @@ def test_backfill_reclassify_updates_pr_number_only_change(ws_db):
 # --- Part C (2026-07-30): raw-item-to-issue linking via reference ID -----
 
 def _pending_item(ws_db, thread_key, subject, pr_number=None, item_class="ACTIONABLE-ASK", from_actor="a@example.com",
-                   jasper_ref_issue_id=None):
+                   jasper_ref_issue_id=None, source="outlook_mail"):
     """A classified-but-not-yet-linked raw_item, ready for cluster_and_link().
     Each thread_key is deliberately unique per call so thread_map_lookup
     never resolves it - the whole point is testing the NO-thread-match
     fallback path."""
     rid = ws_db.insert_raw_item(
-        source="outlook_mail", stable_key=thread_key, thread_key=thread_key, dedupe_key=thread_key,
+        source=source, stable_key=thread_key, thread_key=thread_key, dedupe_key=thread_key,
         occurred_ts=time.time(), subject=subject, from_actor=from_actor, participants_json="[]",
     )
     ws_db.classify_raw_item(
@@ -600,6 +602,162 @@ def test_cluster_and_link_stamps_check_ts_on_fyi_standalone_skip(ws_db):
     rid = _pending_item(ws_db, "ckf1", "just an fyi note", item_class="FYI-EVIDENCE")
     wc.cluster_and_link()
     assert ws_db.get_raw_item(rid)["last_link_check_ts"] is not None
+
+
+# --- Task #54/#55 (2026-08-02, Marc's direct report): Teams ACTIONABLE-ASK/
+# WAITING-ON-OTHERS with no thread/reference match now holds aside instead
+# of always creating a new Issue - scoped to source == "teams_chat" only. --
+
+def test_cluster_and_link_holds_aside_unmatched_teams_actionable_ask(ws_db):
+    rid = _pending_item(ws_db, "tck1", "can you look at this", item_class="ACTIONABLE-ASK", source="teams_chat")
+
+    result = wc.cluster_and_link()
+
+    assert result["issues_created"] == 0
+    assert result["teams_standalone_skipped"] == 1
+    assert ws_db.get_raw_item(rid)["issue_id"] is None
+    assert ws_db.get_raw_item(rid)["last_link_check_ts"] is not None
+
+
+def test_cluster_and_link_holds_aside_unmatched_teams_waiting_on_others(ws_db):
+    rid = _pending_item(ws_db, "tck2", "let me know when you're free", item_class="WAITING-ON-OTHERS", source="teams_chat")
+
+    result = wc.cluster_and_link()
+
+    assert result["teams_standalone_skipped"] == 1
+    assert ws_db.get_raw_item(rid)["issue_id"] is None
+
+
+def test_cluster_and_link_still_creates_issue_for_unmatched_email_actionable_ask(ws_db):
+    """Scope guard: the Teams-specific hold-aside must NOT affect email
+    (or any other non-Teams source) - an unmatched actionable email ask
+    keeps creating a new Issue exactly as before."""
+    rid = _pending_item(ws_db, "eck1", "can you approve this PO", item_class="ACTIONABLE-ASK", source="outlook_mail")
+
+    result = wc.cluster_and_link()
+
+    assert result["issues_created"] == 1
+    assert result["teams_standalone_skipped"] == 0
+    assert ws_db.get_raw_item(rid)["issue_id"] is not None
+
+
+def test_cluster_and_link_teams_ask_still_attaches_when_a_reference_match_exists(ws_db, monkeypatch, tmp_path):
+    """Being from Teams doesn't override a REAL match - only the "would
+    otherwise always create a brand-new Issue" fallthrough is affected."""
+    config = _isolate_config(ws_db, monkeypatch, tmp_path)
+    config.set_value(True, "grouping", "reference_id_auto_attach_enabled")
+
+    _pending_item(ws_db, "tref1", "Approve PR445566-V1", pr_number="PR445566-V1", source="outlook_mail")
+    wc.cluster_and_link()
+
+    rid = _pending_item(ws_db, "tref2", "any update on PR445566?", pr_number="PR445566-V2",
+                         item_class="ACTIONABLE-ASK", source="teams_chat")
+    result = wc.cluster_and_link()
+
+    assert result["attached_via_reference"] == 1
+    assert result["teams_standalone_skipped"] == 0
+    assert ws_db.get_raw_item(rid)["issue_id"] is not None
+
+
+def test_cluster_and_link_unmatched_teams_fyi_still_uses_fyi_path_not_teams_path(ws_db):
+    """A Teams FYI-EVIDENCE item keeps going through the pre-existing
+    fyi_standalone path (with its own subject-match check) - the new Teams
+    branch only ever applies to ACTIONABLE-ASK/WAITING-ON-OTHERS."""
+    rid = _pending_item(ws_db, "tfyi1", "fyi, meeting moved to 3pm", item_class="FYI-EVIDENCE", source="teams_chat")
+
+    result = wc.cluster_and_link()
+
+    assert result["fyi_standalone_skipped"] == 1
+    assert result["teams_standalone_skipped"] == 0
+    assert ws_db.get_raw_item(rid)["issue_id"] is None
+
+
+# --- track_held_aside_item / dismiss_held_aside_item (task #54/#55) --------
+
+def test_list_held_aside_teams_items_surfaces_the_held_aside_pile(ws_db):
+    rid = _pending_item(ws_db, "hq1", "can you take a look at this", item_class="ACTIONABLE-ASK", source="teams_chat")
+    wc.cluster_and_link()
+
+    pending = ws_db.list_held_aside_teams_items()
+
+    assert [p["id"] for p in pending] == [rid]
+
+
+def test_list_held_aside_teams_items_excludes_already_reviewed(ws_db):
+    rid = _pending_item(ws_db, "hq2", "quick ask", item_class="ACTIONABLE-ASK", source="teams_chat")
+    wc.cluster_and_link()
+    ws_db.set_held_aside_status(rid, "dismissed")
+
+    assert ws_db.list_held_aside_teams_items() == []
+
+
+def test_track_held_aside_item_creates_a_real_issue(ws_db):
+    rid = _pending_item(ws_db, "hq3", "can you approve the CDA today", item_class="ACTIONABLE-ASK", source="teams_chat")
+    wc.cluster_and_link()
+
+    issue_id = wc.track_held_aside_item(rid)
+
+    issue = ws_db.get_issue(issue_id)
+    assert issue is not None
+    assert issue["state"] == "active"
+    assert ws_db.get_raw_item(rid)["issue_id"] == issue_id
+    assert ws_db.get_raw_item(rid)["held_aside_status"] == "tracked"
+    # No longer shows up in the queue once resolved.
+    assert ws_db.list_held_aside_teams_items() == []
+
+
+def test_track_held_aside_item_waiting_on_others_creates_waiting_issue(ws_db):
+    rid = _pending_item(ws_db, "hq4", "let me know when free", item_class="WAITING-ON-OTHERS", source="teams_chat")
+    wc.cluster_and_link()
+
+    issue_id = wc.track_held_aside_item(rid)
+
+    assert ws_db.get_issue(issue_id)["state"] == "waiting"
+
+
+def test_track_held_aside_item_rejects_already_linked_item(ws_db):
+    rid = _pending_item(ws_db, "hq5", "a real ask", item_class="ACTIONABLE-ASK", source="outlook_mail")
+    wc.cluster_and_link()  # email creates an issue normally - already linked
+
+    with pytest.raises(wc.HeldAsideItemError):
+        wc.track_held_aside_item(rid)
+
+
+def test_track_held_aside_item_rejects_non_teams_source(ws_db):
+    rid = ws_db.insert_raw_item(source="outlook_mail", stable_key="hq6", thread_key="hq6", dedupe_key="hq6",
+                                 occurred_ts=time.time(), subject="s", from_actor="a@example.com", participants_json="[]")
+    ws_db.classify_raw_item(rid, item_class="ACTIONABLE-ASK", direction="inbound", direction_inferred=False,
+                             topic="other", topic_inferred=True, sentiment="neutral", sentiment_inferred=True,
+                             anomaly_flag=False)
+
+    with pytest.raises(wc.HeldAsideItemError):
+        wc.track_held_aside_item(rid)
+
+
+def test_track_held_aside_item_rejects_unknown_raw_item_id(ws_db):
+    with pytest.raises(wc.HeldAsideItemError):
+        wc.track_held_aside_item(999999)
+
+
+def test_dismiss_held_aside_item_marks_reviewed_without_creating_an_issue(ws_db):
+    rid = _pending_item(ws_db, "hq7", "casual note", item_class="ACTIONABLE-ASK", source="teams_chat")
+    wc.cluster_and_link()
+
+    wc.dismiss_held_aside_item(rid)
+
+    row = ws_db.get_raw_item(rid)
+    assert row["held_aside_status"] == "dismissed"
+    assert row["issue_id"] is None
+    assert ws_db.list_held_aside_teams_items() == []
+
+
+def test_dismiss_held_aside_item_rejects_already_reviewed(ws_db):
+    rid = _pending_item(ws_db, "hq8", "casual note", item_class="ACTIONABLE-ASK", source="teams_chat")
+    wc.cluster_and_link()
+    wc.dismiss_held_aside_item(rid)
+
+    with pytest.raises(wc.HeldAsideItemError):
+        wc.dismiss_held_aside_item(rid)
 
 
 def test_cluster_and_link_does_not_stamp_a_successfully_linked_item(ws_db):

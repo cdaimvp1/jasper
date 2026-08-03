@@ -3447,6 +3447,7 @@ html[data-theme="dark"]{
       <div class="pcc-lanes" id="pjLanes" role="tablist" aria-label="Projects lane">
         <button type="button" class="mqtab on" data-lane="projects" role="tab" aria-selected="true">Projects <span class="ct" id="pjCtProjects">0</span></button>
         <button type="button" class="mqtab" data-lane="parties" role="tab" aria-selected="false">Parties <span class="ct" id="pjCtParties">0</span></button>
+        <button type="button" class="mqtab" data-lane="heldaside" role="tab" aria-selected="false">Held aside (Teams) <span class="ct" id="pjCtHeldAside">0</span></button>
       </div>
 
       <div class="pcc-board" id="pjProjectsBoard">
@@ -3463,6 +3464,14 @@ html[data-theme="dark"]{
       <div class="card" id="pjPartiesCard" style="display:none">
         <div class="ch"><h3>Parties</h3><span class="ph">Everyone seen across Marc's communications · click a chip to correct</span></div>
         <div class="hotable" id="pjPartiesTable"></div>
+      </div>
+
+      <!-- Task #54/#55 (Marc's direct report): Teams messages that didn't
+           clearly match anything used to just silently sit unlinked forever -
+           this is that pile, made visible, with a real per-item decision. -->
+      <div class="card" id="pjHeldAsideCard" style="display:none">
+        <div class="ch"><h3>Held aside (Teams)</h3><span class="ph">Didn't clearly match an existing conversation or reference - your call on each one</span></div>
+        <div class="hotable" id="pjHeldAsideList"></div>
       </div>
 
       <div class="savnote" style="margin-top:14px"><span class="sp">✦</span><span>"Confirm" on a suggestion marks it reviewed only — there's no API to merge two issues into a brand-new project yet (only to assign an issue to an <em>existing</em> project), so actually merging a confirmed pair is still a manual follow-up for now.</span></div>
@@ -9029,6 +9038,69 @@ html[data-theme="dark"]{
     }).join("");
   }
 
+  // ---- Held aside (Teams) lane (task #54/#55) ----------------------------
+  let pjHeldAside = [];
+  const PJ_HELD_ASIDE_CLASS_LABEL = {
+    "ACTIONABLE-ASK": "Ask", "WAITING-ON-OTHERS": "Waiting", "FYI-EVIDENCE": "FYI", "NOISE": "Noise",
+  };
+  async function pjLoadHeldAside() {
+    const r = await fetch("/api/workgraph/held-aside-teams", { cache: "no-store" });
+    const d = await r.json();
+    pjHeldAside = d.items || [];
+    document.getElementById("pjCtHeldAside").textContent = pjHeldAside.length || "";
+    pjRenderHeldAsideList();
+  }
+
+  function pjRenderHeldAsideList() {
+    const el = document.getElementById("pjHeldAsideList");
+    if (!pjHeldAside.length) {
+      el.innerHTML = '<div class="pcc-empty">Nothing held aside right now - every Teams message either matched something or was clearly noise.</div>';
+      return;
+    }
+    el.innerHTML = pjHeldAside.map(item => {
+      const label = PJ_HELD_ASIDE_CLASS_LABEL[item.item_class] || item.item_class || "Unclassified";
+      const text = item.subject || item.body_preview || "(no preview)";
+      const when = item.occurred_ts ? new Date(item.occurred_ts * 1000).toLocaleString() : "";
+      // Only ACTIONABLE-ASK/WAITING-ON-OTHERS can be "tracked" as a real
+      // issue (track_held_aside_item's own validation) - NOISE/FYI-EVIDENCE
+      // Teams items land here too (the pre-existing hold-aside path, see
+      // list_held_aside_teams_items) but were never asks in the first
+      // place, so only Dismiss makes sense for those.
+      const canTrack = item.item_class === "ACTIONABLE-ASK" || item.item_class === "WAITING-ON-OTHERS";
+      return `
+        <div class="horow" data-raw-item-id="${item.id}">
+          <div class="rt"><span class="rk">${pjEsc(label)}</span>${pjEsc(text)}</div>
+          <div class="hosub">${pjEsc(item.from_actor || "unknown sender")}${when ? " · " + pjEsc(when) : ""}${item.confidence ? "<span class=\"sep\">·</span>confidence " + pjEsc(item.confidence) : ""}</div>
+          <div class="pcc-actions-row" style="margin-top:6px">
+            ${canTrack ? `<button class="mqb ghost" type="button" data-held-act="track" data-raw-item-id="${item.id}">Track as issue</button>` : ""}
+            <button class="mqb ghost" type="button" data-held-act="dismiss" data-raw-item-id="${item.id}">Dismiss</button>
+          </div>
+        </div>`;
+    }).join("");
+    el.querySelectorAll("[data-held-act]").forEach(btn => {
+      btn.addEventListener("click", () => pjResolveHeldAside(
+        Number(btn.getAttribute("data-raw-item-id")), btn.getAttribute("data-held-act"), btn));
+    });
+  }
+
+  async function pjResolveHeldAside(rawItemId, act, btn) {
+    btn.disabled = true;
+    try {
+      const r = await fetch(`/api/workgraph/held-aside-teams/${encodeURIComponent(rawItemId)}/${act}`, { method: "POST" });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        throw new Error(d.detail || "failed");
+      }
+      if (window.toast) {
+        window.toast(act === "track" ? "Tracked as a real issue." : "Dismissed - won't show here again.");
+      }
+      await pjLoadHeldAside();
+    } catch (e) {
+      btn.disabled = false;
+      window.alert(`Couldn't ${act} this item: ${e.message}`);
+    }
+  }
+
   // ---- Projects/Parties sub-lane toggle -----------------------------------
   function pjSetLane(lane) {
     pjLane = lane;
@@ -9038,7 +9110,9 @@ html[data-theme="dark"]{
     });
     document.getElementById("pjProjectsBoard").style.display = lane === "projects" ? "" : "none";
     document.getElementById("pjPartiesCard").style.display = lane === "parties" ? "" : "none";
+    document.getElementById("pjHeldAsideCard").style.display = lane === "heldaside" ? "" : "none";
     if (lane === "parties" && !pjParties.length) pjLoadParties();
+    if (lane === "heldaside") pjLoadHeldAside();
   }
   document.querySelectorAll("#pjLanes .mqtab").forEach(btn => {
     btn.addEventListener("click", () => pjSetLane(btn.getAttribute("data-lane")));

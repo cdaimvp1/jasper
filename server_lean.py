@@ -1822,6 +1822,38 @@ async def api_workgraph_project_status(project_id: str, body: WorkgraphProjectSt
     return JSONResponse({"ok": True, "project": sanitize_surrogates(wg.get_project(project_id))})
 
 
+@app.get("/api/workgraph/held-aside-teams")
+async def api_held_aside_teams_list():
+    """Task #54/#55 (Marc's direct report: "not every individual message...
+    in Teams should go into the system"): the real, previously-invisible
+    pile of unlinked, unreviewed Teams raw_items - see cluster_and_link's
+    own comment for how an item lands here instead of always spawning an
+    Issue, and list_held_aside_teams_items for the query itself."""
+    return JSONResponse({"items": sanitize_surrogates(wg.list_held_aside_teams_items())})
+
+
+@app.post("/api/workgraph/held-aside-teams/{raw_item_id}/track")
+async def api_held_aside_teams_track(raw_item_id: int):
+    """A human's explicit override: yes, actually track this one as a real
+    Issue - see workgraph_classify.track_held_aside_item's own docstring."""
+    try:
+        issue_id = workgraph_classify.track_held_aside_item(raw_item_id)
+    except workgraph_classify.HeldAsideItemError as e:
+        raise HTTPException(400, str(e))
+    return JSONResponse({"ok": True, "issue_id": issue_id})
+
+
+@app.post("/api/workgraph/held-aside-teams/{raw_item_id}/dismiss")
+async def api_held_aside_teams_dismiss(raw_item_id: int):
+    """Reviewed, confirmed not worth tracking - see workgraph_classify.
+    dismiss_held_aside_item's own docstring."""
+    try:
+        workgraph_classify.dismiss_held_aside_item(raw_item_id)
+    except workgraph_classify.HeldAsideItemError as e:
+        raise HTTPException(400, str(e))
+    return JSONResponse({"ok": True})
+
+
 class IssueProjectBody(BaseModel):
     project_id: Optional[str] = None  # null = detach from any project
     reason: Optional[str] = None

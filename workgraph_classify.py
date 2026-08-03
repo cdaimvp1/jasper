@@ -409,6 +409,7 @@ def run_classification(limit: int = 500) -> dict:
             signal_type=result["signal_type"], pr_number=result["pr_number"],
             pr_number_base=result["pr_number_base"],
             jasper_ref_issue_id=result["jasper_ref_issue_id"],
+            confidence=result["confidence"],
         )
         counts[result["item_class"]] = counts.get(result["item_class"], 0) + 1
     return {"classified": len(items), "by_class": counts}
@@ -620,6 +621,7 @@ def cluster_and_link(limit: int = 500) -> dict:
     linked = 0
     skipped_noise = 0
     skipped_fyi_standalone = 0
+    skipped_teams_standalone = 0
     attached_via_reference = 0
     would_attach_via_reference = 0
     attached_via_subject_match = 0
@@ -690,6 +692,26 @@ def cluster_and_link(limit: int = 500) -> dict:
                         skipped_fyi_standalone += 1
                         ws.mark_link_checked(item["id"], now)
                         continue
+                # Task #54/#55 (2026-08-02, Marc's direct report): "not every
+                # individual message... in Teams should go into the system" -
+                # confirmed live: 100% of Teams ACTIONABLE-ASK/WAITING-ON-
+                # OTHERS items with no thread/reference match were forcing
+                # their way into a brand-new Issue (this fallthrough always
+                # created one, unconditionally, for every source). A casual
+                # "can you look at X" in a Teams chat has no real signal
+                # distinguishing it from a genuinely trackable ask at this
+                # point - the fix isn't a better guess, it's not guessing:
+                # hold it aside the same way an unmatched FYI-EVIDENCE item
+                # already is, surfaced in the held-aside queue
+                # (GET /api/workgraph/held-aside-teams) for a human decision
+                # instead. Scoped to source == "teams_chat" only, on purpose -
+                # email/calendar asks keep their existing behavior unchanged;
+                # this is a Teams-specific clutter problem Marc reported, not
+                # a general "distrust every new ask" policy change.
+                if item.get("source") == "teams_chat" and item["item_class"] in ("ACTIONABLE-ASK", "WAITING-ON-OTHERS"):
+                    skipped_teams_standalone += 1
+                    ws.mark_link_checked(item["id"], now)
+                    continue
                 if issue_id is None:
                     title = strip_subject_prefix(item.get("subject") or "(no subject)")
                     state = "active" if item["item_class"] == "ACTIONABLE-ASK" else "waiting"
@@ -748,6 +770,7 @@ def cluster_and_link(limit: int = 500) -> dict:
 
     return {"issues_created": created, "items_linked": linked, "noise_skipped": skipped_noise,
             "fyi_standalone_skipped": skipped_fyi_standalone,
+            "teams_standalone_skipped": skipped_teams_standalone,
             "attached_via_reference": attached_via_reference,
             "would_attach_via_reference": would_attach_via_reference,
             "reference_auto_attach_enabled": reference_auto_attach,
@@ -758,6 +781,77 @@ def cluster_and_link(limit: int = 500) -> dict:
             "would_attach_via_jasper_ref": would_attach_via_jasper_ref,
             "jasper_ref_auto_attach_enabled": jasper_ref_auto_attach,
             "parties": party_result, "projects": project_result}
+
+
+class HeldAsideItemError(ValueError):
+    """Raised by track_held_aside_item/dismiss_held_aside_item for a
+    raw_item_id that doesn't exist, isn't a Teams item, or is already
+    linked/reviewed - never silently a no-op, since this is always a
+    direct human action on one specific row."""
+
+
+def track_held_aside_item(raw_item_id: int) -> str:
+    """Task #54/#55: a human's explicit "yes, actually track this" decision
+    on one row from the held-aside queue (see list_held_aside_teams_items).
+    Creates a real Issue for it - the exact same shape cluster_and_link's
+    own new-issue fallback already builds (title/state/priority/
+    confidence_tier, thread_map_set, link_raw_item_to_issue, add_evidence,
+    a starter task for a genuine ask, recompute_issue_state, then the same
+    parties/projects resolution pass a normal auto-created issue gets) -
+    this is a human overriding the hold-aside, not a second, different way
+    an issue gets created. Returns the new issue_id."""
+    item = ws.get_raw_item(raw_item_id)
+    if item is None:
+        raise HeldAsideItemError(f"no such raw_item: {raw_item_id}")
+    if item.get("source") != "teams_chat":
+        raise HeldAsideItemError(f"raw_item {raw_item_id} is not a Teams item")
+    if item.get("issue_id") is not None:
+        raise HeldAsideItemError(f"raw_item {raw_item_id} is already linked to an issue")
+    if item.get("held_aside_status") is not None:
+        raise HeldAsideItemError(f"raw_item {raw_item_id} was already reviewed ({item['held_aside_status']})")
+
+    title = strip_subject_prefix(item.get("subject") or "(no subject)")
+    state = "active" if item.get("item_class") == "ACTIONABLE-ASK" else "waiting"
+    issue_id = ws.create_issue_with_new_id(
+        title=title, category=item.get("topic"),
+        state=state, priority="med", confidence_tier=item.get("confidence") or "M",
+    )
+    ws.thread_map_set(item["thread_key"], issue_id)
+    ws.link_raw_item_to_issue(raw_item_id, issue_id)
+    ws.add_evidence(
+        issue_id=issue_id, type=_evidence_type(item["source"]),
+        summary=(item.get("subject") or item.get("body_preview") or "(no summary)")
+                + " [tracked from the held-aside Teams queue]",
+        raw_item_id=raw_item_id,
+    )
+    if item.get("item_class") == "ACTIONABLE-ASK":
+        owner = ws.find_owner_for(category=item.get("topic"), topic=item.get("topic"))
+        ws.create_task(issue_id=issue_id, label=title, owner=owner)
+    recompute_issue_state(issue_id, new_item_is_actionable=item.get("item_class") == "ACTIONABLE-ASK")
+    workgraph_parties.run([issue_id])
+    workgraph_projects.run([issue_id])
+    derived_title = compute_deterministic_title(issue_id)
+    if derived_title:
+        ws.set_derived_title("issue", issue_id, derived_title)
+    ws.set_held_aside_status(raw_item_id, "tracked")
+    return issue_id
+
+
+def dismiss_held_aside_item(raw_item_id: int) -> None:
+    """The other resolution: reviewed and confirmed NOT worth tracking -
+    stays out of the Inbox permanently (list_held_aside_teams_items filters
+    on held_aside_status IS NULL), same as it already silently was, just
+    now a real recorded decision instead of an invisible default."""
+    item = ws.get_raw_item(raw_item_id)
+    if item is None:
+        raise HeldAsideItemError(f"no such raw_item: {raw_item_id}")
+    if item.get("source") != "teams_chat":
+        raise HeldAsideItemError(f"raw_item {raw_item_id} is not a Teams item")
+    if item.get("issue_id") is not None:
+        raise HeldAsideItemError(f"raw_item {raw_item_id} is already linked to an issue")
+    if item.get("held_aside_status") is not None:
+        raise HeldAsideItemError(f"raw_item {raw_item_id} was already reviewed ({item['held_aside_status']})")
+    ws.set_held_aside_status(raw_item_id, "dismissed")
 
 
 def backfill_reclassify() -> dict:
@@ -830,6 +924,14 @@ def backfill_reclassify() -> dict:
             signal_type=result["signal_type"], pr_number=result["pr_number"],
             pr_number_base=result["pr_number_base"],
             jasper_ref_issue_id=result["jasper_ref_issue_id"],
+            # Task #54/#55: not part of the equality check above on purpose -
+            # confidence was never stored before this, so every historical
+            # row would register as "changed" for a field that's really just
+            # newly-persisted metadata, not a genuine reclassification -
+            # would inflate `updated`/touched_issues for the wrong reason.
+            # Still written whenever this call fires for a real reason
+            # anyway, so the backlog fills in opportunistically over time.
+            confidence=result["confidence"],
         )
         updated += 1
         if item.get("issue_id"):

@@ -875,6 +875,34 @@ def init_workgraph() -> None:
             except sqlite3.OperationalError:
                 pass
             try:
+                # Task #54/#55 (2026-08-02, Marc's direct report on Teams
+                # clutter): classify_item() has always computed a real H/M/L
+                # confidence tier, but nothing ever persisted it - it was
+                # thrown away the moment cluster_and_link finished reading
+                # it. NULL for every row classified before this column
+                # existed, and for any row a future classify_item() call
+                # somehow skips - never guessed at retroactively.
+                conn.execute("ALTER TABLE raw_items ADD COLUMN confidence TEXT")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                # Task #54/#55: a Teams ACTIONABLE-ASK/WAITING-ON-OTHERS item
+                # with no thread/reference match now gets held aside instead
+                # of always spawning a new Issue (see workgraph_classify.
+                # cluster_and_link's own comment) - this is how a human
+                # resolves one from the held-aside queue. NULL = not yet
+                # reviewed (the normal, expected state for most rows).
+                # 'tracked' = a real Issue was created from it manually.
+                # 'dismissed' = reviewed and confirmed not worth tracking.
+                # Deliberately a plain TEXT column with no CHECK constraint -
+                # the projects.status/issues.state CHECK-widening migrations
+                # this same session both needed a rename+rebuild dance to add
+                # one new value; a bare column sidesteps that entirely for a
+                # field with no fixed vocabulary to defend yet.
+                conn.execute("ALTER TABLE raw_items ADD COLUMN held_aside_status TEXT")
+            except sqlite3.OperationalError:
+                pass
+            try:
                 # Task #29 (2026-08-01): attachments were stored on disk but
                 # never read by any extraction function - a real order-form
                 # PDF or pricing XLSX sitting right there was structurally
@@ -1135,6 +1163,7 @@ def classify_raw_item(
     pr_number: Optional[str] = None,
     pr_number_base: Optional[str] = None,
     jasper_ref_issue_id: Optional[str] = None,
+    confidence: Optional[str] = None,
 ) -> None:
     with _lock:
         conn = _connect()
@@ -1144,11 +1173,11 @@ def classify_raw_item(
                        classified = 1, item_class = ?, direction = ?, direction_inferred = ?,
                        topic = ?, topic_inferred = ?, sentiment = ?, sentiment_inferred = ?,
                        anomaly_flag = ?, signal_type = ?, pr_number = ?, pr_number_base = ?,
-                       jasper_ref_issue_id = ?
+                       jasper_ref_issue_id = ?, confidence = ?
                    WHERE id = ?""",
                 (item_class, direction, int(direction_inferred), topic, int(topic_inferred),
                  sentiment, int(sentiment_inferred), int(anomaly_flag), signal_type, pr_number,
-                 pr_number_base, jasper_ref_issue_id, raw_item_id),
+                 pr_number_base, jasper_ref_issue_id, confidence, raw_item_id),
             )
         finally:
             conn.close()
@@ -1214,6 +1243,41 @@ def get_raw_items_by_ids(ids: list[int]) -> dict[int, dict]:
         finally:
             conn.close()
     return {r["id"]: dict(r) for r in rows}
+
+
+def list_held_aside_teams_items(limit: int = 200) -> list[dict]:
+    """Task #54/#55: every Teams raw_item currently sitting unlinked and
+    not-yet-reviewed - the real, previously-invisible pile cluster_and_link
+    already produces (NOISE/unmatched-FYI-EVIDENCE, and now unmatched-
+    ACTIONABLE-ASK/WAITING-ON-OTHERS too - see cluster_and_link's own
+    comment). Newest first - a human reviewing this wants to see what just
+    happened, not dig through months of backlog first. held_aside_status
+    IS NULL excludes anything already reviewed (tracked or dismissed)."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM raw_items WHERE source = 'teams_chat' AND classified = 1 "
+                "AND issue_id IS NULL AND held_aside_status IS NULL "
+                "ORDER BY occurred_ts DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def set_held_aside_status(raw_item_id: int, status: str) -> None:
+    """'tracked' (a real Issue was created from it) or 'dismissed' (reviewed,
+    confirmed not worth tracking) - see the column's own migration comment."""
+    if status not in ("tracked", "dismissed"):
+        raise ValueError(f"invalid held_aside_status: {status!r}")
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute("UPDATE raw_items SET held_aside_status = ? WHERE id = ?", (status, raw_item_id))
+        finally:
+            conn.close()
 
 
 def link_raw_item_to_issue(raw_item_id: int, issue_id: str) -> None:

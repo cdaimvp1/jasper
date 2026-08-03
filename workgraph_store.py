@@ -3271,6 +3271,121 @@ def merge_issues_txn(issue_id_a: str, issue_id_b: str, *, reason_label: str,
             conn.close()
 
 
+def merge_issue_into(loser_id: str, winner_id: str, *, reason: str, actor: str) -> dict:
+    """Real ISSUE-level merge (2026-08-03) - distinct from merge_issues_txn
+    above, which only ever joins PROJECT membership and is a no-op for two
+    issues already in the same project (the exact shape the identity_
+    anchors backfill's reference-conflict report surfaced: 14 real pairs,
+    all already co-located). Moves raw_items/evidence/issue_parties/
+    identity_anchors/source_containers/checklist_dismissals from loser to
+    winner as one all-or-nothing transaction (same BEGIN IMMEDIATE/COMMIT/
+    ROLLBACK discipline as merge_issues_txn, for the identical reason - a
+    crash partway through a multi-table move must not leave orphaned rows).
+
+    Never deletes the loser - it's set to state='dismissed' (issue_state_
+    history logs the transition with `actor`, same as any other state
+    change) and left in place, pointing nowhere special but fully intact,
+    so nothing is lost and a wrong call is a data-preserving mistake, not
+    a destructive one. Both issues get a real, visible evidence row
+    recording the merge; audit_log gets a matching entry (same convention
+    merge_issues_txn's own project-merge path already uses).
+
+    Exclusive identity_anchors already held by the winner are left with
+    the winner (never duplicated into a constraint violation); the loser's
+    matching ones are superseded, not deleted. Non-conflicting anchors move
+    over normally.
+
+    Returns {"status": "merged", "winner_id", "loser_id", "raw_items_moved",
+    "evidence_moved"} or {"status": "not_found"} if either id doesn't
+    resolve to a real issue - never raises for that, same as this file's
+    other lookup-then-act functions."""
+    if loser_id == winner_id:
+        raise ValueError("cannot merge an issue into itself")
+    now = time.time()
+    with _lock:
+        conn = _connect()
+        try:
+            loser = conn.execute("SELECT * FROM issues WHERE id = ?", (loser_id,)).fetchone()
+            winner = conn.execute("SELECT * FROM issues WHERE id = ?", (winner_id,)).fetchone()
+            if loser is None or winner is None:
+                return {"status": "not_found"}
+
+            for attempt in range(5):
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    break
+                except sqlite3.OperationalError:
+                    if attempt == 4:
+                        raise
+                    time.sleep(random.uniform(0, 0.02) * (attempt + 1))
+            try:
+                raw_items_moved = conn.execute(
+                    "UPDATE raw_items SET issue_id = ? WHERE issue_id = ?", (winner_id, loser_id)
+                ).rowcount
+                evidence_moved = conn.execute(
+                    "UPDATE evidence SET issue_id = ? WHERE issue_id = ?", (winner_id, loser_id)
+                ).rowcount
+                conn.execute(
+                    """INSERT OR IGNORE INTO issue_parties (issue_id, party_id, role)
+                       SELECT ?, party_id, role FROM issue_parties WHERE issue_id = ?""",
+                    (winner_id, loser_id),
+                )
+                conn.execute("DELETE FROM issue_parties WHERE issue_id = ?", (loser_id,))
+                conn.execute(
+                    """UPDATE identity_anchors SET issue_id = ?
+                       WHERE issue_id = ? AND status = 'active'
+                       AND NOT (exclusive = 1 AND EXISTS (
+                           SELECT 1 FROM identity_anchors w
+                           WHERE w.issue_id = ? AND w.exclusive = 1 AND w.status = 'active'
+                             AND w.anchor_type = identity_anchors.anchor_type
+                             AND w.normalized_value = identity_anchors.normalized_value))""",
+                    (winner_id, loser_id, winner_id),
+                )
+                conn.execute(
+                    "UPDATE identity_anchors SET status = 'superseded' WHERE issue_id = ? AND status = 'active'",
+                    (loser_id,),
+                )
+                conn.execute("UPDATE source_containers SET issue_id = ? WHERE issue_id = ?", (winner_id, loser_id))
+                conn.execute(
+                    """INSERT OR IGNORE INTO checklist_dismissals
+                       (issue_id, item_key, kind, text_snippet, dismissed_ts, actor, status)
+                       SELECT ?, item_key, kind, text_snippet, dismissed_ts, actor, status
+                       FROM checklist_dismissals WHERE issue_id = ?""",
+                    (winner_id, loser_id),
+                )
+                conn.execute("DELETE FROM checklist_dismissals WHERE issue_id = ?", (loser_id,))
+
+                conn.execute(
+                    "INSERT INTO issue_state_history (issue_id, from_state, to_state, changed_ts, actor) VALUES (?, ?, 'dismissed', ?, ?)",
+                    (loser_id, loser["state"], now, actor),
+                )
+                conn.execute("UPDATE issues SET state = 'dismissed', updated_at = ? WHERE id = ?", (now, loser_id))
+                conn.execute(
+                    "INSERT INTO evidence (issue_id, raw_item_id, type, summary, ts) VALUES (?, NULL, 'worker_action', ?, ?)",
+                    (winner_id, f"Merged {loser_id} into this issue: {reason}", now),
+                )
+                conn.execute(
+                    "INSERT INTO evidence (issue_id, raw_item_id, type, summary, ts) VALUES (?, NULL, 'worker_action', ?, ?)",
+                    (loser_id, f"Merged into {winner_id}: {reason}", now),
+                )
+                conn.execute(
+                    """INSERT INTO audit_log (entity_type, entity_id, field, old_value, new_value, changed_ts, reason)
+                       VALUES ('issue', ?, 'merged_into', ?, ?, ?, ?)""",
+                    (loser_id, loser_id, winner_id, now, reason),
+                )
+                conn.execute("COMMIT")
+                return {"status": "merged", "winner_id": winner_id, "loser_id": loser_id,
+                        "raw_items_moved": raw_items_moved, "evidence_moved": evidence_moved}
+            except Exception:
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.OperationalError:
+                    pass
+                raise
+        finally:
+            conn.close()
+
+
 # --- pending_project_suggestions -------------------------------------------
 
 _SUGGESTION_KINDS = ("merge", "link", "merge_projects")

@@ -513,3 +513,22 @@ noise unrelated to any procurement issue (IT test-tracking spreadsheets,
 architecture exports, unrelated file shares) - correctly left unclustered,
 the same "legitimate noise-filtering" shape as calendar's 126/1123. **1/40
 is legitimate. No fix needed or built.**
+
+### 8.8 First real backfill run (2026-08-03) — findings
+
+`workgraph_identity.backfill_identity_anchors()` ran against the live DB
+(356 issues): 356 `source_containers`, 558 `identity_anchors` written, and
+17 real exclusive-anchor conflicts surfaced — the same PR/PO reference base
+already active on two different issues. Checked all of them: **all 14
+underlying pairs are already co-located in the same project** (e.g.
+marc-271/marc-279 both in proj-031). This is reassuring, not alarming — it
+means D1's 58%-singleton number is almost entirely genuinely-ungrouped
+issues, not cross-project reference mismatches; the live grouping model is
+already doing its project-level job correctly here. Whether each pair
+should also collapse to one ISSUE (not just one project) is a real
+judgment call the backfill correctly did NOT make automatically — some may
+be legitimate separate amendments/resubmissions under the same PR
+(marc-271 and marc-279 carry different dollar amounts: $1.94M vs $3.88M),
+not true duplicates. Left for a human (or the semantic-read signal, Section
+8.3, once built) to review via the existing, already-tested
+`merge_issues()` — never auto-merged here.

@@ -1378,6 +1378,60 @@ def test_list_parties_for_issues_same_party_on_multiple_issues(ws_db):
     assert [p["id"] for p in batched[iid2]] == ["shared"]
 
 
+def test_upsert_source_container_is_idempotent(ws_db):
+    ws_db.upsert_source_container(id="sc1", source="outlook_mail", container_type="email_conversation",
+                                   exact_key="conv1", key_quality="exact", issue_id="marc-1")
+    ws_db.upsert_source_container(id="sc1", source="outlook_mail", container_type="email_conversation",
+                                   exact_key="conv1", key_quality="exact", issue_id="marc-2")
+    rows = ws_db.list_source_containers()
+    assert len(rows) == 1
+    assert rows[0]["issue_id"] == "marc-2"
+
+
+def test_list_source_containers_filters_by_issue(ws_db):
+    ws_db.upsert_source_container(id="sc1", source="outlook_mail", container_type="email_conversation",
+                                   exact_key="conv1", key_quality="exact", issue_id="marc-1")
+    ws_db.upsert_source_container(id="sc2", source="teams_chat", container_type="teams_chat",
+                                   exact_key="chat1", key_quality="exact", issue_id="marc-2")
+    assert [r["id"] for r in ws_db.list_source_containers(issue_id="marc-1")] == ["sc1"]
+
+
+def test_create_identity_anchor_dedupes_same_issue(ws_db):
+    iid = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    first = ws_db.create_identity_anchor(anchor_type="reference", normalized_value="PR1", anchor_strength="strong",
+                                          exclusive=True, issue_id=iid)
+    second = ws_db.create_identity_anchor(anchor_type="reference", normalized_value="PR1", anchor_strength="strong",
+                                           exclusive=True, issue_id=iid)
+    assert first is not None
+    assert second is None  # already recorded for this issue - not a conflict, just a no-op
+    assert len(ws_db.list_identity_anchors(issue_id=iid)) == 1
+
+
+def test_create_identity_anchor_exclusive_conflict_on_different_issue_returns_none(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
+    ws_db.create_identity_anchor(anchor_type="reference", normalized_value="PR1", anchor_strength="strong",
+                                  exclusive=True, issue_id=a)
+    result = ws_db.create_identity_anchor(anchor_type="reference", normalized_value="PR1", anchor_strength="strong",
+                                           exclusive=True, issue_id=b)
+    assert result is None
+    assert ws_db.list_identity_anchors(issue_id=b) == []
+    assert len(ws_db.list_identity_anchors(issue_id=a)) == 1
+
+
+def test_create_identity_anchor_non_exclusive_allows_multiple_issues(ws_db):
+    """A shared party/company is a real, legitimate relationship signal on
+    MANY issues at once - never blocked by the exclusive-anchor index."""
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
+    first = ws_db.create_identity_anchor(anchor_type="party", normalized_value="p1", anchor_strength="weak",
+                                          exclusive=False, issue_id=a)
+    second = ws_db.create_identity_anchor(anchor_type="party", normalized_value="p1", anchor_strength="weak",
+                                           exclusive=False, issue_id=b)
+    assert first is not None
+    assert second is not None
+
+
 def test_get_calendar_raw_items_for_remediation_only_returns_calendar_source(ws_db):
     ws_db.insert_raw_item(source="calendar", stable_key="c1", thread_key="c1", dedupe_key="dkc1",
                            occurred_ts=time.time(), subject="cal", from_actor="a@example.com", participants_json="[]")

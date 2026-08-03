@@ -254,6 +254,57 @@ def init_workgraph() -> None:
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_issue ON evidence(issue_id, ts DESC)")
 
+            # Identity formalization v0 (2026-08-03, docs/design/CONFIDENCE_
+            # AND_IDENTITY_REDESIGN.md Section 3.3): additive overlay, empty
+            # until backfill_identity_anchors() runs (workgraph_identity.py).
+            # Deliberately simpler than the Blueprint's full schema - no
+            # work_objects table exists yet, so anchors/containers point at
+            # TODAY's real entity (issues.id) directly; upgradeable when/if
+            # work_objects lands. source_sessions is intentionally not built
+            # yet - it only matters once a container can hold more than one
+            # real session (Teams sessionization, not built), and an empty,
+            # unused table is not worth adding ahead of that.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS source_containers (
+                    id             TEXT PRIMARY KEY,
+                    source         TEXT NOT NULL,
+                    container_type TEXT NOT NULL CHECK (container_type IN (
+                        'email_conversation','teams_chat','calendar_series','sharepoint_item')),
+                    exact_key      TEXT NOT NULL,
+                    key_quality    TEXT NOT NULL CHECK (key_quality IN ('exact','heuristic','fallback')),
+                    issue_id       TEXT REFERENCES issues(id),
+                    created_ts     REAL NOT NULL,
+                    UNIQUE(source, container_type, exact_key)
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_source_containers_issue ON source_containers(issue_id)")
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS identity_anchors (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    anchor_type      TEXT NOT NULL,
+                    normalized_value TEXT NOT NULL,
+                    anchor_strength  TEXT NOT NULL CHECK (anchor_strength IN ('exact','strong','weak','negative')),
+                    exclusive        INTEGER NOT NULL DEFAULT 0 CHECK (exclusive IN (0,1)),
+                    issue_id         TEXT NOT NULL REFERENCES issues(id),
+                    status           TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','superseded','rejected')),
+                    first_seen_ts    REAL NOT NULL,
+                    last_seen_ts     REAL NOT NULL,
+                    created_by       TEXT NOT NULL DEFAULT 'backfill',
+                    reason_json      TEXT NOT NULL DEFAULT '{}'
+                )
+            """)
+            # Exclusive anchors (reference numbers, Jasper Ref: tags) can
+            # only ever belong to one ACTIVE issue at a time - the whole
+            # point of I2's disjoint-reference veto. Non-exclusive anchors
+            # (party, company) are deliberately NOT covered by this index -
+            # a person/company legitimately touches many issues.
+            conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_identity_anchor_exclusive
+                ON identity_anchors(anchor_type, normalized_value) WHERE exclusive = 1 AND status = 'active'
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_identity_anchors_issue ON identity_anchors(issue_id, status)")
+
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS ingest_cursors (
                     source     TEXT NOT NULL,
@@ -3372,6 +3423,98 @@ def expire_stale_project_suggestions(older_than_days: float, kinds: tuple = ("me
             return cur.rowcount
         finally:
             conn.close()
+
+
+# --- source_containers / identity_anchors (identity formalization v0, ------
+# --- 2026-08-03) -------------------------------------------------------
+
+def upsert_source_container(*, id: str, source: str, container_type: str, exact_key: str,
+                             key_quality: str, issue_id: Optional[str] = None) -> None:
+    """Idempotent - re-running the backfill (or a real ingest hit on an
+    already-known container) just no-ops rather than raising on the UNIQUE
+    (source, container_type, exact_key) constraint."""
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                """INSERT INTO source_containers (id, source, container_type, exact_key, key_quality, issue_id, created_ts)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(source, container_type, exact_key) DO UPDATE SET issue_id = excluded.issue_id""",
+                (id, source, container_type, exact_key, key_quality, issue_id, time.time()),
+            )
+        finally:
+            conn.close()
+
+
+def list_source_containers(issue_id: Optional[str] = None) -> list[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            if issue_id is not None:
+                rows = conn.execute("SELECT * FROM source_containers WHERE issue_id = ?", (issue_id,)).fetchall()
+            else:
+                rows = conn.execute("SELECT * FROM source_containers").fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def create_identity_anchor(*, anchor_type: str, normalized_value: str, anchor_strength: str,
+                            exclusive: bool, issue_id: str, created_by: str = "backfill",
+                            reason_json: str = "{}", now: Optional[float] = None) -> Optional[int]:
+    """Returns the new row's id, or None if either (a) this exact
+    (anchor_type, normalized_value, issue_id) is already recorded and
+    active - a dedupe no-op, safe to call repeatedly (e.g. on every backfill
+    re-run) - or (b) an EXCLUSIVE anchor with this (anchor_type,
+    normalized_value) is already active on a DIFFERENT issue (the
+    idx_identity_anchor_exclusive constraint) - a real, expected outcome
+    during backfill (a pre-existing fragmentation case, e.g. the same PR
+    number legitimately or erroneously touching two issues today), never an
+    error the caller needs to handle specially."""
+    now = now if now is not None else time.time()
+    with _lock:
+        conn = _connect()
+        try:
+            same_issue = conn.execute(
+                """SELECT 1 FROM identity_anchors
+                   WHERE anchor_type = ? AND normalized_value = ? AND issue_id = ? AND status = 'active'""",
+                (anchor_type, normalized_value, issue_id),
+            ).fetchone()
+            if same_issue is not None:
+                return None  # already recorded for this issue, nothing new to insert
+            if exclusive:
+                held_elsewhere = conn.execute(
+                    """SELECT 1 FROM identity_anchors
+                       WHERE anchor_type = ? AND normalized_value = ? AND exclusive = 1 AND status = 'active'""",
+                    (anchor_type, normalized_value),
+                ).fetchone()
+                if held_elsewhere is not None:
+                    return None
+            cur = conn.execute(
+                """INSERT INTO identity_anchors
+                   (anchor_type, normalized_value, anchor_strength, exclusive, issue_id, status,
+                    first_seen_ts, last_seen_ts, created_by, reason_json)
+                   VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)""",
+                (anchor_type, normalized_value, anchor_strength, int(exclusive), issue_id, now, now, created_by, reason_json),
+            )
+            return cur.lastrowid
+        finally:
+            conn.close()
+
+
+def list_identity_anchors(issue_id: Optional[str] = None, status: str = "active") -> list[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            if issue_id is not None:
+                rows = conn.execute(
+                    "SELECT * FROM identity_anchors WHERE issue_id = ? AND status = ?", (issue_id, status)
+                ).fetchall()
+            else:
+                rows = conn.execute("SELECT * FROM identity_anchors WHERE status = ?", (status,)).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
 
 
 def create_capability_suggestion(*, origin: str, observation: str, suggestion: str,

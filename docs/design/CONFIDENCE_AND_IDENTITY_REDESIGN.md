@@ -611,6 +611,38 @@ instead with a direct per-issue `scored_grouping_decision` check against
 the flagged pairs. Fine as a one-time verification; worth doing properly
 if this gate needs re-running after a future change.
 
+### 8.13 Step 10 checked, not built: the remaining singletons don't show the trigger condition
+
+Section 8.3's own rule: build the semantic identity signal only if a real
+sample of the no-signal-at-all singletons shows a large "ambiguous but a
+human would instantly spot it" middle. Sampled the 205 remaining
+singletons (132 of which are the batch run's genuine `no_match` cases)
+directly rather than assuming either way. **They don't show that
+pattern.** The overwhelming majority are exactly what a real one-off
+procurement requisition looks like: a unique PR/PO number, a distinct
+requester, a distinct subject (a specific tool, a specific one-time
+purchase) - e.g. `marc-148` (PR416079-V33), `marc-297` (PR1188348),
+`marc-292` (PR1182019), each a different requester approving a different,
+specific, one-time thing. There is no visible pile of "these are
+obviously the same deal" pairs sitting in this set the way the earlier
+17 reference-conflicts or marc-362/marc-360 were.
+
+**This is a real, worth-stating correction to the original framing, not
+just a "nothing to build" note:** D1's 58% singleton figure was treated
+throughout this doc (and the source Blueprint) as *the* headline problem
+to fix. Looking directly at what's actually left in that number, a large
+share of it looks like **correctly standalone work** - one requisition,
+one approval, one done, with no second thread to belong to - not
+fragmented pieces of a larger deal. The identity work in steps 3-9 was
+still real and necessary (D1-D18 were confirmed, specific bugs, each
+independently verified against real data, not assumed from the raw
+percentage) - but the raw singleton percentage was never the right
+number to chase toward zero, and shouldn't be read as "how much
+identity work is left to do." **Step 10 (semantic identity signal) is
+not built - the evidence doesn't support it right now.** Revisit only if
+a future sample of the *then-current* singleton set shows a real cluster
+of humanly-obvious matches deterministic signals keep missing.
+
 ### 8.12 Step 9's real-world result: mostly a suggestion queue, not mass auto-merge (as intended)
 
 Ran `workgraph_projects.run()` against all 207 singletons with the model

@@ -859,6 +859,72 @@ def init_workgraph() -> None:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_claims_raw_item ON claims(raw_item_id)")
 
             try:
+                # Right-sized completion-contract support (design doc Section
+                # 12.3): a predicate JSON blob a caller can set at claim-
+                # creation time to check before accepting a completion, e.g.
+                # {"requires": ["outbound_message_after_request",
+                # "artifact_attached"]}. Deliberately NOT auto-populated from
+                # extraction yet - that needs its own SYNTHESIS_ROUTINE.md
+                # contract change (same shape as Section 9.7's `whose` field),
+                # not built in this pass since no real extraction support
+                # exists to state one. Column is schema-ready; NULL means "no
+                # stated contract," never silently inferred.
+                conn.execute("ALTER TABLE claims ADD COLUMN completion_contract TEXT")
+            except sqlite3.OperationalError:
+                pass
+
+            # claim_edges (design doc Section 12.3 / 8.2): the edge types
+            # Section 8.2 named back when Phase 3 was built, now real. Only
+            # `supersedes` has an actual writer in this pass (touch_claim's
+            # existing repeat_signals-driven dedup, Section 9.3) -
+            # `contradicts`/`supports` stay schema-ready but empty, same
+            # "don't build a producer nothing calls yet" discipline as
+            # everything else in this doc: Evidence Assembly's conflict
+            # detection (Section 8.1, still "always empty in v0") is the real
+            # future producer for those two, not invented here speculatively.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS claim_edges (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    from_claim_id INTEGER NOT NULL REFERENCES claims(id),
+                    to_claim_id   INTEGER NOT NULL REFERENCES claims(id),
+                    edge_type     TEXT NOT NULL CHECK (edge_type IN
+                                     ('contradicts','supports','derived_from','supersedes')),
+                    created_ts    REAL NOT NULL,
+                    created_by    TEXT NOT NULL
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_claim_edges_from ON claim_edges(from_claim_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_claim_edges_to ON claim_edges(to_claim_id)")
+
+            # claim_events (design doc Section 12.3): right-sized against the
+            # Blueprint's full 14-event work-state taxonomy (REQUEST_WORK/
+            # COMMIT_WORK/.../REOPEN_WORK) - that full taxonomy needs curator
+            # to classify EVERY restatement into one of 14 buckets, which is a
+            # much bigger extraction-contract change than anything built so
+            # far this session, with no current producer for most of them.
+            # Built instead: the 5 event types that already have a real,
+            # deterministic signal today - CREATE (materialize_claims_for_
+            # raw_item's own insert), ESCALATE/ACKNOWLEDGE (touch_claim's
+            # existing escalated flag, Section 9.3), COMPLETE/DISMISS (the
+            # checklist done/dismiss actions, now synced to claim status for
+            # the first time - see workgraph_claims.py). The fuller taxonomy
+            # stays a real, named gap, not silently dropped - revisit if a
+            # real case shows these 5 aren't enough (the same demand-driven
+            # bar every other genuinely-deferred piece in this doc uses).
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS claim_events (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    claim_id   INTEGER NOT NULL REFERENCES claims(id),
+                    event_type TEXT NOT NULL CHECK (event_type IN
+                                  ('create','escalate','acknowledge','complete','dismiss')),
+                    ts         REAL NOT NULL,
+                    actor      TEXT NOT NULL,
+                    note       TEXT
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_claim_events_claim ON claim_events(claim_id, ts)")
+
+            try:
                 # Bumped once per raw_item at claim-materialization time (i.e. in
                 # ingestion order, never in the item's own occurred_ts) - the
                 # cursor synthesis staleness needed and occurred_ts structurally
@@ -4879,6 +4945,109 @@ def touch_claim(
             raise
         finally:
             conn.close()
+
+
+def update_claim_status(claim_id: int, status: str, *, actor: str, superseded_by: Optional[int] = None) -> None:
+    """The one place claims.status ever changes after creation (design doc
+    Section 12.3) - closes a real gap confirmed by reading the code: nothing
+    before this ever moved a claim out of 'open'. Bumps claims_revision same
+    as insert_claim/touch_claim - a status change is real new information a
+    synthesis re-check should see."""
+    if status not in ("open", "done", "superseded", "dismissed"):
+        raise ValueError(f"invalid claim status: {status!r}")
+    now = time.time()
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "UPDATE claims SET status = ?, superseded_by = ?, last_seen_ts = ? WHERE id = ?",
+                (status, superseded_by, now, claim_id),
+            )
+            row = conn.execute("SELECT issue_id FROM claims WHERE id = ?", (claim_id,)).fetchone()
+            if row:
+                conn.execute(
+                    "UPDATE issues SET claims_revision = claims_revision + 1 WHERE id = ?",
+                    (row["issue_id"],),
+                )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.close()
+
+
+def log_claim_event(claim_id: int, event_type: str, *, actor: str, note: Optional[str] = None,
+                     ts: Optional[float] = None) -> int:
+    """Design doc Section 12.3's right-sized event log - 5 real event types
+    (create/escalate/acknowledge/complete/dismiss), each with a real,
+    deterministic producer in workgraph_claims.py, not the Blueprint's full
+    14-type taxonomy (no current producer for the other 9 - a named,
+    deliberate gap, not silently dropped)."""
+    now = ts if ts is not None else time.time()
+    with _lock:
+        conn = _connect()
+        try:
+            cur = conn.execute(
+                "INSERT INTO claim_events (claim_id, event_type, ts, actor, note) VALUES (?, ?, ?, ?, ?)",
+                (claim_id, event_type, now, actor, note),
+            )
+            return cur.lastrowid
+        finally:
+            conn.close()
+
+
+def list_claim_events_for_claim(claim_id: int) -> list[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM claim_events WHERE claim_id = ? ORDER BY ts ASC", (claim_id,)
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def create_claim_edge(from_claim_id: int, to_claim_id: int, edge_type: str, *, actor: str) -> int:
+    with _lock:
+        conn = _connect()
+        try:
+            cur = conn.execute(
+                """INSERT INTO claim_edges (from_claim_id, to_claim_id, edge_type, created_ts, created_by)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (from_claim_id, to_claim_id, edge_type, time.time(), actor),
+            )
+            return cur.lastrowid
+        finally:
+            conn.close()
+
+
+def list_claim_edges_for_claim(claim_id: int) -> list[dict]:
+    """Every edge touching this claim, either direction - same "detail panel
+    shouldn't care which side it's on" reasoning as list_project_links_for_
+    project."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM claim_edges WHERE from_claim_id = ? OR to_claim_id = ?",
+                (claim_id, claim_id),
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_claim(claim_id: int) -> Optional[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute("SELECT * FROM claims WHERE id = ?", (claim_id,)).fetchone()
+        finally:
+            conn.close()
+    return dict(row) if row else None
 
 
 def get_claims_revision(issue_id: str) -> int:

@@ -106,17 +106,29 @@ def materialize_claims_for_raw_item(raw_item_id: int) -> int:
             if repeat is not None:
                 existing = ws.find_open_claim_by_text(issue_id, claim_type, text)
                 if existing is not None:
+                    escalated = bool(repeat.get("escalated"))
                     ws.touch_claim(
-                        existing["id"], ts=ts,
-                        escalated=bool(repeat.get("escalated")),
+                        existing["id"], ts=ts, escalated=escalated,
                         escalation_note=repeat.get("escalation_note"),
+                    )
+                    # Section 12.3's right-sized event log: a repeat is real
+                    # signal either way - escalated means the same ask/
+                    # commitment/decision got worse (a new sender, more
+                    # senior), not-escalated means it's just still open and
+                    # someone said so again. Both are worth a real event,
+                    # not just the silent last_seen_ts bump touch_claim
+                    # already does.
+                    ws.log_claim_event(
+                        existing["id"], "escalate" if escalated else "acknowledge",
+                        actor="curator", note=repeat.get("escalation_note"), ts=ts,
                     )
                     continue
 
-            ws.insert_claim(
+            claim_id = ws.insert_claim(
                 issue_id=issue_id, raw_item_id=raw_item_id, claim_type=claim_type,
                 text=text, author=author, author_basis=author_basis, owner=owner, ts=ts,
             )
+            ws.log_claim_event(claim_id, "create", actor="curator", ts=ts)
             inserted += 1
 
     dates_mentioned = blob.get("dates_mentioned")
@@ -128,11 +140,12 @@ def materialize_claims_for_raw_item(raw_item_id: int) -> int:
             continue
         date_kind = entry.get("kind") if entry.get("kind") in ("hard", "soft") else None
         owner = _derive_owner("date", author, whose=entry.get("whose"))
-        ws.insert_claim(
+        claim_id = ws.insert_claim(
             issue_id=issue_id, raw_item_id=raw_item_id, claim_type="date",
             text=text, author=author, author_basis=author_basis, owner=owner,
             date_kind=date_kind, ts=ts,
         )
+        ws.log_claim_event(claim_id, "create", actor="curator", ts=ts)
         inserted += 1
 
     return inserted
@@ -146,6 +159,37 @@ def _matching_repeat_signal(blob: dict, ask_text: str) -> Optional[dict]:
         if isinstance(signal, dict) and signal.get("ask_text") == ask_text:
             return signal
     return None
+
+
+_CHECKLIST_KIND_TO_CLAIM_TYPE = {"ask": "ask", "decision": "decision", "commitment": "commitment"}
+_CHECKLIST_STATUS_TO_CLAIM_STATUS = {"done": "done", "dismissed": "dismissed"}
+_CHECKLIST_STATUS_TO_EVENT = {"done": "complete", "dismissed": "dismiss"}
+
+
+def sync_checklist_action_to_claim(*, issue_id: str, kind: str, text: str, status: str, actor: str) -> bool:
+    """Design doc Section 12.3: closes a real gap found while building the
+    event log - nothing before this ever moved a claim out of 'open', even
+    though the checklist UI's own "Mark done"/"Dismiss" actions
+    (workgraph_store.mark_checklist_item_done/dismiss_checklist_item) have
+    represented exactly that outcome, on the SAME underlying text, since
+    task #44/#59. Those two mechanisms were never connected - checklist_
+    dismissals stays the authoritative record for the UI (unchanged, not
+    replaced), this is purely additive: best-effort, silently a no-op
+    (returns False) for a `kind` that isn't a real claim_type (e.g.
+    key_facts, which were never claims) or when no matching OPEN claim is
+    found (older data from before Phase 3, or an already-resolved claim) -
+    never an error, since checklist_dismissals already succeeded by the
+    time this runs and remains correct either way."""
+    claim_type = _CHECKLIST_KIND_TO_CLAIM_TYPE.get(kind)
+    new_status = _CHECKLIST_STATUS_TO_CLAIM_STATUS.get(status)
+    if claim_type is None or new_status is None:
+        return False
+    claim = ws.find_open_claim_by_text(issue_id, claim_type, text.strip())
+    if claim is None:
+        return False
+    ws.update_claim_status(claim["id"], new_status, actor=actor)
+    ws.log_claim_event(claim["id"], _CHECKLIST_STATUS_TO_EVENT[status], actor=actor)
+    return True
 
 
 def list_open_claims_for_issue(issue_id: str, claim_type: Optional[str] = None) -> list[dict]:

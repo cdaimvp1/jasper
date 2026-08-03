@@ -1489,6 +1489,13 @@ async def api_workgraph_checklist_dismiss(issue_id: str, body: ChecklistItemDism
         issue_id=issue_id, kind=body.kind, raw_item_id=body.raw_item_id,
         text=body.text, actor=actor,
     )
+    # Section 12.3: best-effort sync to the claims ledger, if this checklist
+    # row corresponds to a real open claim - checklist_dismissals above
+    # stays the authoritative record either way, this closes a real gap
+    # (nothing before this ever moved a claim out of 'open').
+    workgraph_claims.sync_checklist_action_to_claim(
+        issue_id=issue_id, kind=body.kind, text=body.text, status="dismissed", actor=actor,
+    )
     return JSONResponse({"ok": True, "item_key": item_key})
 
 
@@ -1510,6 +1517,10 @@ async def api_workgraph_checklist_done(issue_id: str, body: ChecklistItemDoneBod
     item_key = wg.mark_checklist_item_done(
         issue_id=issue_id, kind=body.kind, raw_item_id=body.raw_item_id,
         text=body.text, actor=actor,
+    )
+    # Section 12.3: same best-effort claims-ledger sync as the dismiss route.
+    workgraph_claims.sync_checklist_action_to_claim(
+        issue_id=issue_id, kind=body.kind, text=body.text, status="done", actor=actor,
     )
     return JSONResponse({"ok": True, "item_key": item_key})
 

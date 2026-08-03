@@ -1707,6 +1707,62 @@ finished to the v2 refinements' full spec:
   producing `owner: unassigned` rather than a wrong guess when it can't
   tell.
 
+**v2.3 done, built and migrated on the live DB (2026-08-03) - with one
+real, explicit scope correction and one deliberately deferred piece,
+both stated plainly rather than silently narrowed:**
+
+- **The 14-event work-state taxonomy above was never built at full
+  scope.** Building it means curator classifying EVERY restatement into
+  one of 14 buckets - a materially bigger extraction-contract change
+  than anything else in this doc, with no current producer for 9 of the
+  14. Built instead: 5 real event types with a real, deterministic
+  producer that already exists today - `create` (every
+  `materialize_claims_for_raw_item` insert), `escalate`/`acknowledge`
+  (the existing `repeat_signals`-driven touch, Section 9.3 - escalated
+  vs not), `complete`/`dismiss` (see below). This is the same
+  "build what has a real producer, name what doesn't" discipline this
+  doc used for `contradicts`/`supports` (schema-ready, genuinely empty
+  until Evidence Assembly's conflict detection exists) - not a walk-back,
+  a continuation of it.
+- **Closed a real, separate gap found while building this:** nothing
+  before this ever moved a claim OUT of `open` - `claims.status` had a
+  full CHECK enum (`open`/`done`/`superseded`/`dismissed`) but zero
+  writers for anything but `open`. The checklist UI's own "Mark
+  done"/"Dismiss" actions (`mark_checklist_item_done`/
+  `dismiss_checklist_item`, task #44/#59) already represent exactly that
+  outcome on the same underlying text, just never connected to the
+  claims ledger. `workgraph_claims.sync_checklist_action_to_claim` closes
+  that: best-effort, silently a no-op for a `kind` that isn't a real
+  claim type (`key_facts`) or when no matching open claim exists (older
+  pre-Phase-3 data) - `checklist_dismissals` stays the UI's own
+  authoritative record either way, this is purely additive.
+- **Completion contracts**: the `completion_contract` column is real and
+  schema-ready, but genuinely unpopulated - populating it needs its own
+  extraction-contract change (curator stating a predicate at extraction
+  time, the same shape as Section 9.7's `whose` field), not attempted in
+  this pass since no real case has asked for it yet.
+- **Actor resolution correction (`owner: unassigned`) was NOT built.**
+  Unlike the checklist-status gap above (confirmed real by reading the
+  code directly), this one has no confirmed real case yet - checking for
+  it would mean re-reading raw evidence text for third-party-attributed
+  commitment patterns, which isn't cheap the way the checklist-status
+  check was. Building it would also require widening `claims.owner`'s
+  CHECK constraint (a real rename+rebuild migration, since it has real
+  production data) for a case with no confirmed instance. Named
+  explicitly rather than silently dropped - the real trigger is a
+  confirmed case where the `direction`-only heuristic produced a wrong
+  `owner`, the same evidentiary bar `work_object_signatures`/attachment-
+  hashing/every other demand-driven item in this doc uses.
+
+Migrated the live DB (backed up first, `pre_v2_3_claims_extensions`) -
+purely additive (`claim_edges`/`claim_events` are new, empty tables;
+`completion_contract` is a new, NULL-default column), `integrity_check:
+ok`, 443 existing claims untouched. Verified live: synced a real open
+claim (`marc-014`'s PR1193376 approval ask) to `done` via the new path,
+confirmed the `complete` event logged with the right actor, then
+reverted it to `open` - a real production claim, not left in a
+test-mutated state.
+
 ### 12.4 `PreparedAction` — between a commitment and executing it
 
 ```sql

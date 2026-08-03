@@ -1416,6 +1416,100 @@ def test_create_identity_constraint_rejects_invalid_type(ws_db):
         ws_db.create_identity_constraint("not_a_real_type", a, None, "test", actor="marc")
 
 
+def test_list_identity_constraints_for_subject_either_side(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
+    c = ws_db.create_issue_with_new_id(title="C", state="active", category="other")
+    ws_db.create_identity_constraint("cannot_merge", a, b, "r1", actor="marc")
+    ws_db.create_identity_constraint("cannot_link", c, a, "r2", actor="marc")
+
+    found = ws_db.list_identity_constraints_for_subject(a)
+
+    assert len(found) == 2
+    assert {c["constraint_type"] for c in found} == {"cannot_merge", "cannot_link"}
+
+
+# --- work_object_signatures (Section 12.7) ---------------------------------
+
+def test_upsert_and_get_work_object_signature(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    ws_db.upsert_work_object_signature(
+        a, definitive_ids_json='["PR1"]', accepted_lineages_json="[]", containers_json="[]",
+        external_orgs_json='["acme"]', participant_roles_json="[]", active_period_start=100.0,
+        active_period_end=200.0, positive_vocabulary_json=None, negative_vocabulary_json=None,
+        cannot_link_ids_json="[]",
+    )
+
+    row = ws_db.get_work_object_signature(a)
+
+    assert row["definitive_ids"] == '["PR1"]'
+    assert row["external_orgs"] == '["acme"]'
+    assert row["active_period_start"] == 100.0
+
+
+def test_upsert_work_object_signature_replaces_existing_row(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    kwargs = dict(definitive_ids_json="[]", accepted_lineages_json="[]", containers_json="[]",
+                  external_orgs_json="[]", participant_roles_json="[]", active_period_start=None,
+                  active_period_end=None, positive_vocabulary_json=None, negative_vocabulary_json=None,
+                  cannot_link_ids_json="[]")
+    ws_db.upsert_work_object_signature(a, **kwargs)
+    ws_db.upsert_work_object_signature(a, **{**kwargs, "external_orgs_json": '["updated"]'})
+
+    row = ws_db.get_work_object_signature(a)
+    assert row["external_orgs"] == '["updated"]'
+
+
+def test_invalidate_work_object_signature_deletes_the_row(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    ws_db.upsert_work_object_signature(
+        a, definitive_ids_json="[]", accepted_lineages_json="[]", containers_json="[]",
+        external_orgs_json="[]", participant_roles_json="[]", active_period_start=None,
+        active_period_end=None, positive_vocabulary_json=None, negative_vocabulary_json=None,
+        cannot_link_ids_json="[]",
+    )
+
+    ws_db.invalidate_work_object_signature(a)
+
+    assert ws_db.get_work_object_signature(a) is None
+
+
+def test_invalidate_work_object_signature_is_a_silent_noop_for_unknown_id(ws_db):
+    ws_db.invalidate_work_object_signature("no-such-issue")  # must not raise
+
+
+def test_link_raw_item_to_issue_invalidates_cached_signature(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    ws_db.upsert_work_object_signature(
+        a, definitive_ids_json="[]", accepted_lineages_json="[]", containers_json="[]",
+        external_orgs_json="[]", participant_roles_json="[]", active_period_start=None,
+        active_period_end=None, positive_vocabulary_json=None, negative_vocabulary_json=None,
+        cannot_link_ids_json="[]",
+    )
+    rid = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key="k1", thread_key="k1", dedupe_key="k1",
+        occurred_ts=time.time(), subject="s", from_actor="a@example.com", participants_json="[]",
+    )
+
+    ws_db.link_raw_item_to_issue(rid, a)
+
+    assert ws_db.get_work_object_signature(a) is None
+
+
+def test_add_evidence_invalidates_cached_signature(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    ws_db.upsert_work_object_signature(
+        a, definitive_ids_json="[]", accepted_lineages_json="[]", containers_json="[]",
+        external_orgs_json="[]", participant_roles_json="[]", active_period_start=None,
+        active_period_end=None, positive_vocabulary_json=None, negative_vocabulary_json=None,
+        cannot_link_ids_json="[]",
+    )
+
+    ws_db.add_evidence(issue_id=a, type="email", summary="test")
+
+    assert ws_db.get_work_object_signature(a) is None
+
+
 def test_expire_stale_project_suggestions_expires_old_pending_merge(ws_db):
     """Phase 0 fix (D2): the structural backstop against the pending queue
     accumulating forever, independent of the generation flag's setting."""

@@ -957,6 +957,44 @@ def init_workgraph() -> None:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_identity_constraints_a ON identity_constraints(constraint_type, subject_a)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_identity_constraints_b ON identity_constraints(constraint_type, subject_b)")
 
+            # work_object_signatures (design doc Section 12.7): a cached,
+            # invalidate-on-write signature per work_object, read by
+            # scored_grouping_decision/backtest_scored_model instead of
+            # each of those re-querying parties/containers/references from
+            # scratch for every OTHER issue on every single call - a real,
+            # measured cost today (_issue_signal_snapshot is recomputed per
+            # candidate, per call). Invalidated (row deleted, recomputed
+            # lazily on next read - see workgraph_projects.
+            # get_or_compute_work_object_signature) at every real write site
+            # that changes what's IN a signature: link_raw_item_to_issue,
+            # link_party_to_issue, add_evidence, reject_suggestion (changes
+            # cannot_link_ids), merge_issue_into (the survivor absorbs the
+            # loser's parties/raw_items/containers). accepted_lineages stays
+            # an honest '[]' - artifact_lineages (12.5/v2.6) doesn't exist
+            # yet, nothing to populate it with. positive_vocabulary/negative_
+            # vocabulary stay NULL, same "no real producer" reason claim_
+            # edges' contradicts/supports and identity_constraints' 8 unused
+            # types are named rather than silently dropped - topic matching
+            # stays the existing direct SequenceMatcher comparison
+            # (workgraph_projects._pairwise_score_from_signature), not
+            # folded into a vocabulary field nothing extracts yet.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS work_object_signatures (
+                    work_object_id      TEXT PRIMARY KEY REFERENCES work_objects(id),
+                    definitive_ids      TEXT NOT NULL,
+                    accepted_lineages   TEXT NOT NULL,
+                    containers          TEXT NOT NULL,
+                    external_orgs       TEXT NOT NULL,
+                    participant_roles   TEXT NOT NULL,
+                    active_period_start REAL,
+                    active_period_end   REAL,
+                    positive_vocabulary TEXT,
+                    negative_vocabulary TEXT,
+                    cannot_link_ids     TEXT NOT NULL,
+                    updated_ts          REAL NOT NULL
+                )
+            """)
+
             try:
                 # Bumped once per raw_item at claim-materialization time (i.e. in
                 # ingestion order, never in the item's own occurred_ts) - the
@@ -1892,6 +1930,7 @@ def link_raw_item_to_issue(raw_item_id: int, issue_id: str) -> None:
             conn.execute("UPDATE raw_items SET issue_id = ? WHERE id = ?", (issue_id, raw_item_id))
         finally:
             conn.close()
+    invalidate_work_object_signature(issue_id)
 
 
 # --- thread_map ---------------------------------------------------------------
@@ -2425,12 +2464,13 @@ def add_evidence(*, issue_id: str, type: str, summary: str, raw_item_id: Optiona
                 (eu_id, issue_id),
             )
             conn.execute("COMMIT")
-            return eu_id
         except Exception:
             conn.execute("ROLLBACK")
             raise
         finally:
             conn.close()
+    invalidate_work_object_signature(issue_id)
+    return eu_id
 
 
 def get_raw_items_for_issue(issue_id: str) -> list[dict]:
@@ -3096,6 +3136,7 @@ def link_party_to_issue(issue_id: str, party_id: str, role: Optional[str] = None
             )
         finally:
             conn.close()
+    invalidate_work_object_signature(issue_id)
 
 
 def list_parties_for_issues(issue_ids: list[str]) -> dict[str, list[dict]]:
@@ -3953,8 +3994,8 @@ def merge_issue_into(loser_id: str, winner_id: str, *, reason: str, actor: str) 
                     (loser_id, loser_id, winner_id, now, reason),
                 )
                 conn.execute("COMMIT")
-                return {"status": "merged", "winner_id": winner_id, "loser_id": loser_id,
-                        "raw_items_moved": raw_items_moved, "evidence_moved": evidence_moved}
+                result = {"status": "merged", "winner_id": winner_id, "loser_id": loser_id,
+                          "raw_items_moved": raw_items_moved, "evidence_moved": evidence_moved}
             except Exception:
                 try:
                     conn.execute("ROLLBACK")
@@ -3963,6 +4004,14 @@ def merge_issue_into(loser_id: str, winner_id: str, *, reason: str, actor: str) 
                 raise
         finally:
             conn.close()
+    # The winner absorbed the loser's parties/raw_items/containers above -
+    # both cached signatures (Section 12.7) are now stale, not just the
+    # winner's (the loser keeps its issue row, per this function's own
+    # "never deletes the loser" contract, so a stale cached signature for
+    # it would otherwise persist indefinitely).
+    invalidate_work_object_signature(winner_id)
+    invalidate_work_object_signature(loser_id)
+    return result
 
 
 # --- pending_project_suggestions -------------------------------------------
@@ -5139,6 +5188,80 @@ def find_identity_constraint(constraint_type: str, subject_a: str,
         finally:
             conn.close()
     return dict(row) if row else None
+
+
+def list_identity_constraints_for_subject(subject_id: str) -> list[dict]:
+    """Every constraint touching this subject, either side, any type - the
+    building block compute_work_object_signature (Section 12.7) uses for
+    cannot_link_ids, since a work_object's own cannot_merge/cannot_link
+    history isn't scoped to one other specific pair the way find_identity_
+    constraint's lookup is."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM identity_constraints WHERE subject_a = ? OR subject_b = ?",
+                (subject_id, subject_id),
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_work_object_signature(work_object_id: str) -> Optional[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM work_object_signatures WHERE work_object_id = ?", (work_object_id,)
+            ).fetchone()
+        finally:
+            conn.close()
+    return dict(row) if row else None
+
+
+def upsert_work_object_signature(work_object_id: str, *, definitive_ids_json: str, accepted_lineages_json: str,
+                                  containers_json: str, external_orgs_json: str, participant_roles_json: str,
+                                  active_period_start: Optional[float], active_period_end: Optional[float],
+                                  positive_vocabulary_json: Optional[str], negative_vocabulary_json: Optional[str],
+                                  cannot_link_ids_json: str) -> None:
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                """INSERT INTO work_object_signatures
+                   (work_object_id, definitive_ids, accepted_lineages, containers, external_orgs,
+                    participant_roles, active_period_start, active_period_end, positive_vocabulary,
+                    negative_vocabulary, cannot_link_ids, updated_ts)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(work_object_id) DO UPDATE SET
+                       definitive_ids = excluded.definitive_ids, accepted_lineages = excluded.accepted_lineages,
+                       containers = excluded.containers, external_orgs = excluded.external_orgs,
+                       participant_roles = excluded.participant_roles,
+                       active_period_start = excluded.active_period_start,
+                       active_period_end = excluded.active_period_end,
+                       positive_vocabulary = excluded.positive_vocabulary,
+                       negative_vocabulary = excluded.negative_vocabulary,
+                       cannot_link_ids = excluded.cannot_link_ids, updated_ts = excluded.updated_ts""",
+                (work_object_id, definitive_ids_json, accepted_lineages_json, containers_json, external_orgs_json,
+                 participant_roles_json, active_period_start, active_period_end, positive_vocabulary_json,
+                 negative_vocabulary_json, cannot_link_ids_json, time.time()),
+            )
+        finally:
+            conn.close()
+
+
+def invalidate_work_object_signature(work_object_id: str) -> None:
+    """Best-effort cache invalidation - called from every real write site
+    that changes what's IN a signature (see the table's own schema comment
+    in init_workgraph). Never raises for an id with no cached row - that's
+    the normal case for a work_object never scored yet."""
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute("DELETE FROM work_object_signatures WHERE work_object_id = ?", (work_object_id,))
+        finally:
+            conn.close()
 
 
 def get_claim(claim_id: int) -> Optional[dict]:

@@ -524,39 +524,154 @@ def _issue_signal_snapshot(issue_id: str, issue: Optional[dict] = None) -> dict:
     }
 
 
-def _pairwise_score(a: dict, b: dict):
-    """Combined confidence score for two issues' precomputed signal
-    snapshots (see _issue_signal_snapshot). Company/topic/sender/category/
-    party each contribute a partial weight; none reaches AUTO_MERGE_THRESHOLD
-    alone - including party (Phase 0 fix, 2026-08-03): a shared external
-    party used to auto_merge on its own in scored_grouping_decision (the
-    exact D4 shape - an account manager/consultant spans many concurrent,
-    unrelated deals, same reasoning that already narrowed the LIVE grouping
-    path off party-alone on 2026-07-31). Now it's one contributing signal
-    like the others, requiring a second corroborating signal to cross
-    AUTO_MERGE_THRESHOLD. A disjoint reference-ID pair is vetoed to 0
-    regardless - the same absolute override the ordered model already
-    applies. Returns (score, matched_signal_names)."""
-    if a["references"] and b["references"] and a["references"].isdisjoint(b["references"]):
+def compute_work_object_signature(work_object_id: str, issue: Optional[dict] = None) -> dict:
+    """Design doc Section 12.7: the real content behind one work_object's
+    cached signature, built from the same real data _issue_signal_snapshot
+    already read (parties/companies/references/source_containers), plus
+    identity_constraints (v2.4's cannot_merge/cannot_link) for
+    cannot_link_ids - a check _issue_signal_snapshot/_pairwise_score never
+    had at all. accepted_lineages stays an honest [] (artifact_lineages/
+    v2.6 doesn't exist yet, nothing to populate it with);
+    positive_vocabulary/negative_vocabulary stay None - no real vocabulary-
+    extraction producer exists yet, same named-not-silently-dropped gap as
+    identity_constraints' 8 unused types. Returns plain Python values
+    (lists/sets as lists) - get_or_compute_work_object_signature is what
+    JSON-encodes for the cache."""
+    if issue is None:
+        issue = ws.get_issue(work_object_id)
+    parties = ws.list_parties_for_issue(work_object_id)
+    real_parties = [
+        p for p in parties
+        if p.get("affiliation") != "external" or not workgraph_signals.is_automated_sender(p.get("primary_email") or "")
+    ]
+    participant_roles = [
+        {"party_id": p["id"], "role": p.get("role"), "affiliation": p.get("affiliation")}
+        for p in real_parties
+    ]
+    external_orgs = sorted({
+        p["company"].lower() for p in real_parties
+        if p.get("affiliation") == "external" and p.get("company")
+    })
+    definitive_ids = sorted(reference_base_ids_for_issue(work_object_id))
+    containers = sorted(c["id"] for c in ws.list_source_containers(issue_id=work_object_id))
+    evidence_ts = [e["ts"] for e in ws.list_evidence(work_object_id) if e.get("ts")]
+    period_bounds = list(evidence_ts)
+    if issue and issue.get("opened_at"):
+        period_bounds.append(issue["opened_at"])
+    cannot_link_ids = sorted({
+        (c["subject_b"] if c["subject_a"] == work_object_id else c["subject_a"])
+        for c in ws.list_identity_constraints_for_subject(work_object_id)
+        if c["constraint_type"] in ("cannot_merge", "cannot_link") and c.get("subject_b")
+    })
+    return {
+        "definitive_ids": definitive_ids,
+        "accepted_lineages": [],
+        "containers": containers,
+        "external_orgs": external_orgs,
+        "participant_roles": participant_roles,
+        "active_period_start": min(period_bounds) if period_bounds else None,
+        "active_period_end": max(period_bounds) if period_bounds else None,
+        "positive_vocabulary": None,
+        "negative_vocabulary": None,
+        "cannot_link_ids": cannot_link_ids,
+    }
+
+
+def get_or_compute_work_object_signature(work_object_id: str, issue: Optional[dict] = None) -> dict:
+    """Cache-first read (design doc Section 12.7) - a cached row survives
+    until the real write sites that change its content invalidate it (see
+    workgraph_store.invalidate_work_object_signature's callers), so a
+    given work_object's signature is normally computed ONCE, not on every
+    single scored_grouping_decision call that happens to consider it as a
+    candidate."""
+    cached = ws.get_work_object_signature(work_object_id)
+    if cached is not None:
+        return {
+            "definitive_ids": json.loads(cached["definitive_ids"]),
+            "accepted_lineages": json.loads(cached["accepted_lineages"]),
+            "containers": json.loads(cached["containers"]),
+            "external_orgs": json.loads(cached["external_orgs"]),
+            "participant_roles": json.loads(cached["participant_roles"]),
+            "active_period_start": cached["active_period_start"],
+            "active_period_end": cached["active_period_end"],
+            "positive_vocabulary": json.loads(cached["positive_vocabulary"]) if cached["positive_vocabulary"] else None,
+            "negative_vocabulary": json.loads(cached["negative_vocabulary"]) if cached["negative_vocabulary"] else None,
+            "cannot_link_ids": json.loads(cached["cannot_link_ids"]),
+        }
+    sig = compute_work_object_signature(work_object_id, issue)
+    ws.upsert_work_object_signature(
+        work_object_id,
+        definitive_ids_json=json.dumps(sig["definitive_ids"]),
+        accepted_lineages_json=json.dumps(sig["accepted_lineages"]),
+        containers_json=json.dumps(sig["containers"]),
+        external_orgs_json=json.dumps(sig["external_orgs"]),
+        participant_roles_json=json.dumps(sig["participant_roles"]),
+        active_period_start=sig["active_period_start"],
+        active_period_end=sig["active_period_end"],
+        positive_vocabulary_json=json.dumps(sig["positive_vocabulary"]) if sig["positive_vocabulary"] is not None else None,
+        negative_vocabulary_json=json.dumps(sig["negative_vocabulary"]) if sig["negative_vocabulary"] is not None else None,
+        cannot_link_ids_json=json.dumps(sig["cannot_link_ids"]),
+    )
+    return sig
+
+
+def _topic_key_for_signature(issue: dict, sig: dict) -> str:
+    """Topic matching stays a direct title comparison, not a signature
+    field - see compute_work_object_signature's own docstring on why
+    positive_vocabulary has no real producer yet. Same has_external gate
+    _issue_signal_snapshot used, derived from the signature's own
+    participant_roles instead of a fresh parties query."""
+    has_external = any(p.get("affiliation") == "external" for p in sig["participant_roles"])
+    if not has_external:
+        return ""
+    key = ws.normalize_topic_key(issue.get("title") or "")
+    return key if len(key) >= MIN_TOPIC_KEY_LEN else ""
+
+
+def _pairwise_score_from_signature(a_id: str, a_sig: dict, a_topic_key: str, a_category: Optional[str],
+                                    b_id: str, b_sig: dict, b_topic_key: str, b_category: Optional[str]):
+    """Replaces _pairwise_score (retired) - same weights/thresholds, scored
+    against each side's cached WHOLE signature rather than a snapshot
+    recomputed from scratch per call. Two real behavior changes from the
+    model it replaces: (1) a cannot_merge/cannot_link identity_constraint
+    (v2.4) now vetoes to 0 outright, the same absolute-override treatment
+    a disjoint reference-ID pair already got - this closes a real gap
+    where scored_grouping_decision's auto_merge path called merge_issues_
+    txn directly, bypassing create_project_suggestion (and therefore v2.4's
+    own veto check) entirely; a rejected pair could previously still get
+    auto-merged by the scored model even after a human explicitly rejected
+    merging it. (2) topic/category stay direct comparisons, not signature
+    fields - see compute_work_object_signature's docstring. Returns (score,
+    matched_signal_names)."""
+    a_ids, b_ids = set(a_sig["definitive_ids"]), set(b_sig["definitive_ids"])
+    if a_ids and b_ids and a_ids.isdisjoint(b_ids):
         return 0.0, []
+    if b_id in a_sig["cannot_link_ids"] or a_id in b_sig["cannot_link_ids"]:
+        return 0.0, []
+
+    a_external = {p["party_id"] for p in a_sig["participant_roles"] if p.get("affiliation") == "external"}
+    b_external = {p["party_id"] for p in b_sig["participant_roles"] if p.get("affiliation") == "external"}
+    a_internal = {p["party_id"] for p in a_sig["participant_roles"] if p.get("affiliation") == "internal"}
+    b_internal = {p["party_id"] for p in b_sig["participant_roles"] if p.get("affiliation") == "internal"}
+
     signals = []
     score = 0.0
-    if a["party_ids"] and b["party_ids"] and not a["party_ids"].isdisjoint(b["party_ids"]):
+    if a_external and b_external and not a_external.isdisjoint(b_external):
         score += SCORE_WEIGHTS["party"]
         signals.append("party")
-    if a["companies"] and b["companies"] and not a["companies"].isdisjoint(b["companies"]):
+    if a_sig["external_orgs"] and b_sig["external_orgs"] and not set(a_sig["external_orgs"]).isdisjoint(b_sig["external_orgs"]):
         score += SCORE_WEIGHTS["company"]
         signals.append("company")
-    if a["topic_key"] and b["topic_key"]:
-        m = SequenceMatcher(None, a["topic_key"], b["topic_key"]).find_longest_match(
-            0, len(a["topic_key"]), 0, len(b["topic_key"]))
+    if a_topic_key and b_topic_key:
+        m = SequenceMatcher(None, a_topic_key, b_topic_key).find_longest_match(
+            0, len(a_topic_key), 0, len(b_topic_key))
         if m.size >= MIN_TOPIC_KEY_LEN:
             score += SCORE_WEIGHTS["topic"]
             signals.append("topic")
-    if a["internal"] and b["internal"] and not a["internal"].isdisjoint(b["internal"]):
+    if a_internal and b_internal and not a_internal.isdisjoint(b_internal):
         score += SCORE_WEIGHTS["sender"]
         signals.append("sender")
-    if a["category"] and a["category"] != "other" and a["category"] == b["category"]:
+    if a_category and a_category != "other" and a_category == b_category:
         score += SCORE_WEIGHTS["category"]
         signals.append("category")
     return score, signals
@@ -577,22 +692,29 @@ def scored_grouping_decision(issue_id: str, issue: dict) -> dict:
     # auto_merge(1.0) branch used to live here - the exact hazard the module
     # docstring's 2026-07-31 narrowing already removed from the LIVE grouping
     # path (_strong_signal_match), but this shadow-only scored model still
-    # carried it verbatim. A shared party now flows into _pairwise_score's
-    # "party" signal below instead, where it contributes but can't alone
-    # cross AUTO_MERGE_THRESHOLD - same treatment as company/topic/sender.
+    # carried it verbatim. A shared party now flows into the signature
+    # model's "party" signal below instead, where it contributes but can't
+    # alone cross AUTO_MERGE_THRESHOLD - same treatment as company/topic/
+    # sender.
 
-    my_snapshot = _issue_signal_snapshot(issue_id, issue)
+    my_project_id = issue.get("project_id")
+    my_sig = get_or_compute_work_object_signature(issue_id, issue)
+    my_topic_key = _topic_key_for_signature(issue, my_sig)
     best_score, best_sibling, best_signals = 0.0, None, []
     # Same limit fix as _shared_topic_key/_weak_signal_candidates above.
     for other in ws.list_issues(states=None, limit=10000):
         if other["id"] == issue_id:
             continue
-        if my_snapshot["project_id"] and my_snapshot["project_id"] == other.get("project_id"):
+        if my_project_id and my_project_id == other.get("project_id"):
             continue
-        if other.get("project_id") and other.get("project_id") != my_snapshot["project_id"]:
+        if other.get("project_id") and other.get("project_id") != my_project_id:
             continue  # never target an issue already in a DIFFERENT project - same rule as _weak_signal_candidates
-        other_snapshot = _issue_signal_snapshot(other["id"], other)
-        score, signals = _pairwise_score(my_snapshot, other_snapshot)
+        other_sig = get_or_compute_work_object_signature(other["id"], other)
+        other_topic_key = _topic_key_for_signature(other, other_sig)
+        score, signals = _pairwise_score_from_signature(
+            issue_id, my_sig, my_topic_key, issue.get("category"),
+            other["id"], other_sig, other_topic_key, other.get("category"),
+        )
         if score > best_score:
             best_score, best_sibling, best_signals = score, other["id"], signals
 
@@ -603,16 +725,16 @@ def scored_grouping_decision(issue_id: str, issue: dict) -> dict:
     # covered this issue) take priority over the match_kind shim, via
     # context_accuracy's own None check.
     present = set()
-    if my_snapshot["category"] and my_snapshot["category"] != "other":
+    if issue.get("category") and issue["category"] != "other":
         present.add("category")
-    if my_snapshot["references"] or my_snapshot["party_ids"] or my_snapshot["companies"] or my_snapshot["topic_key"]:
+    if my_sig["definitive_ids"] or my_sig["participant_roles"] or my_sig["external_orgs"] or my_topic_key:
         present.add("anchor_or_relationship")
     evidence_ts = [e["ts"] for e in ws.list_evidence(issue_id) if e.get("ts")]
     real_anchors = ws.list_identity_anchors(issue_id=issue_id)
     ctx = confidence.context_accuracy(
         present_fields=present, required_fields={"category", "anchor_or_relationship"},
         evidence_ts=evidence_ts, now=time.time(), match_kinds=best_signals,
-        total_refs=1, unresolved_refs=0 if my_snapshot["references"] else 1,
+        total_refs=1, unresolved_refs=0 if my_sig["definitive_ids"] else 1,
         anchor_strengths=([a["anchor_strength"] for a in real_anchors] if real_anchors else None),
     )
     effective_score = confidence.effective_score(best_score, ctx["context_accuracy"])
@@ -641,28 +763,42 @@ def backtest_scored_model() -> dict:
         would now score AT/OR-ABOVE threshold - the actual false-positive
         class that matters (the exact task #81 shape) and needs human
         review before the flag is ever enabled.
-    Every issue's signal snapshot is computed ONCE up front (real queries,
-    O(n)), then compared pairwise purely in memory (O(n^2) cheap set ops)
-    - fast even at real corpus scale."""
+    Every issue's signature is computed ONCE up front (real queries, O(n)),
+    then compared pairwise purely in memory (O(n^2) cheap set ops) - fast
+    even at real corpus scale. Section 12.7: reads/writes the same cached
+    work_object_signatures table the live path does (a full backtest run
+    is itself a real, honest way to warm the cache for every issue in the
+    corpus), scored via _pairwise_score_from_signature - including its
+    cannot_merge/cannot_link veto, so a backtest run now also reports
+    whether that veto changes any real pair's verdict."""
     issues = ws.list_issues(states=None, limit=10000)
-    snapshots = {i["id"]: _issue_signal_snapshot(i["id"], i) for i in issues}
-    ids = list(snapshots.keys())
+    sigs = {}
+    topic_keys = {}
+    projects = {}
+    categories = {}
+    for i in issues:
+        sigs[i["id"]] = get_or_compute_work_object_signature(i["id"], i)
+        topic_keys[i["id"]] = _topic_key_for_signature(i, sigs[i["id"]])
+        projects[i["id"]] = i.get("project_id")
+        categories[i["id"]] = i.get("category")
+    ids = list(sigs.keys())
 
     same_project_below_threshold = []
     different_project_at_or_above = []
     for idx, a_id in enumerate(ids):
-        a = snapshots[a_id]
         for b_id in ids[idx + 1:]:
-            b = snapshots[b_id]
-            score, signals = _pairwise_score(a, b)
-            same_project = bool(a["project_id"] and a["project_id"] == b["project_id"])
+            score, signals = _pairwise_score_from_signature(
+                a_id, sigs[a_id], topic_keys[a_id], categories[a_id],
+                b_id, sigs[b_id], topic_keys[b_id], categories[b_id],
+            )
+            same_project = bool(projects[a_id] and projects[a_id] == projects[b_id])
             if same_project and score < AUTO_MERGE_THRESHOLD:
                 same_project_below_threshold.append(
-                    {"a": a_id, "b": b_id, "score": round(score, 2), "project_id": a["project_id"]})
+                    {"a": a_id, "b": b_id, "score": round(score, 2), "project_id": projects[a_id]})
             elif not same_project and score >= AUTO_MERGE_THRESHOLD:
                 different_project_at_or_above.append({
                     "a": a_id, "b": b_id, "score": round(score, 2), "signals": signals,
-                    "a_project": a["project_id"], "b_project": b["project_id"],
+                    "a_project": projects[a_id], "b_project": projects[b_id],
                 })
     return {
         "issues_checked": len(ids),
@@ -842,6 +978,12 @@ def reject_suggestion(suggestion_id: int) -> dict:
             reason=f"suggestion #{suggestion_id} rejected: {sugg.get('reason') or ''}",
             actor="marc",
         )
+        # Section 12.7: cannot_link_ids is part of both sides' cached
+        # signature - a stale cached signature from before this reject
+        # would otherwise keep scoring this pair as if the constraint
+        # didn't exist until something else happened to invalidate it.
+        ws.invalidate_work_object_signature(sugg["issue_id_a"])
+        ws.invalidate_work_object_signature(sugg["issue_id_b"])
     return {"action": "rejected"}
 
 
@@ -981,10 +1123,16 @@ def group_issue(issue_id: str) -> dict:
     # category match is a shared INTERNAL sender ("sender", which
     # _strong_signal_match never checks). A category match with no such
     # corroboration is dropped rather than suggested.
-    my_snapshot = _issue_signal_snapshot(issue_id, issue)
+    my_sig = get_or_compute_work_object_signature(issue_id, issue)
+    my_topic_key = _topic_key_for_signature(issue, my_sig)
     corroborated = []
     for other in candidates:
-        score, signals = _pairwise_score(my_snapshot, _issue_signal_snapshot(other["id"], other))
+        other_sig = get_or_compute_work_object_signature(other["id"], other)
+        other_topic_key = _topic_key_for_signature(other, other_sig)
+        score, signals = _pairwise_score_from_signature(
+            issue_id, my_sig, my_topic_key, issue.get("category"),
+            other["id"], other_sig, other_topic_key, other.get("category"),
+        )
         if any(s != "category" for s in signals):
             corroborated.append((score, other))
     if not corroborated:

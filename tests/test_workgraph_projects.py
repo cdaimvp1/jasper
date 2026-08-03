@@ -11,6 +11,7 @@ Ariba's own no-reply sender, which is correctly excluded from company
 identification, leaving both sides with an empty company set."""
 from __future__ import annotations
 
+import json
 import time
 
 import workgraph_lessons
@@ -958,15 +959,30 @@ def _isolate_config(monkeypatch, tmp_path):
     return config
 
 
+def _score_pair(a, b):
+    """Section 12.7 helper: builds both sides' cached signatures + topic
+    keys and scores them, the same sequence scored_grouping_decision/
+    backtest_scored_model now use - retired _pairwise_score/
+    _issue_signal_snapshot (Section 9's flat model) called for this
+    directly; keeping ONE real scoring path is the whole point of the
+    signature model (see compute_work_object_signature's docstring)."""
+    issue_a, issue_b = wp.ws.get_issue(a), wp.ws.get_issue(b)
+    sig_a = wp.get_or_compute_work_object_signature(a, issue_a)
+    sig_b = wp.get_or_compute_work_object_signature(b, issue_b)
+    topic_a = wp._topic_key_for_signature(issue_a, sig_a)
+    topic_b = wp._topic_key_for_signature(issue_b, sig_b)
+    return wp._pairwise_score_from_signature(
+        a, sig_a, topic_a, issue_a.get("category"), b, sig_b, topic_b, issue_b.get("category"),
+    )
+
+
 def test_pairwise_score_single_signal_never_reaches_threshold(ws_db):
     a = _issue(ws_db, "A")
     _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
     b = _issue(ws_db, "B, unrelated subject entirely")
     _link_party(ws_db, b, "p2", "other@acme.com", company="Acme")
 
-    snap_a = wp._issue_signal_snapshot(a, ws_db.get_issue(a))
-    snap_b = wp._issue_signal_snapshot(b, ws_db.get_issue(b))
-    score, signals = wp._pairwise_score(snap_a, snap_b)
+    score, signals = _score_pair(a, b)
 
     assert signals == ["company"]
     assert score == wp.SCORE_WEIGHTS["company"]
@@ -979,9 +995,7 @@ def test_pairwise_score_company_and_topic_combine_above_threshold(ws_db):
     b = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted again")
     _link_party(ws_db, b, "p2", "other@acme.com", company="Acme")
 
-    snap_a = wp._issue_signal_snapshot(a, ws_db.get_issue(a))
-    snap_b = wp._issue_signal_snapshot(b, ws_db.get_issue(b))
-    score, signals = wp._pairwise_score(snap_a, snap_b)
+    score, signals = _score_pair(a, b)
 
     assert set(signals) == {"company", "topic"}
     assert score == wp.SCORE_WEIGHTS["company"] + wp.SCORE_WEIGHTS["topic"]
@@ -991,9 +1005,7 @@ def test_pairwise_score_company_and_topic_combine_above_threshold(ws_db):
 def test_pairwise_score_category_other_never_contributes(ws_db):
     a = _issue(ws_db, "A")
     b = _issue(ws_db, "B")
-    snap_a = wp._issue_signal_snapshot(a, ws_db.get_issue(a))
-    snap_b = wp._issue_signal_snapshot(b, ws_db.get_issue(b))
-    score, signals = wp._pairwise_score(snap_a, snap_b)
+    score, signals = _score_pair(a, b)
     assert "category" not in signals
     assert score == 0.0
 
@@ -1009,12 +1021,78 @@ def test_pairwise_score_disjoint_reference_vetoes_everything(ws_db):
     _raw_item(ws_db, b, "PR222222", "pa2")
     _link_party(ws_db, b, "p2", "rep2@acme.com", company="Acme")
 
-    snap_a = wp._issue_signal_snapshot(a, ws_db.get_issue(a))
-    snap_b = wp._issue_signal_snapshot(b, ws_db.get_issue(b))
-    score, signals = wp._pairwise_score(snap_a, snap_b)
+    score, signals = _score_pair(a, b)
 
     assert score == 0.0
     assert signals == []
+
+
+def test_pairwise_score_cannot_merge_constraint_vetoes_everything(ws_db):
+    """Section 12.7's real new veto: a durable cannot_merge (v2.4) must
+    zero the score outright, same absolute-override treatment as a
+    disjoint reference ID - closing the real gap where scored_grouping_
+    decision's auto_merge path bypassed create_project_suggestion (and
+    therefore v2.4's own check) by calling merge_issues_txn directly."""
+    a = _issue(ws_db, "Action required: Approve the Requisition that X submitted")
+    _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
+    b = _issue(ws_db, "Action required: Approve the Requisition that X submitted again")
+    _link_party(ws_db, b, "p2", "other@acme.com", company="Acme")
+    ws_db.create_identity_constraint("cannot_merge", a, b, "confirmed separate", actor="marc")
+
+    score, signals = _score_pair(a, b)
+
+    assert score == 0.0
+    assert signals == []
+
+
+# --- work_object_signatures caching (Section 12.7) ------------------------
+
+def test_get_or_compute_work_object_signature_caches_the_result(ws_db):
+    a = _issue(ws_db, "A")
+    _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
+    assert ws_db.get_work_object_signature(a) is None  # nothing cached yet
+
+    sig = wp.get_or_compute_work_object_signature(a, ws_db.get_issue(a))
+
+    assert sig["external_orgs"] == ["acme"]
+    cached = ws_db.get_work_object_signature(a)
+    assert cached is not None
+    assert json.loads(cached["external_orgs"]) == ["acme"]
+
+
+def test_link_party_to_issue_invalidates_cached_signature(ws_db):
+    a = _issue(ws_db, "A")
+    wp.get_or_compute_work_object_signature(a, ws_db.get_issue(a))
+    assert ws_db.get_work_object_signature(a) is not None
+
+    ws_db.link_party_to_issue(a, "p1")
+
+    assert ws_db.get_work_object_signature(a) is None  # invalidated, not stale
+
+
+def test_reject_suggestion_invalidates_cached_signatures_for_both_sides(ws_db):
+    a = _issue(ws_db, "A")
+    b = _issue(ws_db, "B")
+    wp.get_or_compute_work_object_signature(a, ws_db.get_issue(a))
+    wp.get_or_compute_work_object_signature(b, ws_db.get_issue(b))
+    sid = ws_db.create_project_suggestion(issue_id_a=a, issue_id_b=b, reason="test", suggestion_kind="merge")
+
+    wp.reject_suggestion(sid)
+
+    assert ws_db.get_work_object_signature(a) is None
+    assert ws_db.get_work_object_signature(b) is None
+
+
+def test_merge_issue_into_invalidates_both_cached_signatures(ws_db):
+    winner = _issue(ws_db, "Winner")
+    loser = _issue(ws_db, "Loser")
+    wp.get_or_compute_work_object_signature(winner, ws_db.get_issue(winner))
+    wp.get_or_compute_work_object_signature(loser, ws_db.get_issue(loser))
+
+    ws_db.merge_issue_into(loser, winner, reason="test", actor="marc")
+
+    assert ws_db.get_work_object_signature(winner) is None
+    assert ws_db.get_work_object_signature(loser) is None
 
 
 def test_scored_grouping_decision_reference_match_is_auto_merge(ws_db):
@@ -1263,7 +1341,7 @@ def test_group_issue_same_category_flood_off_by_default_creates_no_suggestion(ws
 
 def test_group_issue_same_category_flag_on_without_corroboration_creates_no_suggestion(ws_db, monkeypatch, tmp_path):
     """Even with the flag on, a bare category match with no OTHER
-    _pairwise_score signal (no shared internal sender) is dropped, not
+    signature-scored signal (no shared internal sender) is dropped, not
     suggested - corroboration is required, the flag alone isn't enough."""
     config = _isolate_config(monkeypatch, tmp_path)
     config.set_value(True, "grouping", "same_category_proximity_suggestions_enabled")

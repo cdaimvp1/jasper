@@ -1940,6 +1940,46 @@ only, matching `workgraph_confidence.py`'s existing `freshness`/
 model. Computed/updated incrementally as claims/evidence attach to a
 work_object, not recomputed from scratch each time.
 
+**Done (2026-08-03):** `work_object_signatures` built exactly to the
+schema above - `id`/`external_orgs`/`participant_roles`/`containers`/
+`definitive_ids`/`cannot_link_ids` are all real, populated fields;
+`accepted_lineages` stays an honest `[]` (artifact_lineages/v2.6 doesn't
+exist yet); `positive_vocabulary`/`negative_vocabulary` stay `NULL` - no
+real vocabulary-extraction producer exists, so topic matching stayed the
+existing direct title `SequenceMatcher` comparison rather than being
+folded into a field nothing populates honestly yet (named gap, same
+discipline as identity_constraints' 8 unused types).
+
+Two corrections from the plan above, both made while building:
+
+1. **"Computed/updated incrementally"** is implemented as cache-on-read +
+   invalidate-on-write, not an eager recompute-on-every-write. The real
+   write sites that change a signature's content
+   (`link_raw_item_to_issue`, `link_party_to_issue`, `add_evidence`,
+   `reject_suggestion`, `merge_issue_into`) call
+   `invalidate_work_object_signature` (a cheap `DELETE`) instead of
+   recomputing inline - `link_raw_item_to_issue`/`link_party_to_issue` in
+   particular are hot, high-frequency classify-pipeline primitives, and
+   eagerly recomputing a multi-query signature inside them on every single
+   call would have slowed that path down for a benefit paid back only at
+   the next scoring read. `get_or_compute_work_object_signature` computes
+   (and re-caches) lazily the next time anything actually needs it -
+   functionally "incremental," same end state, cheaper in the place that
+   matters.
+2. **The real veto this closes turned out to be bigger than the plan
+   named.** `scored_grouping_decision`'s `auto_merge` verdict calls
+   `merge_issues_txn` directly (via `group_issue`'s `_merge_or_defer`) -
+   it never goes through `create_project_suggestion`, so v2.4's own
+   `cannot_merge`/`cannot_link` check (wired into
+   `_create_project_suggestion_on`) never protected the scored model's
+   auto-merge path at all. `_pairwise_score_from_signature`'s
+   `cannot_link_ids` veto is what actually closes that - a pair Marc
+   explicitly rejected can no longer be auto-merged by the scored model
+   either, not just re-suggested. Wired into all three real callers that
+   used to call the retired `_pairwise_score`/`_issue_signal_snapshot`
+   pair: `scored_grouping_decision`, `backtest_scored_model`, and
+   `group_issue`'s same-category-proximity corroboration check.
+
 ### 12.8 Provisional vs confirmed membership + exposure state
 
 ```sql

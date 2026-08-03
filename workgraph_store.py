@@ -924,6 +924,39 @@ def init_workgraph() -> None:
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_claim_events_claim ON claim_events(claim_id, ts)")
 
+            # identity_constraints (design doc Section 12.6): extends
+            # pending_project_suggestions' pairwise dedupe - today PENDING-only,
+            # forgotten the moment a suggestion is rejected/expires - into a
+            # real, durable veto. Schema-ready for all 10 constraint types the
+            # design doc names, but only cannot_merge/cannot_link get a real
+            # producer (workgraph_projects.reject_suggestion) and consumer
+            # (_create_project_suggestion_on, below) in this pass. The other 8
+            # (must_link, confirm_anchor, downweight_anchor,
+            # mark_artifact_generic, override_container_class,
+            # confirm_person_alias, prevent_person_merge,
+            # confirm_work_object_parent) have no current caller that would
+            # ever write one - stay schema-ready-only, same "build what has a
+            # real producer" discipline as claim_edges' contradicts/supports
+            # above.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS identity_constraints (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    constraint_type TEXT NOT NULL CHECK (constraint_type IN
+                                       ('must_link','cannot_link','cannot_merge',
+                                        'confirm_anchor','downweight_anchor',
+                                        'mark_artifact_generic','override_container_class',
+                                        'confirm_person_alias','prevent_person_merge',
+                                        'confirm_work_object_parent')),
+                    subject_a       TEXT NOT NULL,
+                    subject_b       TEXT,
+                    reason          TEXT NOT NULL,
+                    created_ts      REAL NOT NULL,
+                    created_by      TEXT NOT NULL
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_identity_constraints_a ON identity_constraints(constraint_type, subject_a)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_identity_constraints_b ON identity_constraints(constraint_type, subject_b)")
+
             try:
                 # Bumped once per raw_item at claim-materialization time (i.e. in
                 # ingestion order, never in the item's own occurred_ts) - the
@@ -3937,12 +3970,36 @@ def merge_issue_into(loser_id: str, winner_id: str, *, reason: str, actor: str) 
 _SUGGESTION_KINDS = ("merge", "link", "merge_projects")
 
 
+_SUGGESTION_KIND_TO_CONSTRAINT_TYPE = {"merge": "cannot_merge", "link": "cannot_link"}
+
+
 def _create_project_suggestion_on(conn: sqlite3.Connection, *, issue_id_a: str, issue_id_b: str,
-                                   reason: str, suggestion_kind: str, now: float) -> int:
+                                   reason: str, suggestion_kind: str, now: float) -> Optional[int]:
     """Same dedupe-then-insert logic as create_project_suggestion, against a
     GIVEN connection - for merge_issues_txn's own use (2026-07-31, step 5):
     it already holds _lock for its whole body, so calling back into
-    create_project_suggestion (which acquires _lock itself) would deadlock."""
+    create_project_suggestion (which acquires _lock itself) would deadlock.
+
+    Design doc Section 12.6: for 'merge'/'link' kinds only, a durable
+    cannot_merge/cannot_link identity_constraint (written by
+    workgraph_projects.reject_suggestion when a human rejects this exact
+    pair) permanently vetoes a new suggestion for the same pair - the real
+    fix for a rejected suggestion resurfacing once it expires, since
+    pending_project_suggestions' own dedupe only ever looked at PENDING rows
+    of the same kind. Returns None when blocked (no suggestion created);
+    'merge_projects'-kind collisions (a different question - an established-
+    project collision, not "these two are the same/related") are not
+    checked against this veto."""
+    constraint_type = _SUGGESTION_KIND_TO_CONSTRAINT_TYPE.get(suggestion_kind)
+    if constraint_type is not None:
+        blocked = conn.execute(
+            """SELECT id FROM identity_constraints WHERE constraint_type = ? AND
+               ((subject_a = ? AND subject_b = ?) OR (subject_a = ? AND subject_b = ?))""",
+            (constraint_type, issue_id_a, issue_id_b, issue_id_b, issue_id_a),
+        ).fetchone()
+        if blocked:
+            return None
+
     existing = conn.execute(
         """SELECT id FROM pending_project_suggestions
            WHERE status = 'pending' AND suggestion_kind = ? AND
@@ -3960,12 +4017,16 @@ def _create_project_suggestion_on(conn: sqlite3.Connection, *, issue_id_a: str, 
 
 
 def create_project_suggestion(*, issue_id_a: str, issue_id_b: str, reason: str,
-                               suggestion_kind: str = "merge") -> int:
+                               suggestion_kind: str = "merge") -> Optional[int]:
     """suggestion_kind added 2026-07-31 - see pending_project_suggestions'
     own schema comment. Dedupe is scoped to the SAME kind: a pending 'merge'
     suggestion for this pair must not be reused for a 'link' suggestion (or
     vice versa) - they're different questions about the same pair, not
-    interchangeable rows."""
+    interchangeable rows.
+
+    Returns None (no row created) if a durable cannot_merge/cannot_link
+    identity_constraint vetoes this exact pair - see
+    _create_project_suggestion_on's docstring (Section 12.6)."""
     if suggestion_kind not in _SUGGESTION_KINDS:
         raise ValueError(f"invalid suggestion_kind: {suggestion_kind!r}")
     with _lock:
@@ -5038,6 +5099,46 @@ def list_claim_edges_for_claim(claim_id: int) -> list[dict]:
         finally:
             conn.close()
     return [dict(r) for r in rows]
+
+
+def create_identity_constraint(constraint_type: str, subject_a: str, subject_b: Optional[str],
+                                reason: str, *, actor: str) -> int:
+    with _lock:
+        conn = _connect()
+        try:
+            cur = conn.execute(
+                """INSERT INTO identity_constraints
+                   (constraint_type, subject_a, subject_b, reason, created_ts, created_by)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (constraint_type, subject_a, subject_b, reason, time.time(), actor),
+            )
+            return cur.lastrowid
+        finally:
+            conn.close()
+
+
+def find_identity_constraint(constraint_type: str, subject_a: str,
+                              subject_b: Optional[str] = None) -> Optional[dict]:
+    """Checks both orderings of the pair (a,b)/(b,a) - same "a relationship
+    has no inherent direction" reasoning as list_claim_edges_for_claim/
+    list_project_links_for_project."""
+    with _lock:
+        conn = _connect()
+        try:
+            if subject_b is None:
+                row = conn.execute(
+                    "SELECT * FROM identity_constraints WHERE constraint_type = ? AND subject_a = ?",
+                    (constraint_type, subject_a),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    """SELECT * FROM identity_constraints WHERE constraint_type = ? AND
+                       ((subject_a = ? AND subject_b = ?) OR (subject_a = ? AND subject_b = ?))""",
+                    (constraint_type, subject_a, subject_b, subject_b, subject_a),
+                ).fetchone()
+        finally:
+            conn.close()
+    return dict(row) if row else None
 
 
 def get_claim(claim_id: int) -> Optional[dict]:

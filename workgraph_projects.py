@@ -829,6 +829,19 @@ def reject_suggestion(suggestion_id: int) -> dict:
     # same reasoning as confirm_suggestion's own docstring above.
     if sugg is not None and sugg.get("suggestion_kind") == "merge":
         workgraph_lessons.record_confirmed_or_rejected(issue_id_a=sugg["issue_id_a"], status="rejected")
+    # Design doc Section 12.6: a real human reject (this is the only caller,
+    # server_lean.py's cockpit route) is exactly the producer for a durable
+    # cannot_merge/cannot_link veto - unlike the pending-suggestion row this
+    # just resolved, this memory doesn't expire, so the same pair can't
+    # resurface a new suggestion once fresh evidence arrives (see
+    # workgraph_store._create_project_suggestion_on, the consumer side).
+    if sugg is not None and sugg.get("suggestion_kind") in ("merge", "link"):
+        constraint_type = "cannot_merge" if sugg["suggestion_kind"] == "merge" else "cannot_link"
+        ws.create_identity_constraint(
+            constraint_type, sugg["issue_id_a"], sugg["issue_id_b"],
+            reason=f"suggestion #{suggestion_id} rejected: {sugg.get('reason') or ''}",
+            actor="marc",
+        )
     return {"action": "rejected"}
 
 

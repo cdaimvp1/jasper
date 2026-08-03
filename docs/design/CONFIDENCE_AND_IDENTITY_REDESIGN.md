@@ -1869,6 +1869,44 @@ scoring directly: a template file (e.g. a blank order-form template
 attached to many unrelated threads) downweights globally instead of only
 ever being handled per-thread.
 
+**Done (2026-08-03):** `identity_constraints` built exactly as specified
+above - all 10 constraint types schema-ready via the CHECK list, brand
+new table so purely additive (no migration of existing data needed,
+unlike 12.1/12.2/12.3). Only `cannot_merge`/`cannot_link` got a real
+producer/consumer this pass, per the same "build what has a real
+producer" discipline 12.3 established:
+
+- **Producer:** `workgraph_projects.reject_suggestion` - its ONE real
+  caller (`server_lean.py`'s cockpit Reject route, i.e. always a human,
+  never curator) now writes a `cannot_merge` (for `merge`-kind) or
+  `cannot_link` (for `link`-kind) constraint alongside the existing
+  `resolve_project_suggestion(..., "rejected")` call and the pre-existing
+  Total Recall lesson write. Correction from the plan above: rather than
+  wiring the check into `merge_issue_into` (a manual, already-confirmed
+  merge that has no business re-litigating an old rejection), the actual
+  choke point is `_create_project_suggestion_on` (see consumer below) -
+  `merge_issue_into` never proposes anything, it executes what's already
+  been decided.
+- **Consumer:** `workgraph_store._create_project_suggestion_on` - the
+  single function ALL suggestion creation funnels through (both
+  `create_project_suggestion` and `merge_issues_txn`'s internal
+  `merge_projects`-kind collision path) now checks for a matching
+  constraint (either ordering of the pair) before the existing pending-
+  dedupe check, and returns `None` instead of a row when blocked. Scoped
+  to `merge`/`link` kinds only - `merge_projects` (an established-project
+  collision, a different question entirely) is not checked against this
+  veto. No production caller of `create_project_suggestion` used its
+  return value before this change (grep-confirmed), so widening the
+  return type to `Optional[int]` broke nothing live.
+- **Deferred, schema-ready-only** (no current caller would ever write
+  one): `must_link`, `confirm_anchor`, `downweight_anchor`,
+  `mark_artifact_generic`, `override_container_class`,
+  `confirm_person_alias`, `prevent_person_merge`,
+  `confirm_work_object_parent`. Same named-gap-not-silently-dropped
+  discipline as claim_edges' `contradicts`/`supports` (12.3) - revisit
+  each if/when a real producer shows up (e.g. `mark_artifact_generic`
+  once Evidence Assembly's template-detection exists, per 12.5/12.9).
+
 ### 12.7 `ProjectSignature`-based scoring
 
 Replaces `scored_grouping_decision`'s flat weighted-sum
@@ -1975,9 +2013,11 @@ move:
    and Evidence Assembly both read evidence.
 3. **Claims extensions** (12.3): edges, work-state taxonomy + reconciler,
    completion contracts, the actor-resolution correction.
-4. **`identity_constraints`** (12.6) - wire `cannot_merge` into
-   `merge_issue_into` immediately once it exists, closing a real gap
-   (rejected suggestions can currently resurface).
+4. **`identity_constraints`** (12.6) - wire `cannot_merge`/`cannot_link`
+   into `_create_project_suggestion_on` (the real suggestion-creation
+   choke point, not `merge_issue_into` - correction made while building,
+   see 12.6's own "Done" note) immediately once it exists, closing a real
+   gap (rejected suggestions can currently resurface).
 5. **`work_object_signatures`** (12.7) - replaces the flat weighted-sum
    scoring; re-run `backtest_scored_model()`'s equivalent against the new
    signature model before trusting it live, same discipline as the

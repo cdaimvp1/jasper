@@ -1390,6 +1390,32 @@ def test_create_project_suggestion_same_kind_dedups(ws_db):
     assert len(ws_db.list_project_suggestions(status="pending")) == 1
 
 
+def test_create_and_find_identity_constraint_either_ordering(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
+
+    cid = ws_db.create_identity_constraint("cannot_merge", a, b, "confirmed separate", actor="marc")
+    assert cid is not None
+
+    assert ws_db.find_identity_constraint("cannot_merge", a, b) is not None
+    assert ws_db.find_identity_constraint("cannot_merge", b, a) is not None  # order-independent
+    assert ws_db.find_identity_constraint("cannot_link", a, b) is None  # different type, no match
+
+
+def test_find_identity_constraint_no_subject_b_matches_single_subject_types(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    ws_db.create_identity_constraint("confirm_anchor", a, None, "test", actor="marc")
+
+    assert ws_db.find_identity_constraint("confirm_anchor", a) is not None
+
+
+def test_create_identity_constraint_rejects_invalid_type(ws_db):
+    import sqlite3
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    with pytest.raises(sqlite3.IntegrityError):
+        ws_db.create_identity_constraint("not_a_real_type", a, None, "test", actor="marc")
+
+
 def test_expire_stale_project_suggestions_expires_old_pending_merge(ws_db):
     """Phase 0 fix (D2): the structural backstop against the pending queue
     accumulating forever, independent of the generation flag's setting."""

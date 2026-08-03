@@ -553,6 +553,58 @@ def test_reject_suggestion_link_kind_does_not_record_a_lesson(ws_db):
     assert ws_db.get_lesson_by_situation(key, "rejected") is None
 
 
+def test_reject_suggestion_merge_kind_writes_cannot_merge_constraint(ws_db):
+    a = _issue(ws_db, "A")
+    b = _issue(ws_db, "B")
+    sid = ws_db.create_project_suggestion(issue_id_a=a, issue_id_b=b, reason="test", suggestion_kind="merge")
+
+    wp.reject_suggestion(sid)
+
+    constraint = ws_db.find_identity_constraint("cannot_merge", a, b)
+    assert constraint is not None
+    assert constraint["created_by"] == "marc"
+
+
+def test_reject_suggestion_link_kind_writes_cannot_link_constraint(ws_db):
+    a = _issue(ws_db, "A")
+    b = _issue(ws_db, "B")
+    sid = ws_db.create_project_suggestion(issue_id_a=a, issue_id_b=b, reason="test", suggestion_kind="link")
+
+    wp.reject_suggestion(sid)
+
+    assert ws_db.find_identity_constraint("cannot_link", a, b) is not None
+    assert ws_db.find_identity_constraint("cannot_merge", a, b) is None  # wrong kind, not written
+
+
+def test_rejected_pair_cannot_resurface_a_new_suggestion(ws_db):
+    """The real bug this closes: today a rejected suggestion just expires
+    and the same pair can resurface a brand-new one from fresh evidence -
+    once rejected, create_project_suggestion for the SAME pair/kind must
+    come back None forever, not a new pending row."""
+    a = _issue(ws_db, "A")
+    b = _issue(ws_db, "B")
+    sid = ws_db.create_project_suggestion(issue_id_a=a, issue_id_b=b, reason="test", suggestion_kind="merge")
+    wp.reject_suggestion(sid)
+
+    blocked = ws_db.create_project_suggestion(issue_id_a=a, issue_id_b=b, reason="fresh evidence", suggestion_kind="merge")
+    assert blocked is None
+    # order-independence: (b, a) is the same pair
+    blocked2 = ws_db.create_project_suggestion(issue_id_a=b, issue_id_b=a, reason="fresh evidence", suggestion_kind="merge")
+    assert blocked2 is None
+
+
+def test_rejected_merge_does_not_block_a_link_suggestion_for_the_same_pair(ws_db):
+    """cannot_merge and cannot_link are different questions about the same
+    pair - rejecting one must not silently veto the other."""
+    a = _issue(ws_db, "A")
+    b = _issue(ws_db, "B")
+    sid = ws_db.create_project_suggestion(issue_id_a=a, issue_id_b=b, reason="test", suggestion_kind="merge")
+    wp.reject_suggestion(sid)
+
+    link_sid = ws_db.create_project_suggestion(issue_id_a=a, issue_id_b=b, reason="test", suggestion_kind="link")
+    assert link_sid is not None
+
+
 def test_weak_signal_candidates_exclude_disjoint_reference_pair(ws_db):
     now = time.time()
     a = _issue(ws_db, "Contract review A", opened_at=now)

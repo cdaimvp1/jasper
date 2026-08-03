@@ -1745,12 +1745,22 @@ async def api_project_detail(project_id: str):
     deep_links.attach_deep_links(repeat_signals)
     parties = workgraph_projects.aggregate_parties_for_project(project_id)
     value_by_issue = workgraph_nba.value_amounts_for_issues(open_ids)
+    parties_by_issue = wg.list_parties_for_issues(issue_ids)
     # Detail Panel Refined (task #124 follow-on, 2026-08-01): the per-issue
     # values were already computed above just to sum them - attaching them
     # back onto each issue costs nothing extra and is what the Project tab's
     # "issues, priority order" list needs to show a real dollar figure per row.
+    # Fixed 2026-08-02 (Marc's direct report: project-detail buttons
+    # "reacting very slowly"): each issue's own parties (for its row's party
+    # chips) used to require the CLIENT to fetch the full
+    # GET /api/workgraph/issues/{id} payload separately, once per member
+    # issue - real, measured cost on a server where every request currently
+    # blocks the same single event loop (see list_parties_for_issues' own
+    # docstring). Attaching them here means the one project-detail response
+    # already has everything the issue-row list needs.
     for i in issues:
         i["value_found"] = value_by_issue.get(i["id"])
+        i["parties"] = sanitize_surrogates(parties_by_issue.get(i["id"], []))
     # "What the next owner must know" needs one real headline action, not
     # a full per-issue candidate_actions() call for every member (that
     # would mean N extra full detail fetches) - the highest-priority open

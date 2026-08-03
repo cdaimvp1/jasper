@@ -1258,6 +1258,51 @@ def test_remediate_merge_issue_identity_moves_a_party_only_the_loser_had(ws_db):
     assert any(p["id"] == "loser-only" for p in parties)
 
 
+def test_list_parties_for_issues_batched_matches_per_issue_calls(ws_db):
+    """N+1 fix (2026-08-02): list_parties_for_issues must return the exact
+    same result as calling list_parties_for_issue once per issue, but via a
+    single query across every issue - see its own docstring for why this
+    exists (removing a per-member-issue fetch the project detail page used
+    to make just for row party chips)."""
+    iid1 = ws_db.create_issue_with_new_id(title="One", state="active", category="other")
+    iid2 = ws_db.create_issue_with_new_id(title="Two", state="active", category="other")
+    iid3 = ws_db.create_issue_with_new_id(title="No parties", state="active", category="other")
+    ws_db.upsert_party(id="party-a", primary_email="a@example.com", display_name="A",
+                        affiliation="internal", affiliation_confidence="H", affiliation_source="domain", company=None)
+    ws_db.upsert_party(id="party-b", primary_email="b@example.com", display_name="B",
+                        affiliation="external", affiliation_confidence="M", affiliation_source="domain", company="Acme")
+    ws_db.link_party_to_issue(iid1, "party-a")
+    ws_db.link_party_to_issue(iid2, "party-b")
+
+    batched = ws_db.list_parties_for_issues([iid1, iid2, iid3])
+
+    assert [p["id"] for p in batched[iid1]] == ["party-a"]
+    assert [p["id"] for p in batched[iid2]] == ["party-b"]
+    assert batched[iid3] == []
+    assert batched[iid1] == ws_db.list_parties_for_issue(iid1)
+    assert batched[iid2] == ws_db.list_parties_for_issue(iid2)
+
+
+def test_list_parties_for_issues_empty_list_returns_empty_dict(ws_db):
+    assert ws_db.list_parties_for_issues([]) == {}
+
+
+def test_list_parties_for_issues_same_party_on_multiple_issues(ws_db):
+    """A shared party (e.g. the same external contact on two issues in one
+    project) must appear under EACH issue's own entry, not just one."""
+    iid1 = ws_db.create_issue_with_new_id(title="One", state="active", category="other")
+    iid2 = ws_db.create_issue_with_new_id(title="Two", state="active", category="other")
+    ws_db.upsert_party(id="shared", primary_email="shared@example.com", display_name="Shared",
+                        affiliation="external", affiliation_confidence="H", affiliation_source="domain", company=None)
+    ws_db.link_party_to_issue(iid1, "shared")
+    ws_db.link_party_to_issue(iid2, "shared")
+
+    batched = ws_db.list_parties_for_issues([iid1, iid2])
+
+    assert [p["id"] for p in batched[iid1]] == ["shared"]
+    assert [p["id"] for p in batched[iid2]] == ["shared"]
+
+
 def test_get_calendar_raw_items_for_remediation_only_returns_calendar_source(ws_db):
     ws_db.insert_raw_item(source="calendar", stable_key="c1", thread_key="c1", dedupe_key="dkc1",
                            occurred_ts=time.time(), subject="cal", from_actor="a@example.com", participants_json="[]")

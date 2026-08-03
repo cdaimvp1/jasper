@@ -2371,19 +2371,42 @@ def link_party_to_issue(issue_id: str, party_id: str, role: Optional[str] = None
             conn.close()
 
 
-def list_parties_for_issue(issue_id: str) -> list[dict]:
+def list_parties_for_issues(issue_ids: list[str]) -> dict[str, list[dict]]:
+    """Batched sibling of list_parties_for_issue - one query across every
+    issue instead of one per issue. Added 2026-08-02: api_project_detail's
+    client (pjRenderProjectDetail) was calling GET /api/workgraph/issues/
+    {id} once per member issue just to get each issue's own party chips -
+    real, measured cost, since every request on this server currently blocks
+    the single event loop on synchronous SQLite calls (confirmed live: 15
+    genuinely-parallel curl requests to that endpoint took 9.3s combined,
+    not ~1s as true parallelism would). Fixing that server-wide is a much
+    bigger, riskier change than this task called for - this instead removes
+    the NEED for those N requests at all, by having api_project_detail
+    attach each issue's own parties directly onto it in the one response
+    the page already fetches."""
+    if not issue_ids:
+        return {}
     with _lock:
         conn = _connect()
         try:
+            placeholders = ",".join("?" * len(issue_ids))
             rows = conn.execute(
-                """SELECT p.*, ip.role FROM parties p
-                   JOIN issue_parties ip ON ip.party_id = p.id
-                   WHERE ip.issue_id = ?""",
-                (issue_id,),
+                f"""SELECT p.*, ip.role, ip.issue_id AS issue_id FROM parties p
+                    JOIN issue_parties ip ON ip.party_id = p.id
+                    WHERE ip.issue_id IN ({placeholders})""",
+                issue_ids,
             ).fetchall()
         finally:
             conn.close()
-    return [dict(r) for r in rows]
+    out: dict[str, list[dict]] = {iid: [] for iid in issue_ids}
+    for r in rows:
+        d = dict(r)
+        out[d["issue_id"]].append(d)
+    return out
+
+
+def list_parties_for_issue(issue_id: str) -> list[dict]:
+    return list_parties_for_issues([issue_id]).get(issue_id, [])
 
 
 def list_issues_for_party(party_id: str) -> list[str]:

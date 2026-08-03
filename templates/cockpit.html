@@ -8695,13 +8695,17 @@ html[data-theme="dark"]{
 
   async function pjRenderProjectDetail(d) {
     const project = d.project, issues = d.issues || [];
-    await Promise.all(issues.map(async iss => {
-      if (pjIssueDetailCache[iss.id]) return;
-      try {
-        const rd = await fetch(`/api/workgraph/issues/${encodeURIComponent(iss.id)}`, { cache: "no-store" });
-        if (rd.ok) pjIssueDetailCache[iss.id] = await rd.json();
-      } catch (e) { /* row just renders without party chips */ }
-    }));
+    // Fixed 2026-08-02 (Marc's direct report: project-detail buttons
+    // "reacting very slowly"): this used to fetch the FULL
+    // GET /api/workgraph/issues/{id} payload for every member issue, in
+    // parallel, just to read its .parties for that row's chips - real,
+    // measured cost (15 genuinely-parallel requests to that endpoint took
+    // 9.3s combined on this server, not the ~1s true parallelism would
+    // give - every request here currently blocks the same single event
+    // loop on synchronous SQLite calls). api_project_detail now attaches
+    // each issue's own parties directly (see server_lean.py), so the ONE
+    // request this function already made has everything issueRows needs -
+    // no per-issue fetch, no pjIssueDetailCache dependency here at all.
     const body = document.getElementById("pjProjectDetail");
 
     // Project-detail redesign (2026-07-31, Marc's own design brief:
@@ -8730,8 +8734,7 @@ html[data-theme="dark"]{
     // #70 gap). Rows are clickable straight into PCC Detail (also task #70 -
     // this list used to be read-only, with no way to act on what it showed).
     const issueRows = issues.map((iss, idx) => {
-      const full = pjIssueDetailCache[iss.id];
-      const parties = (full && full.parties) || [];
+      const parties = iss.parties || [];
       const chips = parties.length
         ? `<div class="pcc-actions-row" style="margin-top:6px">${parties.map(p => window.renderPartyChip(p)).join("")}</div>` : "";
       const reasonHtml = iss.nba_reason

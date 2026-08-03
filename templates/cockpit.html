@@ -3119,6 +3119,25 @@ html[data-theme="dark"]{
 .cp-wake-all-btn{border-color:var(--lk-pri);color:var(--lk-pri);font-weight:800;margin-right:6px}
 .cp-wake-all-btn:hover{background:var(--lk-pri);color:#fff}
 
+/* Task #57 (2026-08-02): "Your next move" strip - deliberately plain. The
+   removed rollup cards (0ffeecc) tried to look important with dollar
+   totals and a colored banner and got the underlying math wrong. This is
+   just the top few already-scored, already-grouped issues (pccRenderNextMove
+   below) - same visual weight as a normal list row, not a bigger claim than
+   the data actually supports. */
+#pccNextMove{margin-bottom:14px;border:1px solid var(--lk-line2);background:var(--lk-surface)}
+.pcc-nextmove-hd{font:800 11px var(--sans);text-transform:uppercase;letter-spacing:.05em;color:var(--lk-mut2);
+  padding:9px 14px 7px;border-bottom:1px solid var(--lk-line2)}
+.pcc-nextmove-rows{display:flex;flex-direction:column}
+.pcc-nextmove-row{display:flex;align-items:baseline;gap:10px;padding:9px 14px;cursor:pointer;
+  border-bottom:1px solid var(--lk-line2)}
+.pcc-nextmove-row:last-child{border-bottom:none}
+.pcc-nextmove-row:hover{background:var(--lk-panel)}
+.pcc-nextmove-title{font:700 13px var(--sans);color:var(--lk-ink);flex:none;max-width:45%;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pcc-nextmove-reason{font:400 12.5px var(--sans);color:var(--lk-mut2);flex:1;min-width:0;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
 /* ── Telemetry page (task #48/#51) - everything scoped under #cp-view-telemetry
    so these fairly generic class names (.pill/.section/etc in the original
    mockup, renamed .pcc-tele-* here) can never collide with the rest of the
@@ -3302,6 +3321,14 @@ html[data-theme="dark"]{
 
     <!-- ════ PCC ADD: Personal Command Center board — real workgraph data ════ -->
     <div id="cp-view-pcc">
+     <!-- Task #57 (Marc's direct report, 2026-08-02): the removed rollup
+          cards (task #124-adjacent, 0ffeecc) tried to distill everything
+          into dollar totals and got the math wrong (a real ~$6.3M double-
+          count). This is a different shape on purpose - no new aggregate
+          math, just the top few already-scored, already-grouped issues
+          surfaced above the flat list, so 249 open items don't all read as
+          equally Marc's. See pccRenderNextMove() below. -->
+     <div id="pccNextMove" style="display:none"></div>
      <div class="cp-home-split" id="cpHomeSplit">
       <!-- Back Office moved 2026-07-28 (Tia): now lives inside the ambient chat
            drawer (click the dino icon, top of the masthead) instead of a fixed
@@ -6267,9 +6294,54 @@ html[data-theme="dark"]{
       } catch (e) { /* lane bucketing just skips this one */ }
     }));
     pccUpdateCounts();
+    pccRenderNextMove();
     pccRenderList();
     pccUpdateGreeting();
     if (pccSelectedId && pccDetailCache[pccSelectedId]) pccRenderDetail(pccDetailCache[pccSelectedId]);
+  }
+
+  // Task #57 (Marc's direct report + design review, 2026-08-02): "Your next
+  // move" - the top few items by the SAME real priority_score/nba_reason
+  // workgraph_nba.py already computes, through the SAME project-collapsing
+  // pccGroupByProject already does (task #53) - reused, not reinvented, so
+  // a project with 5 messages shows as ONE recommended action here too,
+  // never 5. No new aggregate math, no dollar totals - the removed rollup
+  // cards' exact failure mode. Deliberately called BEFORE pccRenderList()
+  // below - pccGroupByProject has a real side effect (it rebuilds the
+  // shared pccProjectGroupMembers map used by the Inbox list's own click
+  // routing), so pccRenderList's own call needs to run LAST and "win" for
+  // the currently-active lane. This function never reads that shared map -
+  // its own click handlers close directly over the group objects it just
+  // built locally, so the overwrite that happens right after doesn't matter.
+  function pccRenderNextMove() {
+    const el = document.getElementById("pccNextMove");
+    if (!el) return;
+    const open = pccIssues.filter(i => i.state === "active" || i.state === "waiting" || i.state === "blocked");
+    if (!open.length) { el.style.display = "none"; el.innerHTML = ""; return; }
+    const top = pccGroupByProject(open).slice()
+      .sort((a, b) => (b.priority_score || 0) - (a.priority_score || 0))
+      .slice(0, 3);
+    el.style.display = "";
+    el.innerHTML = `
+      <div class="pcc-nextmove-hd">Your next move</div>
+      <div class="pcc-nextmove-rows">
+        ${top.map((iss, idx) => `
+          <div class="pcc-nextmove-row" data-idx="${idx}">
+            <span class="pcc-nextmove-title">${pccEsc(iss.display_title || iss.title)}</span>
+            <span class="pcc-nextmove-reason">${pccEsc(iss.nba_reason || iss.preview || "")}</span>
+          </div>`).join("")}
+      </div>`;
+    el.querySelectorAll(".pcc-nextmove-row").forEach(row => {
+      const iss = top[Number(row.getAttribute("data-idx"))];
+      row.addEventListener("click", () => {
+        if (iss.__isProjectGroup) {
+          if (window.pjShowView) window.pjShowView();
+          if (window.pjSelectProject) window.pjSelectProject(iss.project_id);
+        } else {
+          pccSelectIssue(iss.id);
+        }
+      });
+    });
   }
 
   // --- task #65: Value-at-risk rollup banner -------------------------------

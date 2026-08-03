@@ -38,106 +38,85 @@ import workgraph_store as ws
 # run()'s deferred_count).
 DEFAULT_SYNTHESIS_LIMIT = 8
 
-# item_class values that never justify waking curator on their own (see
-# _is_material) - matches workgraph_classify.py's taxonomy.
-_NON_MATERIAL_CLASSES = ("NOISE", "FYI-EVIDENCE")
-
 
 def compute_evidence_marker(entity_type: str, entity_id: str) -> str:
-    """Pure. A project's evidence scope is the UNION of every one of its
-    constituent issues' evidence (Marc's requirement: one synthesis per
-    underlying negotiation, which can span several issues/threads) - an
-    issue's scope is just its own evidence. Marker is deliberately just
-    count + max timestamp, not a hash of full content: cheap, and sufficient
-    to detect "something new landed" without needing to diff bodies."""
+    """Revision-counter marker (design doc Section 9.5), not count/max_ts.
+
+    D9/D10's real root cause, found by reading this module directly rather
+    than assumed: the OLD marker ("count:N|max_ts:T") correctly flagged a
+    late-arriving, old-timestamped item as stale at the top level (any count
+    change flips the string) - but the delta this module used to decide
+    WHAT was actually new (filtering raw_items by `occurred_ts > since`,
+    `since` parsed from the old marker's max_ts) is blind to exactly that
+    item, since its own occurred_ts is older than `since`. The entity got
+    silently marked fresh again (touch_synthesis_marker) without the late
+    content ever actually being folded into a re-synthesis.
+
+    The fix: claims_revision (workgraph_claims.py / Section 9.2) is bumped
+    once per raw_item at MATERIALIZATION time - i.e. in the order Jasper
+    learned about an item, never in the item's own occurred_ts - which is
+    exactly the property this comparison needed and occurred_ts structurally
+    can't provide. It also subsumes the old separate materiality filter for
+    free: a claim is only ever created for genuinely material content (an
+    ask/decision/commitment/date), so a revision bump IS a real materiality
+    signal, and pure NOISE/FYI evidence that produces zero claims correctly
+    never changes the marker at all - no separate _is_material check needed.
+
+    A project's scope is still every constituent issue's claims activity
+    (Marc's requirement: one synthesis per underlying negotiation, which can
+    span several issues/threads) - taken as the max revision across members,
+    computed at check time rather than kept as a synced second counter."""
     if entity_type == "project":
-        evidence: list[dict] = []
-        for issue in ws.list_issues_for_project(entity_id):
-            evidence.extend(ws.list_evidence(issue["id"]))
+        rev = ws.get_max_claims_revision_for_project(entity_id)
     elif entity_type == "issue":
-        evidence = ws.list_evidence(entity_id)
+        rev = ws.get_claims_revision(entity_id)
     else:
         raise ValueError(f"unknown entity_type: {entity_type}")
-
-    count = len(evidence)
-    max_ts = max((e["ts"] for e in evidence), default=0.0)
-    return f"count:{count}|max_ts:{max_ts}"
+    return f"rev:{rev}"
 
 
-def _parse_max_ts(marker: Optional[str]) -> float:
-    if not marker:
-        return 0.0
-    for part in marker.split("|"):
-        if part.startswith("max_ts:"):
-            try:
-                return float(part.split(":", 1)[1])
-            except ValueError:
-                return 0.0
-    return 0.0
-
-
-def _new_raw_items_since(entity_type: str, entity_id: str, previous_marker: Optional[str]) -> list[dict]:
-    """raw_items newly occurred since previous_marker's max_ts - the actual
-    DELTA a materiality check needs, not just the count/timestamp marker."""
-    since = _parse_max_ts(previous_marker)
-    if entity_type == "project":
-        issue_ids = [i["id"] for i in ws.list_issues_for_project(entity_id)]
-    else:
-        issue_ids = [entity_id]
-    items = []
-    for iid in issue_ids:
-        items.extend(r for r in ws.get_raw_items_for_issue(iid) if r["occurred_ts"] > since)
-    return items
-
-
-def _is_material(new_items: list[dict]) -> bool:
-    """True if the new evidence is worth waking curator over: anything
-    beyond NOISE/FYI-EVIDENCE, or an FYI item whose extraction (if one
-    exists yet) actually carries an ask/decision/commitment. Pure inbox
-    churn (an automated FYI notice, a closure receipt) returns False."""
-    for item in new_items:
-        if item.get("item_class") not in _NON_MATERIAL_CLASSES:
-            return True
-        extraction = ws.get_extraction(item["id"])
-        if extraction and any(extraction["extracted_json"].get(k) for k in ("asks", "decisions", "commitments")):
-            return True
-    return False
+def _parse_rev(marker: Optional[str]) -> int:
+    """0 for a never-synthesized entity AND for any pre-migration marker in
+    the old "count:...|max_ts:..." format - both correctly sort as the
+    oldest/most-overdue bucket, and the old format is never matched by a
+    freshly computed "rev:N" marker, so it's always treated as stale once
+    (Section 9.5's documented one-time re-synthesis cost)."""
+    if not marker or not marker.startswith("rev:"):
+        return 0
+    try:
+        return int(marker.split(":", 1)[1])
+    except ValueError:
+        return 0
 
 
 def list_stale_entities(limit: int = DEFAULT_SYNTHESIS_LIMIT, *, stats: Optional[dict] = None) -> list[dict]:
     """Every Project (ws.list_projects()) and every standalone Issue
-    (ws.list_standalone_issue_ids() - no project_id) whose current evidence
-    marker doesn't match its stored synthesis row (or has no synthesis row at
-    all, which is stale by definition - always material, first pass).
-    Pure/deterministic - no LLM/network call anywhere in this function or
-    anything it calls, INCLUDING the materiality check and the marker-touch
-    it triggers.
+    (ws.list_standalone_issue_ids() - no project_id) whose current claims-
+    revision marker (Section 9.5) doesn't match its stored synthesis row (or
+    has no synthesis row at all, which is stale by definition - always
+    material, first pass). Pure/deterministic - no LLM/network call
+    anywhere in this function or anything it calls.
 
-    Two things keep this bounded and cheap for curator:
-      - materiality filter: an entity whose only new evidence since its last
-        synthesis is NOISE/FYI-EVIDENCE with no real extraction content has
-        its marker silently advanced (ws.touch_synthesis_marker) instead of
-        being added to the list - it won't keep re-flagging every wake for
-        evidence that never needed a re-synthesis.
-      - per-wake cap: entities are ranked never-synthesized-first, then
-        oldest-marker-first, and only the first `limit` are returned. The
-        rest are deferred to the next wake, counted in `stats` if the caller
-        passed one (see run()) - never silently dropped.
+    The old separate materiality filter (touch the marker without
+    re-synthesizing when new evidence was NOISE/FYI-only) is gone - it's
+    now structural: claims_revision only bumps when a real ask/decision/
+    commitment/date claim is materialized, so purely immaterial evidence
+    never changes the marker in the first place. `skipped_immaterial` is
+    kept in `stats` at a constant 0 for callers that already read it
+    (ingest/scheduled_refresh.py's log line) rather than removing the key.
+
+    Bounded for curator by a per-wake cap: entities are ranked never-
+    synthesized-first, then oldest-marker-first, and only the first `limit`
+    are returned. The rest are deferred to the next wake, counted in
+    `stats` if the caller passed one (see run()) - never silently dropped.
     """
     stale = []
-    skipped_immaterial = 0
 
     for project in ws.list_projects():
         marker = compute_evidence_marker("project", project["id"])
         existing = ws.get_synthesis("project", project["id"])
         if existing is not None and existing.get("synthesized_from_marker") == marker:
             continue
-        if existing is not None:
-            new_items = _new_raw_items_since("project", project["id"], existing.get("synthesized_from_marker"))
-            if not _is_material(new_items):
-                ws.touch_synthesis_marker("project", project["id"], marker)
-                skipped_immaterial += 1
-                continue
         stale.append({
             "entity_type": "project",
             "entity_id": project["id"],
@@ -152,12 +131,6 @@ def list_stale_entities(limit: int = DEFAULT_SYNTHESIS_LIMIT, *, stats: Optional
         existing = ws.get_synthesis("issue", issue_id)
         if existing is not None and existing.get("synthesized_from_marker") == marker:
             continue
-        if existing is not None:
-            new_items = _new_raw_items_since("issue", issue_id, existing.get("synthesized_from_marker"))
-            if not _is_material(new_items):
-                ws.touch_synthesis_marker("issue", issue_id, marker)
-                skipped_immaterial += 1
-                continue
         issue = ws.get_issue(issue_id)
         stale.append({
             "entity_type": "issue",
@@ -169,23 +142,14 @@ def list_stale_entities(limit: int = DEFAULT_SYNTHESIS_LIMIT, *, stats: Optional
         })
 
     # Rank: never-synthesized (previous_marker is None) first, then
-    # oldest-marker first, so a big backlog doesn't starve entities that
-    # have been waiting longest.
-    #
-    # Fixed 2026-07-29: this used to sort on the raw marker STRING
-    # ("count:N|max_ts:T"), not by time - since `count` sits before `max_ts`
-    # in the string and digit-length varies, lexicographic comparison was
-    # dominated by the count field. Confirmed: "count:12|..." (fresher, more
-    # evidence) sorted BEFORE "count:3|..." (genuinely staler) because "1"
-    # lexicographically precedes "3". Given DEFAULT_SYNTHESIS_LIMIT truncates
-    # this list, that could bump genuinely long-neglected entities out of
-    # curator's work queue in favor of fresher ones - the opposite of the
-    # anti-starvation guarantee this sort exists for. _parse_max_ts already
-    # existed for exactly this - just wasn't being used here.
-    stale.sort(key=lambda s: (s["previous_marker"] is not None, _parse_max_ts(s["previous_marker"])))
+    # oldest-revision first, so a big backlog doesn't starve entities that
+    # have been waiting longest (same anti-starvation intent as the
+    # 2026-07-29 fix to the old count/max_ts sort - _parse_rev is its
+    # rev:N-marker successor).
+    stale.sort(key=lambda s: (s["previous_marker"] is not None, _parse_rev(s["previous_marker"])))
 
     if stats is not None:
-        stats["skipped_immaterial"] = skipped_immaterial
+        stats["skipped_immaterial"] = 0
         stats["deferred"] = max(0, len(stale) - limit)
 
     return stale[:limit]

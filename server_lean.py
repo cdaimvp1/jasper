@@ -57,6 +57,7 @@ from bus import init_bus, emit_event, query_events, latest_id, event_count
 
 from watchers import start_watchers, stop_watchers
 
+import workgraph_claims
 import workgraph_store as wg
 import workgraph_classify
 import workgraph_nba
@@ -2137,9 +2138,19 @@ class ExtractionBody(BaseModel):
 
 @app.post("/api/workgraph/raw_items/{raw_item_id}/extraction")
 async def api_raw_item_extraction_write(raw_item_id: int, body: ExtractionBody):
-    if wg.get_raw_item(raw_item_id) is None:
+    item = wg.get_raw_item(raw_item_id)
+    if item is None:
         raise HTTPException(404, f"no such raw_item: {raw_item_id}")
     wg.create_extraction(raw_item_id, json.dumps(body.extracted_json))
+    # Phase 3 (design doc Section 9): materialize claims from this extraction
+    # the moment it's written - the live-wiring point claims_revision (Section
+    # 9.5) needs to stay current for real, not just at backfill time. Also
+    # index evidence_fts (Section 9.6) here, same reasoning: this is the one
+    # place a raw_item's real text+extraction are both freshly available.
+    workgraph_claims.materialize_claims_for_raw_item(raw_item_id)
+    body_text = text_extract.resolve_item_text(item)
+    if body_text and body_text.strip():
+        wg.index_evidence_fts(raw_item_id, item.get("issue_id"), body_text)
     return JSONResponse({"ok": True, "extraction": sanitize_surrogates(wg.get_extraction(raw_item_id))})
 
 

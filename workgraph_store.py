@@ -775,6 +775,63 @@ def init_workgraph() -> None:
             except sqlite3.OperationalError:
                 pass  # already added by a prior init_workgraph() call
 
+            # --- Phase 3 (design doc Section 9): claims materialize the ask/
+            # decision/commitment/date fields already sitting in
+            # raw_item_extractions.extracted_json into real, typed, deduped,
+            # actor-attributed rows - not a new extraction pass, see
+            # workgraph_claims.py. author is deterministic (raw_items.direction),
+            # never a keyword guess (Section 9.4). owner is derived from
+            # author+claim_type for ask/commitment, and from the extraction's
+            # own 'whose' judgment for date claims (Section 9.7, task #57) -
+            # NULL for decisions, which are joint facts, not obligations.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS claims (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    issue_id        TEXT NOT NULL REFERENCES issues(id),
+                    raw_item_id     INTEGER NOT NULL REFERENCES raw_items(id),
+                    claim_type      TEXT NOT NULL CHECK (claim_type IN ('ask','decision','commitment','date')),
+                    text            TEXT NOT NULL,
+                    author          TEXT NOT NULL CHECK (author IN ('marc','counterparty','unknown')),
+                    author_basis    TEXT NOT NULL CHECK (author_basis IN ('direction','unresolved')),
+                    owner           TEXT CHECK (owner IN ('marc','counterparty','unknown')),
+                    date_kind       TEXT CHECK (date_kind IN ('hard','soft')),
+                    status          TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','done','superseded','dismissed')),
+                    superseded_by   INTEGER REFERENCES claims(id),
+                    escalated       INTEGER NOT NULL DEFAULT 0,
+                    escalation_note TEXT,
+                    first_seen_ts   REAL NOT NULL,
+                    last_seen_ts    REAL NOT NULL
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_claims_issue ON claims(issue_id, status)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_claims_raw_item ON claims(raw_item_id)")
+
+            try:
+                # Bumped once per raw_item at claim-materialization time (i.e. in
+                # ingestion order, never in the item's own occurred_ts) - the
+                # cursor synthesis staleness needed and occurred_ts structurally
+                # can't provide (Section 9.5 - D9/D10's real root cause: a late-
+                # arriving, old-timestamped item was correctly flagged stale at
+                # the top level but invisible to the occurred_ts-keyed delta that
+                # decides what's actually new to (re-)synthesize).
+                conn.execute("ALTER TABLE issues ADD COLUMN claims_revision INTEGER NOT NULL DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass  # already added by a prior init_workgraph() call
+
+            # Full-text evidence index (Section 9.6) over the same body
+            # text_extract.resolve_item_text() already resolves from local
+            # files (never a live Outlook/Graph call) - safe to backfill over
+            # the whole historical corpus. Feeds Evidence Assembly's
+            # (Section 8.1) full-text candidate path and Project Deep-Dive's
+            # (Section 8.4) in-corpus search, before either falls back to live
+            # M365 search.
+            conn.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS evidence_fts USING fts5(
+                    body, raw_item_id UNINDEXED, issue_id UNINDEXED,
+                    tokenize='porter unicode61'
+                )
+            """)
+
             # --- Attachments: relates a real file on disk to a specific issue,
             # project, or chat conversation - not just a filename mentioned in a
             # message. The file itself lives under DOCUMENTS_DIR (see paths.py),
@@ -4297,6 +4354,242 @@ def list_extractions_for_issues(issue_ids: list[str]) -> dict[str, list[dict]]:
             d["extracted_json"] = {}
         out.setdefault(d["issue_id"], []).append(d)
     return out
+
+
+def list_raw_item_ids_with_extractions() -> list[int]:
+    """Every raw_item that has a real extraction, oldest first - the backfill
+    driver for workgraph_claims_backfill.backfill_claims (Section 9.9 step 3),
+    not a hot-path query."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT raw_item_id FROM raw_item_extractions ORDER BY raw_item_id ASC"
+            ).fetchall()
+        finally:
+            conn.close()
+    return [r["raw_item_id"] for r in rows]
+
+
+def list_all_raw_item_ids() -> list[int]:
+    """Every raw_item, extracted or not - the FTS backfill (Section 9.6)
+    indexes full text regardless of whether extraction has run, since
+    evidence search is useful before/without extraction too."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute("SELECT id FROM raw_items ORDER BY id ASC").fetchall()
+        finally:
+            conn.close()
+    return [r["id"] for r in rows]
+
+
+# --- claims (design doc Section 9 / Phase 3) --------------------------
+# Materialized, typed, deduped, actor-attributed rows over the ask/decision/
+# commitment/date fields raw_item_extractions already carries. See
+# workgraph_claims.py for the materialization logic that calls these -
+# this layer is pure persistence, same split as every other table here.
+
+def has_claims_for_raw_item(raw_item_id: int) -> bool:
+    """Idempotency guard - materialize_claims_for_raw_item is safe to call
+    more than once per raw_item (mirrors the never-re-extract discipline
+    raw_item_extractions itself already relies on)."""
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM claims WHERE raw_item_id = ? LIMIT 1", (raw_item_id,)
+            ).fetchone()
+        finally:
+            conn.close()
+    return row is not None
+
+
+def find_open_claim_by_text(issue_id: str, claim_type: str, text: str) -> Optional[dict]:
+    """Exact-text match among this issue's OPEN claims of the same type -
+    used both for repeat_signals-driven ask dedup (Section 9.3) and as a
+    same-raw_item idempotency fallback. Exact match only; no fuzzy text
+    comparison anywhere in this module, deliberately - the real dedup
+    signal is curator's own repeat_signals judgment, not a text-similarity
+    guess."""
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                """SELECT * FROM claims WHERE issue_id = ? AND claim_type = ?
+                   AND status = 'open' AND text = ? ORDER BY id DESC LIMIT 1""",
+                (issue_id, claim_type, text),
+            ).fetchone()
+        finally:
+            conn.close()
+    return dict(row) if row else None
+
+
+def insert_claim(
+    *, issue_id: str, raw_item_id: int, claim_type: str, text: str,
+    author: str, author_basis: str, owner: Optional[str] = None,
+    date_kind: Optional[str] = None, ts: Optional[float] = None,
+) -> int:
+    now = ts if ts is not None else time.time()
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            cur = conn.execute(
+                """INSERT INTO claims
+                   (issue_id, raw_item_id, claim_type, text, author, author_basis,
+                    owner, date_kind, status, first_seen_ts, last_seen_ts)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)""",
+                (issue_id, raw_item_id, claim_type, text, author, author_basis,
+                 owner, date_kind, now, now),
+            )
+            claim_id = cur.lastrowid
+            conn.execute(
+                "UPDATE issues SET claims_revision = claims_revision + 1 WHERE id = ?",
+                (issue_id,),
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.close()
+    return claim_id
+
+
+def touch_claim(
+    claim_id: int, *, ts: Optional[float] = None,
+    escalated: Optional[bool] = None, escalation_note: Optional[str] = None,
+) -> None:
+    """Updates an existing OPEN claim's last_seen_ts (and escalation state,
+    if curator's repeat_signals flagged one) instead of inserting a second
+    row for the same restated ask - Section 9.3's dedup rule. Bumps
+    claims_revision too: a touch is still new information worth a
+    re-synthesis check, even though no new row was created."""
+    now = ts if ts is not None else time.time()
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            if escalated is None:
+                conn.execute(
+                    "UPDATE claims SET last_seen_ts = ? WHERE id = ?", (now, claim_id)
+                )
+            else:
+                conn.execute(
+                    """UPDATE claims SET last_seen_ts = ?, escalated = ?, escalation_note = ?
+                       WHERE id = ?""",
+                    (now, int(escalated), escalation_note, claim_id),
+                )
+            row = conn.execute("SELECT issue_id FROM claims WHERE id = ?", (claim_id,)).fetchone()
+            if row:
+                conn.execute(
+                    "UPDATE issues SET claims_revision = claims_revision + 1 WHERE id = ?",
+                    (row["issue_id"],),
+                )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.close()
+
+
+def get_claims_revision(issue_id: str) -> int:
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT claims_revision FROM issues WHERE id = ?", (issue_id,)
+            ).fetchone()
+        finally:
+            conn.close()
+    return row["claims_revision"] if row else 0
+
+
+def get_max_claims_revision_for_project(project_id: str) -> int:
+    """Project-level revision is derived, not stored (Section 9.5) -
+    MAX(claims_revision) across member issues, computed at synthesis-check
+    time rather than kept as a second counter in sync with its members."""
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT MAX(claims_revision) AS m FROM issues WHERE project_id = ?",
+                (project_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+    return (row["m"] if row and row["m"] is not None else 0)
+
+
+def list_open_claims_for_issue(issue_id: str, claim_type: Optional[str] = None) -> list[dict]:
+    return list_open_claims_for_issues([issue_id], claim_type=claim_type).get(issue_id, [])
+
+
+def list_open_claims_for_issues(issue_ids: list[str], claim_type: Optional[str] = None) -> dict[str, list[dict]]:
+    if not issue_ids:
+        return {}
+    with _lock:
+        conn = _connect()
+        try:
+            placeholders = ",".join("?" * len(issue_ids))
+            params: list = list(issue_ids)
+            type_clause = ""
+            if claim_type is not None:
+                type_clause = " AND claim_type = ?"
+                params.append(claim_type)
+            rows = conn.execute(
+                f"""SELECT * FROM claims WHERE issue_id IN ({placeholders})
+                    AND status = 'open'{type_clause}
+                    ORDER BY last_seen_ts DESC""",
+                params,
+            ).fetchall()
+        finally:
+            conn.close()
+    out: dict[str, list[dict]] = {iid: [] for iid in issue_ids}
+    for r in rows:
+        out.setdefault(r["issue_id"], []).append(dict(r))
+    return out
+
+
+def index_evidence_fts(raw_item_id: int, issue_id: Optional[str], body: str) -> None:
+    """Idempotent (delete-then-insert, keyed on raw_item_id) - safe to call
+    every time a raw_item's text is resolved, not just on first backfill."""
+    if not body or not body.strip():
+        return
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute("DELETE FROM evidence_fts WHERE raw_item_id = ?", (raw_item_id,))
+            conn.execute(
+                "INSERT INTO evidence_fts (body, raw_item_id, issue_id) VALUES (?, ?, ?)",
+                (body, raw_item_id, issue_id),
+            )
+        finally:
+            conn.close()
+
+
+def search_evidence_fts(query: str, issue_id: Optional[str] = None, limit: int = 50) -> list[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            if issue_id:
+                rows = conn.execute(
+                    """SELECT raw_item_id, issue_id, snippet(evidence_fts, 0, '[', ']', '...', 12) AS snippet
+                       FROM evidence_fts WHERE evidence_fts MATCH ? AND issue_id = ?
+                       ORDER BY rank LIMIT ?""",
+                    (query, issue_id, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT raw_item_id, issue_id, snippet(evidence_fts, 0, '[', ']', '...', 12) AS snippet
+                       FROM evidence_fts WHERE evidence_fts MATCH ? ORDER BY rank LIMIT ?""",
+                    (query, limit),
+                ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
 
 
 # --- synthesis ---------------------------------------------------------

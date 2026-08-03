@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import time
 
+import workgraph_claims
 import workgraph_commitments as wc
 
 
@@ -23,6 +24,9 @@ def _issue_with_commitments(ws_db, title, key, commitments, extracted_ts=None):
         conn = ws_db._connect()
         conn.execute("UPDATE raw_item_extractions SET extracted_ts = ? WHERE raw_item_id = ?", (extracted_ts, rid))
         conn.close()
+    # This reader surfaces `claims` (Section 9.8), materialized from the
+    # extraction just like the live extraction-write route does.
+    workgraph_claims.materialize_claims_for_raw_item(rid)
     return issue_id
 
 
@@ -56,6 +60,7 @@ def test_list_open_commitments_excludes_closed_issues(ws_db):
     )
     ws_db.link_raw_item_to_issue(rid, issue_id)
     ws_db.create_extraction(rid, json.dumps({"commitments": ["should not appear"]}))
+    workgraph_claims.materialize_claims_for_raw_item(rid)
 
     assert wc.list_open_commitments() == []
 
@@ -95,6 +100,7 @@ def test_list_commitments_for_issue_includes_closed_issues(ws_db):
                                  participants_json="[]")
     ws_db.link_raw_item_to_issue(rid, issue_id)
     ws_db.create_extraction(rid, json.dumps({"commitments": ["closed-issue commitment"]}))
+    workgraph_claims.materialize_claims_for_raw_item(rid)
     assert [e["text"] for e in wc.list_commitments_for_issue(issue_id)] == ["closed-issue commitment"]
 
 

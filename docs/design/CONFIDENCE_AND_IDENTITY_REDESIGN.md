@@ -738,3 +738,314 @@ be legitimate separate amendments/resubmissions under the same PR
 not true duplicates. Left for a human (or the semantic-read signal, Section
 8.3, once built) to review via the existing, already-tested
 `merge_issues()` — never auto-merged here.
+
+---
+
+## 9. Phase 3: claims + commitment/decision ledger — design (step 11)
+
+Authorized directly by Marc (2026-08-03): "yes you can design this now",
+then "after the design is done, build it" — design and build in the same
+pass, no separate approval gate in between. This section is written before
+any of it is built, against the real current code (read in full, not
+assumed), the same discipline every prior section used.
+
+### 9.0 What this actually fixes (resolves Marc's framing question)
+
+Marc's real question: "one work item per thread" doesn't match how email
+actually works — a single thread can carry many distinct asks, decisions,
+and commitments. That's correct, and it means **"work item" was always the
+wrong noun for two different things this doc had been conflating:**
+
+- An **issue** (Section 3) is a *container identity* — "this thread of
+  conversation is one continuous piece of work." One thread, one issue
+  (mostly — see 8.9's marc-362 exception, which is exactly a container
+  holding more than it should).
+- A **claim** (this section, new) is the actual granular thing Marc means
+  by "task" — one ask, one decision, one commitment, one deadline. Many
+  claims live inside one issue. This was never built as a first-class
+  thing; it has existed only as an unstructured, un-deduped, un-attributed
+  JSON blob per message (9.1 below).
+
+Phase 3 doesn't change issue identity at all. It builds the claims layer
+underneath it — the thing Marc actually meant by "work item" in the
+original goal ("all the tasks, deduped, actor-attributed, honest
+completion").
+
+### 9.1 Current state (read directly, not assumed)
+
+- `raw_item_extractions` (one row per `raw_item`, PK on `raw_item_id`):
+  a single unversioned JSON blob — `asks`, `decisions`, `dates_mentioned`
+  (`{"text","kind":"hard"|"soft"}`), `commitments`, `key_facts`,
+  `repeat_signals` (`{"ask_text","days_since_first_ask","escalated",
+  "escalation_note"}`). `ingest/SYNTHESIS_ROUTINE.md`'s own rule: extract
+  once per raw_item, **never re-extract** — deliberate, and the direct
+  root cause of D9/D10 below.
+- Three reader modules (`workgraph_commitments.py`,
+  `workgraph_asks_decisions.py`, `workgraph_repeat_signals.py`) are
+  **reflect-only** — they read the blob fields back out for display, with
+  no dedup, no actor attribution, no lifecycle (open/done/superseded).
+- `repeat_signals` is the one field that's already *real, curator-judged
+  dedup* — populated only when curator judges a genuine restatement of an
+  existing ask — but it is currently only ever displayed
+  (`workgraph_repeat_signals.py`), never consumed to actually link or
+  collapse anything. This is the load-bearing fact behind 9.3.
+- `workgraph_commitments.py`'s own docstring already found the actor
+  problem and refused to guess: "only 5 of 79 real extracted commitments
+  even mention Marc by name... a keyword filter would be exactly the kind
+  of unreliable guess this design already showed the cost of." This is
+  binding on 9.4 below.
+- `text_extract.resolve_item_text(item)` resolves a raw_item's full body
+  from a **local file** (`raw_ref` → `body_text`/`body_html`, quote-
+  stripped), never a live Outlook/Graph call — safe and cheap to run over
+  the entire historical corpus, including for 9.6's backfill.
+- `synthesis.synthesized_from_marker` is a string,
+  `"count:N|max_ts:T"` — this is D9/D10's exact shape: a late-arriving
+  historical item (e.g. a backfilled attachment with an old timestamp)
+  changes `count` but not `max_ts`, so a marker comparison keyed on either
+  alone can miss it. No revision/change-event infrastructure exists to
+  fix this properly (the Blueprint's Phase 1 was never built — a
+  deliberate right-sizing call this section narrows rather than reopens).
+
+### 9.2 The `claims` table — materializing what curator already extracts
+
+One new table, additive, pointed at `issues.id` directly (same scope
+call as `merge_issue_into` — no `work_objects` layer):
+
+```sql
+CREATE TABLE claims (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    issue_id        TEXT NOT NULL REFERENCES issues(id),
+    raw_item_id     INTEGER NOT NULL REFERENCES raw_items(id),
+    claim_type      TEXT NOT NULL CHECK (claim_type IN
+                       ('ask','decision','commitment','date')),
+    text            TEXT NOT NULL,
+    author          TEXT NOT NULL CHECK (author IN
+                       ('marc','counterparty','unknown')),
+    author_basis    TEXT NOT NULL CHECK (author_basis IN
+                       ('direction','unresolved')),
+    owner           TEXT CHECK (owner IN ('marc','counterparty','unknown')),
+    date_kind       TEXT CHECK (date_kind IN ('hard','soft')),   -- date only
+    status          TEXT NOT NULL DEFAULT 'open' CHECK (status IN
+                       ('open','done','superseded','dismissed')),
+    superseded_by   INTEGER REFERENCES claims(id),
+    escalated       INTEGER NOT NULL DEFAULT 0,
+    escalation_note TEXT,
+    first_seen_ts   REAL NOT NULL,
+    last_seen_ts    REAL NOT NULL
+)
+```
+
+This is a straight materialization of fields Jasper already extracts —
+not a new extraction pass, not a new LLM call. `ask`/`decision`/
+`commitment` rows come from the matching `extracted_json` list;
+`date` rows come from `dates_mentioned`. Built once per raw_item, at the
+same point the blob is already written — same "compute once, never
+re-extract" discipline `SYNTHESIS_ROUTINE.md` already enforces, just with
+a consumer that actually keeps state instead of re-reading the blob
+every time.
+
+### 9.3 Dedup and supersession — consume `repeat_signals`, don't rebuild it
+
+The dedup signal already exists and is already curator-judged; the only
+gap is that nothing reads it for anything but display. Materialization
+rule for `ask` claims: if the raw_item's `repeat_signals` names an
+`ask_text` matching an existing **open** claim on the same issue, don't
+insert a new row — update that claim's `last_seen_ts`, and if
+`escalated` is set, carry `escalated`/`escalation_note` onto it. Only
+insert a new claim when curator's own judgment says it's genuinely new.
+
+**Real gap, stated plainly:** `repeat_signals` today only covers asks.
+Commitments and decisions get no equivalent judgment yet — a repeated
+commitment restated in a later message would materialize as a second
+open claim rather than updating the first. Fix is a small,
+additive contract change (9.7), not a new mechanism: widen the *scope*
+of the judgment curator already makes, don't invent a second one.
+
+### 9.4 Actor resolution — deterministic, never a keyword guess
+
+Binding constraint from 9.1: `workgraph_commitments.py` already proved
+keyword/name matching doesn't work (5/79). The fix is to stop trying to
+find Marc's name in the text at all, and use the one signal Jasper
+already computes deterministically for every raw_item: `direction`
+(`inbound`/`outbound`/`internal`).
+
+- `author` = who wrote the raw_item this claim came from. `outbound` →
+  `marc`; `inbound` → `counterparty`; `internal` or missing → `unknown`
+  (never guessed — matches I3, never false certainty).
+- `owner` (who the resulting obligation actually falls on) is **derived
+  from `author` + `claim_type`**, not a second judgment:
+  - `commitment`: owner = author (the person who said "I'll do X" owns
+    doing X).
+  - `ask`: owner = **the other side** from author (an ask made by Marc
+    puts the obligation on the counterparty to respond, and vice versa).
+  - `decision`: owner = NULL — a decision is a joint fact, not an
+    obligation on one side.
+  - `date`: owner is NOT derived from direction (see 9.7 — a date's
+    "whose deadline" can't be inferred from who happened to write the
+    message that mentioned it).
+
+This resolves actor attribution for asks and commitments with zero new
+curator judgment and zero keyword matching — it was sitting in a column
+Jasper already fills in at classify time.
+
+### 9.5 D9/D10 fix — a revision counter replaces the marker string
+
+Root cause, precisely (checked directly in `workgraph_synthesis.py`, not
+assumed): the top-level staleness check
+(`list_stale_entities`'s `existing.get("synthesized_from_marker") ==
+marker`) actually catches a late item fine — it's a full string compare
+and `count` changing is enough to flip it. The real bug is one level
+down, in `_new_raw_items_since`, which computes its delta as
+`occurred_ts > since` where `since` is parsed out of the *old* marker's
+`max_ts`. A late-arriving, old-timestamped item (`occurred_ts` older than
+`since`) is correctly flagged stale at the top level but then invisible
+to `_new_raw_items_since` — so `_is_material` sees an empty delta, and
+`touch_synthesis_marker` silently advances the marker **without ever
+actually re-synthesizing the late content**. That's D9/D10: not a
+missed staleness flag, a missed delta.
+
+Fix, right-sized to this section rather than reopening the Blueprint's
+full audit/change-event system: add
+`issues.claims_revision INTEGER NOT NULL DEFAULT 0`, bumped in the same
+transaction that inserts or updates any claim for that issue — bumped at
+**ingestion/materialization time**, so it's monotonic in the order Jasper
+*learned about* an item, never in the item's own `occurred_ts`. That's
+the property `_new_raw_items_since` actually needs and `occurred_ts`
+structurally can't provide. Project-level revision is **derived**, not
+stored: `MAX(claims_revision)` across member issues at synthesis-check
+time — one fewer counter to keep in sync.
+
+`synthesized_from_marker` becomes `"rev:N"`. Both the top-level equality
+check and `_new_raw_items_since`'s delta switch to comparing against the
+stored revision instead of parsing `max_ts` — "new since last synthesis"
+now means "materialized after revision N," which is correct regardless
+of the underlying evidence's own timestamp order. Old
+`"count:...|max_ts:..."` markers are left as-is on already-synthesized
+rows; the comparison treats any marker not in `rev:` form as
+unconditionally stale, which forces exactly one harmless re-synthesis per
+existing entity after migration — cheaper than special-casing the old
+format.
+
+### 9.6 FTS evidence index
+
+`text_extract.resolve_item_text()` reads local files (9.1) — safe to run
+over the full historical corpus once. New FTS5 virtual table:
+
+```sql
+CREATE VIRTUAL TABLE evidence_fts USING fts5(
+    body, raw_item_id UNINDEXED, issue_id UNINDEXED,
+    tokenize='porter unicode61'
+)
+```
+
+Backfilled once over every existing raw_item, then kept current
+incrementally (insert on ingest, idempotent on `raw_item_id`). Consumer:
+Evidence Assembly (8.1) gets a real full-text candidate path in addition
+to its existing linked-evidence ranking, and Project Deep-Dive (8.4) gets
+a cheap in-corpus search to run before falling back to live M365 search.
+Not a new capability class — the missing half of retrieval Evidence
+Assembly was already scoped to need.
+
+### 9.7 Task #57 folded in — `whose` on date claims
+
+Marc's recorded decision on #57: a third-party deadline with real
+consequences to Marc should be **elevated**, not downgraded, just because
+it's nominally the counterparty's date to hit. `direction` can't answer
+"whose deadline is this" the way it answers ask/commitment ownership — a
+counterparty can write about *Marc's* deadline, or about *their own*, and
+only the sentence's actual content distinguishes them. This is the one
+place in this section that needs a real (small) extraction contract
+change, because it needs the same kind of read curator already does for
+hard/soft:
+
+- `SYNTHESIS_ROUTINE.md` change: add `"whose": "marc"|"counterparty"|
+  "shared"|"unclear"` to each `dates_mentioned` entry, judged the same
+  way `kind` already is. Additive — existing hard/soft judgment,
+  never-re-extract rule, and delta-based reading are all unchanged.
+- `claims.owner` for `date` claims is set from this field directly
+  (`unclear` → `unknown`).
+- The actual "elevate, don't downgrade" behavior is a **consumption**
+  rule, not a schema rule — it belongs to NBA v2 (step 13, Section 7),
+  which is the first consumer that ranks by urgency. Recording it here
+  now (owner captured at extraction time) means step 13 doesn't need its
+  own extraction-contract change later — the data will already exist by
+  the time it's needed. Historical items simply have `owner = unknown`
+  for date claims until naturally superseded; no forced backfill of old
+  judgment.
+
+### 9.8 Consumers — retire the reflect-only readers, don't wrap them
+
+`workgraph_commitments.py` / `workgraph_asks_decisions.py` /
+`workgraph_repeat_signals.py` become thin views over `claims`
+(`list_open_claims_for_issue(s, claim_type=...)`) rather than a second
+API surface kept in permanent sync with a third. Check real callers
+before deleting anything — likely just the issue-detail panel and NBA's
+existing read paths — and swap them onto the new table directly rather
+than leaving a compatibility shim (this codebase's own stated preference:
+no backwards-compat wrappers when the call sites can just be updated).
+
+### 9.9 Build order (this step — executed immediately, per Marc's direction)
+
+1. Migration: `claims` table, `issues.claims_revision`, `evidence_fts` —
+   additive. Back up the live DB first, same as every prior real-data
+   step in this doc.
+2. `workgraph_claims.py`: `materialize_claims_for_raw_item(raw_item_id)`
+   (idempotent — safe to call once per raw_item, mirrors the existing
+   never-re-extract discipline), the `author`/`owner` derivation (9.4),
+   the `repeat_signals` dedup rule (9.3), `list_open_claims_for_issue(s)`.
+3. Backfill: run materialization over every existing
+   `raw_item_extractions` row (extracted_json only — no live calls).
+4. FTS backfill (9.6) over every existing raw_item via
+   `resolve_item_text()`.
+5. Marker migration (9.5): switch to `rev:N`, wire the revision bump into
+   the same transaction as claim materialization.
+6. `SYNTHESIS_ROUTINE.md` contract changes: `whose` on `dates_mentioned`
+   (9.7); widen `repeat_signals` guidance to commitments/decisions (9.3).
+7. Point the three reader modules at `claims` (9.8); update their
+   callers.
+8. Tests: materialization idempotency, the full `author`/`owner`
+   derivation matrix, `repeat_signals`-driven dedup, the revision-counter
+   staleness fix (a synthetic D9/D10 repro), FTS backfill correctness.
+9. Run against the live DB (backed up first), verify `integrity_check`,
+   commit and push incrementally — same discipline as every step from
+   Phase 0 through step 10.
+
+### 9.10 Step 11 done: built and run against the live DB (2026-08-03)
+
+Backed up first (`backup.create_labeled_snapshot`, labeled
+`pre_phase3_claims_backfill`). Migration applied cleanly (`claims`,
+`issues.claims_revision`, `evidence_fts` all present). Backfill results
+against the real corpus (356 issues, 511 extractions, 2,524 raw_items):
+
+- **Claims:** 423 materialized from the 511 existing extractions —
+  258 asks, 89 commitments, 61 decisions, 15 dates. Author split:
+  336 counterparty / 79 marc / 8 unknown (no direction recorded).
+  Owner split: 230 marc / 110 counterparty / 22 unknown / 61 null
+  (decisions, correctly no owner). Spot-checked several by hand — e.g.
+  an ask authored by a counterparty ("Category-manager approval
+  requested for PR1193376...") correctly resolves `owner: marc`, the
+  exact "who actually owes the next move" read the old commitments
+  module could never make from text alone.
+- **Evidence FTS:** 2,105 of 2,524 raw_items indexed (419 skipped —
+  genuinely empty resolved text, e.g. bare calendar entries with no
+  body).
+- **`integrity_check`: ok.**
+- **The D9/D10 fix is confirmed live, not just in tests:** all 328
+  existing `synthesis` rows still carry the pre-migration
+  `"count:...|max_ts:..."` marker, so `list_stale_entities()` now
+  correctly flags 248 of them for a one-time re-synthesis (documented,
+  expected cost of the marker-format change, Section 9.5) — the exact
+  before/after this section predicted, observed on the real corpus
+  rather than assumed.
+- Wired live (not just backfilled once): `POST /api/workgraph/raw_items/
+  {id}/extraction` now calls `materialize_claims_for_raw_item` and
+  `index_evidence_fts` inline, so every future extraction curator writes
+  keeps `claims`/`evidence_fts`/`claims_revision` current without a
+  second backfill ever being needed again.
+- `workgraph_commitments.py`/`workgraph_asks_decisions.py`/
+  `workgraph_repeat_signals.py` rewritten to read `claims` — same public
+  functions, same return shapes, every existing caller unaffected. Full
+  test suite green throughout (~930 tests).
+
+**Step 11 (Phase 3) is done.** Next per Section 7: step 12 (Project
+Deep-Dive) or step 13 (Phase 4/NBA v2), both now unblocked by this.

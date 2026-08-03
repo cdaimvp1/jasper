@@ -21,9 +21,15 @@ different jobs.
    python workgraph_synthesis.py --list-stale
    ```
    This is pure/deterministic (no LLM call inside it) — it just diffs each entity's current
-   evidence marker against its stored `synthesized_from_marker`. Each item gives you
+   revision marker (`"rev:N"`) against its stored `synthesized_from_marker`. Each item gives you
    `entity_type`, `entity_id`, `name`, `current_marker`, `previous_marker`, and
-   `previous_summary` (null if this entity has never been synthesized before).
+   `previous_summary` (null if this entity has never been synthesized before). **Treat
+   `current_marker`/`previous_marker` as opaque — never parse them.** (2026-08-03, Section 9.5 of
+   the design doc: the old `"count:N|max_ts:T"` marker WAS parseable, and a prior version of this
+   routine parsed its `max_ts` to decide which evidence rows were "new" — that's the same class of
+   bug that shipped as D9/D10 in the code: a late-arriving, old-timestamped item is invisible to a
+   timestamp-based delta. The real, correct novelty signal is the per-raw_item extraction-existence
+   check in step 2 below, which is what decides what's new, never the marker.)
 
 2. **For each stale entity, gather context — the DELTA, not the whole history:**
    - The prior synthesis (`previous_summary` above, plus fetch the full row via
@@ -32,11 +38,12 @@ different jobs.
    - For a project: every issue in it (`GET /api/workgraph/projects/{project_id}` gives you the
      issue list). For a standalone issue: just that one issue
      (`GET /api/workgraph/issues/{issue_id}`).
-   - The evidence rows for those issue(s), from that same response — but only what's NEW since
-     `previous_marker` (parse the `count:`/`max_ts:` out of both markers; anything with
-     `ts`/`occurred_ts` newer than the previous `max_ts` is new). If `previous_marker` is null,
-     this entity has never been synthesized — treat everything as new, but this only happens once
-     per entity.
+   - The evidence rows for those issue(s), from that same response. The real "is this new"
+     signal is per-raw_item, not the entity-level marker: for each evidence row's `raw_item_id`,
+     call `GET /api/workgraph/raw_items/{raw_item_id}` — if its `extraction` field is already
+     populated, this raw_item was already processed on a prior wake (whatever its own
+     `occurred_ts` happens to be, including an old one) and you can skip straight to step 4 for it;
+     only a raw_item with no `extraction` yet is genuinely new work for you here.
    - **`evidence[].summary` is subject-line-only by construction (`classify_item`'s own summary
      field falls back to body only when there's no subject at all, which is nearly never) — it is
      NOT the communication's content, just a label for the Progress-timeline list. Never write an
@@ -56,7 +63,8 @@ different jobs.
    ```
    POST /api/workgraph/raw_items/{raw_item_id}/extraction
    {"extracted_json": {"asks": [...], "decisions": [...],
-                        "dates_mentioned": [{"text": "...", "kind": "hard"|"soft"}, ...],
+                        "dates_mentioned": [{"text": "...", "kind": "hard"|"soft",
+                                             "whose": "marc"|"counterparty"|"shared"|"unclear"}, ...],
                         "commitments": [...], "key_facts": [...],
                         "repeat_signals": [{"ask_text": "...", "days_since_first_ask": 6,
                                              "escalated": true,
@@ -64,31 +72,39 @@ different jobs.
                                              requester's manager rather than the requester"}, ...]}}
    ```
    Computed ONCE per raw_item, permanently — never re-extract an item that already has a row here
-   (check first; the routes list above tell you which raw_items already have one).
+   (check first; the routes list above tell you which raw_items already have one). Writing this
+   also materializes it into the `claims` ledger automatically (Phase 3, design doc Section 9) —
+   nothing further to do here for that; author/owner attribution is deterministic, computed from
+   this raw_item's `direction`, never something you need to judge or add to this payload.
 
-   **`repeat_signals` (added 2026-07-30, Marc's direct request) — only populate this when a NEW ask
-   on this raw_item is genuinely restating one already asked earlier on the SAME issue, never a
-   guess:**
-   - Before writing `asks` for this raw_item, check this issue's prior asks:
-     `GET /api/workgraph/issues/{issue_id}` returns an `asks` list (already scoped to this one
-     issue) — read it first, same "gather the delta, not a guess" discipline as everywhere else in
-     this routine.
-   - If (and only if) a new ask is clearly the same request restated — a reminder, a follow-up, "as
-     mentioned before," the same specific thing being asked again — add one `repeat_signals` entry:
-     `ask_text` (the new raw_item's own restatement, verbatim), `days_since_first_ask` (real
-     arithmetic from this raw_item's `occurred_ts` minus the first ask's `occurred_ts` — never
-     estimate this, it's computable), `escalated` (true only if this occurrence came from a
-     DIFFERENT, more senior, or otherwise new sender than the original ask — not true just because
-     time has passed), and `escalation_note` only when `escalated` is true (say who/what changed,
-     don't repeat the ask text here).
-   - If a new ask is NOT a clear repeat (a genuinely new, distinct ask, even on a related topic),
-     do not force a `repeat_signals` entry — omitting it entirely is the normal, correct outcome for
-     most asks, same as `estimated_completion` being genuinely absent in step 5 below. This field
-     exists to capture a real, judged repeat — never to flag every ask as "maybe related."
+   **`repeat_signals` (added 2026-07-30, Marc's direct request; widened 2026-08-03, Section 9.3, to
+   commitments and decisions too, not just asks) — only populate this when a NEW ask, commitment,
+   or decision on this raw_item is genuinely restating one already made earlier on the SAME issue,
+   never a guess:**
+   - Before writing `asks`/`commitments`/`decisions` for this raw_item, check this issue's prior
+     ones: `GET /api/workgraph/issues/{issue_id}` returns `asks`/`commitments`/`decisions` lists
+     (already scoped to this one issue) — read them first, same "gather the delta, not a guess"
+     discipline as everywhere else in this routine.
+   - If (and only if) a new one is clearly the same ask/commitment/decision restated — a reminder,
+     a follow-up, "as mentioned before," the same specific thing being said again — add one
+     `repeat_signals` entry: `ask_text` (the new raw_item's own restatement, verbatim — same field
+     name regardless of whether the underlying claim is an ask, commitment, or decision, so the
+     claims ledger's dedup logic has one field to match against), `days_since_first_ask` (real
+     arithmetic from this raw_item's `occurred_ts` minus the first occurrence's `occurred_ts` —
+     never estimate this, it's computable), `escalated` (true only if this occurrence came from a
+     DIFFERENT, more senior, or otherwise new sender than the original — not true just because time
+     has passed), and `escalation_note` only when `escalated` is true (say who/what changed, don't
+     repeat the text here).
+   - If a new one is NOT a clear repeat (genuinely new, distinct, even on a related topic), do not
+     force a `repeat_signals` entry — omitting it entirely is the normal, correct outcome most of
+     the time, same as `estimated_completion` being genuinely absent in step 5 below. This field
+     exists to capture a real, judged repeat — never to flag every ask/commitment/decision as
+     "maybe related."
 
-   **`dates_mentioned` entries need real judgment on `kind` (added 2026-07-30, Marc's direct
-   request) — this is exactly the kind of call deterministic code can't make, which is why it
-   lives here and not in a keyword filter:**
+   **`dates_mentioned` entries need real judgment on `kind` and `whose` (added 2026-07-30 for
+   `kind`, Marc's direct request; `whose` added 2026-08-03, task #57/design doc Section 9.7) — this
+   is exactly the kind of call deterministic code can't make, which is why it lives here and not in
+   a keyword filter:**
    - `"hard"` — a real, binding date with an actual consequence for missing it: a contract's
      must-sign-by date, a notice-of-non-renewal or termination deadline, an SLA cutoff, a filing
      deadline. If missing it has a real, nameable consequence, it's hard.
@@ -97,6 +113,15 @@ different jobs.
    - When you genuinely can't tell from the text, still pick the closer of the two rather than
      omitting `kind` — Jasper treats a missing/malformed `kind` as "unclassified" and shows it
      more cautiously than either, so a real guess is more useful than silence.
+   - **`whose`** — who the date actually binds, judged from what the sentence says, never from who
+     sent the message (the sender and the date's owner are frequently different people: a
+     counterparty routinely writes about MARC's deadline, and vice versa). `"marc"` if Marc is the
+     one who must act by this date; `"counterparty"` if the other side is; `"shared"` for a mutual
+     date (e.g. a signing ceremony both sides must hit); `"unclear"` when the text genuinely doesn't
+     say. Marc's explicit standing decision (task #57): a counterparty's own deadline that still has
+     real consequences for Marc must never be read as "not mine, so lower priority" — `whose` just
+     records who the date belongs to; it is not a priority signal by itself, and downstream
+     surfacing (NBA) must not downgrade a `"counterparty"` date just because it isn't `"marc"`.
    - Plain strings (the old shape, from before this date) still work and just show as
      unclassified — don't go back and re-extract old raw_items to backfill `kind` (violates the
      "computed once, permanently" rule above); this only applies going forward.

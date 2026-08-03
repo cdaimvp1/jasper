@@ -1,120 +1,133 @@
-"""Regression tests for workgraph_repeat_signals.py (Part D of the grouping/
-NBA redesign): surfaces raw_item_extractions' `repeat_signals` field,
-per-issue, verbatim, with defensive handling for malformed data."""
+"""Regression tests for workgraph_repeat_signals.py, rewritten 2026-08-03
+(Section 9.8) for the claims-backed contract: a repeat signal now only has
+meaning as a real repeat TOUCH on an existing open claim (Section 9.3), not
+free-floating metadata read verbatim off an extraction blob. A raw_item
+whose `repeat_signals` names an `ask_text` with no matching open ask on the
+issue is simply new information, not a repeat - nothing to surface here."""
 from __future__ import annotations
 
 import json
 import time
 
+import workgraph_claims
 import workgraph_repeat_signals as wrs
 
 
-def _issue_with_extraction(ws_db, title, key, extracted_json, extracted_ts=None):
-    issue_id = ws_db.create_issue_with_new_id(title=title, state="active", category="other")
+def _issue(ws_db, title="Issue"):
+    return ws_db.create_issue_with_new_id(title=title, state="active", category="other")
+
+
+def _raw_item(ws_db, issue_id, key, extracted_json, direction="outbound"):
     rid = ws_db.insert_raw_item(
         source="outlook_mail", stable_key=key, thread_key=key, dedupe_key=key,
         occurred_ts=time.time(), subject="s", from_actor="a@example.com", participants_json="[]",
     )
     ws_db.link_raw_item_to_issue(rid, issue_id)
     ws_db.create_extraction(rid, json.dumps(extracted_json))
-    if extracted_ts is not None:
-        conn = ws_db._connect()
-        conn.execute("UPDATE raw_item_extractions SET extracted_ts = ? WHERE raw_item_id = ?", (extracted_ts, rid))
-        conn.close()
-    return issue_id
+    conn = ws_db._connect()
+    conn.execute("UPDATE raw_items SET direction = ? WHERE id = ?", (direction, rid))
+    conn.close()
+    workgraph_claims.materialize_claims_for_raw_item(rid)
+    return rid
+
+
+def _ask_then_repeat(ws_db, issue_id, first_key, second_key, text, escalated=False, escalation_note=None):
+    _raw_item(ws_db, issue_id, first_key, {"asks": [text]})
+    signal = {"ask_text": text, "days_since_first_ask": 6, "escalated": escalated}
+    if escalation_note is not None:
+        signal["escalation_note"] = escalation_note
+    _raw_item(ws_db, issue_id, second_key, {"asks": [text], "repeat_signals": [signal]})
 
 
 def test_list_repeat_signals_empty_when_none_exist(ws_db):
-    iid = _issue_with_extraction(ws_db, "No repeats", "rs1", {"asks": ["a fresh ask"]})
+    iid = _issue(ws_db)
+    _raw_item(ws_db, iid, "rs1", {"asks": ["a fresh ask"]})
     assert wrs.list_repeat_signals_for_issue(iid) == []
 
 
-def test_list_repeat_signals_surfaces_full_shape(ws_db):
-    iid = _issue_with_extraction(ws_db, "Reminder", "rs2", {
-        "repeat_signals": [{"ask_text": "please sign the SOW", "days_since_first_ask": 6,
-                             "escalated": True, "escalation_note": "now from the requester's manager"}],
-    })
+def test_first_occurrence_alone_is_not_a_repeat(ws_db):
+    """A claim that's only ever been seen once (first_seen_ts == last_seen_ts)
+    was never touched as a repeat - nothing to surface."""
+    iid = _issue(ws_db)
+    _raw_item(ws_db, iid, "rs2", {"asks": ["please sign the SOW"]})
+    assert wrs.list_repeat_signals_for_issue(iid) == []
+
+
+def test_real_repeat_surfaces_escalated_true_and_note(ws_db):
+    iid = _issue(ws_db)
+    _ask_then_repeat(ws_db, iid, "rs3a", "rs3b", "please sign the SOW",
+                      escalated=True, escalation_note="now from the requester's manager")
+
     entries = wrs.list_repeat_signals_for_issue(iid)
+
     assert len(entries) == 1
     assert entries[0]["ask_text"] == "please sign the SOW"
-    assert entries[0]["days_since_first_ask"] == 6
     assert entries[0]["escalated"] is True
     assert entries[0]["escalation_note"] == "now from the requester's manager"
+    assert entries[0]["days_since_first_ask"] >= 0
 
 
-def test_list_repeat_signals_defaults_escalated_false_and_note_none(ws_db):
-    iid = _issue_with_extraction(ws_db, "Reminder", "rs3", {
-        "repeat_signals": [{"ask_text": "please sign the SOW", "days_since_first_ask": 3}],
-    })
+def test_real_repeat_defaults_escalated_false_and_note_none(ws_db):
+    iid = _issue(ws_db)
+    _ask_then_repeat(ws_db, iid, "rs4a", "rs4b", "please sign the SOW")
+
     entries = wrs.list_repeat_signals_for_issue(iid)
+
     assert entries[0]["escalated"] is False
     assert entries[0]["escalation_note"] is None
 
 
-def test_list_repeat_signals_scoped_to_one_issue(ws_db):
-    iid = _issue_with_extraction(ws_db, "Mine", "rs4", {
-        "repeat_signals": [{"ask_text": "mine", "days_since_first_ask": 1}],
-    })
-    _issue_with_extraction(ws_db, "Other", "rs5", {
-        "repeat_signals": [{"ask_text": "not mine", "days_since_first_ask": 1}],
-    })
-    entries = wrs.list_repeat_signals_for_issue(iid)
+def test_repeat_scoped_to_one_issue(ws_db):
+    iid1 = _issue(ws_db, "Mine")
+    iid2 = _issue(ws_db, "Other")
+    _ask_then_repeat(ws_db, iid1, "rs5a", "rs5b", "mine")
+    _ask_then_repeat(ws_db, iid2, "rs6a", "rs6b", "not mine")
+
+    entries = wrs.list_repeat_signals_for_issue(iid1)
+
     assert [e["ask_text"] for e in entries] == ["mine"]
 
 
-def test_list_repeat_signals_sorted_most_recently_extracted_first(ws_db):
-    now = time.time()
-    iid = ws_db.create_issue_with_new_id(title="Multi", state="active", category="other")
-    for key, ts, text in (("rs6", now - 500, "older"), ("rs7", now, "newer")):
-        rid = ws_db.insert_raw_item(source="outlook_mail", stable_key=key, thread_key=key, dedupe_key=key,
-                                     occurred_ts=time.time(), subject="s", from_actor="a@example.com",
-                                     participants_json="[]")
-        ws_db.link_raw_item_to_issue(rid, iid)
-        ws_db.create_extraction(rid, json.dumps({"repeat_signals": [{"ask_text": text, "days_since_first_ask": 1}]}))
-        conn = ws_db._connect()
-        conn.execute("UPDATE raw_item_extractions SET extracted_ts = ? WHERE raw_item_id = ?", (ts, rid))
-        conn.close()
+def test_repeat_works_for_commitments_and_decisions_too(ws_db):
+    """Section 9.3's real gap fix: repeat_signals now covers commitments and
+    decisions, not just asks."""
+    iid = _issue(ws_db)
+    _raw_item(ws_db, iid, "rs7a", {"commitments": ["I'll send the PO"]})
+    _raw_item(ws_db, iid, "rs7b", {
+        "commitments": ["I'll send the PO"],
+        "repeat_signals": [{"ask_text": "I'll send the PO", "escalated": False}],
+    })
 
     entries = wrs.list_repeat_signals_for_issue(iid)
-    assert [e["ask_text"] for e in entries] == ["newer", "older"]
+
+    assert [e["ask_text"] for e in entries] == ["I'll send the PO"]
 
 
-def test_list_repeat_signals_non_list_field_ignored(ws_db):
-    iid = _issue_with_extraction(ws_db, "Malformed", "rs8", {"repeat_signals": "not a list"})
+def test_repeat_signals_non_list_field_does_not_crash(ws_db):
+    iid = _issue(ws_db)
+    rid = _raw_item(ws_db, iid, "rs8", {"asks": ["an ask"], "repeat_signals": "not a list"})
+    assert ws_db.has_claims_for_raw_item(rid)
     assert wrs.list_repeat_signals_for_issue(iid) == []
 
 
-def test_list_repeat_signals_non_dict_entry_skipped(ws_db):
-    iid = _issue_with_extraction(ws_db, "Malformed entry", "rs9", {"repeat_signals": ["just a string", 5]})
+def test_repeat_signals_non_dict_entry_does_not_match(ws_db):
+    iid = _issue(ws_db)
+    _raw_item(ws_db, iid, "rs9a", {"asks": ["an ask"]})
+    _raw_item(ws_db, iid, "rs9b", {"asks": ["an ask"], "repeat_signals": ["just a string", 5]})
+
     assert wrs.list_repeat_signals_for_issue(iid) == []
 
 
-def test_list_repeat_signals_missing_ask_text_skipped(ws_db):
-    iid = _issue_with_extraction(ws_db, "No ask_text", "rs10", {
-        "repeat_signals": [{"days_since_first_ask": 1}],
-    })
-    assert wrs.list_repeat_signals_for_issue(iid) == []
-
-
-def test_list_repeat_signals_malformed_days_field_ignored_not_crashed(ws_db):
-    iid = _issue_with_extraction(ws_db, "Bad days", "rs11", {
-        "repeat_signals": [{"ask_text": "an ask", "days_since_first_ask": "not a number"}],
-    })
-    entries = wrs.list_repeat_signals_for_issue(iid)
-    assert entries[0]["days_since_first_ask"] is None
-
-
-# --- N+1 fix (2026-08-02): batched list_repeat_signals_for_issues() must
-# match calling the singular version once per issue, but via one fetch. ---
+# --- N+1 fix (2026-08-02, carried over to the claims-backed path): batched
+# list_repeat_signals_for_issues() must match calling the singular version
+# once per issue, but via one fetch. ---
 
 def test_list_repeat_signals_for_issues_batched_matches_per_issue_calls(ws_db):
-    iid1 = _issue_with_extraction(ws_db, "One", "b1", {
-        "repeat_signals": [{"ask_text": "signal one", "days_since_first_ask": 2}],
-    })
-    iid2 = _issue_with_extraction(ws_db, "Two", "b2", {
-        "repeat_signals": [{"ask_text": "signal two", "days_since_first_ask": 4, "escalated": True}],
-    })
-    iid3 = ws_db.create_issue_with_new_id(title="None", state="active", category="other")
+    iid1 = _issue(ws_db, "One")
+    iid2 = _issue(ws_db, "Two")
+    iid3 = _issue(ws_db, "None")
+    _ask_then_repeat(ws_db, iid1, "b1a", "b1b", "signal one")
+    _ask_then_repeat(ws_db, iid2, "b2a", "b2b", "signal two", escalated=True)
 
     batched = wrs.list_repeat_signals_for_issues([iid1, iid2, iid3])
 

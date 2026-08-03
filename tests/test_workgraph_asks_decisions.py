@@ -8,6 +8,7 @@ import json
 import time
 
 import workgraph_asks_decisions as wad
+import workgraph_claims
 
 
 def _issue_with_extraction(ws_db, title, key, extracted_json, extracted_ts=None):
@@ -22,6 +23,9 @@ def _issue_with_extraction(ws_db, title, key, extracted_json, extracted_ts=None)
         conn = ws_db._connect()
         conn.execute("UPDATE raw_item_extractions SET extracted_ts = ? WHERE raw_item_id = ?", (extracted_ts, rid))
         conn.close()
+    # These readers surface `claims` (Section 9.8), materialized from the
+    # extraction just like the live extraction-write route does.
+    workgraph_claims.materialize_claims_for_raw_item(rid)
     return issue_id
 
 
@@ -81,6 +85,7 @@ def test_list_open_decisions_excludes_closed_issues(ws_db):
     )
     ws_db.link_raw_item_to_issue(rid, issue_id)
     ws_db.create_extraction(rid, json.dumps({"decisions": ["should not appear"]}))
+    workgraph_claims.materialize_claims_for_raw_item(rid)
 
     assert wad.list_open_decisions() == []
 
@@ -123,6 +128,7 @@ def test_list_asks_for_issue_includes_closed_issues(ws_db):
                                  participants_json="[]")
     ws_db.link_raw_item_to_issue(rid, issue_id)
     ws_db.create_extraction(rid, json.dumps({"asks": ["closed-issue ask"]}))
+    workgraph_claims.materialize_claims_for_raw_item(rid)
 
     assert [e["text"] for e in wad.list_asks_for_issue(issue_id)] == ["closed-issue ask"]
 

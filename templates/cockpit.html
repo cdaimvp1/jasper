@@ -2398,6 +2398,19 @@ html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans)
 .main>h1,.main>.sub{padding-left:40px}
 #cp-view-pcc,#cp-view-projects{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden}
 #cp-view-projects{padding-left:40px}
+/* Task #19 (Marc's direct report): .main is a fixed-height (height:100%)
+   flex column with overflow:hidden - #cp-view-pcc/#cp-view-projects above
+   are fine because they're flex columns with their OWN internal overflow-y
+   scroll areas sized to fit. #cp-view-settings never got that treatment
+   when it was grafted in from the old standalone settings.html (see that
+   graft's own comment) - it's just a plain, potentially-tall stack of
+   cards, so anything past the viewport was silently clipped with no
+   scrollbar at all, not merely hard to reach. flex:1;min-height:0 gives it
+   a real bounded height from .main's flex column (min-height:0 is the
+   classic flexbox fix - without it a flex item refuses to shrink below its
+   content height, which is exactly what let it overflow .main uncontained
+   in the first place); overflow-y:auto scrolls INSIDE that height instead. */
+#cp-view-settings{flex:1;min-height:0;overflow-y:auto}
 h1{font-size:var(--fz-h);font-weight:800;letter-spacing:-.02em;margin:0 0 5px}
 .sub{color:var(--mut);font-size:15px;margin:0 0 24px}
 

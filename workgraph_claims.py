@@ -71,7 +71,15 @@ def materialize_claims_for_raw_item(raw_item_id: int) -> int:
     Returns the number of NEW claim rows inserted (touches to existing open
     claims, via repeat_signals dedup, don't count). No-ops (returns 0) if
     there's no extraction yet, no issue_id yet, or claims already exist for
-    this raw_item."""
+    this raw_item.
+
+    Design doc Section 12.10 (prompt-injection boundary, a standing
+    constraint, not a one-time check): this function reads ONLY
+    extraction.extracted_json's already-parsed asks/decisions/commitments/
+    dates_mentioned fields (below) - never raw_item's own subject/body text
+    directly. Content read FROM evidence is structurally untrusted and can
+    never itself become an operating instruction; any future field added
+    here must stay on the extracted_json side of that line."""
     if ws.has_claims_for_raw_item(raw_item_id):
         return 0
 

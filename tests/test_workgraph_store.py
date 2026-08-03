@@ -1811,6 +1811,126 @@ def test_run_prepared_action_expiry_daily_if_due_only_runs_once_a_day(ws_db):
     assert second is None  # already claimed today
 
 
+# --- membership_state / exposure_state (Section 12.8) ----------------------
+
+def test_new_work_object_defaults_provisional_and_not_exposed(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+
+    state = ws_db.get_work_object_membership_exposure(a)
+
+    assert state["membership_state"] == "provisional"
+    assert state["exposure_state"] == "not_exposed"
+
+
+def test_confirm_work_object_membership_sets_confirmed(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+
+    ws_db.confirm_work_object_membership(a)
+
+    assert ws_db.get_work_object_membership_exposure(a)["membership_state"] == "confirmed"
+
+
+def test_advance_work_object_exposure_state_moves_forward(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+
+    ws_db.advance_work_object_exposure_state(a, "shown_in_project")
+    assert ws_db.get_work_object_membership_exposure(a)["exposure_state"] == "shown_in_project"
+
+    ws_db.advance_work_object_exposure_state(a, "used_for_action")
+    assert ws_db.get_work_object_membership_exposure(a)["exposure_state"] == "used_for_action"
+
+
+def test_advance_work_object_exposure_state_never_regresses(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    ws_db.advance_work_object_exposure_state(a, "used_for_action")
+
+    ws_db.advance_work_object_exposure_state(a, "shown_in_project")  # lower rank - must be a no-op
+
+    assert ws_db.get_work_object_membership_exposure(a)["exposure_state"] == "used_for_action"
+
+
+def test_upsert_synthesis_advances_exposure_state_to_used_in_summary(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+
+    ws_db.upsert_synthesis(
+        entity_type="issue", entity_id=a, summary="test summary",
+        next_steps_json="[]", suggested_actions_json="[]", synthesized_from_marker="rev:1",
+    )
+
+    assert ws_db.get_work_object_membership_exposure(a)["exposure_state"] == "used_in_summary"
+
+
+# --- three-tier timeline (Section 12.9) ------------------------------------
+
+def test_list_complete_timeline_includes_evidence_and_claim_events(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    ws_db.add_evidence(issue_id=a, type="email", summary="an email arrived")
+    rid = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key="k1", thread_key="k1", dedupe_key="k1",
+        occurred_ts=time.time(), subject="s", from_actor="a@example.com", participants_json="[]",
+    )
+    ws_db.link_raw_item_to_issue(rid, a)
+    claim_id = ws_db.insert_claim(
+        issue_id=a, raw_item_id=rid, claim_type="ask", text="approve this",
+        author="counterparty", author_basis="direction", owner="marc", ts=time.time(),
+    )
+    ws_db.log_claim_event(claim_id, "create", actor="curator")
+
+    timeline = ws_db.list_complete_timeline_for_issue(a)
+
+    kinds = [(e["tier"], e["kind"]) for e in timeline]
+    assert ("evidence", "email") in kinds
+    assert ("claim_event", "create") in kinds
+    assert timeline == sorted(timeline, key=lambda e: e["ts"])  # chronological
+
+
+def test_list_milestone_timeline_includes_artifact_versions_and_state_transitions(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    aid = ws_db.create_attachment(
+        entity_type="issue", entity_id=a, kind="upload", filename="f1.pdf",
+        stored_path="p1.pdf", content_type=None, size_bytes=10, sha256_hex="hmilestone", uploaded_by="marc",
+    )
+    ws_db.create_attachment(
+        entity_type="issue", entity_id=a, kind="upload", filename="f2.pdf",
+        stored_path="p2.pdf", content_type=None, size_bytes=10, sha256_hex="hmilestone", uploaded_by="marc",
+    )
+    conn = ws_db._connect()
+    conn.execute(
+        "INSERT INTO issue_state_history (issue_id, from_state, to_state, changed_ts, actor) VALUES (?, 'active', 'blocked', ?, 'marc')",
+        (a, time.time()),
+    )
+    conn.commit()
+    conn.close()
+
+    milestones = ws_db.list_milestone_timeline_for_issue(a)
+
+    kinds = [e["kind"] for e in milestones]
+    assert "artifact_version_produced" in kinds
+    assert "issue_blocked" in kinds
+
+
+def test_list_activity_stream_excludes_evidence_behind_a_milestone_claim(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    rid_ask = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key="k1", thread_key="k1", dedupe_key="k1",
+        occurred_ts=time.time(), subject="s", from_actor="a@example.com", participants_json="[]",
+    )
+    ws_db.link_raw_item_to_issue(rid_ask, a)
+    claim_id = ws_db.insert_claim(
+        issue_id=a, raw_item_id=rid_ask, claim_type="ask", text="approve this",
+        author="counterparty", author_basis="direction", owner="marc", ts=time.time(),
+    )
+    ws_db.log_claim_event(claim_id, "create", actor="curator")
+    ws_db.add_evidence(issue_id=a, type="email", summary="the ask email", raw_item_id=rid_ask)
+    ws_db.add_evidence(issue_id=a, type="email", summary="an unrelated FYI email", raw_item_id=None)
+
+    activity = ws_db.list_activity_stream_for_issue(a)
+
+    summaries = [e["summary"] for e in activity]
+    assert "an unrelated FYI email" in summaries
+    assert "the ask email" not in summaries  # behind a milestone claim's raw_item - excluded
+
+
 def test_expire_stale_project_suggestions_expires_old_pending_merge(ws_db):
     """Phase 0 fix (D2): the structural backstop against the pending queue
     accumulating forever, independent of the generation flag's setting."""

@@ -1258,6 +1258,32 @@ def init_workgraph() -> None:
                     except sqlite3.OperationalError:
                         pass
 
+            # Design doc Section 12.8: provisional-vs-confirmed grouping +
+            # exposure tracking, additive to the already-migrated
+            # work_objects table. membership_state defaults 'provisional'
+            # for every row (matches the schema's own DEFAULT - an auto-
+            # merge/auto-link the deterministic matcher made with no human
+            # confirmation yet); only a real human-confirm event
+            # (workgraph_projects.confirm_suggestion) ever sets 'confirmed'.
+            # exposure_state advances forward-only (see advance_work_object_
+            # exposure_state below) from three real render points: the
+            # Project Detail route (shown_in_project), upsert_synthesis
+            # (used_in_summary), api_cockpit_action (used_for_action).
+            try:
+                conn.execute(
+                    "ALTER TABLE work_objects ADD COLUMN membership_state TEXT NOT NULL DEFAULT 'provisional' "
+                    "CHECK (membership_state IN ('provisional','confirmed'))"
+                )
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute(
+                    "ALTER TABLE work_objects ADD COLUMN exposure_state TEXT NOT NULL DEFAULT 'not_exposed' "
+                    "CHECK (exposure_state IN ('not_exposed','shown_in_project','used_in_summary','used_for_action'))"
+                )
+            except sqlite3.OperationalError:
+                pass
+
             # `issues`/`projects` as views over work_objects - every existing
             # caller across the whole codebase keeps working completely
             # unchanged (confirmed empirically: partial-column INSERT/UPDATE,
@@ -2152,6 +2178,67 @@ def list_issue_state_history_for_issues(issue_ids: list[str]) -> dict[str, list[
     return out
 
 
+# --- membership_state / exposure_state (design doc Section 12.8) ----------
+# Bypass the issues/projects views entirely (same reasoning as add_evidence,
+# Section 12.2) - these two columns live on work_objects directly and don't
+# need to be exposed through either view's existing column list, since no
+# current caller reads/writes them through the issue/project JSON payload.
+
+_EXPOSURE_STATE_RANK = {"not_exposed": 0, "shown_in_project": 1, "used_in_summary": 2, "used_for_action": 3}
+
+
+def get_work_object_membership_exposure(work_object_id: str) -> Optional[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT membership_state, exposure_state FROM work_objects WHERE id = ?", (work_object_id,)
+            ).fetchone()
+        finally:
+            conn.close()
+    return dict(row) if row else None
+
+
+def confirm_work_object_membership(work_object_id: str) -> None:
+    """The real, single human-confirm event (workgraph_projects.
+    confirm_suggestion) - membership_state only ever moves provisional ->
+    confirmed, never the reverse (a confirmed grouping being un-confirmed
+    isn't a real case this session found a producer for)."""
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                "UPDATE work_objects SET membership_state = 'confirmed' WHERE id = ?", (work_object_id,)
+            )
+        finally:
+            conn.close()
+
+
+def advance_work_object_exposure_state(work_object_id: str, new_state: str) -> None:
+    """Forward-only (design doc Section 12.8's own rule: 'once exposed,
+    never silently moved again') - ranked not_exposed < shown_in_project <
+    used_in_summary < used_for_action, a single atomic UPDATE that only
+    takes effect if new_state actually outranks whatever's there now, so
+    a later call with an EARLIER-ranked state (e.g. a project detail view
+    after the issue was already used_for_action) is a safe no-op rather
+    than a regression. Called from every real render/dispatch point that
+    exposes a work_object to Marc: the Project Detail route
+    (shown_in_project), upsert_synthesis (used_in_summary),
+    api_cockpit_action (used_for_action)."""
+    new_rank = _EXPOSURE_STATE_RANK[new_state]
+    with _lock:
+        conn = _connect()
+        try:
+            case_expr = " ".join(f"WHEN '{state}' THEN {rank}" for state, rank in _EXPOSURE_STATE_RANK.items())
+            conn.execute(
+                f"UPDATE work_objects SET exposure_state = ? "
+                f"WHERE id = ? AND (CASE exposure_state {case_expr} END) < ?",
+                (new_state, work_object_id, new_rank),
+            )
+        finally:
+            conn.close()
+
+
 def get_issue(id: str) -> Optional[dict]:
     with _lock:
         conn = _connect()
@@ -2924,6 +3011,13 @@ def create_prepared_action(*, claim_id: Optional[int], action_type: str, propose
                             evidence_refs_json: str, rationale: str, risk_class: str,
                             idempotency_key: str, required_approval: int = 1,
                             state: str = "proposed") -> int:
+    """Design doc Section 12.10 (prompt-injection boundary, a standing
+    constraint): required_approval defaults 1 for every action_type - no
+    code path in this codebase flips it to 0 based on anything evidence
+    content itself says (e.g. a supplier's email cannot mark its own
+    resulting action as pre-approved, no matter how it's worded). The one
+    real caller (server_lean.py's api_cockpit_action) never passes this
+    parameter at all, so it always stays the default."""
     now = time.time()
     with _lock:
         conn = _connect()
@@ -5518,6 +5612,110 @@ def list_open_claims_for_issue(issue_id: str, claim_type: Optional[str] = None) 
     return list_open_claims_for_issues([issue_id], claim_type=claim_type).get(issue_id, [])
 
 
+def list_claims_for_issue(issue_id: str) -> list[dict]:
+    """ALL claims regardless of status - unlike list_open_claims_for_issue,
+    needed by the three-tier timeline (Section 12.9), which must show a
+    completed/dismissed claim's own history too, not just what's still
+    open."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM claims WHERE issue_id = ? ORDER BY first_seen_ts ASC", (issue_id,)
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+# --- three-tier timeline (design doc Section 12.9) -------------------------
+# Read-time views over evidence_units/claims/claim_events/artifact_versions/
+# prepared_actions/issue_state_history/audit_log - NOT a new stored table,
+# per the design's own framing.
+
+_MILESTONE_CLAIM_EVENT_TYPES = ("create", "complete", "dismiss")
+
+
+def list_complete_timeline_for_issue(issue_id: str) -> list[dict]:
+    """The 'complete event timeline' - every evidence_unit + every claim
+    event for this issue, unified and chronological (today's issue_state_
+    history plus everything else, as the design puts it)."""
+    entries = []
+    for e in list_evidence(issue_id):
+        entries.append({"ts": e["ts"], "tier": "evidence", "kind": e["type"], "detail": e["summary"]})
+    for c in list_claims_for_issue(issue_id):
+        for ev in list_claim_events_for_claim(c["id"]):
+            entries.append({
+                "ts": ev["ts"], "tier": "claim_event", "kind": ev["event_type"], "detail": c["text"],
+                "claim_type": c["claim_type"], "claim_id": c["id"], "actor": ev["actor"],
+            })
+    entries.sort(key=lambda e: e["ts"])
+    return entries
+
+
+def list_milestone_timeline_for_issue(issue_id: str) -> list[dict]:
+    """The deterministically-filtered milestone view. Real producers wired:
+    claim create/complete/dismiss events (ask/commitment/decision/date),
+    artifact_versions (a version was produced - v2.6), prepared_actions
+    reaching a terminal state (v2.7), issue_state_history transitions to
+    'blocked'/'done', and audit_log 'merged_into' entries (a work_object
+    merge). 'approval received' and 'work_object split' have no current
+    producer in this codebase - named gaps, not silently dropped, same
+    discipline as everywhere else in this doc."""
+    entries = []
+    for c in list_claims_for_issue(issue_id):
+        for ev in list_claim_events_for_claim(c["id"]):
+            if ev["event_type"] in _MILESTONE_CLAIM_EVENT_TYPES:
+                entries.append({
+                    "ts": ev["ts"], "kind": f"{c['claim_type']}_{ev['event_type']}", "detail": c["text"],
+                    "claim_id": c["id"], "actor": ev["actor"],
+                })
+    with _lock:
+        conn = _connect()
+        try:
+            for r in conn.execute(
+                """SELECT av.created_ts AS ts, al.title AS title FROM artifact_versions av
+                   JOIN artifact_lineages al ON al.id = av.lineage_id
+                   WHERE al.work_object_id = ?""", (issue_id,),
+            ).fetchall():
+                entries.append({"ts": r["ts"], "kind": "artifact_version_produced", "detail": r["title"]})
+            for r in conn.execute(
+                """SELECT resolved_ts AS ts, state, action_type FROM prepared_actions
+                   WHERE claim_id IN (SELECT id FROM claims WHERE issue_id = ?) AND resolved_ts IS NOT NULL""",
+                (issue_id,),
+            ).fetchall():
+                entries.append({"ts": r["ts"], "kind": f"prepared_action_{r['state']}", "detail": r["action_type"]})
+            for r in conn.execute(
+                """SELECT changed_ts AS ts, to_state FROM issue_state_history
+                   WHERE issue_id = ? AND to_state IN ('blocked','done')""", (issue_id,),
+            ).fetchall():
+                entries.append({"ts": r["ts"], "kind": f"issue_{r['to_state']}", "detail": None})
+            for r in conn.execute(
+                """SELECT changed_ts AS ts, new_value FROM audit_log
+                   WHERE entity_type = 'issue' AND entity_id = ? AND field = 'merged_into'""", (issue_id,),
+            ).fetchall():
+                entries.append({"ts": r["ts"], "kind": "work_object_merged", "detail": f"merged into {r['new_value']}"})
+        finally:
+            conn.close()
+    entries.sort(key=lambda e: e["ts"])
+    return entries
+
+
+def list_activity_stream_for_issue(issue_id: str) -> list[dict]:
+    """The complement tier (routine comms) - an evidence_unit whose
+    raw_item already produced a milestone-tier claim event is excluded,
+    since that specific communication already has its own dedicated
+    milestone entry. Never the default view, per the design's own
+    framing - a UI concern, not enforced here."""
+    milestone_claim_ids = {e["claim_id"] for e in list_milestone_timeline_for_issue(issue_id) if e.get("claim_id")}
+    milestone_raw_item_ids = set()
+    for cid in milestone_claim_ids:
+        claim = get_claim(cid)
+        if claim and claim.get("raw_item_id"):
+            milestone_raw_item_ids.add(claim["raw_item_id"])
+    return [e for e in list_evidence(issue_id) if e.get("raw_item_id") not in milestone_raw_item_ids]
+
+
 def list_open_claims_for_issues(issue_ids: list[str], claim_type: Optional[str] = None) -> dict[str, list[dict]]:
     if not issue_ids:
         return {}
@@ -5647,6 +5845,12 @@ def upsert_synthesis(
             )
         finally:
             conn.close()
+    # Design doc Section 12.8: entity_id is a work_object id for both real
+    # entity_type values ('issue'/'project', the only ones server_lean.py's
+    # route accepts) - this work_object's own content was just used in a
+    # real summary shown to Marc.
+    if entity_type in ("issue", "project"):
+        advance_work_object_exposure_state(entity_id, "used_in_summary")
 
 
 def touch_synthesis_marker(entity_type: str, entity_id: str, marker: str) -> None:

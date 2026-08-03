@@ -535,6 +535,21 @@ def test_confirm_suggestion_link_kind_reuses_existing_projects(ws_db):
     assert ws_db.get_issue(b)["project_id"] == result["to_project_id"]
 
 
+def test_confirm_suggestion_merge_kind_marks_both_issues_confirmed(ws_db):
+    """Section 12.8: a real human/curator confirm event - unlike the raw
+    auto-merge threshold path, which leaves membership_state at its
+    'provisional' default - marks BOTH sides confirmed, not just the
+    winner."""
+    a = _issue(ws_db, "A")
+    b = _issue(ws_db, "B")
+    sid = ws_db.create_project_suggestion(issue_id_a=a, issue_id_b=b, reason="test", suggestion_kind="merge")
+
+    wp.confirm_suggestion(sid)
+
+    assert ws_db.get_work_object_membership_exposure(a)["membership_state"] == "confirmed"
+    assert ws_db.get_work_object_membership_exposure(b)["membership_state"] == "confirmed"
+
+
 def test_reject_suggestion_link_kind_does_not_record_a_lesson(ws_db):
     """A link-suggestion rejection must NOT feed Total Recall's merge
     precedent bucket - that's a different question (same project or not)

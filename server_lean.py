@@ -1725,6 +1725,14 @@ async def api_project_detail(project_id: str):
     synthesis = wg.get_synthesis("project", project_id)
     attachments = wg.list_attachments_for_project(project_id)
     issue_ids = [i["id"] for i in issues]
+    # Design doc Section 12.8: this GET is the real render point - the
+    # project itself and every member issue are genuinely shown to Marc
+    # here, unlike wg.list_issues_for_project's OTHER callers (deep_dive
+    # picker, aristotle detection, internal aggregation), which never
+    # display anything and must not advance exposure_state.
+    wg.advance_work_object_exposure_state(project_id, "shown_in_project")
+    for iid in issue_ids:
+        wg.advance_work_object_exposure_state(iid, "shown_in_project")
     open_issues = [i for i in issues if i["state"] in ("active", "waiting", "blocked")]
     open_ids = [i["id"] for i in open_issues]
 
@@ -2477,6 +2485,26 @@ async def api_issue_attachments(issue_id: str):
     return JSONResponse({"attachments": sanitize_surrogates(wg.list_attachments_for_issue(issue_id))})
 
 
+@app.get("/api/workgraph/issues/{issue_id}/timeline")
+async def api_issue_timeline(issue_id: str, tier: str = "milestone"):
+    """Design doc Section 12.9: three read-time views over evidence_units/
+    claims/claim_events/artifact_versions/prepared_actions - never a new
+    stored table. tier defaults to 'milestone' (deterministically filtered
+    - the one Marc should actually see by default); 'complete' and
+    'activity' are the other two."""
+    if wg.get_issue(issue_id) is None:
+        raise HTTPException(404, f"no such issue: {issue_id}")
+    if tier == "complete":
+        entries = wg.list_complete_timeline_for_issue(issue_id)
+    elif tier == "activity":
+        entries = wg.list_activity_stream_for_issue(issue_id)
+    elif tier == "milestone":
+        entries = wg.list_milestone_timeline_for_issue(issue_id)
+    else:
+        raise HTTPException(400, f"unknown tier: {tier} (expected complete|milestone|activity)")
+    return JSONResponse({"tier": tier, "entries": sanitize_surrogates(entries)})
+
+
 @app.get("/api/attachments/{attachment_id}/download")
 async def api_attachment_download(attachment_id: int):
     att = wg.get_attachment(attachment_id)
@@ -2568,6 +2596,9 @@ async def api_cockpit_action(body: CockpitActionBody):
         issue_id=body.issue_id, action_kind=body.action_kind, worker=body.worker,
         instructions=body.instructions, message_id=result.get("message_id"),
     )
+    # Design doc Section 12.8: a real action was just dispatched for this
+    # issue - the strongest of the three exposure states (highest rank).
+    wg.advance_work_object_exposure_state(body.issue_id, "used_for_action")
     # Part E2 (2026-07-30): a real generative action was just requested -
     # resolve whichever candidate list was most recently offered, if any,
     # and link it to the real pending_action this produced.

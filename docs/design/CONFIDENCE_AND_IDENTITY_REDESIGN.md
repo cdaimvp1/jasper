@@ -2098,6 +2098,37 @@ rewritten" invariant (Section 0's original monotonicity claim) applies
 to the confirmed/exposed tier, not to a provisional guess nobody's
 looked at yet.
 
+**Done (2026-08-03):** both columns added to `work_objects` exactly as
+designed (a real `ALTER TABLE ... ADD COLUMN ... CHECK (...)` - confirmed
+empirically first that SQLite actually enforces a CHECK constraint added
+this way, not assumed). `membership_state` defaults `'provisional'` for
+every row and only ever advances to `'confirmed'` via one real producer:
+`workgraph_projects.confirm_suggestion` marks BOTH sides of a confirmed
+`merge`-kind suggestion confirmed (a `link`-kind confirm doesn't change
+either issue's own project assignment, so it's left untouched).
+`exposure_state` advances forward-only (`not_exposed` <
+`shown_in_project` < `used_in_summary` < `used_for_action`, a single
+atomic ranked `UPDATE`, never regressing) from three real render points:
+`api_project_detail` (`shown_in_project` - for the project AND every
+member issue), `upsert_synthesis` (`used_in_summary` - the one place a
+synthesis row is ever written, so this covers every future caller too,
+not just today's one route), and `api_cockpit_action` (`used_for_action`
+- v2.7's own real dispatch point).
+
+One honest finding, made before writing any enforcement code: **the
+"silently revised" risk this rule protects against has no current
+violator.** `group_issue`'s own candidate-generation (`_strong_signal_
+match`/`_weak_signal_candidates`) already refuses to target any issue
+that already has a `project_id` at all, REGARDLESS of `membership_state`
+- so nothing in this codebase today would ever try to re-merge an
+already-grouped issue, provisional or confirmed. The columns and their
+real producers are still real, inspectable data (and the right place for
+a FUTURE code path to check before doing something this rule would
+forbid), but no defensive runtime guard was added against a violation
+that structurally can't happen yet - that would have been the same
+"speculative infrastructure with no real producer" this whole doc argues
+against, just on the consumer side instead of the producer side.
+
 ### 12.9 Three-tier timeline
 
 Read-time views over `evidence_units`/`claims`/`claim_edges`, not a new
@@ -2111,6 +2142,25 @@ stored table:
   received, commitment completed/reopened, work_object merge/split.
 - **Activity stream** - the complement (routine comms), collapsed/
   summarized, never the default view.
+
+**Done (2026-08-03):** all three built as read-time functions in
+`workgraph_store.py` (`list_complete_timeline_for_issue`/`list_milestone_
+timeline_for_issue`/`list_activity_stream_for_issue`), exposed via one new
+route, `GET /api/workgraph/issues/{issue_id}/timeline?tier=complete|
+milestone|activity` (defaults `milestone`). Real producers wired for the
+milestone tier: claim `create`/`complete`/`dismiss` events (ask/
+commitment/decision/date, Section 9/12.3), `artifact_versions.created_ts`
+(12.5), `prepared_actions` reaching a terminal state (12.4),
+`issue_state_history` transitions to `blocked`/`done`, and `audit_log`
+`merged_into` entries (a work_object merge). `approval received` and
+`work_object split` have no current producer in this codebase - named
+gaps, not silently dropped, same discipline as everywhere else in this
+doc (no approval-gate mechanism exists yet per 12.4's own finding; nothing
+ever splits a work_object back apart). The activity stream approximates
+"the complement" by excluding an `evidence_unit` whose `raw_item` already
+produced a milestone-tier claim event, keyed on `raw_item_id` - simple,
+real, and consistent with the design's own framing that this tier is a UI
+concern ("never the default view"), not a data-shape guarantee.
 
 ### 12.10 Prompt-injection boundary
 
@@ -2126,6 +2176,28 @@ that flips it `False` based on anything the evidence itself says (e.g. a
 supplier's email cannot mark its own resulting action as pre-approved,
 no matter how it's worded). Documented as a standing constraint on every
 future action-generating surface, not a one-time check.
+
+**Done (2026-08-03):** both stated invariants verified true against the
+real code, not assumed, before writing anything:
+1. `materialize_claims_for_raw_item` reads only `extraction.
+   extracted_json`'s already-parsed `asks`/`decisions`/`commitments`/
+   `dates_mentioned` fields - confirmed by re-reading the function itself;
+   `raw_item.subject`/body text is never touched.
+2. `create_prepared_action`'s `required_approval` parameter defaults `1`;
+   grep-confirmed its ONE real caller (`api_cockpit_action`) never passes
+   it at all, so every real row ever created stays at the default. A
+   cockpit action's own `instructions` text traces back to either Marc's
+   own typed input or a ranked candidate's `label`/`rationale` (both
+   derived from `claims.text` - itself the EXTRACTION's parsed `asks`/
+   `commitments` output, not verbatim raw email body), so this doesn't
+   smuggle raw untrusted text in through a side door either.
+
+No new runtime mechanism was needed to make these true - they already
+held. What this pass added is a standing, explicit comment at each
+enforcement point (`materialize_claims_for_raw_item`'s and
+`create_prepared_action`'s own docstrings) naming Section 12.10 directly,
+so a future change to either function carries the constraint forward
+instead of silently drifting from it.
 
 ### 12.11 Tenant scope — explicitly deferred, no placeholder columns either
 

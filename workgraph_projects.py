@@ -955,6 +955,14 @@ def confirm_suggestion(suggestion_id: int, *, link_type: str = "related") -> dic
     workgraph_lessons.record_confirmed_or_rejected(issue_id_a=sugg["issue_id_a"], status="confirmed")
     if result["status"] == "deferred":
         return {"action": "deferred_reconciliation", "suggestion_id": result["suggestion_id"]}
+    # Design doc Section 12.8: a real confirm event (a human click, or
+    # curator's own LLM judgment on weak-signal residue - both are a
+    # deliberate review of THIS specific pair, a qualitatively stronger
+    # signal than the raw auto-merge threshold alone) - both sides just
+    # joined the same project together, so both get marked 'confirmed',
+    # never just the winner.
+    ws.confirm_work_object_membership(sugg["issue_id_a"])
+    ws.confirm_work_object_membership(sugg["issue_id_b"])
     return {"action": "merged", "project_id": result["project_id"]}
 
 

@@ -672,6 +672,78 @@ def test_cluster_and_link_unmatched_teams_fyi_still_uses_fyi_path_not_teams_path
     assert ws_db.get_raw_item(rid)["issue_id"] is None
 
 
+# --- Teams session-scoped grouping key (2026-08-03, Section 3.2/8) --------
+
+def _teams_item_in_shared_chat(ws_db, chat_id, dedupe_suffix, subject, pr_number, occurred_ts,
+                                item_class="ACTIONABLE-ASK"):
+    """Like _pending_item, but for tests that need MULTIPLE items sharing
+    the same real Teams thread_key (_pending_item's own dedupe_key ==
+    thread_key would collide on the second call) - a distinct dedupe_key/
+    stable_key per message, same thread_key (chat_id) for all of them,
+    matching the real shape (one chat, many distinct messages)."""
+    stable_key = f"{chat_id}:{dedupe_suffix}"
+    rid = ws_db.insert_raw_item(
+        source="teams_chat", stable_key=stable_key, thread_key=chat_id, dedupe_key=stable_key,
+        occurred_ts=occurred_ts, subject=subject, from_actor="a@example.com", participants_json="[]",
+    )
+    ws_db.classify_raw_item(
+        rid, item_class=item_class, direction="inbound", direction_inferred=False,
+        topic="other", topic_inferred=True, sentiment="neutral", sentiment_inferred=True,
+        anomaly_flag=False, signal_type=None, pr_number=pr_number,
+        pr_number_base=workgraph_signals.reference_base(pr_number),
+        jasper_ref_issue_id=None,
+    )
+    return rid
+
+
+def test_effective_thread_key_unchanged_for_non_teams_sources(ws_db):
+    rid = _pending_item(ws_db, "eck9", "some ask", source="outlook_mail")
+    item = ws_db.get_raw_item(rid)
+    assert wc._effective_thread_key(item) == "eck9"
+
+
+def test_effective_thread_key_same_session_for_close_messages_sharing_reference(ws_db):
+    now = time.time()
+    r1 = _teams_item_in_shared_chat(ws_db, "multi1", "m1", "Approve PR900001", "PR900001", now)
+    r2 = _teams_item_in_shared_chat(ws_db, "multi1", "m2", "any update on PR900001?", "PR900001", now + 60)
+    item1, item2 = ws_db.get_raw_item(r1), ws_db.get_raw_item(r2)
+    assert wc._effective_thread_key(item1) == wc._effective_thread_key(item2)
+
+
+def test_effective_thread_key_splits_session_on_reference_mismatch(ws_db):
+    """The real fix: a different reference on the SAME physical Teams chat
+    now computes a different grouping key - it no longer forces a
+    genuinely different topic into whatever issue the flat container
+    happened to be pointing at."""
+    now = time.time()
+    r1 = _teams_item_in_shared_chat(ws_db, "multi2", "m1", "Approve PR900001", "PR900001", now)
+    r2 = _teams_item_in_shared_chat(ws_db, "multi2", "m2", "Approve PR900002", "PR900002", now + 60)
+    item1, item2 = ws_db.get_raw_item(r1), ws_db.get_raw_item(r2)
+    assert wc._effective_thread_key(item1) != wc._effective_thread_key(item2)
+
+
+def test_cluster_and_link_new_teams_session_does_not_silently_attach_to_old_sessions_issue(ws_db):
+    """End-to-end: a Teams chat's session 0 already resolved to a real
+    issue (e.g. via track_held_aside_item_as_issue). A NEW message on the
+    SAME physical thread_key but a genuinely different reference (a new
+    session) must NOT auto-attach to that issue - it falls through to the
+    existing hold-aside path exactly as if it were a brand-new container,
+    not a silent misattachment to an unrelated topic."""
+    now = time.time()
+    r1 = _teams_item_in_shared_chat(ws_db, "multi3", "m1", "Approve PR900001", "PR900001", now)
+    item1 = ws_db.get_raw_item(r1)
+    existing_issue = ws_db.create_issue_with_new_id(title="Existing", state="active", category="other")
+    ws_db.thread_map_set(wc._effective_thread_key(item1), existing_issue)
+    ws_db.link_raw_item_to_issue(r1, existing_issue)
+
+    r2 = _teams_item_in_shared_chat(ws_db, "multi3", "m2", "Approve PR900002", "PR900002", now + 60)
+
+    result = wc.cluster_and_link()
+
+    assert result["teams_standalone_skipped"] == 1
+    assert ws_db.get_raw_item(r2)["issue_id"] is None  # NOT silently attached to existing_issue
+
+
 # --- track_held_aside_item / dismiss_held_aside_item (task #54/#55) --------
 
 def test_list_held_aside_teams_items_surfaces_the_held_aside_pile(ws_db):

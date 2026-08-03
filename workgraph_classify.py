@@ -33,6 +33,7 @@ import workgraph_store as ws
 import workgraph_parties
 import workgraph_projects
 import workgraph_signals
+import workgraph_sessionize
 import text_extract
 
 # ===========================================================================
@@ -559,6 +560,33 @@ def _sender_domain_seen_on_issue(issue_id: str, from_actor: Optional[str]) -> bo
     return False
 
 
+def _effective_thread_key(item: dict) -> str:
+    """The real grouping key for this item — the bare thread_key for every
+    source except `teams_chat`, where it's session-scoped instead (Section
+    3.2/8 of docs/design/CONFIDENCE_AND_IDENTITY_REDESIGN.md). Wired live
+    2026-08-03, after a shadow comparison against the real corpus (4 of 17
+    Teams containers are genuinely multi-session; all currently route to
+    at most one issue each, so this only changes where a FUTURE message
+    lands, never reassigns history) and a read-only backtest_scored_model
+    run that found marc-362 — the confirmed multi-topic chat this fixes —
+    generating false-positive cross-project matches via its blended,
+    whole-chat signal.
+
+    A session boundary inside the same physical Teams chat now behaves
+    exactly like a different Outlook ConversationID already does: no
+    match, falls through to the existing new-issue/hold-aside logic below
+    (task #54/#55) rather than force-attaching to whatever issue the flat
+    thread_key used to point at."""
+    thread_key = item.get("thread_key")
+    if item.get("source") != "teams_chat" or not thread_key:
+        return thread_key
+    messages = ws.list_raw_items_by_thread_key("teams_chat", thread_key)
+    sessioned = workgraph_sessionize.sessionize_teams_messages(messages)
+    this_id = item.get("id")
+    session_seq = next((m["session_sequence"] for m in sessioned if m.get("id") == this_id), 0)
+    return f"{thread_key}::s{session_seq}"
+
+
 def cluster_and_link(limit: int = 500) -> dict:
     """For every classified-but-not-yet-linked item (issue_id IS NULL),
     resolve via thread_map (an existing Issue's thread_key) or create a new
@@ -641,7 +669,7 @@ def cluster_and_link(limit: int = 500) -> dict:
             ws.mark_link_checked(item["id"], now)
             continue
 
-        thread_key = item["thread_key"]
+        thread_key = _effective_thread_key(item)
         issue_id = ws.thread_map_lookup(thread_key)
         is_new_issue = False
         reference_match = None
@@ -816,7 +844,7 @@ def track_held_aside_item(raw_item_id: int) -> str:
         title=title, category=item.get("topic"),
         state=state, priority="med", confidence_tier=item.get("confidence") or "M",
     )
-    ws.thread_map_set(item["thread_key"], issue_id)
+    ws.thread_map_set(_effective_thread_key(item), issue_id)
     ws.link_raw_item_to_issue(raw_item_id, issue_id)
     ws.add_evidence(
         issue_id=issue_id, type=_evidence_type(item["source"]),

@@ -579,6 +579,39 @@ architecture exports, unrelated file shares) - correctly left unclustered,
 the same "legitimate noise-filtering" shape as calendar's 126/1123. **1/40
 is legitimate. No fix needed or built.**
 
+### 8.10 Step 8 done, and a second real blocker found for step 9
+
+Wired: `workgraph_classify._effective_thread_key()` now computes a
+session-scoped grouping key for `teams_chat` items (bare thread_key for
+every other source, unchanged). A session boundary inside one physical
+Teams chat now behaves exactly like a different Outlook ConversationID
+already does — falls through to the existing new-issue/hold-aside path
+(task #54/#55) instead of force-attaching to whatever issue the flat
+container used to point at. Forward-looking only, by design: this changes
+where a *future* message lands, not any existing raw_item's current
+issue_id — no retroactive resplit was built or run.
+
+That last point matters for step 9. Re-checking the backtest's false-
+positive class after this shipped: it's **unchanged** (still the same 80
+pairs) — expected, since nothing retroactive happened and none of
+marc-362's *existing* raw_items moved. But looking closer at the second
+repeat offender from that class, **marc-360, found something session-
+wiring can't fix**: it's not a Teams chat at all — it's a single calendar
+event ("Lilly / SAP Legal Discussion: S/4HANA Cloud") that matches many
+unrelated issues via `party`+`sender` alone, because a common internal
+attendee (a manager/legal/coordinator-shaped contact) is invited across
+many genuinely unrelated real deals. **This is the same shape D4 already
+fixed for `party` alone — but `sender` (shared internal party, weight
+0.30) still combines with `party`/`company` to cross the auto-merge
+threshold without any structural anchor at all.** Session-splitting a
+Teams container doesn't touch this; it needs a decision about the
+`sender` signal itself (e.g. demote it to non-combining-alone, the same
+treatment `party` already got in Phase 0/D4) before the scored model's
+backtest can be considered clean. **Step 9 stays blocked on this, not
+just on step 8** — flagged for Marc rather than reweighted unilaterally,
+since it changes how much a shared internal contact counts as evidence
+at all, and that's a real product call, not a mechanical fix.
+
 ### 8.9 Step 6/9 findings (2026-08-03): singleton rate unchanged, scored-model backtest fails its own gate
 
 Measured against the live DB after Phase 0 + identity formalization +

@@ -240,6 +240,36 @@ _PROCESSORS = {
 }
 
 
+def _claims_content_but_empty(source: str, payload: dict, items: list[dict]) -> str | None:
+    """Phase 0 fix (D5, 2026-08-03): distinguishes a genuinely empty pull
+    (a real `[]` - archive normally, nothing lost) from a shaped-but-empty
+    stub that PROMISED content and delivered none - the real confirmed
+    defect: a Teams payload like `{"count":21,"note":"Messages fetched from
+    read_resource"}` with no `value`/`messages` list parsed as `ok:True,
+    items:0` and archived, silently losing 21 real messages with no alert.
+    Returns a reason string when this looks like that shape, else None."""
+    if items:
+        return None
+    if source == "teams_chat":
+        messages_raw = payload.get("messages_raw")
+        if isinstance(messages_raw, dict) and "value" not in messages_raw and "messages" not in messages_raw:
+            if messages_raw.get("count") or messages_raw.get("note"):
+                return (f"messages_raw claims content (count={messages_raw.get('count')!r}, "
+                        f"note={messages_raw.get('note')!r}) but has no value/messages list")
+        return None
+    if source == "calendar":
+        events = payload.get("events")
+        if events is not None and not isinstance(events, list):
+            return f"events is not a list ({type(events).__name__}) - shaped-but-unparseable payload"
+        return None
+    if source == "sharepoint":
+        results = payload.get("results")
+        if results is not None and not isinstance(results, list):
+            return f"results is not a list ({type(results).__name__}) - shaped-but-unparseable payload"
+        return None
+    return None
+
+
 def process_file(path: Path) -> dict:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -255,6 +285,10 @@ def process_file(path: Path) -> dict:
         items = processor(payload)
     except Exception as e:
         return {"ok": False, "file": path.name, "error": f"processor raised: {e}"}
+
+    empty_reason = _claims_content_but_empty(source, payload, items)
+    if empty_reason:
+        return {"ok": False, "file": path.name, "source": source, "error": empty_reason}
 
     inserted = duplicates = 0
     for item in items:
@@ -295,6 +329,19 @@ def run() -> list[dict]:
             path.rename(dest_dir / path.name)
         except Exception:
             pass  # non-fatal - the file stays in the inbox and will be retried next sweep
+        if not result["ok"]:
+            # Phase 0 fix (D5): a dead-lettered file used to be silently
+            # invisible - alerting must never itself abort the sweep (an
+            # alert-write failure is not worse than the ingest failure it
+            # would be reporting).
+            try:
+                ws.create_alert(
+                    issue_id=None, kind="anomaly", severity="warn",
+                    summary=f"ingest dead-letter: {result['file']} — {result.get('error')}",
+                    source_ref=result["file"],
+                )
+            except Exception:
+                pass
     return results
 
 

@@ -12,6 +12,7 @@ different project than the rest.
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -129,3 +130,99 @@ def test_process_calendar_two_occurrences_of_same_series_share_thread_key():
     payload = {"source": "calendar", "events": [occ1, occ2]}
     out = normalize._process_calendar(payload)
     assert out[0]["thread_key"] == out[1]["thread_key"]
+
+
+# --- Phase 0 fix (D5, 2026-08-03): dead-letter shaped-but-empty stubs ------
+
+def test_claims_content_but_empty_detects_teams_stub_shape():
+    """The real confirmed defect: a shaped-but-empty Teams payload with a
+    count/note but no value/messages list used to parse as ok:True,
+    items:0 and archive silently - 21 real messages lost with no trace."""
+    payload = {"source": "teams_chat", "chat_id": "c1",
+               "messages_raw": {"count": 21, "note": "Messages fetched from read_resource"}}
+    reason = normalize._claims_content_but_empty("teams_chat", payload, [])
+    assert reason is not None
+    assert "count=21" in reason
+
+
+def test_claims_content_but_empty_teams_genuinely_empty_pull_is_not_a_failure():
+    payload = {"source": "teams_chat", "chat_id": "c1", "messages_raw": {"value": []}}
+    reason = normalize._claims_content_but_empty("teams_chat", payload, [])
+    assert reason is None
+
+
+def test_claims_content_but_empty_teams_real_items_parsed_is_not_a_failure():
+    payload = {"source": "teams_chat", "chat_id": "c1", "messages_raw": {"value": [{}]}}
+    reason = normalize._claims_content_but_empty("teams_chat", payload, [{"source": "teams_chat"}])
+    assert reason is None
+
+
+def test_claims_content_but_empty_calendar_non_list_events_is_a_failure():
+    payload = {"source": "calendar", "events": {"count": 5, "note": "stub"}}
+    reason = normalize._claims_content_but_empty("calendar", payload, [])
+    assert reason is not None
+
+
+def test_claims_content_but_empty_calendar_real_empty_list_is_not_a_failure():
+    payload = {"source": "calendar", "events": []}
+    reason = normalize._claims_content_but_empty("calendar", payload, [])
+    assert reason is None
+
+
+def test_claims_content_but_empty_sharepoint_non_list_results_is_a_failure():
+    payload = {"source": "sharepoint", "results": {"count": 3}}
+    reason = normalize._claims_content_but_empty("sharepoint", payload, [])
+    assert reason is not None
+
+
+def test_process_file_routes_teams_stub_to_failure_not_silent_success(tmp_path):
+    f = tmp_path / "stub.json"
+    f.write_text(json.dumps({"source": "teams_chat", "chat_id": "c1",
+                              "messages_raw": {"count": 21, "note": "Messages fetched from read_resource"}}),
+                 encoding="utf-8")
+    result = normalize.process_file(f)
+    assert result["ok"] is False
+    assert "count=21" in result["error"]
+
+
+def test_run_routes_stub_file_to_failed_dir_and_creates_alert(ws_db, tmp_path, monkeypatch):
+    inbox = tmp_path / "inbox"
+    processed = tmp_path / "processed"
+    failed = tmp_path / "failed"
+    monkeypatch.setattr(normalize, "INBOX_DIR", inbox)
+    monkeypatch.setattr(normalize, "PROCESSED_DIR", processed)
+    monkeypatch.setattr(normalize, "FAILED_DIR", failed)
+    inbox.mkdir(parents=True)
+    (inbox / "stub.json").write_text(
+        json.dumps({"source": "teams_chat", "chat_id": "c1",
+                    "messages_raw": {"count": 21, "note": "Messages fetched from read_resource"}}),
+        encoding="utf-8",
+    )
+
+    results = normalize.run()
+
+    assert results[0]["ok"] is False
+    assert (failed / "stub.json").exists()
+    assert not (processed / "stub.json").exists()
+    alerts = ws_db.list_alerts()
+    assert any(a["kind"] == "anomaly" and "stub.json" in a["summary"] for a in alerts)
+
+
+def test_run_processes_real_payload_and_leaves_empty_pull_as_success(ws_db, tmp_path, monkeypatch):
+    """A genuinely empty pull (events: []) must still archive as ok:True,
+    not get dead-lettered alongside real failures."""
+    inbox = tmp_path / "inbox"
+    processed = tmp_path / "processed"
+    failed = tmp_path / "failed"
+    monkeypatch.setattr(normalize, "INBOX_DIR", inbox)
+    monkeypatch.setattr(normalize, "PROCESSED_DIR", processed)
+    monkeypatch.setattr(normalize, "FAILED_DIR", failed)
+    inbox.mkdir(parents=True)
+    (inbox / "empty.json").write_text(json.dumps({"source": "calendar", "events": []}), encoding="utf-8")
+
+    results = normalize.run()
+
+    assert results[0]["ok"] is True
+    assert (processed / "empty.json").exists()
+    assert not (failed / "empty.json").exists()
+    assert ws_db.list_alerts() == []

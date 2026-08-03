@@ -531,6 +531,46 @@ def init_workgraph() -> None:
             except sqlite3.OperationalError:
                 pass
 
+            # Phase 0 fix (D2, 2026-08-03): 'expired' is a new resolution for
+            # the sweep in expire_stale_project_suggestions - a status VALUE
+            # on a column whose CHECK is baked into the original CREATE TABLE
+            # (unlike suggestion_kind above, which was added later with no
+            # CHECK at all), so this needs the same detect+rebuild migration
+            # already used for issues.state (task #44) and alerts.kind (task
+            # #55), not a plain ALTER. Only 'merge' suggestions expire -
+            # 'link' suggestions are exempt (see expire_stale_project_
+            # suggestions' own docstring for why).
+            existing_suggestions_sql = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='pending_project_suggestions'"
+            ).fetchone()
+            if existing_suggestions_sql and "'expired'" not in (existing_suggestions_sql["sql"] or ""):
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    conn.execute("ALTER TABLE pending_project_suggestions RENAME TO pending_project_suggestions_pre_phase0")
+                    conn.execute("""
+                        CREATE TABLE pending_project_suggestions (
+                            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                            issue_id_a      TEXT NOT NULL,
+                            issue_id_b      TEXT NOT NULL,
+                            reason          TEXT NOT NULL,
+                            status          TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','confirmed','rejected','expired')),
+                            created_ts      REAL NOT NULL,
+                            resolved_ts     REAL,
+                            suggestion_kind TEXT NOT NULL DEFAULT 'merge'
+                        )
+                    """)
+                    cols = [r["name"] for r in conn.execute("PRAGMA table_info(pending_project_suggestions_pre_phase0)").fetchall()]
+                    col_list = ", ".join(cols)
+                    conn.execute(f"INSERT INTO pending_project_suggestions ({col_list}) SELECT {col_list} FROM pending_project_suggestions_pre_phase0")
+                    conn.execute("DROP TABLE pending_project_suggestions_pre_phase0")
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_project_suggestions_status ON pending_project_suggestions(status)")
+                    conn.execute("COMMIT")
+                except sqlite3.OperationalError:
+                    try:
+                        conn.execute("ROLLBACK")
+                    except sqlite3.OperationalError:
+                        pass
+
             # 2026-07-31: durable relationships between two DIFFERENT real
             # projects that should NOT become one project - e.g. "same
             # vendor team, adjacent topics" (two distinct recurring PwC
@@ -3280,6 +3320,35 @@ def resolve_project_suggestion(id: int, status: str) -> None:
                 "UPDATE pending_project_suggestions SET status = ?, resolved_ts = ? WHERE id = ?",
                 (status, time.time(), id),
             )
+        finally:
+            conn.close()
+
+
+def expire_stale_project_suggestions(older_than_days: float, kinds: tuple = ("merge",)) -> int:
+    """Phase 0 fix (D2, 2026-08-03): the structural guarantee that a stale
+    pending queue can't just silently accumulate forever, independent of
+    whether same_category_proximity_suggestions_enabled is on. Resolves
+    (not deletes - reversible bookkeeping, same as any other resolution) any
+    'pending' row of the given suggestion_kind(s) older than the cutoff to
+    status='expired'. 'link' suggestions are exempt by default - a
+    relationship suggestion doesn't go stale the way a same-project merge
+    guess does; Marc or a worker may still want to confirm a 'related'
+    connection long after it first surfaced. Returns the number of rows
+    resolved."""
+    if not kinds:
+        return 0
+    cutoff = time.time() - older_than_days * 86400
+    placeholders = ",".join("?" for _ in kinds)
+    with _lock:
+        conn = _connect()
+        try:
+            cur = conn.execute(
+                f"""UPDATE pending_project_suggestions
+                    SET status = 'expired', resolved_ts = ?
+                    WHERE status = 'pending' AND created_ts < ? AND suggestion_kind IN ({placeholders})""",
+                (time.time(), cutoff, *kinds),
+            )
+            return cur.rowcount
         finally:
             conn.close()
 

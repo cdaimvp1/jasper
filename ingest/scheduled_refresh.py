@@ -372,6 +372,15 @@ def run() -> dict:
     except Exception as e:
         aristotle_detection_result = {"error": str(e)}
 
+    # 11. Phase 0 fix (D2) - expire stale pending merge suggestions, once/day,
+    # same never-block guard. Structural backstop against the queue
+    # accumulating again regardless of the same_category_proximity_
+    # suggestions_enabled flag's setting.
+    try:
+        suggestion_expiry_result = workgraph_projects.run_suggestion_expiry_daily_if_due()
+    except Exception as e:
+        suggestion_expiry_result = {"error": str(e)}
+
     summary = {
         "mail": mail_result,
         "classify_after_mail": classify_result_1,
@@ -386,6 +395,7 @@ def run() -> dict:
         "health_check": health_check_result,
         "personal_learning": personal_learning_result,
         "aristotle_detection": aristotle_detection_result,
+        "suggestion_expiry": suggestion_expiry_result,
     }
     _log(f"REFRESH ok mail_inserted={mail_result.get('inserted', '?')} "
         f"relay_ok={relay_result.get('ok')} relay_calendar_advanced={relay_result.get('cursor_advanced')} "

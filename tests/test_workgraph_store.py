@@ -1161,6 +1161,51 @@ def test_create_project_suggestion_same_kind_dedups(ws_db):
     assert len(ws_db.list_project_suggestions(status="pending")) == 1
 
 
+def test_expire_stale_project_suggestions_expires_old_pending_merge(ws_db):
+    """Phase 0 fix (D2): the structural backstop against the pending queue
+    accumulating forever, independent of the generation flag's setting."""
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
+    sid = ws_db.create_project_suggestion(issue_id_a=a, issue_id_b=b, reason="test", suggestion_kind="merge")
+    conn = ws_db._connect()
+    conn.execute("UPDATE pending_project_suggestions SET created_ts = ? WHERE id = ?",
+                 (time.time() - 30 * 86400, sid))
+    conn.close()
+
+    expired = ws_db.expire_stale_project_suggestions(21)
+
+    assert expired == 1
+    assert ws_db.get_project_suggestion(sid)["status"] == "expired"
+
+
+def test_expire_stale_project_suggestions_leaves_recent_pending(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
+    sid = ws_db.create_project_suggestion(issue_id_a=a, issue_id_b=b, reason="test", suggestion_kind="merge")
+
+    expired = ws_db.expire_stale_project_suggestions(21)
+
+    assert expired == 0
+    assert ws_db.get_project_suggestion(sid)["status"] == "pending"
+
+
+def test_expire_stale_project_suggestions_exempts_link_kind_by_default(ws_db):
+    """A 'related' suggestion doesn't go stale the way a same-project merge
+    guess does - Marc may still want to confirm it long after it surfaced."""
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
+    sid = ws_db.create_project_suggestion(issue_id_a=a, issue_id_b=b, reason="test", suggestion_kind="link")
+    conn = ws_db._connect()
+    conn.execute("UPDATE pending_project_suggestions SET created_ts = ? WHERE id = ?",
+                 (time.time() - 30 * 86400, sid))
+    conn.close()
+
+    expired = ws_db.expire_stale_project_suggestions(21)
+
+    assert expired == 0
+    assert ws_db.get_project_suggestion(sid)["status"] == "pending"
+
+
 def test_create_project_link_persists_and_is_idempotent(ws_db):
     p1 = ws_db.create_project_with_new_id(name="P1", category="other")
     p2 = ws_db.create_project_with_new_id(name="P2", category="other")

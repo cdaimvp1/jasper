@@ -472,7 +472,7 @@ def _weak_signal_candidates(issue: dict) -> list:
 # only ACTS on it once the flag is on, and the flag should only be
 # switched on after backtest_scored_model()'s output has been reviewed
 # (see that function's own docstring) - a hard gate, not a formality.
-SCORE_WEIGHTS = {"company": 0.40, "topic": 0.40, "sender": 0.30, "category": 0.15}
+SCORE_WEIGHTS = {"company": 0.40, "topic": 0.40, "sender": 0.30, "category": 0.15, "party": 0.40}
 AUTO_MERGE_THRESHOLD = 0.65
 WEAK_SUGGESTION_FLOOR = 0.15  # preserves today's "one weak signal -> suggestion" behavior
 
@@ -491,12 +491,17 @@ def _issue_signal_snapshot(issue_id: str, issue: Optional[dict] = None) -> dict:
         and not workgraph_signals.is_automated_sender(p.get("primary_email") or "")
     }
     internal = {p["id"] for p in parties if p.get("affiliation") == "internal"}
+    party_ids = {
+        p["id"] for p in parties
+        if p.get("affiliation") == "external" and not workgraph_signals.is_automated_sender(p.get("primary_email") or "")
+    }
     has_external = any(p.get("affiliation") == "external" for p in parties)
     topic_key = ws.normalize_topic_key(issue.get("title") or "") if has_external else ""
     return {
         "id": issue_id,
         "companies": companies,
         "internal": internal,
+        "party_ids": party_ids,
         "topic_key": topic_key if len(topic_key) >= MIN_TOPIC_KEY_LEN else "",
         "references": reference_base_ids_for_issue(issue_id),  # base, not full - see that function's docstring
         "category": issue.get("category"),
@@ -506,15 +511,24 @@ def _issue_signal_snapshot(issue_id: str, issue: Optional[dict] = None) -> dict:
 
 def _pairwise_score(a: dict, b: dict):
     """Combined confidence score for two issues' precomputed signal
-    snapshots (see _issue_signal_snapshot). Company/topic/sender/category
-    each contribute a partial weight; none reaches AUTO_MERGE_THRESHOLD
-    alone. A disjoint reference-ID pair is vetoed to 0 regardless - the
-    same absolute override the ordered model already applies. Returns
-    (score, matched_signal_names)."""
+    snapshots (see _issue_signal_snapshot). Company/topic/sender/category/
+    party each contribute a partial weight; none reaches AUTO_MERGE_THRESHOLD
+    alone - including party (Phase 0 fix, 2026-08-03): a shared external
+    party used to auto_merge on its own in scored_grouping_decision (the
+    exact D4 shape - an account manager/consultant spans many concurrent,
+    unrelated deals, same reasoning that already narrowed the LIVE grouping
+    path off party-alone on 2026-07-31). Now it's one contributing signal
+    like the others, requiring a second corroborating signal to cross
+    AUTO_MERGE_THRESHOLD. A disjoint reference-ID pair is vetoed to 0
+    regardless - the same absolute override the ordered model already
+    applies. Returns (score, matched_signal_names)."""
     if a["references"] and b["references"] and a["references"].isdisjoint(b["references"]):
         return 0.0, []
     signals = []
     score = 0.0
+    if a["party_ids"] and b["party_ids"] and not a["party_ids"].isdisjoint(b["party_ids"]):
+        score += SCORE_WEIGHTS["party"]
+        signals.append("party")
     if a["companies"] and b["companies"] and not a["companies"].isdisjoint(b["companies"]):
         score += SCORE_WEIGHTS["company"]
         signals.append("company")
@@ -544,11 +558,13 @@ def scored_grouping_decision(issue_id: str, issue: dict) -> dict:
     if m:
         ref, sibling_id = m
         return {"verdict": "auto_merge", "score": 1.0, "sibling_id": sibling_id, "matched_signals": ["reference"]}
-    m = _shared_external_party(issue_id)
-    if m:
-        party_id, sibling_id = m
-        if not _vetoed_by_reference_mismatch(issue_id, sibling_id):
-            return {"verdict": "auto_merge", "score": 1.0, "sibling_id": sibling_id, "matched_signals": ["party"]}
+    # Phase 0 fix (2026-08-03, D4): a standalone _shared_external_party ->
+    # auto_merge(1.0) branch used to live here - the exact hazard the module
+    # docstring's 2026-07-31 narrowing already removed from the LIVE grouping
+    # path (_strong_signal_match), but this shadow-only scored model still
+    # carried it verbatim. A shared party now flows into _pairwise_score's
+    # "party" signal below instead, where it contributes but can't alone
+    # cross AUTO_MERGE_THRESHOLD - same treatment as company/topic/sender.
 
     my_snapshot = _issue_signal_snapshot(issue_id, issue)
     best_score, best_sibling, best_signals = 0.0, None, []
@@ -894,31 +910,72 @@ def group_issue(issue_id: str) -> dict:
             return _finish("suggested", signal=kind, sibling_id=sibling_id, count=1)
         return _finish("no_match")
 
+    # Phase 0 fix (D2, 2026-08-03): same-category-proximity candidate
+    # generation is OFF by default (config('grouping',
+    # 'same_category_proximity_suggestions_enabled')) - this whole branch
+    # used to emit one suggestion PER candidate, unbounded, which is exactly
+    # how the pending queue reached 2,004 rows (~99% eventually rejected).
+    if not bool(config.get("grouping", "same_category_proximity_suggestions_enabled")):
+        return _finish("no_match")
+
     candidates = _weak_signal_candidates(issue)
+    if not candidates:
+        return _finish("no_match")
 
-    # Total Recall precedent check, before asking curator (or Marc) at all:
-    # has this issue's situation (category + external company) already been
-    # confirmed/rejected STRONG_PRECEDENT_HITS+ times with high trust? If so,
-    # resolve deterministically now rather than adding to curator's queue -
+    # Corroboration requirement, kept as belt-and-suspenders for whenever
+    # this flag IS turned on: _strong_signal_match already searched
+    # exhaustively across every other issue for shared party/company/topic
+    # and found none, or this issue wouldn't have reached here - so the
+    # only _pairwise_score signal left that can genuinely corroborate a bare
+    # category match is a shared INTERNAL sender ("sender", which
+    # _strong_signal_match never checks). A category match with no such
+    # corroboration is dropped rather than suggested.
+    my_snapshot = _issue_signal_snapshot(issue_id, issue)
+    corroborated = []
+    for other in candidates:
+        score, signals = _pairwise_score(my_snapshot, _issue_signal_snapshot(other["id"], other))
+        if any(s != "category" for s in signals):
+            corroborated.append((score, other))
+    if not corroborated:
+        return _finish("no_match")
+    corroborated.sort(key=lambda pair: pair[0], reverse=True)
+    _, best = corroborated[0]
+
+    # Total Recall precedent check, before asking curator (or Marc) at all -
     # see workgraph_lessons.precedent_prefilter. A 'confirmed' verdict merges
-    # immediately; a 'rejected' verdict means don't even surface a
-    # suggestion. None (no strong precedent yet) falls through to today's
-    # behavior unchanged.
+    # immediately; a 'rejected' verdict means don't even surface a suggestion.
     precedent = workgraph_lessons.precedent_prefilter(issue)
-    if precedent == "confirmed" and candidates:
-        return _merge_or_defer(candidates[0]["id"], "auto-resolved by precedent (repeated confirmed pattern)", "precedent")
+    if precedent == "confirmed":
+        return _merge_or_defer(best["id"], "auto-resolved by precedent (repeated confirmed pattern)", "precedent")
+    if precedent == "rejected":
+        return _finish("no_match")
 
-    suggested = 0
-    if precedent != "rejected":
-        for other in candidates:
-            ws.create_project_suggestion(
-                issue_id_a=issue_id, issue_id_b=other["id"],
-                reason=f"same category ('{issue.get('category')}') within {WEAK_SIGNAL_WINDOW_DAYS}d, no shared external contact found",
-            )
-            suggested += 1
-    if suggested:
-        return _finish("suggested", sibling_id=candidates[0]["id"] if candidates else None, count=suggested)
-    return _finish("no_match")
+    # At most ONE suggestion per call, for the single best-corroborated
+    # candidate - never one-per-candidate.
+    ws.create_project_suggestion(
+        issue_id_a=issue_id, issue_id_b=best["id"],
+        reason=f"same category ('{issue.get('category')}') within {WEAK_SIGNAL_WINDOW_DAYS}d, corroborated by shared internal sender",
+    )
+    return _finish("suggested", sibling_id=best["id"], count=1)
+
+
+def run_suggestion_expiry_daily_if_due(now: Optional[float] = None) -> Optional[dict]:
+    """Phase 0 fix (D2, 2026-08-03): same once-a-day gate as retention/
+    health_check/aristotle_detection (ws.claim_daily_run) - piggybacks
+    scheduled_refresh.py's 5x/day cycle without sweeping 5x. Expires
+    'pending' merge suggestions older than config('grouping',
+    'weak_signal_ttl_days') to status='expired' (reversible bookkeeping,
+    not a delete). Returns None on every call that isn't the day's first
+    claim, a real checkable 'did not run' signal, matching the sibling
+    gates' own convention."""
+    if now is None:
+        now = time.time()
+    today = time.strftime("%Y-%m-%d", time.localtime(now))
+    if not ws.claim_daily_run("suggestion_expiry", today):
+        return None
+    ttl_days = config.get("grouping", "weak_signal_ttl_days") or 21
+    expired = ws.expire_stale_project_suggestions(ttl_days, kinds=("merge",))
+    return {"expired": expired, "ttl_days": ttl_days}
 
 
 def backfill_regroup_by_reference() -> dict:

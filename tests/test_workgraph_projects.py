@@ -965,6 +965,44 @@ def test_scored_grouping_decision_reference_match_is_auto_merge(ws_db):
     assert decision["matched_signals"] == ["reference"]
 
 
+def test_scored_grouping_decision_shared_party_alone_is_suggest_not_auto_merge(ws_db):
+    """Phase 0 fix (D4): a standalone _shared_external_party -> auto_merge(1.0)
+    branch used to live in scored_grouping_decision - the exact hazard the
+    live grouping path (_strong_signal_match) was already narrowed off of on
+    2026-07-31 (see this module's docstring). A shared party alone must now
+    only ever SUGGEST, never auto-merge, on otherwise unrelated topics."""
+    # company left unset on both sides so ONLY the party signal fires -
+    # otherwise a shared party who also shares a company would double up
+    # both signals and auto-merge for a different reason than this test
+    # means to isolate.
+    a = _issue(ws_db, "Renewal negotiation")
+    _link_party(ws_db, a, "p_shared", "rep@acme.com")
+    b = _issue(ws_db, "Completely unrelated support escalation")
+    _link_party(ws_db, b, "p_shared", "rep@acme.com")
+
+    decision = wp.scored_grouping_decision(a, ws_db.get_issue(a))
+
+    assert decision["verdict"] == "suggest"
+    assert decision["sibling_id"] == b
+    assert decision["matched_signals"] == ["party"]
+
+
+def test_scored_grouping_decision_shared_party_plus_topic_is_auto_merge(ws_db):
+    """A shared party COMBINED with a second corroborating signal (topic)
+    still auto-merges - party contributes like company/topic/sender/category
+    already did, it just can't clear AUTO_MERGE_THRESHOLD alone anymore."""
+    a = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted")
+    _link_party(ws_db, a, "p_shared2", "rep@acme.com", company="Acme")
+    b = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted again")
+    _link_party(ws_db, b, "p_shared2", "rep@acme.com", company="Acme")
+
+    decision = wp.scored_grouping_decision(a, ws_db.get_issue(a))
+
+    assert decision["verdict"] == "auto_merge"
+    assert decision["sibling_id"] == b
+    assert "party" in decision["matched_signals"]
+
+
 def test_scored_grouping_decision_combined_weak_signals_auto_merge(ws_db):
     a = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted")
     _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
@@ -1060,6 +1098,83 @@ def test_group_issue_flag_on_single_weak_signal_creates_suggestion_not_merge(ws_
 
     assert result["action"] == "suggested"
     assert ws_db.get_issue(a)["project_id"] is None
+
+
+def test_group_issue_same_category_flood_off_by_default_creates_no_suggestion(ws_db):
+    """Phase 0 fix (D2): same-category-proximity candidate generation is
+    OFF by default. A bare same-category pair with no other signal must not
+    create a suggestion at all - this is the fix for the 2,004-row flood."""
+    a = _issue(ws_db, "A")
+    ws_db.update_issue(a, category="rfp-sourcing")
+    b = _issue(ws_db, "B, totally unrelated")
+    ws_db.update_issue(b, category="rfp-sourcing")
+
+    result = wp.group_issue(a)
+
+    assert result["action"] == "no_match"
+
+
+def test_group_issue_same_category_flag_on_without_corroboration_creates_no_suggestion(ws_db, monkeypatch, tmp_path):
+    """Even with the flag on, a bare category match with no OTHER
+    _pairwise_score signal (no shared internal sender) is dropped, not
+    suggested - corroboration is required, the flag alone isn't enough."""
+    config = _isolate_config(monkeypatch, tmp_path)
+    config.set_value(True, "grouping", "same_category_proximity_suggestions_enabled")
+
+    a = _issue(ws_db, "A")
+    ws_db.update_issue(a, category="rfp-sourcing")
+    b = _issue(ws_db, "B, totally unrelated")
+    ws_db.update_issue(b, category="rfp-sourcing")
+
+    result = wp.group_issue(a)
+
+    assert result["action"] == "no_match"
+
+
+def test_group_issue_same_category_flag_on_with_corroboration_creates_one_suggestion(ws_db, monkeypatch, tmp_path):
+    """With the flag on AND a shared internal sender corroborating the
+    category match, exactly one suggestion is created for the single
+    best-scoring candidate - never one per candidate (the actual flood fix,
+    even with the flag on)."""
+    config = _isolate_config(monkeypatch, tmp_path)
+    config.set_value(True, "grouping", "same_category_proximity_suggestions_enabled")
+
+    def _internal(issue_id, party_id):
+        ws_db.upsert_party(id=party_id, primary_email="me@lilly.com", display_name="Me",
+                            affiliation="internal", affiliation_confidence="H", affiliation_source="domain", company=None)
+        ws_db.link_party_to_issue(issue_id, party_id)
+
+    a = _issue(ws_db, "A")
+    ws_db.update_issue(a, category="rfp-sourcing")
+    _internal(a, "int-shared")
+    b = _issue(ws_db, "B, totally unrelated")
+    ws_db.update_issue(b, category="rfp-sourcing")
+    _internal(b, "int-shared")
+    c = _issue(ws_db, "C, also unrelated")
+    ws_db.update_issue(c, category="rfp-sourcing")
+    _internal(c, "int-shared")
+
+    result = wp.group_issue(a)
+
+    assert result["action"] == "suggested"
+    assert result["count"] == 1
+
+
+def test_run_suggestion_expiry_daily_if_due_expires_old_and_gates_second_call(ws_db):
+    a = _issue(ws_db, "A")
+    b = _issue(ws_db, "B")
+    sid = ws_db.create_project_suggestion(issue_id_a=a, issue_id_b=b, reason="test", suggestion_kind="merge")
+    conn = ws_db._connect()
+    conn.execute("UPDATE pending_project_suggestions SET created_ts = ? WHERE id = ?",
+                 (time.time() - 30 * 86400, sid))
+    conn.close()
+
+    first = wp.run_suggestion_expiry_daily_if_due()
+    assert first == {"expired": 1, "ttl_days": 21}
+    assert ws_db.get_project_suggestion(sid)["status"] == "expired"
+
+    second = wp.run_suggestion_expiry_daily_if_due()
+    assert second is None
 
 
 # --- backtest_scored_model (Part A2's required gate) ----------------------

@@ -101,3 +101,22 @@ def test_list_commitments_for_issue_includes_closed_issues(ws_db):
 def test_list_commitments_for_issue_empty_when_none(ws_db):
     iid = ws_db.create_issue_with_new_id(title="None", state="active", category="other")
     assert wc.list_commitments_for_issue(iid) == []
+
+
+# --- N+1 fix (2026-08-02): batched list_commitments_for_issues() must
+# match calling the singular version once per issue, but via one fetch. ---
+
+def test_list_commitments_for_issues_batched_matches_per_issue_calls(ws_db):
+    iid1 = _issue_with_commitments(ws_db, "One", "b1", ["commitment one"])
+    iid2 = _issue_with_commitments(ws_db, "Two", "b2", ["commitment two"])
+    iid3 = ws_db.create_issue_with_new_id(title="None", state="active", category="other")
+
+    batched = wc.list_commitments_for_issues([iid1, iid2, iid3])
+
+    assert batched[iid1] == wc.list_commitments_for_issue(iid1)
+    assert batched[iid2] == wc.list_commitments_for_issue(iid2)
+    assert batched[iid3] == []
+
+
+def test_list_commitments_for_issues_empty_list_returns_empty_dict(ws_db):
+    assert wc.list_commitments_for_issues([]) == {}

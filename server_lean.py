@@ -1702,6 +1702,25 @@ async def api_project_detail(project_id: str):
     # (correctly-scoped) callers.
     asks, decisions, key_facts, commitments, repeat_signals = [], [], [], [], []
     title_by_id = {i["id"]: (i.get("display_title") or i["title"]) for i in issues}
+    # Fixed 2026-08-02 (Marc's direct report: project-detail buttons "reacting
+    # very slowly") - this loop used to call list_asks_for_issue/
+    # list_decisions_for_issue/list_key_facts_for_issue/
+    # list_commitments_for_issue/list_repeat_signals_for_issue ONE ISSUE AT A
+    # TIME, each independently re-querying the same underlying
+    # raw_item_extractions table via list_extractions_for_issues([iid]) -
+    # despite that function already being the batched-safe primitive its own
+    # docstring advertises. For a 4-issue project that was 20 separate DB
+    # round-trips instead of 4. Confirmed live via curl timing before this
+    # fix: GET /api/workgraph/projects/{id} alone took ~3.1s, and every
+    # button click on this page chains a POST + this same GET behind it -
+    # a real multi-second delay per click, not a missing click handler.
+    # Batched *_for_issues() siblings (same modules) now do exactly one
+    # extractions fetch per field across the WHOLE project.
+    asks_by_issue = workgraph_asks_decisions.list_asks_for_issues(issue_ids)
+    decisions_by_issue = workgraph_asks_decisions.list_decisions_for_issues(issue_ids)
+    key_facts_by_issue = workgraph_key_facts.list_key_facts_for_issues(issue_ids)
+    commitments_by_issue = workgraph_commitments.list_commitments_for_issues(issue_ids)
+    repeat_signals_by_issue = workgraph_repeat_signals.list_repeat_signals_for_issues(issue_ids)
     for iid in issue_ids:
         issue_title = title_by_id.get(iid, iid)
         # Checklist rework (2026-08-01): asks/decisions/commitments now carry
@@ -1709,14 +1728,14 @@ async def api_project_detail(project_id: str):
         # here too so project-scoped items can get the same real deep link
         # the issue-detail endpoint already attaches, not just the text.
         asks.extend({"issue_id": iid, "issue_title": issue_title, "text": t["text"], "raw_item_id": t["raw_item_id"]}
-                    for t in workgraph_asks_decisions.list_asks_for_issue(iid))
+                    for t in asks_by_issue.get(iid, []))
         decisions.extend({"issue_id": iid, "issue_title": issue_title, "text": t["text"], "raw_item_id": t["raw_item_id"]}
-                    for t in workgraph_asks_decisions.list_decisions_for_issue(iid))
+                    for t in decisions_by_issue.get(iid, []))
         key_facts.extend({"issue_id": iid, "issue_title": issue_title, "text": t}
-                    for t in workgraph_key_facts.list_key_facts_for_issue(iid))
+                    for t in key_facts_by_issue.get(iid, []))
         commitments.extend({"issue_id": iid, "issue_title": issue_title, "text": t["text"], "raw_item_id": t["raw_item_id"]}
-                    for t in workgraph_commitments.list_commitments_for_issue(iid))
-        for rs in workgraph_repeat_signals.list_repeat_signals_for_issue(iid):
+                    for t in commitments_by_issue.get(iid, []))
+        for rs in repeat_signals_by_issue.get(iid, []):
             rs["issue_id"] = iid
             rs["issue_title"] = issue_title
             repeat_signals.append(rs)

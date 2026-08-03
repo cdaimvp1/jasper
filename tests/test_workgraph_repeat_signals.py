@@ -102,3 +102,26 @@ def test_list_repeat_signals_malformed_days_field_ignored_not_crashed(ws_db):
     })
     entries = wrs.list_repeat_signals_for_issue(iid)
     assert entries[0]["days_since_first_ask"] is None
+
+
+# --- N+1 fix (2026-08-02): batched list_repeat_signals_for_issues() must
+# match calling the singular version once per issue, but via one fetch. ---
+
+def test_list_repeat_signals_for_issues_batched_matches_per_issue_calls(ws_db):
+    iid1 = _issue_with_extraction(ws_db, "One", "b1", {
+        "repeat_signals": [{"ask_text": "signal one", "days_since_first_ask": 2}],
+    })
+    iid2 = _issue_with_extraction(ws_db, "Two", "b2", {
+        "repeat_signals": [{"ask_text": "signal two", "days_since_first_ask": 4, "escalated": True}],
+    })
+    iid3 = ws_db.create_issue_with_new_id(title="None", state="active", category="other")
+
+    batched = wrs.list_repeat_signals_for_issues([iid1, iid2, iid3])
+
+    assert batched[iid1] == wrs.list_repeat_signals_for_issue(iid1)
+    assert batched[iid2] == wrs.list_repeat_signals_for_issue(iid2)
+    assert batched[iid3] == []
+
+
+def test_list_repeat_signals_for_issues_empty_list_returns_empty_dict(ws_db):
+    assert wrs.list_repeat_signals_for_issues([]) == {}

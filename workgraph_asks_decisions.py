@@ -61,6 +61,32 @@ def list_open_decisions() -> list[dict]:
     return _rollup("decisions")
 
 
+def _texts_for_issues(issue_ids: list[str], field_name: str) -> dict[str, list[dict]]:
+    """Batched form of _texts_for_issue below - one list_extractions_for_issues
+    call across every issue instead of one per issue (real bug found 2026-08-02:
+    api_project_detail was calling the singular list_asks_for_issue/
+    list_decisions_for_issue/etc. once PER MEMBER ISSUE, each independently
+    re-querying the same underlying raw_item_extractions table despite
+    list_extractions_for_issues already being the batched-safe primitive - a
+    real, measured multi-second latency on every project-detail load/action
+    for even a 4-issue project, confirmed live via curl timing before this
+    fix. _texts_for_issue itself now just calls this with a single-element
+    list, so its own behavior/callers are unchanged."""
+    extractions_by_issue = ws.list_extractions_for_issues(issue_ids)
+    out: dict[str, list[dict]] = {}
+    for iid in issue_ids:
+        texts = []
+        for extraction in extractions_by_issue.get(iid, []):
+            values = (extraction.get("extracted_json") or {}).get(field_name) or []
+            if not isinstance(values, list):
+                continue
+            for text in values:
+                if isinstance(text, str) and text.strip():
+                    texts.append({"text": text.strip(), "raw_item_id": extraction.get("raw_item_id")})
+        out[iid] = texts
+    return out
+
+
 def _texts_for_issue(issue_id: str, field_name: str) -> list[dict]:
     """Enhancement #87 (issue detail panel): the same real field, scoped to
     ONE issue's own extractions rather than every open issue - no state
@@ -71,16 +97,7 @@ def _texts_for_issue(issue_id: str, field_name: str) -> list[dict]:
     Sign/Outlook) the source email already carries, via deep_links.
     attach_deep_links, instead of this ask ever floating free of its
     source."""
-    extractions_by_issue = ws.list_extractions_for_issues([issue_id])
-    out = []
-    for extraction in extractions_by_issue.get(issue_id, []):
-        values = (extraction.get("extracted_json") or {}).get(field_name) or []
-        if not isinstance(values, list):
-            continue
-        for text in values:
-            if isinstance(text, str) and text.strip():
-                out.append({"text": text.strip(), "raw_item_id": extraction.get("raw_item_id")})
-    return out
+    return _texts_for_issues([issue_id], field_name).get(issue_id, [])
 
 
 def list_asks_for_issue(issue_id: str) -> list[dict]:
@@ -89,3 +106,13 @@ def list_asks_for_issue(issue_id: str) -> list[dict]:
 
 def list_decisions_for_issue(issue_id: str) -> list[dict]:
     return _texts_for_issue(issue_id, "decisions")
+
+
+def list_asks_for_issues(issue_ids: list[str]) -> dict[str, list[dict]]:
+    """Batched sibling for api_project_detail - see _texts_for_issues."""
+    return _texts_for_issues(issue_ids, "asks")
+
+
+def list_decisions_for_issues(issue_ids: list[str]) -> dict[str, list[dict]]:
+    """Batched sibling for api_project_detail - see _texts_for_issues."""
+    return _texts_for_issues(issue_ids, "decisions")

@@ -16,31 +16,46 @@ from __future__ import annotations
 import workgraph_store as ws
 
 
+def list_repeat_signals_for_issues(issue_ids: list[str]) -> dict[str, list[dict]]:
+    """Batched sibling of list_repeat_signals_for_issue - one
+    list_extractions_for_issues call across every issue instead of one per
+    issue (real N+1 bug found 2026-08-02 in api_project_detail, which was
+    looping the singular version over every member issue - see
+    workgraph_asks_decisions._texts_for_issues' own comment for the full
+    story and the measured latency). list_repeat_signals_for_issue itself
+    now just calls this with a single-element list, so its own behavior/
+    callers are unchanged."""
+    extractions_by_issue = ws.list_extractions_for_issues(issue_ids)
+    out: dict[str, list[dict]] = {}
+    for iid in issue_ids:
+        signals_out = []
+        for extraction in extractions_by_issue.get(iid, []):
+            signals = (extraction.get("extracted_json") or {}).get("repeat_signals") or []
+            if not isinstance(signals, list):
+                continue
+            for entry in signals:
+                if not isinstance(entry, dict):
+                    continue
+                ask_text = entry.get("ask_text")
+                if not isinstance(ask_text, str) or not ask_text.strip():
+                    continue
+                days = entry.get("days_since_first_ask")
+                signals_out.append({
+                    "ask_text": ask_text.strip(),
+                    "days_since_first_ask": days if isinstance(days, (int, float)) else None,
+                    "escalated": bool(entry.get("escalated")),
+                    "escalation_note": entry.get("escalation_note") if isinstance(entry.get("escalation_note"), str) else None,
+                    "extracted_ts": extraction["extracted_ts"],
+                    "raw_item_id": extraction.get("raw_item_id"),
+                })
+        signals_out.sort(key=lambda e: e["extracted_ts"], reverse=True)
+        out[iid] = signals_out
+    return out
+
+
 def list_repeat_signals_for_issue(issue_id: str) -> list[dict]:
     """Every real repeat/escalation signal curator recorded for this issue's
     own extractions. Each entry: {ask_text, days_since_first_ask, escalated,
     escalation_note}. A malformed entry (not a dict, or missing a real
     ask_text) is skipped rather than guessed at or allowed to crash."""
-    extractions_by_issue = ws.list_extractions_for_issues([issue_id])
-    out = []
-    for extraction in extractions_by_issue.get(issue_id, []):
-        signals = (extraction.get("extracted_json") or {}).get("repeat_signals") or []
-        if not isinstance(signals, list):
-            continue
-        for entry in signals:
-            if not isinstance(entry, dict):
-                continue
-            ask_text = entry.get("ask_text")
-            if not isinstance(ask_text, str) or not ask_text.strip():
-                continue
-            days = entry.get("days_since_first_ask")
-            out.append({
-                "ask_text": ask_text.strip(),
-                "days_since_first_ask": days if isinstance(days, (int, float)) else None,
-                "escalated": bool(entry.get("escalated")),
-                "escalation_note": entry.get("escalation_note") if isinstance(entry.get("escalation_note"), str) else None,
-                "extracted_ts": extraction["extracted_ts"],
-                "raw_item_id": extraction.get("raw_item_id"),
-            })
-    out.sort(key=lambda e: e["extracted_ts"], reverse=True)
-    return out
+    return list_repeat_signals_for_issues([issue_id]).get(issue_id, [])

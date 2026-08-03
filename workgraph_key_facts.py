@@ -50,17 +50,30 @@ def list_open_key_facts() -> list[dict]:
     return entries
 
 
+def list_key_facts_for_issues(issue_ids: list[str]) -> dict[str, list[str]]:
+    """Batched sibling of list_key_facts_for_issue - one list_extractions_for_
+    issues call across every issue instead of one per issue (real N+1 bug
+    found 2026-08-02 in api_project_detail - see workgraph_asks_decisions.
+    _texts_for_issues' own comment for the full story and the measured
+    latency). list_key_facts_for_issue itself now just calls this with a
+    single-element list, so its own behavior/callers are unchanged."""
+    extractions_by_issue = ws.list_extractions_for_issues(issue_ids)
+    out: dict[str, list[str]] = {}
+    for iid in issue_ids:
+        facts_out = []
+        for extraction in extractions_by_issue.get(iid, []):
+            facts = (extraction.get("extracted_json") or {}).get("key_facts") or []
+            if not isinstance(facts, list):
+                continue
+            for text in facts:
+                if isinstance(text, str) and text.strip():
+                    facts_out.append(text.strip())
+        out[iid] = facts_out
+    return out
+
+
 def list_key_facts_for_issue(issue_id: str) -> list[str]:
     """Enhancement #87 (issue detail panel): the same real field, scoped to
     ONE issue's own extractions rather than every open issue - no state
     filter, same reasoning as workgraph_asks_decisions._texts_for_issue."""
-    extractions_by_issue = ws.list_extractions_for_issues([issue_id])
-    out = []
-    for extraction in extractions_by_issue.get(issue_id, []):
-        facts = (extraction.get("extracted_json") or {}).get("key_facts") or []
-        if not isinstance(facts, list):
-            continue
-        for text in facts:
-            if isinstance(text, str) and text.strip():
-                out.append(text.strip())
-    return out
+    return list_key_facts_for_issues([issue_id]).get(issue_id, [])

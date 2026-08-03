@@ -119,3 +119,32 @@ def test_list_key_facts_for_issue_non_list_field_value_ignored(ws_db):
     iid = _issue_with_facts(ws_db, "Malformed", "m3", "not a list")
 
     assert wkf.list_key_facts_for_issue(iid) == []
+
+
+# --- N+1 fix (2026-08-02): batched list_key_facts_for_issues() must match
+# calling the singular version once per issue, but via one extractions fetch.
+
+def test_list_key_facts_for_issues_batched_matches_per_issue_calls(ws_db):
+    iid1 = _issue_with_facts(ws_db, "One", "b1", ["fact one"])
+    iid2 = _issue_with_facts(ws_db, "Two", "b2", ["fact two", "fact two-b"])
+    iid3 = ws_db.create_issue_with_new_id(title="No facts", state="active", category="other")
+
+    batched = wkf.list_key_facts_for_issues([iid1, iid2, iid3])
+
+    assert batched[iid1] == wkf.list_key_facts_for_issue(iid1) == ["fact one"]
+    assert set(batched[iid2]) == set(wkf.list_key_facts_for_issue(iid2)) == {"fact two", "fact two-b"}
+    assert batched[iid3] == []
+
+
+def test_list_key_facts_for_issues_empty_list_returns_empty_dict(ws_db):
+    assert wkf.list_key_facts_for_issues([]) == {}
+
+
+def test_list_key_facts_for_issues_does_not_leak_across_issues(ws_db):
+    iid1 = _issue_with_facts(ws_db, "Good", "b3", ["real fact"])
+    iid2 = _issue_with_facts(ws_db, "Bad", "b4", "not a list")
+
+    batched = wkf.list_key_facts_for_issues([iid1, iid2])
+
+    assert batched[iid1] == ["real fact"]
+    assert batched[iid2] == []

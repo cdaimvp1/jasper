@@ -49,6 +49,30 @@ def list_open_commitments() -> list[dict]:
     return entries
 
 
+def list_commitments_for_issues(issue_ids: list[str]) -> dict[str, list[dict]]:
+    """Batched sibling of list_commitments_for_issue - one
+    list_extractions_for_issues call across every issue instead of one per
+    issue (real N+1 bug found 2026-08-02 in api_project_detail, which was
+    looping the singular version over every member issue - see
+    workgraph_asks_decisions._texts_for_issues' own comment for the full
+    story and the measured latency). list_commitments_for_issue itself now
+    just calls this with a single-element list, so its own behavior/callers
+    are unchanged."""
+    extractions_by_issue = ws.list_extractions_for_issues(issue_ids)
+    out: dict[str, list[dict]] = {}
+    for iid in issue_ids:
+        commitments_out = []
+        for extraction in extractions_by_issue.get(iid, []):
+            commitments = (extraction.get("extracted_json") or {}).get("commitments") or []
+            if not isinstance(commitments, list):
+                continue
+            for text in commitments:
+                if isinstance(text, str) and text.strip():
+                    commitments_out.append({"text": text.strip(), "raw_item_id": extraction.get("raw_item_id")})
+        out[iid] = commitments_out
+    return out
+
+
 def list_commitments_for_issue(issue_id: str) -> list[dict]:
     """Part of the project-detail redesign (2026-07-31): the same real
     field, scoped to ONE issue's own extractions - no state filter, same
@@ -57,13 +81,4 @@ def list_commitments_for_issue(issue_id: str) -> list[dict]:
     project's member issues) as well as any future per-issue display.
     Returns {text, raw_item_id} (2026-08-01, checklist rework) so a caller
     can attach the source email's real deep link via deep_links."""
-    extractions_by_issue = ws.list_extractions_for_issues([issue_id])
-    out = []
-    for extraction in extractions_by_issue.get(issue_id, []):
-        commitments = (extraction.get("extracted_json") or {}).get("commitments") or []
-        if not isinstance(commitments, list):
-            continue
-        for text in commitments:
-            if isinstance(text, str) and text.strip():
-                out.append({"text": text.strip(), "raw_item_id": extraction.get("raw_item_id")})
-    return out
+    return list_commitments_for_issues([issue_id]).get(issue_id, [])

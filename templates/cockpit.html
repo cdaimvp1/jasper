@@ -8985,7 +8985,17 @@ html[data-theme="dark"]{
         body: JSON.stringify({ status }),
       });
       if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.detail || "failed"); }
-      await pjLoadProjects();
+      // Fixed 2026-08-02 (Marc's direct report: buttons "reacting very
+      // slowly"): this used to await a full pjLoadProjects() (GET the
+      // ENTIRE project list, up to hundreds of rows) just to update ONE
+      // project's own status badge in the sidebar list - a whole extra
+      // network round-trip for a one-field change already known locally.
+      // Patches pjProjects in place and re-renders from memory instead;
+      // pjSelectProject(true) below still does the one real refetch this
+      // action actually needs (the detail view's own header/actions).
+      const cached = pjProjects.find(p => p.id === projectId);
+      if (cached) cached.status = status;
+      pjRenderProjectList();
       await pjSelectProject(projectId, true);
     } catch (e) {
       window.alert("Couldn't update this project's status - please try again.");

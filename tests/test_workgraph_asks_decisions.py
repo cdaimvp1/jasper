@@ -153,3 +153,47 @@ def test_list_asks_for_issue_non_list_field_value_ignored(ws_db):
     iid = _issue_with_extraction(ws_db, "Malformed", "m4", {"asks": 5})
 
     assert wad.list_asks_for_issue(iid) == []
+
+
+# --- N+1 fix (2026-08-02): batched *_for_issues() must match the singular
+# *_for_issue() call made once per issue, but via one extractions fetch. ---
+
+def test_list_asks_for_issues_batched_matches_per_issue_calls(ws_db):
+    iid1 = _issue_with_extraction(ws_db, "One", "b1", {"asks": ["ask one"]})
+    iid2 = _issue_with_extraction(ws_db, "Two", "b2", {"asks": ["ask two"]})
+    iid3 = ws_db.create_issue_with_new_id(title="No asks", state="active", category="other")
+
+    batched = wad.list_asks_for_issues([iid1, iid2, iid3])
+
+    assert [e["text"] for e in batched[iid1]] == ["ask one"]
+    assert [e["text"] for e in batched[iid2]] == ["ask two"]
+    assert batched[iid3] == []
+    # Exactly the same shape/content the per-issue call already returns.
+    assert batched[iid1] == wad.list_asks_for_issue(iid1)
+    assert batched[iid2] == wad.list_asks_for_issue(iid2)
+
+
+def test_list_decisions_for_issues_batched_matches_per_issue_calls(ws_db):
+    iid1 = _issue_with_extraction(ws_db, "One", "b3", {"decisions": ["decision one"]})
+    iid2 = _issue_with_extraction(ws_db, "Two", "b4", {"decisions": ["decision two"]})
+
+    batched = wad.list_decisions_for_issues([iid1, iid2])
+
+    assert batched[iid1] == wad.list_decisions_for_issue(iid1)
+    assert batched[iid2] == wad.list_decisions_for_issue(iid2)
+
+
+def test_list_asks_for_issues_empty_list_returns_empty_dict(ws_db):
+    assert wad.list_asks_for_issues([]) == {}
+
+
+def test_list_asks_for_issues_does_not_leak_across_issues(ws_db):
+    """A malformed/absent field on one issue must never contaminate another
+    issue's own entry in the same batched call."""
+    iid1 = _issue_with_extraction(ws_db, "Good", "b5", {"asks": ["real ask"]})
+    iid2 = _issue_with_extraction(ws_db, "Bad", "b6", {"asks": 5})
+
+    batched = wad.list_asks_for_issues([iid1, iid2])
+
+    assert [e["text"] for e in batched[iid1]] == ["real ask"]
+    assert batched[iid2] == []

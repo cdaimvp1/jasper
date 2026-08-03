@@ -1595,6 +1595,65 @@ def test_create_attachment_third_matching_hash_joins_the_same_lineage(ws_db):
     assert len(ws_db.list_artifact_versions_for_lineage(lineage_id)) == 3
 
 
+# --- attachment-hash consumer surfacing (v2.9) -----------------------------
+
+def test_list_other_occurrences_for_attachment_empty_for_a_unique_hash(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    aid = ws_db.create_attachment(
+        entity_type="issue", entity_id=a, kind="upload", filename="f.pdf",
+        stored_path="f.pdf", content_type=None, size_bytes=10, sha256_hex="unique1", uploaded_by="marc",
+    )
+
+    assert ws_db.list_other_occurrences_for_attachment(aid) == []
+
+
+def test_list_other_occurrences_for_attachment_surfaces_the_other_issue(ws_db):
+    a = ws_db.create_issue_with_new_id(title="Contract A", state="active", category="other")
+    b = ws_db.create_issue_with_new_id(title="Contract B", state="active", category="other")
+    aid1 = ws_db.create_attachment(
+        entity_type="issue", entity_id=a, kind="upload", filename="order_form.xlsx",
+        stored_path="p1.xlsx", content_type=None, size_bytes=10, sha256_hex="sharedh", uploaded_by="marc",
+    )
+    aid2 = ws_db.create_attachment(
+        entity_type="issue", entity_id=b, kind="upload", filename="order_form_copy.xlsx",
+        stored_path="p2.xlsx", content_type=None, size_bytes=10, sha256_hex="sharedh", uploaded_by="marc",
+    )
+
+    occurrences_from_1 = ws_db.list_other_occurrences_for_attachment(aid1)
+    assert len(occurrences_from_1) == 1
+    assert occurrences_from_1[0]["attachment_id"] == aid2
+    assert occurrences_from_1[0]["work_object_id"] == b
+    assert occurrences_from_1[0]["work_object_title"] == "Contract B"
+
+    occurrences_from_2 = ws_db.list_other_occurrences_for_attachment(aid2)
+    assert len(occurrences_from_2) == 1
+    assert occurrences_from_2[0]["attachment_id"] == aid1
+    assert occurrences_from_2[0]["work_object_title"] == "Contract A"
+
+
+def test_list_other_occurrences_for_attachment_none_title_for_unresolved_work_object(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    rid = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key="k1", thread_key="k1", dedupe_key="k1",
+        occurred_ts=time.time(), subject="s", from_actor="a@example.com", participants_json="[]",
+    )  # never linked to an issue - entity resolves to no real work_object
+    aid1 = ws_db.create_attachment(
+        entity_type="issue", entity_id=a, kind="upload", filename="f1.pdf",
+        stored_path="p1.pdf", content_type=None, size_bytes=10, sha256_hex="sh2", uploaded_by="marc",
+    )
+    aid2 = ws_db.create_attachment(
+        entity_type="raw_item", entity_id=str(rid), kind="reference", filename="f2.pdf",
+        stored_path="p2.pdf", content_type=None, size_bytes=10, sha256_hex="sh2", uploaded_by="outlook_ingest",
+    )
+
+    occurrences = ws_db.list_other_occurrences_for_attachment(aid1)
+
+    assert len(occurrences) == 1
+    assert occurrences[0]["attachment_id"] == aid2
+    assert occurrences[0]["work_object_id"] is None
+    assert occurrences[0]["work_object_title"] is None
+
+
 def test_work_object_id_for_attachment_resolves_via_raw_item(ws_db):
     a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
     rid = ws_db.insert_raw_item(

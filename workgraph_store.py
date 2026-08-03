@@ -6071,6 +6071,42 @@ def list_artifact_versions_for_lineage(lineage_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def list_other_occurrences_for_attachment(attachment_id: int) -> list[dict]:
+    """Design doc Section 12.5's own motivating signal - 'this document
+    also appears on N other threads' - v2.6 built the real data
+    (artifact_lineages/artifact_versions) and the live linking producer,
+    but never a caller that actually surfaces it. This is that consumer:
+    one entry per OTHER attachment sharing this one's lineage (empty if
+    this attachment has no confirmed duplicate at all), each tagged with
+    the owning work_object's title where resolvable (None for a 'project'/
+    'chat'-scoped attachment, or a 'raw_item' never linked to an issue -
+    same honest non-guess as _work_object_id_for_attachment itself)."""
+    version = find_artifact_version_by_attachment(attachment_id)
+    if version is None:
+        return []
+    out = []
+    for v in list_artifact_versions_for_lineage(version["lineage_id"]):
+        if v["attachment_id"] == attachment_id:
+            continue
+        att = get_attachment(v["attachment_id"])
+        if att is None:
+            continue
+        work_object_id = _work_object_id_for_attachment(att)
+        title = None
+        if work_object_id:
+            wo = get_issue(work_object_id)
+            title = wo["title"] if wo else None
+            if title is None:
+                wo = get_project(work_object_id)
+                title = wo["name"] if wo else None
+        out.append({
+            "attachment_id": att["id"], "filename": att["filename"], "uploaded_ts": att["uploaded_ts"],
+            "work_object_id": work_object_id, "work_object_title": title,
+        })
+    out.sort(key=lambda o: o["uploaded_ts"])
+    return out
+
+
 def _ensure_artifact_versions(attachments: list[dict]) -> str:
     """Given 2+ attachments confirmed to share one sha256, ensures every
     one of them has an artifact_version row in the SAME lineage - reuses

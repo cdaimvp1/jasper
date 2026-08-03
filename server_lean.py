@@ -2505,6 +2505,20 @@ async def api_issue_timeline(issue_id: str, tier: str = "milestone"):
     return JSONResponse({"tier": tier, "entries": sanitize_surrogates(entries)})
 
 
+@app.get("/api/attachments/{attachment_id}/lineage")
+async def api_attachment_lineage(attachment_id: int):
+    """Design doc Section 12.5's own motivating signal, finally surfaced -
+    v2.6 built artifact_lineages/artifact_versions and the live linking
+    producer but never a caller that shows 'this document also appears
+    on N other threads'. occurrences is [] (not 404) for an attachment
+    with no confirmed duplicate - a real, common, correct answer, not a
+    missing-data error."""
+    if wg.get_attachment(attachment_id) is None:
+        raise HTTPException(404, "no such attachment")
+    occurrences = wg.list_other_occurrences_for_attachment(attachment_id)
+    return JSONResponse({"occurrences": sanitize_surrogates(occurrences)})
+
+
 @app.get("/api/attachments/{attachment_id}/download")
 async def api_attachment_download(attachment_id: int):
     att = wg.get_attachment(attachment_id)

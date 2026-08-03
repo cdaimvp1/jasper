@@ -1912,6 +1912,18 @@ of the same file still stores its own copy (unchanged), it just now also
 gets a real `artifact_versions` row pointing at the same lineage as the
 first.
 
+**v2.9 follow-up (2026-08-03):** this pass built the real DATA layer -
+the table, the backfill, and the live linking producer - but never a
+caller that actually shows "this document also appears on N other
+threads" to Marc, the literal signal this section opens with. Closed as
+its own step: `list_other_occurrences_for_attachment` (one entry per
+OTHER attachment in the same lineage, tagged with the owning
+work_object's title where resolvable - `None` for a `raw_item` never
+linked to an issue, honest rather than guessed) and a new route,
+`GET /api/attachments/{attachment_id}/lineage`. `occurrences: []` for an
+attachment with no confirmed duplicate is a real, common, correct answer
+- not treated as a 404.
+
 ### 12.6 Richer constraint model
 
 Extends `pending_project_suggestions`' existing pairwise

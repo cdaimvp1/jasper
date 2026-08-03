@@ -473,7 +473,21 @@ def _weak_signal_candidates(issue: dict) -> list:
 # only ACTS on it once the flag is on, and the flag should only be
 # switched on after backtest_scored_model()'s output has been reviewed
 # (see that function's own docstring) - a hard gate, not a formality.
-SCORE_WEIGHTS = {"company": 0.40, "topic": 0.40, "sender": 0.30, "category": 0.15, "party": 0.40}
+#
+# sender demoted 0.30 -> 0.20 (2026-08-03, Marc's direct call): the live
+# backtest against the real corpus surfaced a real false-positive shape
+# beyond D4's party-alone fix - a shared INTERNAL contact (sender) still
+# combined with just ONE other weak signal (party or company, 0.40) to
+# cross AUTO_MERGE_THRESHOLD with zero structural anchor. Confirmed real:
+# marc-360 (a single calendar event) matched several genuinely unrelated
+# deals purely because a common internal attendee - a manager/legal/
+# coordinator-shaped contact invited everywhere - was on all of them.
+# At 0.20, sender can no longer cross threshold paired with just one
+# 0.40-weight signal (0.40+0.20=0.60 < 0.65) - it still corroborates a
+# real 3-signal alignment (party+company+sender=1.0), just never enough
+# alone with a single weak partner, the same discipline D4 already
+# applied to party.
+SCORE_WEIGHTS = {"company": 0.40, "topic": 0.40, "sender": 0.20, "category": 0.15, "party": 0.40}
 AUTO_MERGE_THRESHOLD = 0.65
 WEAK_SUGGESTION_FLOOR = 0.15  # preserves today's "one weak signal -> suggestion" behavior
 
@@ -582,29 +596,18 @@ def scored_grouping_decision(issue_id: str, issue: dict) -> dict:
         if score > best_score:
             best_score, best_sibling, best_signals = score, other["id"], signals
 
-    if best_score >= AUTO_MERGE_THRESHOLD:
-        verdict = "auto_merge"
-    elif best_score >= WEAK_SUGGESTION_FLOOR:
-        verdict = "suggest"
-    else:
-        verdict = "no_match"
-
-    # Confidence spine v0 (2026-08-03) - OBSERVE-ONLY for this shadow-only
-    # model: computed and attached for backtest_scored_model/shadow-log
-    # review, but the verdict above is still decided on the raw ordered
-    # score alone. Damping the actual threshold decision needs the same
-    # backtest-before-trust discipline this module already requires before
-    # scored_model_enabled ever flips on (see backtest_scored_model's own
-    # docstring) - not something to wire in unreviewed.
+    # Confidence spine v1 (2026-08-03) - the verdict below now decides on
+    # the DAMPED score, not the raw ordered one. Deferred from v0/v1's own
+    # commits until this exact backtest-and-review happened (see git log)
+    # - not wired in unreviewed. Real anchors (once the backfill has
+    # covered this issue) take priority over the match_kind shim, via
+    # context_accuracy's own None check.
     present = set()
     if my_snapshot["category"] and my_snapshot["category"] != "other":
         present.add("category")
     if my_snapshot["references"] or my_snapshot["party_ids"] or my_snapshot["companies"] or my_snapshot["topic_key"]:
         present.add("anchor_or_relationship")
     evidence_ts = [e["ts"] for e in ws.list_evidence(issue_id) if e.get("ts")]
-    # Confidence spine v1: real identity_anchors when the backfill has
-    # already covered this issue; falls back to the match_kind shim
-    # (best_signals) when it hasn't, via context_accuracy's own None check.
     real_anchors = ws.list_identity_anchors(issue_id=issue_id)
     ctx = confidence.context_accuracy(
         present_fields=present, required_fields={"category", "anchor_or_relationship"},
@@ -612,10 +615,18 @@ def scored_grouping_decision(issue_id: str, issue: dict) -> dict:
         total_refs=1, unresolved_refs=0 if my_snapshot["references"] else 1,
         anchor_strengths=([a["anchor_strength"] for a in real_anchors] if real_anchors else None),
     )
+    effective_score = confidence.effective_score(best_score, ctx["context_accuracy"])
+
+    if effective_score >= AUTO_MERGE_THRESHOLD:
+        verdict = "auto_merge"
+    elif effective_score >= WEAK_SUGGESTION_FLOOR:
+        verdict = "suggest"
+    else:
+        verdict = "no_match"
+
     return {"verdict": verdict, "score": round(best_score, 2),
             "sibling_id": best_sibling if verdict != "no_match" else None, "matched_signals": best_signals,
-            "context_accuracy": ctx["context_accuracy"],
-            "effective_score": confidence.effective_score(best_score, ctx["context_accuracy"])}
+            "context_accuracy": ctx["context_accuracy"], "effective_score": effective_score}
 
 
 def backtest_scored_model() -> dict:

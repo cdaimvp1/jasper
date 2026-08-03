@@ -579,6 +579,38 @@ architecture exports, unrelated file shares) - correctly left unclustered,
 the same "legitimate noise-filtering" shape as calendar's 126/1123. **1/40
 is legitimate. No fix needed or built.**
 
+### 8.11 Step 9 done: sender demoted, damping activated live, gate passes, model enabled
+
+Applied Marc's approved fix: `SCORE_WEIGHTS["sender"]` 0.30 → 0.20 (party
+already got this treatment in D4; sender needed the same - see the weight
+table's own comment for the exact arithmetic). Also activated what v0/v1
+had deliberately left observe-only: `scored_grouping_decision`'s verdict
+now decides on `effective_score` (context_accuracy-damped), not the raw
+ordered score - the backtest-and-review gate this was waiting for is what
+this section documents.
+
+Re-ran the backtest after the sender fix alone: different-project false
+positives dropped from 80 to 36 (raw score). Then checked what the REAL,
+damped verdict is for every issue behind those 36 pairs (calling
+`scored_grouping_decision` directly, not the backtest's raw-score-only
+check) - **34 of 36 now correctly land on "suggest," not "auto_merge"**;
+thin/no-anchor context damps them below threshold live, exactly the
+mechanism this was built for. The remaining 2 (`marc-357`/`marc-356`,
+mutual pair, 5 matching signals, effective_score 0.92) are **not a false
+positive at all** - both are the identical recurring "LEAH CLM - Send a
+Contract for Signature" training-webinar calendar invite, fragmented
+into two issues. Correctly belongs merged.
+
+**Gate passes.** `config('grouping','scored_model_enabled')` set to
+`true` on the live install. Note for later: `backtest_scored_model()`
+itself still only checks the raw, undamped score (a conservative upper
+bound, never an under-count) - upgrading it to be damping-aware would
+need pre-fetching evidence/anchors once per issue alongside the existing
+signal-snapshot pass to stay O(n) DB-reads; not done here, verified
+instead with a direct per-issue `scored_grouping_decision` check against
+the flagged pairs. Fine as a one-time verification; worth doing properly
+if this gate needs re-running after a future change.
+
 ### 8.10 Step 8 done, and a second real blocker found for step 9
 
 Wired: `workgraph_classify._effective_thread_key()` now computes a

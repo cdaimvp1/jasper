@@ -58,6 +58,20 @@ def _link_party(ws_db, issue_id, party_id, email, affiliation="external", compan
     ws_db.link_party_to_issue(issue_id, party_id)
 
 
+def _give_real_context(ws_db, issue_id, category="rfp-sourcing"):
+    """Confidence spine v1 (2026-08-03): scored_grouping_decision's verdict
+    is now damped by real context_accuracy, not just the raw pairwise
+    score - a 2-signal match with NO category, NO evidence, and NO
+    reference (the bare _issue() default) genuinely deserves a lower
+    effective score than the same match backed by real context. Tests
+    whose actual point is "does a 2-signal combination auto-merge" need
+    that real context to isolate what they're testing, same as production
+    issues (which have a real category and real evidence) almost always
+    do - a bare-fixture issue is the unrealistic case, not the norm."""
+    ws_db.update_issue(issue_id, category=category)
+    ws_db.add_evidence(issue_id=issue_id, type="email", summary="real evidence for this issue")
+
+
 # --- reference_ids_for_issue --------------------------------------------
 
 def test_reference_ids_extracts_pr_number(ws_db):
@@ -987,23 +1001,56 @@ def test_scored_grouping_decision_shared_party_alone_is_suggest_not_auto_merge(w
     assert decision["matched_signals"] == ["party"]
 
 
-def test_scored_grouping_decision_shared_party_plus_topic_is_auto_merge(ws_db):
-    """A shared party COMBINED with a second corroborating signal (topic)
-    still auto-merges - party contributes like company/topic/sender/category
-    already did, it just can't clear AUTO_MERGE_THRESHOLD alone anymore."""
+def test_scored_grouping_decision_two_signals_without_a_real_anchor_only_suggests(ws_db):
+    """Confidence spine v1 (2026-08-03): a 2-signal heuristic match
+    (party+topic, raw 0.80, isolated from company by leaving it unset on
+    both sides) now correctly stays at "suggest," never "auto_merge" -
+    without ANY real structural anchor (a reference), referential_
+    resolution is 0 on this pair regardless of how rich the surrounding
+    context is, capping effective_score below AUTO_MERGE_THRESHOLD. This
+    is the intended, more conservative behavior: docs/design/CONFIDENCE_
+    AND_IDENTITY_REDESIGN.md Section 3.3's own bucket rules reserve
+    Automatic for real anchors - two heuristic signals alone were never
+    supposed to be enough, the original scored model just hadn't been
+    checked against that rule until this backtest did."""
     a = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted")
-    _link_party(ws_db, a, "p_shared2", "rep@acme.com", company="Acme")
+    _link_party(ws_db, a, "p_shared2", "rep@acme.com")
     b = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted again")
-    _link_party(ws_db, b, "p_shared2", "rep@acme.com", company="Acme")
+    _link_party(ws_db, b, "p_shared2", "rep@acme.com")
 
     decision = wp.scored_grouping_decision(a, ws_db.get_issue(a))
 
-    assert decision["verdict"] == "auto_merge"
-    assert decision["sibling_id"] == b
+    assert decision["verdict"] == "suggest"
+    assert decision["score"] == 0.8  # the raw score is still high...
+    assert decision["effective_score"] < wp.AUTO_MERGE_THRESHOLD  # ...but the damped one decides
     assert "party" in decision["matched_signals"]
 
 
-def test_scored_grouping_decision_combined_weak_signals_auto_merge(ws_db):
+def test_scored_grouping_decision_real_context_raises_effective_score_even_when_it_cant_cross_alone(ws_db):
+    """_give_real_context (category + evidence) measurably raises
+    effective_score over the identical thin-context match - real context
+    is worth something, it just isn't a substitute for a real anchor when
+    deciding Automatic vs One-touch."""
+    a = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted")
+    _link_party(ws_db, a, "p1", "rep@acme.com")
+    _give_real_context(ws_db, a)
+    b = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted again")
+    _link_party(ws_db, b, "p2", "other@acme.com")
+    thin = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted")
+    _link_party(ws_db, thin, "p3", "third@acme.com")
+    thin_b = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted again")
+    _link_party(ws_db, thin_b, "p4", "fourth@acme.com")
+
+    rich_decision = wp.scored_grouping_decision(a, ws_db.get_issue(a))
+    thin_decision = wp.scored_grouping_decision(thin, ws_db.get_issue(thin))
+
+    assert rich_decision["verdict"] == thin_decision["verdict"] == "suggest"
+    assert rich_decision["effective_score"] > thin_decision["effective_score"]
+
+
+def test_scored_grouping_decision_combined_weak_signals_still_only_suggests_without_anchor(ws_db):
+    """company+topic (raw 0.80, no party/reference at all) - same shape,
+    same reasoning as the party+topic test above."""
     a = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted")
     _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
     b = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted again")
@@ -1011,7 +1058,7 @@ def test_scored_grouping_decision_combined_weak_signals_auto_merge(ws_db):
 
     decision = wp.scored_grouping_decision(a, ws_db.get_issue(a))
 
-    assert decision["verdict"] == "auto_merge"
+    assert decision["verdict"] == "suggest"
     assert decision["sibling_id"] == b
     assert set(decision["matched_signals"]) == {"company", "topic"}
 
@@ -1028,12 +1075,15 @@ def test_scored_grouping_decision_single_weak_signal_is_suggest_not_merge(ws_db)
     assert decision["sibling_id"] == b
 
 
-def test_scored_grouping_decision_attaches_confidence_spine_fields_observe_only(ws_db):
-    """Confidence spine v0 (2026-08-03): computed and attached for shadow-
-    log/backtest review, but must NOT change the verdict here - this
-    shadow-only model's decision is still the raw ordered score alone until
-    a real backtest reviews the damped thresholds (same discipline already
-    required before scored_model_enabled itself is ever flipped on)."""
+def test_scored_grouping_decision_attaches_confidence_spine_fields(ws_db):
+    """Confidence spine v1 (2026-08-03): context_accuracy/effective_score
+    are real now (they decide the verdict, not just observational fields -
+    see the "still only suggests without anchor" tests above for a case
+    where damping actually changes the bucket). A single weak signal
+    (party alone, raw 0.40) stays "suggest" here regardless - it was
+    already below AUTO_MERGE_THRESHOLD undamped, so this case doesn't by
+    itself prove damping is active; it just confirms the fields are
+    computed and internally consistent."""
     a = _issue(ws_db, "A")
     _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
     b = _issue(ws_db, "B, unrelated subject entirely")
@@ -1043,13 +1093,12 @@ def test_scored_grouping_decision_attaches_confidence_spine_fields_observe_only(
 
     assert 0.0 <= decision["context_accuracy"] <= 1.0
     assert decision["effective_score"] == round(decision["score"] * decision["context_accuracy"], 6)
-    assert decision["verdict"] == "suggest"  # unchanged by the spine - observe-only
+    assert decision["verdict"] == "suggest"
 
 
 def test_scored_grouping_decision_uses_real_anchors_when_backfilled(ws_db):
-    """Confidence spine v1: once identity_anchors exist for the issue, the
-    observe-only context_accuracy field must be computed from them, not
-    the match_kind shim."""
+    """Confidence spine v1: once identity_anchors exist for the issue,
+    context_accuracy is computed from them, not the match_kind shim."""
     a = _issue(ws_db, "A")
     _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
     b = _issue(ws_db, "B, unrelated subject entirely")
@@ -1062,7 +1111,7 @@ def test_scored_grouping_decision_uses_real_anchors_when_backfilled(ws_db):
     with_anchors = wp.scored_grouping_decision(a, ws_db.get_issue(a))
 
     assert with_anchors["context_accuracy"] > without_anchors["context_accuracy"]
-    assert with_anchors["verdict"] == without_anchors["verdict"] == "suggest"  # still observe-only
+    assert with_anchors["verdict"] == without_anchors["verdict"] == "suggest"
 
 
 def test_scored_grouping_decision_nothing_shared_is_no_match(ws_db):
@@ -1086,13 +1135,17 @@ def test_group_issue_shadow_scored_always_attached_regardless_of_flag(ws_db):
 
 
 def test_group_issue_flag_off_uses_ordered_model_not_scored_model(ws_db, monkeypatch, tmp_path):
-    """Real behavior check: a pair scoring high under the scored model
-    (shared company) only SUGGESTS under the live, narrowed (2026-07-31)
-    ordered model - which is the point of the narrowing: shared company
-    alone is no longer auto-merge-worthy in the path that's actually live
-    while the flag is off, even though shadow_scored still reports what the
-    scored model itself would have done. Confirms the flag really gates
-    which model ACTS, not just which model is computed."""
+    """Real behavior check: with the flag off, group_issue's own ORDERED
+    model (_strong_signal_match) resolves this shared-company pair on its
+    own terms ("company", a link suggestion) - never touching the scored
+    model's verdict, even though shadow_scored is still computed and
+    logged for comparison. Confidence spine v1 note: post-damping, the
+    scored model's OWN verdict for this same pair is also "suggest" now
+    (no real anchor - see test_scored_grouping_decision_combined_weak_
+    signals_still_only_suggests_without_anchor), so the two models agree
+    on the outcome here; what this test actually confirms is that the flag
+    gates which model's REASONING drove it - "company" (ordered), not
+    "scored" - not a wider outcome gap that no longer exists post-damping."""
     config = _isolate_config(monkeypatch, tmp_path)
     assert config.get("grouping", "scored_model_enabled") in (None, False)
 
@@ -1104,10 +1157,15 @@ def test_group_issue_flag_off_uses_ordered_model_not_scored_model(ws_db, monkeyp
     result = wp.group_issue(a)
 
     assert result["action"] == "suggested"
-    assert result["shadow_scored"]["verdict"] == "auto_merge"
+    assert result["signal"] == "company"
+    assert result["shadow_scored"]["verdict"] == "suggest"  # still computed/logged either way
 
 
 def test_group_issue_flag_on_uses_scored_model(ws_db, monkeypatch, tmp_path):
+    """Same pair as above, flag ON: the SCORED model's own path handles
+    it (signal="scored") instead of the ordered model's "company" - the
+    real thing the flag gates. Post-damping, both land on "suggested" for
+    this no-anchor pair (see the module-level note above)."""
     config = _isolate_config(monkeypatch, tmp_path)
     config.set_value(True, "grouping", "scored_model_enabled")
 
@@ -1118,7 +1176,7 @@ def test_group_issue_flag_on_uses_scored_model(ws_db, monkeypatch, tmp_path):
 
     result = wp.group_issue(a)
 
-    assert result["action"] == "auto_merged"
+    assert result["action"] == "suggested"
     assert result["signal"] == "scored"
 
 

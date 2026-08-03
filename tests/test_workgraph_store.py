@@ -1676,6 +1676,141 @@ def test_backfill_artifact_lineages_invalidates_a_preexisting_cached_signature(w
     assert ws_db.get_work_object_signature(a) is None  # invalidated, not left stale
 
 
+# --- prepared_actions (Section 12.4) ---------------------------------------
+
+def test_create_and_get_prepared_action(ws_db):
+    pid = ws_db.create_prepared_action(
+        claim_id=None, action_type="draft_reply", proposed_parameters_json="{}",
+        evidence_refs_json="[]", rationale="test", risk_class="low", idempotency_key="key1",
+    )
+
+    row = ws_db.get_prepared_action(pid)
+    assert row["action_type"] == "draft_reply"
+    assert row["state"] == "proposed"  # default
+    assert row["required_approval"] == 1  # default
+    assert row["resolved_ts"] is None
+
+
+def test_create_prepared_action_rejects_invalid_risk_class(ws_db):
+    import sqlite3
+    with pytest.raises(sqlite3.IntegrityError):
+        ws_db.create_prepared_action(
+            claim_id=None, action_type="draft_reply", proposed_parameters_json="{}",
+            evidence_refs_json="[]", rationale="test", risk_class="not_a_real_class", idempotency_key="key2",
+        )
+
+
+def test_create_prepared_action_rejects_duplicate_idempotency_key(ws_db):
+    import sqlite3
+    ws_db.create_prepared_action(
+        claim_id=None, action_type="draft_reply", proposed_parameters_json="{}",
+        evidence_refs_json="[]", rationale="test", risk_class="low", idempotency_key="dup-key",
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        ws_db.create_prepared_action(
+            claim_id=None, action_type="draft_reply", proposed_parameters_json="{}",
+            evidence_refs_json="[]", rationale="test again", risk_class="low", idempotency_key="dup-key",
+        )
+
+
+def test_find_prepared_action_by_idempotency_key(ws_db):
+    pid = ws_db.create_prepared_action(
+        claim_id=None, action_type="draft_reply", proposed_parameters_json="{}",
+        evidence_refs_json="[]", rationale="test", risk_class="low", idempotency_key="findme",
+    )
+
+    found = ws_db.find_prepared_action_by_idempotency_key("findme")
+    assert found["id"] == pid
+    assert ws_db.find_prepared_action_by_idempotency_key("no-such-key") is None
+
+
+def test_update_prepared_action_state_stamps_resolved_ts_only_on_terminal_state(ws_db):
+    pid = ws_db.create_prepared_action(
+        claim_id=None, action_type="draft_reply", proposed_parameters_json="{}",
+        evidence_refs_json="[]", rationale="test", risk_class="low", idempotency_key="k3",
+    )
+
+    ws_db.update_prepared_action_state(pid, "executing")
+    mid = ws_db.get_prepared_action(pid)
+    assert mid["state"] == "executing"
+    assert mid["resolved_ts"] is None  # not a terminal state
+
+    ws_db.update_prepared_action_state(pid, "succeeded", policy_result="ok")
+    done = ws_db.get_prepared_action(pid)
+    assert done["state"] == "succeeded"
+    assert done["policy_result"] == "ok"
+    assert done["resolved_ts"] is not None
+
+
+def test_list_prepared_actions_for_claim(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    rid = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key="k1", thread_key="k1", dedupe_key="k1",
+        occurred_ts=time.time(), subject="s", from_actor="a@example.com", participants_json="[]",
+    )
+    ws_db.link_raw_item_to_issue(rid, a)
+    claim_id = ws_db.insert_claim(
+        issue_id=a, raw_item_id=rid, claim_type="ask", text="approve this",
+        author="counterparty", author_basis="direction", owner="marc", ts=time.time(),
+    )
+    ws_db.create_prepared_action(
+        claim_id=claim_id, action_type="draft_reply", proposed_parameters_json="{}",
+        evidence_refs_json="[]", rationale="test", risk_class="low", idempotency_key="k4",
+    )
+
+    found = ws_db.list_prepared_actions_for_claim(claim_id)
+    assert len(found) == 1
+    assert found[0]["claim_id"] == claim_id
+
+
+def test_expire_stale_prepared_actions_only_touches_non_terminal_past_cutoff(ws_db):
+    now = time.time()
+    stale_id = ws_db.create_prepared_action(
+        claim_id=None, action_type="draft_reply", proposed_parameters_json="{}",
+        evidence_refs_json="[]", rationale="test", risk_class="low", idempotency_key="stale",
+    )
+    fresh_id = ws_db.create_prepared_action(
+        claim_id=None, action_type="draft_reply", proposed_parameters_json="{}",
+        evidence_refs_json="[]", rationale="test", risk_class="low", idempotency_key="fresh",
+    )
+    terminal_id = ws_db.create_prepared_action(
+        claim_id=None, action_type="draft_reply", proposed_parameters_json="{}",
+        evidence_refs_json="[]", rationale="test", risk_class="low", idempotency_key="terminal",
+    )
+    conn = ws_db._connect()
+    conn.execute("UPDATE prepared_actions SET created_ts = ? WHERE id = ?", (now - 7200, stale_id))
+    conn.execute("UPDATE prepared_actions SET created_ts = ? WHERE id = ?", (now - 7200, terminal_id))
+    conn.commit()
+    conn.close()
+    ws_db.update_prepared_action_state(terminal_id, "succeeded")
+
+    expired = ws_db.expire_stale_prepared_actions(3600, now=now)
+
+    assert expired == 1
+    assert ws_db.get_prepared_action(stale_id)["state"] == "expired"
+    assert ws_db.get_prepared_action(fresh_id)["state"] == "proposed"  # too recent, untouched
+    assert ws_db.get_prepared_action(terminal_id)["state"] == "succeeded"  # already terminal, untouched
+
+
+def test_run_prepared_action_expiry_daily_if_due_only_runs_once_a_day(ws_db):
+    now = time.time()
+    stale_id = ws_db.create_prepared_action(
+        claim_id=None, action_type="draft_reply", proposed_parameters_json="{}",
+        evidence_refs_json="[]", rationale="test", risk_class="low", idempotency_key="daily1",
+    )
+    conn = ws_db._connect()
+    conn.execute("UPDATE prepared_actions SET created_ts = ? WHERE id = ?", (now - 7200, stale_id))
+    conn.commit()
+    conn.close()
+
+    first = ws_db.run_prepared_action_expiry_daily_if_due(now=now)
+    assert first == 1
+    assert ws_db.get_prepared_action(stale_id)["state"] == "expired"
+
+    second = ws_db.run_prepared_action_expiry_daily_if_due(now=now)
+    assert second is None  # already claimed today
+
+
 def test_expire_stale_project_suggestions_expires_old_pending_merge(ws_db):
     """Phase 0 fix (D2): the structural backstop against the pending queue
     accumulating forever, independent of the generation flag's setting."""

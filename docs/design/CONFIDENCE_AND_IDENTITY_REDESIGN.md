@@ -1796,6 +1796,52 @@ gone through before a worker crashed) is a real, queryable `uncertain`
 state rather than a silent retry risk (v2 refinement #17's write-ahead
 concern) - `idempotency_key` blocks a retry from double-sending.
 
+**Done (2026-08-03):** `prepared_actions` built exactly to the schema
+above. One real finding while investigating the producer/consumer side,
+before writing any code: **every action in this codebase today is
+human-click-initiated, never autonomous.** `server_lean.py`'s
+`/api/cockpit/actions` route (`api_cockpit_action`) is the ONE real
+dispatch point - a human clicks Draft/Review/Summarize in the cockpit,
+which relays to a worker over team_room. There is no code path anywhere
+that decides to execute an action on its own. That reframes what this
+table can honestly protect against right now: not "an autonomous system
+retrying a risky send," which doesn't exist yet, but a real, mundane risk
+that DOES exist today - a double-click or a browser/network retry
+firing the same request twice.
+
+Wired into `api_cockpit_action`: an `idempotency_key` (a hash of
+`issue_id|action_kind|instructions`) is checked BEFORE dispatch - a
+matching, non-terminal `prepared_actions` row created within the last 5
+minutes (`COCKPIT_ACTION_IDEMPOTENCY_WINDOW_SECONDS`) means this is a
+duplicate of an in-flight request, and the route returns the existing
+row instead of posting a second team_room message and creating a second
+`pending_action`. Otherwise a new row is created (`state='approved'` -
+the human click that reached this route IS the approval; no separate
+policy gate exists yet), transitioned to `'executing'` right before
+`team_room.post_message`, and to `'failed'` if that call raises.
+
+Named, not silently built: `claim_id`/`evidence_refs` stay `NULL`/`[]`
+for every row this route creates - an issue-level cockpit action isn't
+tied to one specific claim, so nothing honest to link. `risk_class`
+is always `'low'` - every current `action_kind` (`draft_reply`,
+`review_contract`, `summarize`, `custom`) requires a further human step
+(actually hitting Send in Outlook, etc.) before any real-world effect,
+so none is `medium`/`high` yet; that stays a real, later classification
+once/if a genuinely irreversible action_kind exists. The
+`executing -> succeeded/failed/uncertain` resolution most of the state
+machine describes has **no current resolver** - nothing in this codebase
+reports a worker's real-world outcome back to the DB, the same
+pre-existing gap `pending_actions.status` has always had
+(`update_pending_action_status` has zero callers, confirmed by grep
+before writing anything here). A row this route creates sits at
+`'executing'` until something else resolves it, or until
+`expire_stale_prepared_actions` (a bookkeeping-only sweep, same
+"reversible status change, never a delete" convention as
+`expire_stale_project_suggestions`, wired into `scheduled_refresh.py`'s
+existing once-a-day gate) marks it `'expired'` after an hour of no
+resolution - never what blocks a live double-dispatch, which is the
+inline idempotency check's job alone.
+
 ### 12.5 `ArtifactLineage`/`ArtifactVersion` — the real answer to attachment hashing's open question
 
 Directly resolves the attachment-hashing consumer question from this

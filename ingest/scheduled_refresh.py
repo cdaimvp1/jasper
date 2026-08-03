@@ -470,6 +470,16 @@ def run() -> dict:
     except Exception as e:
         identity_backfill_result = {"error": str(e)}
 
+    # 14. Design doc Section 12.4 - same once/day gate. Bookkeeping only -
+    # marks a prepared_action stuck in a non-terminal state past an hour
+    # as 'expired' (nothing ever resolved it - see the table's own schema
+    # comment); the real live double-dispatch guard is api_cockpit_action's
+    # own inline idempotency-key check, independent of this sweep.
+    try:
+        prepared_action_expiry_result = ws.run_prepared_action_expiry_daily_if_due()
+    except Exception as e:
+        prepared_action_expiry_result = {"error": str(e)}
+
     summary = {
         "mail": mail_result,
         "classify_after_mail": classify_result_1,
@@ -488,6 +498,7 @@ def run() -> dict:
         "suggestion_expiry": suggestion_expiry_result,
         "choice_log_expiry": choice_log_expiry_result,
         "identity_backfill": identity_backfill_result,
+        "prepared_action_expiry": prepared_action_expiry_result,
     }
     _log(f"REFRESH ok mail_inserted={mail_result.get('inserted', '?')} "
         f"relay_ok={relay_result.get('ok')} relay_calendar_advanced={relay_result.get('cursor_advanced')} "

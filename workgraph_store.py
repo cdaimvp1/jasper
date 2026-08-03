@@ -1035,6 +1035,50 @@ def init_workgraph() -> None:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_artifact_versions_lineage ON artifact_versions(lineage_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_artifact_versions_attachment ON artifact_versions(attachment_id)")
 
+            # prepared_actions (design doc Section 12.4): the real execution-
+            # safety layer between a candidate action and dispatching it.
+            # Real producer/consumer: server_lean.py's /api/cockpit/actions
+            # route - the ONE real dispatch point in this codebase (every
+            # action today is human-click-initiated via the cockpit UI, then
+            # relayed to a worker over team_room; nothing here is ever
+            # autonomously triggered). claim_id/evidence_refs stay NULL/[]
+            # for a cockpit action not tied to one specific claim (an issue-
+            # level "summarize" isn't about a single ask/commitment) -
+            # honest, not guessed. required_approval defaults to 1 and is
+            # trivially satisfied by the human click that creates the row -
+            # no separate approval GATE exists yet (named gap, same
+            # discipline as everywhere else in this doc). idempotency_key
+            # is what actually earns this table its keep today: real,
+            # observable risk (a double-click, a browser retry) getting a
+            # concrete block, not a rewrite of the full autonomous-execution
+            # lifecycle the state list describes - most of that lifecycle
+            # (executing -> succeeded/failed/uncertain) has no real resolver
+            # yet, since nothing reports a worker's real-world outcome back
+            # (the same pre-existing gap pending_actions.status has always
+            # had - update_pending_action_status has zero callers).
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS prepared_actions (
+                    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                    claim_id             INTEGER REFERENCES claims(id),
+                    action_type          TEXT NOT NULL,
+                    proposed_parameters  TEXT NOT NULL,
+                    evidence_refs        TEXT NOT NULL,
+                    rationale            TEXT NOT NULL,
+                    risk_class           TEXT NOT NULL CHECK (risk_class IN ('low','medium','high')),
+                    required_approval    INTEGER NOT NULL DEFAULT 1,
+                    policy_result        TEXT,
+                    state                TEXT NOT NULL DEFAULT 'proposed' CHECK (state IN
+                                            ('proposed','ready_for_approval','approved',
+                                             'executing','succeeded','failed','uncertain',
+                                             'rejected','expired','cancelled')),
+                    idempotency_key      TEXT NOT NULL UNIQUE,
+                    created_ts           REAL NOT NULL,
+                    resolved_ts          REAL
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_prepared_actions_claim ON prepared_actions(claim_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_prepared_actions_state ON prepared_actions(state, created_ts)")
+
             try:
                 # Bumped once per raw_item at claim-materialization time (i.e. in
                 # ingestion order, never in the item's own occurred_ts) - the
@@ -2869,6 +2913,134 @@ def list_pending_actions(issue_id: Optional[str] = None) -> list[dict]:
         finally:
             conn.close()
     return [dict(r) for r in rows]
+
+
+# --- prepared_actions (design doc Section 12.4) -----------------------------
+
+PREPARED_ACTION_TERMINAL_STATES = ("succeeded", "failed", "rejected", "expired", "cancelled")
+
+
+def create_prepared_action(*, claim_id: Optional[int], action_type: str, proposed_parameters_json: str,
+                            evidence_refs_json: str, rationale: str, risk_class: str,
+                            idempotency_key: str, required_approval: int = 1,
+                            state: str = "proposed") -> int:
+    now = time.time()
+    with _lock:
+        conn = _connect()
+        try:
+            cur = conn.execute(
+                """INSERT INTO prepared_actions
+                   (claim_id, action_type, proposed_parameters, evidence_refs, rationale, risk_class,
+                    required_approval, state, idempotency_key, created_ts)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (claim_id, action_type, proposed_parameters_json, evidence_refs_json, rationale, risk_class,
+                 required_approval, state, idempotency_key, now),
+            )
+            return cur.lastrowid
+        finally:
+            conn.close()
+
+
+def get_prepared_action(id: int) -> Optional[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute("SELECT * FROM prepared_actions WHERE id = ?", (id,)).fetchone()
+        finally:
+            conn.close()
+    return dict(row) if row else None
+
+
+def find_prepared_action_by_idempotency_key(idempotency_key: str) -> Optional[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM prepared_actions WHERE idempotency_key = ?", (idempotency_key,)
+            ).fetchone()
+        finally:
+            conn.close()
+    return dict(row) if row else None
+
+
+def update_prepared_action_state(id: int, state: str, *, policy_result: Optional[str] = None) -> None:
+    """resolved_ts is stamped once the state reaches a terminal one - never
+    overwritten by a later call, mirroring resolve_project_suggestion's own
+    'first resolution wins' convention."""
+    now = time.time()
+    resolved_ts = now if state in PREPARED_ACTION_TERMINAL_STATES else None
+    with _lock:
+        conn = _connect()
+        try:
+            if resolved_ts is not None:
+                conn.execute(
+                    "UPDATE prepared_actions SET state = ?, policy_result = ?, resolved_ts = ? WHERE id = ?",
+                    (state, policy_result, resolved_ts, id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE prepared_actions SET state = ?, policy_result = ? WHERE id = ?",
+                    (state, policy_result, id),
+                )
+        finally:
+            conn.close()
+
+
+def list_prepared_actions_for_claim(claim_id: int) -> list[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM prepared_actions WHERE claim_id = ? ORDER BY created_ts DESC", (claim_id,)
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def expire_stale_prepared_actions(max_age_seconds: float, *, now: Optional[float] = None) -> int:
+    """Bookkeeping sweep, same 'reversible status change, never a delete'
+    convention as expire_stale_project_suggestions - a prepared_action
+    stuck in a non-terminal state past max_age_seconds (nothing ever
+    resolved it - see this table's own schema comment on the missing
+    real-world-outcome resolver) gets marked 'expired' rather than left
+    looking perpetually in-flight. NOT what blocks a live double-dispatch
+    - api_cockpit_action's own inline idempotency-key check (a narrower,
+    real-time window) does that regardless of whether this sweep has run
+    yet. Returns the number of rows expired."""
+    if now is None:
+        now = time.time()
+    cutoff = now - max_age_seconds
+    with _lock:
+        conn = _connect()
+        try:
+            all_states = ("proposed", "ready_for_approval", "approved", "executing", "uncertain")
+            placeholders = ", ".join("?" for _ in all_states)
+            cur = conn.execute(
+                f"UPDATE prepared_actions SET state = 'expired', resolved_ts = ? "
+                f"WHERE state IN ({placeholders}) AND created_ts < ?",
+                (now, *all_states, cutoff),
+            )
+            return cur.rowcount
+        finally:
+            conn.close()
+
+
+PREPARED_ACTION_STALE_AFTER_SECONDS = 3600  # a worker either dispatches or fails fast - an hour means abandoned/stuck
+
+
+def run_prepared_action_expiry_daily_if_due(now: Optional[float] = None) -> Optional[int]:
+    """Same once-a-day gate as run_suggestion_expiry_daily_if_due
+    (workgraph_projects.py) - piggybacks scheduled_refresh.py's 5x/day
+    cycle without sweeping 5x. Returns None on every call that isn't the
+    day's first claim (a real checkable 'did not run' signal, matching
+    the sibling gates' own convention), or the number of rows expired."""
+    if now is None:
+        now = time.time()
+    today = time.strftime("%Y-%m-%d", time.localtime(now))
+    if not claim_daily_run("prepared_action_expiry", today):
+        return None
+    return expire_stale_prepared_actions(PREPARED_ACTION_STALE_AFTER_SECONDS, now=now)
 
 
 # --- nba_choice_log (Part E2, grouping/NBA redesign, 2026-07-30) --------

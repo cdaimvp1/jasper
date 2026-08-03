@@ -2503,24 +2503,66 @@ async def api_attachment_delete(attachment_id: int):
     return JSONResponse({"ok": True})
 
 
+# Design doc Section 12.4: long enough to catch a genuine double-click or a
+# browser/network retry of the SAME request, short enough that a legitimate
+# second request for the same issue+action_kind a few minutes later is never
+# blocked. Dispatch itself (team_room.post_message) is near-instant, so this
+# has nothing to do with how long the WORKER takes to actually do the work.
+COCKPIT_ACTION_IDEMPOTENCY_WINDOW_SECONDS = 300
+
+
+def _cockpit_action_idempotency_key(issue_id: str, action_kind: str, instructions: Optional[str]) -> str:
+    return hashlib.sha256(f"{issue_id}|{action_kind}|{instructions or ''}".encode("utf-8")).hexdigest()
+
+
 @app.post("/api/cockpit/actions")
 async def api_cockpit_action(body: CockpitActionBody):
     """Generative actions (draft, review, summarize) — wakes a worker via the
     PROVEN action-bridge (team_room @mention -> F9 fanout -> worker_notifications
     -> the worker's armed Monitor poller), empirically confirmed working this
     session. The message is a thin wake-trigger + pointer; the worker pulls full
-    Issue context from workgraph.db itself, not from the message body."""
+    Issue context from workgraph.db itself, not from the message body.
+
+    Design doc Section 12.4: this is the one real dispatch point in the
+    codebase (every action here is human-click-initiated, never autonomous)
+    - prepared_actions is the real execution-safety layer wired in here, an
+    idempotency_key blocking an actual double-dispatch (a double-click, a
+    browser retry) rather than sending a second team_room message and
+    creating a second pending_action for the identical request."""
     if wg.get_issue(body.issue_id) is None:
         raise HTTPException(404, f"no such issue: {body.issue_id}")
+
+    idempotency_key = _cockpit_action_idempotency_key(body.issue_id, body.action_kind, body.instructions)
+    existing = wg.find_prepared_action_by_idempotency_key(idempotency_key)
+    if (existing is not None and existing["state"] not in wg.PREPARED_ACTION_TERMINAL_STATES
+            and (time.time() - existing["created_ts"]) < COCKPIT_ACTION_IDEMPOTENCY_WINDOW_SECONDS):
+        return JSONResponse({"ok": True, "duplicate": True, "prepared_action_id": existing["id"],
+                              "state": existing["state"]})
+
+    prepared_id = wg.create_prepared_action(
+        claim_id=None,  # an issue-level cockpit action isn't tied to one specific claim - honest, not guessed
+        action_type=body.action_kind,
+        proposed_parameters_json=json.dumps({"issue_id": body.issue_id, "action_kind": body.action_kind,
+                                              "worker": body.worker, "instructions": body.instructions},
+                                             ensure_ascii=False),
+        evidence_refs_json="[]",  # no claim-level evidence linkage at this call site - named gap, not fabricated
+        rationale=body.instructions or f"cockpit action: {body.action_kind}",
+        risk_class="low",  # every current action_kind requires a further human step before any real-world effect
+        idempotency_key=idempotency_key,
+        state="approved",  # the human click that reached this route IS the approval - no separate policy gate exists yet
+    )
+
     sender = config.get("manager", "id") or "marc"
     envelope = "@{worker} [COCKPIT-ACTION] {payload}".format(
         worker=body.worker,
         payload=json.dumps({"type": body.action_kind, "issue_id": body.issue_id,
                            "instructions": body.instructions}, ensure_ascii=False),
     )
+    wg.update_prepared_action_state(prepared_id, "executing")
     try:
         result = team_room.post_message(sender=sender, body=envelope)
     except ValueError as e:
+        wg.update_prepared_action_state(prepared_id, "failed", policy_result=str(e))
         raise HTTPException(400, str(e))
     pending_id = wg.create_pending_action(
         issue_id=body.issue_id, action_kind=body.action_kind, worker=body.worker,
@@ -2533,7 +2575,8 @@ async def api_cockpit_action(body: CockpitActionBody):
     if open_log is not None:
         wg.mark_choice_log_chosen(open_log["id"], chosen_action_kind=body.action_kind,
                                    resulting_pending_action_id=pending_id)
-    return JSONResponse({"ok": True, "pending_action_id": pending_id, "message_id": result.get("message_id")})
+    return JSONResponse({"ok": True, "pending_action_id": pending_id, "message_id": result.get("message_id"),
+                          "prepared_action_id": prepared_id})
 
 
 _cockpit_refresh_in_flight = False

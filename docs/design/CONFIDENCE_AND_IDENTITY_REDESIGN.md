@@ -1431,5 +1431,461 @@ into the primary view.
 The three explicit non-builds remain correctly parked, not forgotten:
 attachment hashing (no confirmed defect behind it), the semantic identity
 signal (Step 10 found no real trigger condition in the actual singleton
-set), and the `work_objects` abstraction (Section 7's own scope call —
-`merge_issue_into` already delivers the behavior it existed for).
+set). **Correction, 2026-08-03 (Marc's direct instruction, see Section
+12): the `work_objects` scope call above was never actually Marc's own
+choice between the smaller and fuller design — it was this doc's own
+engineering judgment, presented as part of a package. Re-opened and
+being built for real, full scope, per Section 12 below** (the one
+deliberate exception: tenant/multi-user scope, deferred until a second
+real user exists, per Marc's own generalization roadmap).
+
+---
+
+## 12. Ambient Work Orchestration v2 — building it right, full scope (reopened 2026-08-03)
+
+Marc's direct correction: the scope-downs throughout this doc (no
+`work_objects`, no `EvidenceUnit` layer, no `PreparedAction`, claims as a
+smaller stand-in for a full claim store) were never something he
+specifically weighed and chose — they were this doc's own engineering
+judgment, packaged into a design he was asked to approve as a whole. His
+instruction now: **build it at full scope on his real desktop, unless a
+specific piece genuinely cannot run there** (not "would take more
+engineering effort" — that's not a desktop limitation, that's just the
+size of the work). The one confirmed exception, by his own direction:
+**tenant/multi-user scope, deferred until a second real user exists** —
+that one doesn't just cost more to build, it has no way to be exercised
+or tested with a single operator, and his own generalization roadmap
+already said to hold it until the stabilization period is declared over.
+
+Grounded against the real current schema (not the abstract Blueprint
+description) before designing anything below — `issues`/`projects` are
+separate tables today with a one-way `issues.project_id` FK (two tiers
+only, no nesting above project); `evidence.issue_id` is a single
+mandatory FK (one raw_item's evidence can only ever belong to ONE issue,
+confirmed directly in the schema — the exact constraint EvidenceUnit
+exists to remove); `project_links` is built and firing (70 real pending
+`link` suggestions in the queue right now, zero yet confirmed — a real
+backlog, not a dead mechanism) but carries no hierarchy/nesting
+semantics, only symmetric relatedness.
+
+### 12.1 Typed `work_objects` — replaces the issues/projects split, migrated not wrapped
+
+Marc's explicit choice: migrate the real data into one model, not wrap
+the old tables with a second parallel identity system to keep in sync
+forever.
+
+```sql
+CREATE TABLE work_objects (
+    id               TEXT PRIMARY KEY,
+    object_type      TEXT NOT NULL CHECK (object_type IN
+                        ('relationship','program','project','engagement',
+                         'case','request','recurring_responsibility')),
+    parent_id        TEXT REFERENCES work_objects(id),
+    name             TEXT NOT NULL,
+    category         TEXT,
+    status           TEXT NOT NULL DEFAULT 'active' CHECK (status IN
+                        ('active','waiting','done','archived','dismissed')),
+    priority_score   REAL,
+    nba_action_kind  TEXT,
+    nba_reason       TEXT,
+    owner            TEXT NOT NULL DEFAULT 'marc',
+    due              TEXT,
+    confidence_tier  TEXT,
+    claims_revision  INTEGER NOT NULL DEFAULT 0,
+    last_deep_dive_ts   REAL,
+    last_deep_dive_note TEXT,
+    opened_at        REAL NOT NULL,
+    updated_at       REAL NOT NULL
+)
+```
+
+**Migration, real and direct, not a shim:**
+- Every existing `issue` -> a `work_object` with `object_type='request'`
+  (an email/Teams thread is structurally "someone asking for something,"
+  the Blueprint's own closest type), same `id` reused (no new id scheme —
+  every existing FK across `evidence`/`claims`/`identity_anchors`/
+  `source_containers`/`issue_parties`/`issue_state_history` keeps working
+  unchanged), `parent_id` = the work_object created from its old
+  `project_id`.
+- Every existing `project` -> a `work_object` with `object_type='project'`,
+  `parent_id = NULL` (no `relationship`/`program`/`engagement` tier is
+  auto-inferred — `project_links`' symmetric relatedness data doesn't
+  carry real parent/child semantics, so fabricating a tier from it would
+  be a guess; a human or a future scored mechanism promotes a real
+  `relationship`/`program` above existing projects going forward, not
+  this migration).
+- `issues`/`projects` tables kept, renamed to `issues_pre_workobjects`/
+  `projects_pre_workobjects` (same detect-and-rename pattern this file
+  already uses for every CHECK-widening migration) — never dropped,
+  reversible if anything is missed.
+- **Correction, made while building rather than assumed at design time:**
+  the paragraph above originally said every caller across the codebase
+  would need repointing at `work_objects` directly — checked against
+  what SQLite actually supports before writing that code, and it's
+  wrong. `issues`/`projects` become real SQLite VIEWS over
+  `work_objects` (filtered by `object_type`), with `INSTEAD OF`
+  triggers making them fully read/write, not just read-only
+  projections. Confirmed empirically before wiring this in for real: a
+  partial-column `INSERT`/`UPDATE` against the view (the exact pattern
+  `create_issue()`/`update_issue()`'s own dynamic SQL already uses)
+  behaves identically to the real table — unspecified columns correctly
+  resolve to `NULL`/their prior value, not an error. **Zero callers
+  anywhere in the codebase needed to change** — `workgraph_classify.py`/
+  `workgraph_projects.py`/`workgraph_nba.py`/`workgraph_claims.py`/
+  `workgraph_deepdive.py`/`server_lean.py` all keep calling
+  `ws.list_issues`/`ws.get_issue`/`ws.list_projects`/`ws.get_project`
+  exactly as before. `work_objects` is still the one real underlying
+  table (satisfying "migrate, don't wrap") — the views are how every
+  existing raw SQL statement in the file keeps working against that one
+  real table without being individually rewritten.
+
+**v2.1 done, built and migrated on the live DB (2026-08-03).** Two real
+bugs found and fixed while building, both against the FULL existing test
+suite (~960 tests), not assumed correct from the design:
+
+1. `CREATE INDEX IF NOT EXISTS idx_issues_state ON issues(...)` (and two
+   siblings) — safe on a real table, but SQLite raises "views may not be
+   indexed" on the second-and-later `init_workgraph()` call, once `issues`
+   is a view. Unlike `CREATE TABLE IF NOT EXISTS` (confirmed to silently
+   no-op against an existing view of the same name) and the existing
+   `ALTER TABLE` calls (already `try`/`except sqlite3.OperationalError`-
+   wrapped, which happens to catch this too), a bare `CREATE INDEX` was
+   the one statement shape in this file with no existing safety net.
+   Wrapped in the same `try`/`except` pattern.
+2. The `issues`/`projects` `INSTEAD OF UPDATE` triggers omitted
+   `opened_at` from their `SET` clause — any `UPDATE issues SET
+   opened_at = ...` (used by tests simulating a specific issue age, and
+   by anything that ever needs to correct it) silently had no effect,
+   confirmed live via `workgraph_suppliers`' `days_to_close` computing
+   `0.0` instead of a real value. Added `opened_at = NEW.opened_at` to
+   both triggers.
+
+Migrated the real live DB (backed up first, labeled
+`pre_work_objects_migration`): 408 total `work_objects` (360 `request` +
+48 `project`), exactly matching `issues_pre_workobjects`/
+`projects_pre_workobjects`'s row counts — lossless. `integrity_check: ok`.
+Restarted the live server and confirmed the real HTTP API
+(`/api/workgraph/issues`, `/api/workgraph/projects`,
+`/api/workgraph/actions/ranked`) all return correct data through the new
+view layer, plus every Phase 3/12/13 function built earlier this session
+(`rank_actions`, `list_deepdive_candidates`) working unchanged against
+real production data.
+
+### 12.2 `EvidenceUnit` — evidence can belong to more than one work_object
+
+Removes the exact constraint just confirmed in the schema
+(`evidence.issue_id` mandatory, one row = one work_object only):
+
+```sql
+CREATE TABLE evidence_units (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    raw_item_id   INTEGER NOT NULL REFERENCES raw_items(id),
+    type          TEXT NOT NULL CHECK (type IN
+                     ('email','teams','calendar','sharepoint','worker_action')),
+    summary       TEXT NOT NULL,
+    ts            REAL NOT NULL
+);
+CREATE TABLE evidence_unit_links (
+    evidence_unit_id INTEGER NOT NULL REFERENCES evidence_units(id),
+    work_object_id   TEXT NOT NULL REFERENCES work_objects(id),
+    PRIMARY KEY (evidence_unit_id, work_object_id)
+);
+```
+
+One `evidence_unit` per raw_item (not per raw_item-per-issue like today's
+`evidence`) — `evidence_unit_links` is the many-to-many join that lets
+"attached is the SAP redline; separately, did you see the Workday invoice
+issue?" attach evidence of the SAME message to TWO real work_objects, the
+exact case the current schema structurally can't represent. Migration:
+one `evidence_unit` per distinct `raw_item_id` already in `evidence`, one
+`evidence_unit_links` row per existing `evidence` row (mechanical,
+lossless). The old `evidence` table's role as "the append-only link from
+an issue to its source" is now `evidence_unit_links`; `list_evidence`/
+`list_evidence_for_issues` become thin views over the join.
+
+### 12.3 Claims extensions — edges, work-state taxonomy, and a real reconciler
+
+Builds on Phase 3's `claims` table (Section 9) — this was already a real,
+smaller version of "the claim store," not a wrong direction, just not
+finished to the v2 refinements' full spec:
+
+- **Edge table** (Section 8.2 already named this, never built):
+  ```sql
+  CREATE TABLE claim_edges (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      from_claim_id INTEGER NOT NULL REFERENCES claims(id),
+      to_claim_id   INTEGER NOT NULL REFERENCES claims(id),
+      edge_type     TEXT NOT NULL CHECK (edge_type IN
+                       ('contradicts','supports','derived_from','supersedes')),
+      created_ts    REAL NOT NULL,
+      created_by    TEXT NOT NULL
+  );
+  ```
+  `supersedes` folds in what `claims.superseded_by` already does today as
+  a real edge instead of a bare column - the column stays for the common
+  fast-path query, the edge table is the general case.
+- **Work-state event taxonomy + reconciler**, replacing "materialize once,
+  never revisit" with a real event log: `REQUEST_WORK`, `COMMIT_WORK`,
+  `ASSIGN_WORK`, `DELIVER_OUTPUT`, `REQUEST_DECISION`, `RECORD_DECISION`,
+  `DECLARE_BLOCKER`, `CREATE_DEPENDENCY`, `CHANGE_DEADLINE`,
+  `CANCEL_WORK`, `CLAIM_COMPLETION`, `ACKNOWLEDGE`, `REOPEN_WORK`,
+  `REPORT_STATUS` — each written by `workgraph_claims.py` at
+  materialization time (a new extraction on an EXISTING open claim
+  produces an event against it, not always a bare dedup-touch), each
+  routed through a reconciler function that maps
+  (current claim status, event type) -> new status
+  (open/done/superseded/dismissed/blocked), so "can you review this?" ->
+  "just following up" -> "we need it tomorrow instead" becomes one
+  claim with a `CHANGE_DEADLINE` event and a nudge, not three claims.
+- **Completion contracts, explicit and predicate-based** (not a weighted
+  average): a `completion_contract` JSON column on `claims`, set at
+  creation time for claim_type='commitment' where the extraction can
+  state one (e.g. "return the redline": `{"requires": ["outbound_message_after_request", "artifact_attached"]}`)
+  - checked by the reconciler before accepting a `CLAIM_COMPLETION`
+  event, never inferred from silence/a deep-link click/calendar passage
+  alone (v2 refinement #14 - "ignored twice" is not completion evidence).
+  Statuses widen to include `stale_unverified`/`completed_inferred`/
+  `completed_confirmed`, not a binary done/not-done.
+- **Actor resolution correction** (v2 refinement #10): the reconciler
+  never defaults ownership to the raw_item's author (today's `direction`-
+  based rule) when the extraction can tell the speaker is describing a
+  THIRD party's commitment ("Marc is going to send Legal the redline,"
+  said BY Sarah) - `author` (who wrote this raw_item, still direction-
+  based, unchanged) and `owner` (who the obligation resolves to) stay
+  the two separate fields Section 9.4 already split them into; this adds
+  a third, extraction-time-judged override when the text names a
+  different responsible party than direction alone would derive,
+  producing `owner: unassigned` rather than a wrong guess when it can't
+  tell.
+
+### 12.4 `PreparedAction` — between a commitment and executing it
+
+```sql
+CREATE TABLE prepared_actions (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    claim_id           INTEGER REFERENCES claims(id),
+    action_type        TEXT NOT NULL,
+    proposed_parameters TEXT NOT NULL,   -- JSON
+    evidence_refs       TEXT NOT NULL,   -- JSON list of evidence_unit ids
+    rationale           TEXT NOT NULL,
+    risk_class          TEXT NOT NULL CHECK (risk_class IN ('low','medium','high')),
+    required_approval    INTEGER NOT NULL DEFAULT 1,
+    policy_result        TEXT,
+    state                TEXT NOT NULL DEFAULT 'proposed' CHECK (state IN
+                            ('proposed','ready_for_approval','approved',
+                             'executing','succeeded','failed','uncertain',
+                             'rejected','expired','cancelled')),
+    idempotency_key      TEXT NOT NULL UNIQUE,
+    created_ts           REAL NOT NULL,
+    resolved_ts          REAL
+);
+```
+
+Prevents conflating "the skill/action completed" with "the obligation was
+fulfilled" (v2 refinement #16) — today's `pending_actions`/
+`nba_choice_log` tables are close cousins of this but don't carry a real
+state machine or idempotency key; `PreparedAction` sits between a
+`rank_actions` candidate (Section 11) and the actual `pending_actions`
+dispatch, so an uncertain external outcome (an email send that might have
+gone through before a worker crashed) is a real, queryable `uncertain`
+state rather than a silent retry risk (v2 refinement #17's write-ahead
+concern) - `idempotency_key` blocks a retry from double-sending.
+
+### 12.5 `ArtifactLineage`/`ArtifactVersion` — the real answer to attachment hashing's open question
+
+Directly resolves the attachment-hashing consumer question from this
+same conversation: `sha256` was already computed on every attachment
+(385/385, confirmed) but nothing read it. The 39 real duplicate-hash
+groups found (all legitimate cross-work_object reuse of the same file,
+zero same-work_object waste) are lineage instances, not noise:
+
+```sql
+CREATE TABLE artifact_lineages (
+    id            TEXT PRIMARY KEY,
+    work_object_id TEXT REFERENCES work_objects(id),
+    title         TEXT NOT NULL,
+    created_ts    REAL NOT NULL
+);
+CREATE TABLE artifact_versions (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    lineage_id      TEXT NOT NULL REFERENCES artifact_lineages(id),
+    attachment_id   INTEGER NOT NULL REFERENCES attachments(id),
+    document_role   TEXT NOT NULL CHECK (document_role IN
+                       ('original','redline','counter_redline','clean_copy',
+                        'executed_copy','exhibit','other')),
+    derived_from_id INTEGER REFERENCES artifact_versions(id),
+    sha256          TEXT NOT NULL,
+    created_ts      REAL NOT NULL
+);
+```
+
+Backfill: group existing `attachments` by `sha256`; each real duplicate
+group becomes one `artifact_lineages` row with N `artifact_versions`
+(one per attachment row referencing it) — surfaces exactly the "this
+document also appears on N other threads" signal identified as
+enhancement idea #2/#6 (task #110), now with a real mechanism instead of
+a flat hash comparison. `document_role`/`derived_from_id` are set going
+forward by whatever extracts/uploads a new version (curator's synthesis
+routine, the claudeskills redline output if #112 is ever built) - not
+backfillable from historical data with any honesty, since nothing today
+records "this PDF is a redline of that one" - left NULL/`other` for
+existing rows rather than guessed.
+
+### 12.6 Richer constraint model
+
+Extends `pending_project_suggestions`' existing pairwise
+`must_link`/`cannot_link`-shaped mechanism (today expressed only as
+merge/link suggestion rows) into a real, typed constraint table:
+
+```sql
+CREATE TABLE identity_constraints (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    constraint_type TEXT NOT NULL CHECK (constraint_type IN
+                       ('must_link','cannot_link','cannot_merge',
+                        'confirm_anchor','downweight_anchor',
+                        'mark_artifact_generic','override_container_class',
+                        'confirm_person_alias','prevent_person_merge',
+                        'confirm_work_object_parent')),
+    subject_a       TEXT NOT NULL,
+    subject_b       TEXT,
+    reason          TEXT NOT NULL,
+    created_ts      REAL NOT NULL,
+    created_by      TEXT NOT NULL
+);
+```
+
+`cannot_merge(work_object, work_object)` is the one this doc's own
+`merge_issue_into`/`merge_issues_txn` should check before ever merging -
+a real, durable "these two were confirmed separate, never re-propose it"
+memory the suggestion-expiry sweep (D2) currently has no equivalent of
+(today a rejected suggestion just expires and can resurface later from
+fresh evidence). `mark_artifact_generic` feeds Evidence Assembly/
+scoring directly: a template file (e.g. a blank order-form template
+attached to many unrelated threads) downweights globally instead of only
+ever being handled per-thread.
+
+### 12.7 `ProjectSignature`-based scoring
+
+Replaces `scored_grouping_decision`'s flat weighted-sum
+(company/topic/sender/category) with a real per-work_object signature,
+checked as a whole rather than summed pairwise:
+
+```sql
+CREATE TABLE work_object_signatures (
+    work_object_id      TEXT PRIMARY KEY REFERENCES work_objects(id),
+    definitive_ids       TEXT NOT NULL,  -- JSON: exact reference numbers
+    accepted_lineages     TEXT NOT NULL, -- JSON: artifact_lineage ids
+    containers            TEXT NOT NULL, -- JSON: source_container ids
+    external_orgs         TEXT NOT NULL, -- JSON
+    participant_roles     TEXT NOT NULL, -- JSON
+    active_period_start    REAL,
+    active_period_end      REAL,
+    positive_vocabulary     TEXT,        -- JSON
+    negative_vocabulary     TEXT,        -- JSON
+    cannot_link_ids         TEXT NOT NULL -- JSON, mirrors identity_constraints
+);
+```
+
+A new candidate is scored against the WHOLE signature (a hard conflict on
+`definitive_ids` or a `cannot_link` entry vetoes outright, same veto
+discipline D4 already established for `party` alone), not a sum of
+independent per-signal weights - this is where v2 refinement #6's anchor-
+decay-by-type point lands too: `definitive_ids` barely decay,
+`participant_roles` decay fast, `positive_vocabulary` is a tie-breaker
+only, matching `workgraph_confidence.py`'s existing `freshness`/
+`provenance_reliability` split rather than inventing a second decay
+model. Computed/updated incrementally as claims/evidence attach to a
+work_object, not recomputed from scratch each time.
+
+### 12.8 Provisional vs confirmed membership + exposure state
+
+```sql
+ALTER TABLE work_objects ADD COLUMN membership_state TEXT NOT NULL DEFAULT 'provisional'
+    CHECK (membership_state IN ('provisional','confirmed'));
+ALTER TABLE work_objects ADD COLUMN exposure_state TEXT NOT NULL DEFAULT 'not_exposed'
+    CHECK (exposure_state IN ('not_exposed','shown_in_project','used_in_summary','used_for_action'));
+```
+
+Rule (v2 refinement #7): a `provisional` assignment (an auto-merge/auto-
+link the deterministic matcher made with no human confirmation yet) can
+be silently revised before `exposure_state` ever advances past
+`not_exposed` - once Marc has actually seen it (in the Inbox, in a
+synthesis, in an NBA action), it becomes `confirmed`-eligible-only,
+never silently moved again. This is what gives real stability without
+freezing every early machine guess forever - the "identity events never
+rewritten" invariant (Section 0's original monotonicity claim) applies
+to the confirmed/exposed tier, not to a provisional guess nobody's
+looked at yet.
+
+### 12.9 Three-tier timeline
+
+Read-time views over `evidence_units`/`claims`/`claim_edges`, not a new
+stored table:
+- **Complete event timeline** - every `evidence_unit` + every claim
+  event, unfiltered (today's `issue_state_history` plus everything else,
+  unified).
+- **Milestone timeline** - deterministically filtered: commitment
+  created, deadline changed, decision recorded, artifact version
+  produced, `PreparedAction` succeeded, blocker declared, approval
+  received, commitment completed/reopened, work_object merge/split.
+- **Activity stream** - the complement (routine comms), collapsed/
+  summarized, never the default view.
+
+### 12.10 Prompt-injection boundary
+
+A real, previously-missing gate, independent of scale/tenancy: content
+read FROM evidence (email/Teams/attachment text) is structurally
+untrusted and can never itself become an operating instruction. Concrete
+enforcement point: `workgraph_claims.materialize_claims_for_raw_item` and
+`PreparedAction` creation both only ever consume STRUCTURED extraction
+output (already-parsed `asks`/`commitments`/etc.) — never raw evidence
+text directly — and `PreparedAction.required_approval` defaults `True`
+for every `action_type` derived from evidence content, with no code path
+that flips it `False` based on anything the evidence itself says (e.g. a
+supplier's email cannot mark its own resulting action as pre-approved,
+no matter how it's worded). Documented as a standing constraint on every
+future action-generating surface, not a one-time check.
+
+### 12.11 Tenant scope — explicitly deferred, no placeholder columns either
+
+Per Marc's direct instruction: held until a second real user exists, same
+as the generalization roadmap already said. Not even reserving
+`scope`/`tenant_id` columns now, deliberately - this codebase's own
+established pattern is a cheap additive `ALTER TABLE ADD COLUMN`
+whenever a real need shows up (used throughout this entire doc), so
+there's no real cost to waiting versus the v2 refinements' own suggested
+hedge of adding the columns early "so it isn't a rewrite later." Revisit
+only when Marc declares the stabilization period over per his own
+roadmap.
+
+### 12.12 Build order
+
+Sequenced so nothing downstream is built on a foundation that's about to
+move:
+
+1. **`work_objects` migration** (12.1) - the foundation everything else
+   nests under. Backup first, migrate `issues`/`projects` data, repoint
+   every caller. Largest single mechanical step.
+2. **`evidence_units`** (12.2) - second, because claim materialization
+   and Evidence Assembly both read evidence.
+3. **Claims extensions** (12.3): edges, work-state taxonomy + reconciler,
+   completion contracts, the actor-resolution correction.
+4. **`identity_constraints`** (12.6) - wire `cannot_merge` into
+   `merge_issue_into` immediately once it exists, closing a real gap
+   (rejected suggestions can currently resurface).
+5. **`work_object_signatures`** (12.7) - replaces the flat weighted-sum
+   scoring; re-run `backtest_scored_model()`'s equivalent against the new
+   signature model before trusting it live, same discipline as the
+   original scored-model gate.
+6. **`artifact_lineages`/`artifact_versions`** (12.5) - backfill from the
+   39 real existing duplicate-hash groups.
+7. **`prepared_actions`** (12.4) - the actual execution-safety layer;
+   wire `rank_actions` (Section 11) as its first real producer.
+8. **Provisional/confirmed + exposure state** (12.8), **three-tier
+   timeline** (12.9), **prompt-injection boundary** (12.10) - can land in
+   parallel with 4-7, no shared dependency on each other.
+9. Tenant scope (12.11): not built, not scheduled.
+
+Each step: backup before any real-DB migration, full test suite green,
+live-restart-and-verify, commit and push individually - same discipline
+as every prior step in this doc.

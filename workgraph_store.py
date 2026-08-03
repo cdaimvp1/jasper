@@ -92,6 +92,23 @@ def init_workgraph() -> None:
                 )
             """)
 
+            # --- work_objects (design doc Section 12.1, 2026-08-03): issues and
+            # projects are migrated into ONE typed, nestable table further
+            # below, AFTER every legacy issues/projects block below has run -
+            # deliberately left completely unmodified rather than wrapped in a
+            # Python-level guard (confirmed empirically, safe either way:
+            # CREATE TABLE IF NOT EXISTS silently no-ops against an existing
+            # VIEW of the same name; the CHECK-widening rename/rebuild blocks
+            # already gate on `type='table'` in sqlite_master, which a view
+            # never matches; every ALTER TABLE ADD COLUMN below is already
+            # try/except sqlite3.OperationalError-wrapped, and "cannot add a
+            # column to a view" is exactly that error type - all three cases
+            # this file's own existing code already handles safely without
+            # any change here). Once `issues`/`projects` become views (further
+            # below), this entire block keeps running every init_workgraph()
+            # call as pure, harmless no-ops - not deleted, since it's still
+            # the real, load-bearing setup path for a brand-new install where
+            # work_objects doesn't exist yet.
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS issues (
                     id               TEXT PRIMARY KEY,
@@ -109,8 +126,18 @@ def init_workgraph() -> None:
                     confidence_tier  TEXT CHECK (confidence_tier IN ('H','M','L'))
                 )
             """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_issues_state ON issues(state)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_issues_priority ON issues(priority_score DESC)")
+            # Real indices, only ever meaningful while `issues` is still a real
+            # table (first run) - "views may not be indexed" is a real SQLite
+            # error post-migration (unlike CREATE TABLE IF NOT EXISTS, which
+            # silently no-ops against an existing view of the same name; an
+            # index name that doesn't exist yet isn't caught by its own IF NOT
+            # EXISTS clause). work_objects gets the equivalent indices directly,
+            # further down.
+            try:
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_issues_state ON issues(state)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_issues_priority ON issues(priority_score DESC)")
+            except sqlite3.OperationalError:
+                pass  # issues is already a view (work_objects has its own indices)
 
             # Task #44: a real 'dismissed' outcome, distinct from 'done' - using
             # "done" for "this was wrong/not needed" would corrupt whatever
@@ -562,7 +589,10 @@ def init_workgraph() -> None:
                 conn.execute("ALTER TABLE issues ADD COLUMN project_id TEXT REFERENCES projects(id)")
             except sqlite3.OperationalError:
                 pass  # already added by a prior init_workgraph() call
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_issues_project ON issues(project_id)")
+            try:
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_issues_project ON issues(project_id)")
+            except sqlite3.OperationalError:
+                pass  # issues is already a view (work_objects has its own indices)
 
             try:
                 # Project Deep-Dive (design doc Section 10.4): set ONLY by
@@ -911,6 +941,186 @@ def init_workgraph() -> None:
                 conn.execute("ALTER TABLE issues ADD COLUMN has_unmet_prerequisite INTEGER NOT NULL DEFAULT 0")
             except sqlite3.OperationalError:
                 pass  # already added by a prior init_workgraph() call
+
+            # --- work_objects (design doc Section 12.1, 2026-08-03) - one real,
+            # typed, nestable table replacing the issues/projects split, per
+            # Marc's explicit "build it right, migrate don't wrap" instruction.
+            # Everything above this point is untouched, real, load-bearing
+            # setup for a brand-new install (or a no-op on an already-migrated
+            # one, per the note further up) - by this point `issues`/
+            # `projects` are guaranteed to be fully-formed real tables with
+            # every column the rest of this function ever added. This block
+            # migrates them ONCE, then every future call just ensures the
+            # views/triggers exist.
+            work_objects_exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='work_objects'"
+            ).fetchone() is not None
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS work_objects (
+                    id                     TEXT PRIMARY KEY,
+                    object_type            TEXT NOT NULL CHECK (object_type IN
+                                              ('relationship','program','project','engagement',
+                                               'case','request','recurring_responsibility')),
+                    parent_id              TEXT REFERENCES work_objects(id),
+                    title                  TEXT NOT NULL,
+                    category               TEXT,
+                    status                 TEXT NOT NULL CHECK (status IN
+                                              ('active','waiting','blocked','done',
+                                               'noise-archived','dismissed','archived')),
+                    priority               TEXT CHECK (priority IN ('high','med','low')),
+                    priority_score         REAL,
+                    nba_action_kind        TEXT CHECK (nba_action_kind IN
+                                              ('draft','review','approve','chase','wait','read','none')),
+                    nba_reason             TEXT,
+                    owner                  TEXT NOT NULL DEFAULT 'marc',
+                    due                    TEXT,
+                    confidence_tier        TEXT CHECK (confidence_tier IN ('H','M','L')),
+                    lesson_id_cited        INTEGER REFERENCES lessons(id),
+                    has_unmet_prerequisite INTEGER NOT NULL DEFAULT 0,
+                    claims_revision        INTEGER NOT NULL DEFAULT 0,
+                    last_deep_dive_ts      REAL,
+                    last_deep_dive_note    TEXT,
+                    opened_at              REAL NOT NULL,
+                    updated_at             REAL NOT NULL
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_work_objects_type_status ON work_objects(object_type, status)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_work_objects_parent ON work_objects(parent_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_work_objects_priority ON work_objects(priority_score DESC)")
+
+            if not work_objects_exists:
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    # Real issue columns, driven by PRAGMA table_info rather than
+                    # a hardcoded guess - same "never assume the column set"
+                    # discipline as every other rename+rebuild migration in this
+                    # file, since issues has grown columns via ALTER TABLE many
+                    # times since its original CREATE TABLE.
+                    issue_cols = {r["name"] for r in conn.execute("PRAGMA table_info(issues)").fetchall()}
+                    conn.execute(f"""
+                        INSERT INTO work_objects
+                            (id, object_type, parent_id, title, category, status, priority,
+                             priority_score, nba_action_kind, nba_reason, owner, due,
+                             confidence_tier, lesson_id_cited, has_unmet_prerequisite,
+                             claims_revision, opened_at, updated_at)
+                        SELECT id, 'request', {"project_id" if "project_id" in issue_cols else "NULL"},
+                               title, category, state, priority,
+                               priority_score, nba_action_kind, nba_reason, owner, due,
+                               confidence_tier,
+                               {"lesson_id_cited" if "lesson_id_cited" in issue_cols else "NULL"},
+                               {"has_unmet_prerequisite" if "has_unmet_prerequisite" in issue_cols else "0"},
+                               {"claims_revision" if "claims_revision" in issue_cols else "0"},
+                               opened_at, updated_at
+                        FROM issues
+                    """)
+                    project_cols = {r["name"] for r in conn.execute("PRAGMA table_info(projects)").fetchall()}
+                    conn.execute(f"""
+                        INSERT INTO work_objects
+                            (id, object_type, parent_id, title, category, status, owner,
+                             opened_at, updated_at, last_deep_dive_ts, last_deep_dive_note)
+                        SELECT id, 'project', NULL, name, category, status, 'marc',
+                               opened_at, updated_at,
+                               {"last_deep_dive_ts" if "last_deep_dive_ts" in project_cols else "NULL"},
+                               {"last_deep_dive_note" if "last_deep_dive_note" in project_cols else "NULL"}
+                        FROM projects
+                    """)
+                    conn.execute("ALTER TABLE issues RENAME TO issues_pre_workobjects")
+                    conn.execute("ALTER TABLE projects RENAME TO projects_pre_workobjects")
+                    conn.execute("COMMIT")
+                except sqlite3.OperationalError:
+                    try:
+                        conn.execute("ROLLBACK")
+                    except sqlite3.OperationalError:
+                        pass
+
+            # `issues`/`projects` as views over work_objects - every existing
+            # caller across the whole codebase keeps working completely
+            # unchanged (confirmed empirically: partial-column INSERT/UPDATE,
+            # matching create_issue()/update_issue()'s own exact patterns,
+            # both behave identically to a real table). INSTEAD OF triggers
+            # make them fully read/write, not just read-only projections.
+            conn.execute("""
+                CREATE VIEW IF NOT EXISTS issues AS
+                SELECT id, title, category, status AS state, priority, priority_score,
+                       nba_action_kind, nba_reason, owner, due, opened_at, updated_at,
+                       confidence_tier, parent_id AS project_id, lesson_id_cited,
+                       has_unmet_prerequisite, claims_revision
+                FROM work_objects WHERE object_type = 'request'
+            """)
+            conn.execute("""
+                CREATE TRIGGER IF NOT EXISTS trg_issues_insert INSTEAD OF INSERT ON issues
+                BEGIN
+                    INSERT INTO work_objects
+                        (id, object_type, parent_id, title, category, status, priority,
+                         priority_score, nba_action_kind, nba_reason, owner, due,
+                         opened_at, updated_at, confidence_tier, lesson_id_cited,
+                         has_unmet_prerequisite, claims_revision)
+                    VALUES
+                        (NEW.id, 'request', NEW.project_id, NEW.title, NEW.category, NEW.state,
+                         NEW.priority, NEW.priority_score, NEW.nba_action_kind, NEW.nba_reason,
+                         NEW.owner, NEW.due, NEW.opened_at, NEW.updated_at, NEW.confidence_tier,
+                         NEW.lesson_id_cited, COALESCE(NEW.has_unmet_prerequisite, 0),
+                         COALESCE(NEW.claims_revision, 0));
+                END
+            """)
+            conn.execute("""
+                CREATE TRIGGER IF NOT EXISTS trg_issues_update INSTEAD OF UPDATE ON issues
+                BEGIN
+                    UPDATE work_objects SET
+                        title = NEW.title, category = NEW.category, status = NEW.state,
+                        priority = NEW.priority, priority_score = NEW.priority_score,
+                        nba_action_kind = NEW.nba_action_kind, nba_reason = NEW.nba_reason,
+                        owner = NEW.owner, due = NEW.due,
+                        opened_at = NEW.opened_at, updated_at = NEW.updated_at,
+                        confidence_tier = NEW.confidence_tier, parent_id = NEW.project_id,
+                        lesson_id_cited = NEW.lesson_id_cited,
+                        has_unmet_prerequisite = NEW.has_unmet_prerequisite,
+                        claims_revision = NEW.claims_revision
+                    WHERE id = OLD.id;
+                END
+            """)
+            conn.execute("""
+                CREATE TRIGGER IF NOT EXISTS trg_issues_delete INSTEAD OF DELETE ON issues
+                BEGIN
+                    DELETE FROM work_objects WHERE id = OLD.id;
+                END
+            """)
+
+            conn.execute("""
+                CREATE VIEW IF NOT EXISTS projects AS
+                SELECT id, title AS name, category, status, opened_at, updated_at,
+                       last_deep_dive_ts, last_deep_dive_note
+                FROM work_objects WHERE object_type = 'project'
+            """)
+            conn.execute("""
+                CREATE TRIGGER IF NOT EXISTS trg_projects_insert INSTEAD OF INSERT ON projects
+                BEGIN
+                    INSERT INTO work_objects
+                        (id, object_type, parent_id, title, category, status, owner,
+                         opened_at, updated_at, last_deep_dive_ts, last_deep_dive_note)
+                    VALUES
+                        (NEW.id, 'project', NULL, NEW.name, NEW.category, NEW.status, 'marc',
+                         NEW.opened_at, NEW.updated_at, NEW.last_deep_dive_ts, NEW.last_deep_dive_note);
+                END
+            """)
+            conn.execute("""
+                CREATE TRIGGER IF NOT EXISTS trg_projects_update INSTEAD OF UPDATE ON projects
+                BEGIN
+                    UPDATE work_objects SET
+                        title = NEW.name, category = NEW.category, status = NEW.status,
+                        opened_at = NEW.opened_at, updated_at = NEW.updated_at,
+                        last_deep_dive_ts = NEW.last_deep_dive_ts,
+                        last_deep_dive_note = NEW.last_deep_dive_note
+                    WHERE id = OLD.id;
+                END
+            """)
+            conn.execute("""
+                CREATE TRIGGER IF NOT EXISTS trg_projects_delete INSTEAD OF DELETE ON projects
+                BEGIN
+                    DELETE FROM work_objects WHERE id = OLD.id;
+                END
+            """)
 
             # Socrates-for-Jasper (#see workgraph_socrates.py): one row per TIER
             # consulted per question, not one row per question - this is what

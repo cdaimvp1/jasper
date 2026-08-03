@@ -513,9 +513,44 @@ def test_issues_migration_preserves_existing_rows_from_old_schema(ws_db):
     TABLE in the migration omitted them, so the INSERT...SELECT failed with
     "no such column", silently caught and rolled back every single time,
     meaning the constraint never actually widened in production despite the
-    migration looking correct and every other test passing."""
+    migration looking correct and every other test passing.
+
+    2026-08-03 (design doc Section 12.1): the ws_db fixture's own
+    init_workgraph() call already migrated issues/projects into
+    work_objects, so `issues`/`projects` are VIEWS by the time this test
+    body runs - simulating a genuinely pre-migration database means
+    tearing all of that back down first (triggers, views, and
+    work_objects itself), not just the issues table."""
     conn = ws_db._connect()
-    conn.execute("DROP TABLE issues")
+    conn.execute("DROP TRIGGER IF EXISTS trg_issues_insert")
+    conn.execute("DROP TRIGGER IF EXISTS trg_issues_update")
+    conn.execute("DROP TRIGGER IF EXISTS trg_issues_delete")
+    conn.execute("DROP TRIGGER IF EXISTS trg_projects_insert")
+    conn.execute("DROP TRIGGER IF EXISTS trg_projects_update")
+    conn.execute("DROP TRIGGER IF EXISTS trg_projects_delete")
+    conn.execute("DROP VIEW IF EXISTS issues")
+    conn.execute("DROP VIEW IF EXISTS projects")
+    conn.execute("DROP TABLE IF EXISTS work_objects")
+    # The ws_db fixture's own init_workgraph() call already ran this
+    # migration once, leaving these backup tables behind (by design, never
+    # dropped in real production - see workgraph_store.py's own comment).
+    # Simulating a genuinely pre-migration database means clearing them
+    # too, or the real migration's rename step collides with its own prior
+    # run's leftovers - a real, if narrow, case worth naming rather than
+    # silently working around: this is not something this specific test
+    # needs to also cover, so it clears it rather than asserting on it.
+    conn.execute("DROP TABLE IF EXISTS issues_pre_workobjects")
+    conn.execute("DROP TABLE IF EXISTS projects_pre_workobjects")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS projects (
+            id         TEXT PRIMARY KEY,
+            name       TEXT NOT NULL,
+            category   TEXT,
+            status     TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','waiting','done','archived','dismissed')),
+            opened_at  REAL NOT NULL,
+            updated_at REAL NOT NULL
+        )
+    """)
     conn.execute("""
         CREATE TABLE issues (
             id               TEXT PRIMARY KEY,

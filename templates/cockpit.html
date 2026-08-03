@@ -6076,22 +6076,37 @@ html[data-theme="dark"]{
   const MQ_ICON_CLOCK = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>';
   const MQ_ICON_ALERT = '<svg viewBox="0 0 24 24"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 3.9L2.5 17a2 2 0 001.7 3h15.6a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/></svg>';
 
-  let pccProjectNamesLoaded = false;
   async function pccLoadProjectNames() {
     // Fixed 2026-07-31: project name/id was needed for search (see
     // pccMatchesFilters) but the Inbox view never loaded the project
     // list on its own - it depended on the separate Handover/Projects
     // views having already fetched theirs first, which isn't guaranteed.
-    // Self-contained fetch, once, independent of those other views.
-    if (pccProjectNamesLoaded) return;
+    // Self-contained fetch, independent of those other views.
+    //
+    // Task #20: also captures each project's own status now, into
+    // pccProjectStatusById - pccLaneIssues needs it to filter out a
+    // dismissed/archived project's member issues (see pccProjectIsHidden).
+    // Re-fetched every time pccLoadIssues polls (no longer a one-time
+    // "already loaded" guard) so a project Marc just dismissed from the
+    // Project Detail view actually disappears from the Inbox within one
+    // poll cycle, not only after a hard page reload.
     try {
       const r = await fetch("/api/workgraph/projects", { cache: "no-store" });
       if (!r.ok) return;
       const d = await r.json();
       pccProjectNameById = {};
-      (d.projects || []).forEach(p => { pccProjectNameById[p.id] = p.name; });
-      pccProjectNamesLoaded = true;
-    } catch (e) { /* search just won't match on project name/id until the next successful load */ }
+      pccProjectStatusById = {};
+      (d.projects || []).forEach(p => { pccProjectNameById[p.id] = p.name; pccProjectStatusById[p.id] = p.status; });
+    } catch (e) { /* search/hiding just won't reflect project changes until the next successful load */ }
+  }
+  // A dismissed/archived project's own member issues keep their own
+  // issue.state untouched - dismissing/archiving is a project-level
+  // decision, not a rewrite of each issue's individual outcome/history -
+  // so this is a display-time filter, not a data mutation.
+  function pccProjectIsHidden(projectId) {
+    if (!projectId) return false;
+    const status = pccProjectStatusById[projectId];
+    return status === "dismissed" || status === "archived";
   }
 
   let pccIssues = [];               // active + waiting + blocked, server-sorted by priority_score
@@ -6101,7 +6116,8 @@ html[data-theme="dark"]{
   let pccSelectedId = null;
   let pccInited = false;
   let pccSearchQuery = "";
-  let pccProjectNameById = {};      // project_id -> name, loaded once (search needs it - see pccLoadProjectNames)
+  let pccProjectNameById = {};      // project_id -> name (search needs it - see pccLoadProjectNames)
+  let pccProjectStatusById = {};    // project_id -> status (task #20: pccLaneIssues hides a dismissed/archived project's issues)
   let pccProjectHaystackById = {};  // project_id -> combined searchable text of every member issue (recomputed alongside pccIssues)
   // Task #53: Inbox rows collapse to one per project when 2+ open issues
   // share a project_id, so a correctly-grouped duplicate (e.g. an Ariba
@@ -6340,15 +6356,23 @@ html[data-theme="dark"]{
     return ts.length ? Math.max(...ts) : null;
   }
   function pccLaneIssues(lane) {
-    if (lane === "all") return pccIssues.slice();
-    if (lane === "issues") return pccIssues.filter(i => i.state === "active");
-    if (lane === "waiting") return pccIssues.filter(i => i.state === "waiting" || i.state === "blocked");
-    if (lane === "meetings") return pccIssues.filter(i => pccEvidenceTypes(i.id).includes("calendar"));
-    if (lane === "comms") return pccIssues.filter(i => {
+    let result;
+    if (lane === "all") result = pccIssues.slice();
+    else if (lane === "issues") result = pccIssues.filter(i => i.state === "active");
+    else if (lane === "waiting") result = pccIssues.filter(i => i.state === "waiting" || i.state === "blocked");
+    else if (lane === "meetings") result = pccIssues.filter(i => pccEvidenceTypes(i.id).includes("calendar"));
+    else if (lane === "comms") result = pccIssues.filter(i => {
       const t = pccEvidenceTypes(i.id);
       return t.includes("email") || t.includes("teams");
     });
-    return [];   // handover/projects aren't row-shaped - the board swaps out entirely for those
+    else return [];   // handover/projects aren't row-shaped - the board swaps out entirely for those
+    // Task #20 (Marc's direct report on #62): dismissing/archiving a whole
+    // PROJECT left its member issues sitting in the Inbox forever, since
+    // that's a project-level decision that never touched each issue's own
+    // state. "All" stays exempt, same "genuinely everything" premise it
+    // already has for done/noise-archived issues - a hidden issue is still
+    // one click (lane: All) away, never actually lost.
+    return lane === "all" ? result : result.filter(i => !pccProjectIsHidden(i.project_id));
   }
 
   // Task #53: collapse 2+ open issues sharing a project_id into one Inbox
@@ -8803,9 +8827,13 @@ html[data-theme="dark"]{
           ${topActionHtml}
         </div>
         <div class="pcc-detail-hd-actions pcc-actions-row">
-          <button class="mqb ghost" type="button" data-proj-act="done">Mark done</button>
-          <button class="mqb ghost" type="button" data-proj-act="archive">Archive</button>
-          <button class="mqb ghost" type="button" style="border-color:var(--lk-danger);color:var(--lk-danger)" data-proj-act="dismiss">Dismiss</button>
+          ${project.status === "done" || project.status === "archived" || project.status === "dismissed" ? `
+            <button class="mqb ghost" type="button" data-proj-act="revert">Revert to active</button>
+          ` : `
+            <button class="mqb ghost" type="button" data-proj-act="done">Mark done</button>
+            <button class="mqb ghost" type="button" data-proj-act="archive">Archive</button>
+            <button class="mqb ghost" type="button" style="border-color:var(--lk-danger);color:var(--lk-danger)" data-proj-act="dismiss">Dismiss</button>
+          `}
         </div>
       </div>
       ${summaryZones}
@@ -8843,9 +8871,12 @@ html[data-theme="dark"]{
     });
   }
 
-  // Task #62: real project-level Mark done/Dismiss/Archive - there was no
-  // way to change a project's own status from this view at all before (see
-  // POST /api/workgraph/projects/{id}/status, added server-side for this).
+  // Task #62/#20: real project-level Mark done/Dismiss/Archive/Revert -
+  // there was no way to change a project's own status from this view at
+  // all before (see POST /api/workgraph/projects/{id}/status, added
+  // server-side for this). Revert (task #20) just posts "active" - the
+  // header above swaps to show it in place of Mark done/Archive/Dismiss
+  // once a project is already done/archived/dismissed.
   // Unlike the issue-level Detail Panel, a project stays visible in
   // pjProjectList regardless of status (the list has no status filter) -
   // so rather than guessing at a "next project" to jump to, this just
@@ -8853,7 +8884,7 @@ html[data-theme="dark"]{
   // project's detail in place (forceRefresh, so the new status actually
   // shows in its own header badge).
   async function pjRunProjectAction(projectId, act) {
-    const statusByAct = { done: "done", dismiss: "dismissed", archive: "archived" };
+    const statusByAct = { done: "done", dismiss: "dismissed", archive: "archived", revert: "active" };
     const status = statusByAct[act];
     if (!status) return;
     try {

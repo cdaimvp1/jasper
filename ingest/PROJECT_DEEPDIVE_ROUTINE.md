@@ -71,9 +71,9 @@ dive did not run this wake."
      429/rate-limit is hit, stop that source for this wake only, same as relay's own rule —
      do not retry-loop, move to the next seed/source with whatever you already have.
 
-4. **Any genuinely new result gets written through relay's own existing ingestion path —
-   not a new mechanism.** Same envelope shapes `GRAPH_INGEST_ROUTINE.md` already specifies
-   (`{"source": "outlook_mail"|"teams_chat"|"sharepoint", ...}`), written to
+4. **Teams and SharePoint finds go through relay's own existing ingestion path — not a new
+   mechanism.** Envelope shapes `GRAPH_INGEST_ROUTINE.md` already specifies
+   (`{"source": "teams_chat"|"sharepoint", ...}`), written to
    `INBOX/<source>_<unix_ts>.json` (`paths.DATA_DIR / "raw_ingest_inbox"`, never a bare
    relative path — same caution as `GRAPH_INGEST_ROUTINE.md`'s own fixed bug). Then:
    ```
@@ -86,6 +86,17 @@ dive did not run this wake."
    expected — **never hand-attach a find directly to this project yourself.** The whole
    point of routing through the normal pipeline is that the existing, already-tested
    identity/grouping logic makes that call, not this routine.
+
+   **`outlook_email_search` hits are different — do NOT try to write an `outlook_mail`
+   envelope for them (confirmed live, 2026-08-03: no such source exists in
+   `normalize.py`'s `_PROCESSORS` — mail never went through the Teams/Calendar/SharePoint
+   drop-file path at all).** Mail ingestion is `outlook_com_ingest.py`, a separate,
+   independent, comprehensive scan of Marc's real mailbox folder (local Outlook COM, not
+   this M365 connector) that already runs every `scheduled_refresh.py` cycle regardless of
+   Deep-Dive. A real mail hit here doesn't need (or have a way to receive) manual
+   ingestion — if it's genuinely in the mailbox, the next regular mail scan picks it up on
+   its own. Just note the finding in step 6's report; do not attempt to write a drop file
+   for it.
 
 5. **Emit a bus event** if anything new was actually written this wake (skip if nothing was
    found — no reason to wake anyone over an empty result):

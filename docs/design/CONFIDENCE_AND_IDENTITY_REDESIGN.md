@@ -1205,15 +1205,57 @@ green (~940 tests) — deterministic scaffolding only (picker, seed
 derivation, completion route); the routine's own live-search judgment is
 untested by design, same split as `SYNTHESIS_ROUTINE.md`.
 
-**Not yet observed: a real headless run actually exercising live M365
-search.** That's the one part of this step no test or direct DB check can
-verify — per 10.2, worth watching the first several real
-`run_deepdive_oneshot()` firings (next scheduled_refresh cycles) directly,
-checking `projects.last_deep_dive_note` for an honest account each time,
-before trusting the sweep unattended.
+### 10.7 First real headless run, live M365 search, observed (2026-08-03)
 
-**Step 12 is done, pending that first real-world observation.** Next per
-Section 7: step 13 (Phase 4/NBA v2), the capstone.
+Triggered `run_deepdive_oneshot()` directly rather than waiting for the
+next scheduled cycle. **First attempt failed for a mundane, unrelated
+reason, not the M365-auth risk 10.2 named:** the live server hadn't been
+restarted since this session's commits, so `/api/workgraph/deep-dive/next`
+didn't exist on the running process yet. Curator's own honesty requirement
+worked exactly as designed — it detected the 404, refused to fabricate a
+search, refused to restart the server unilaterally (per
+`conductor_runbook.md`'s "propose to the manager first" rule), and reported
+plainly what happened. Restarted the server directly (`POST
+/api/server/restart`, confirmed all three new routes respond correctly),
+then re-ran it for a genuine second attempt.
+
+**Second attempt: real success, with two honestly-reported real limits.**
+Seeded on `proj-043` ("Pwc — contract"). Curator correctly scoped its own
+75 returned anchors down to the real distinguishing identity (most were
+internal Lilly staff shared across many projects, useless as a search
+seed) before ever calling a live tool. Net result: **11 new raw_items
+ingested, 0 duplicates** — 1 real Teams message plus 10 real SharePoint
+documents (executed PSAs, RFIs, amendments dating back to 2011) that had
+never been indexed before. Cross-checked `marc-033`'s existing PwC mention
+against the new evidence and correctly confirmed it was already linked to
+the right project, not a matcher miss.
+
+Two real, honestly-reported limits, not fabricated around:
+- **A real gap in this routine's own instructions, found and fixed
+  immediately:** `outlook_email_search` found genuine new content (a
+  2026-08-03 rate-card thread), but the routine told curator to write it
+  through the same `outlook_mail` drop-file envelope Teams/SharePoint
+  finds use — that source doesn't exist in `normalize.py`'s processors.
+  Mail ingestion is `outlook_com_ingest.py`, a fully independent,
+  comprehensive scan of Marc's real mailbox that already runs every
+  `scheduled_refresh.py` cycle regardless of Deep-Dive — a real mail hit
+  needs no manual handling at all, it surfaces on its own next mail scan.
+  Fixed `PROJECT_DEEPDIVE_ROUTINE.md` to say so directly instead of
+  pointing at a path that never existed.
+- **A live connector inconsistency, exactly the risk class 10.2
+  anticipated, just a different symptom:** `chat_message_search` returned
+  a real hit (a specific Teams meeting chat), but `read_resource` on that
+  exact `chatId`/`messageId` the search itself returned came back
+  `NOT_FOUND` — the content couldn't be retrieved even though the search
+  succeeded. Not fixable from this side; noted honestly in the run's own
+  `last_deep_dive_note` rather than silently dropped or guessed around.
+
+**Step 12 is confirmed working end-to-end on real data**, both search
+paths that can currently ingest (Teams, SharePoint) proven live, the
+mail-path gap found and closed, and the honesty discipline validated
+under a real failure (twice, in two different ways) rather than only in
+tests. Watching a few more real scheduled-cycle firings is still
+worthwhile, but the core mechanism is no longer unobserved.
 
 ---
 

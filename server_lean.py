@@ -2061,6 +2061,26 @@ async def api_issue_split_from_project(issue_id: str, body: IssueSplitBody):
     return JSONResponse({"ok": True, "result": result})
 
 
+class IssueRegroupBody(BaseModel):
+    lookback_days: Optional[int] = None
+
+
+@app.post("/api/workgraph/issues/{issue_id}/regroup")
+async def api_issue_regroup(issue_id: str, body: IssueRegroupBody):
+    """Task #177's 'worker via chat, look back further if necessary' escape
+    hatch - Marc's own follow-up to agreeing the default open-plus-grace-
+    period candidate scoping (workgraph_projects.GROUPING_LOOKBACK_GRACE_
+    DAYS) was right. Re-runs group_issue for a standalone issue with a
+    wider (or narrower) candidate window than the default; a no-op on an
+    issue that already has a project (group_issue's own early return -
+    this isn't a re-grouping tool for grouped issues, see /split for that
+    direction instead)."""
+    if wg.get_issue(issue_id) is None:
+        raise HTTPException(404, f"no such issue: {issue_id}")
+    result = workgraph_projects.group_issue(issue_id, lookback_days=body.lookback_days)
+    return JSONResponse({"ok": True, "result": result})
+
+
 MAX_GROUPING_SUGGESTIONS_PER_WAKE = 12
 
 

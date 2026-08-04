@@ -2247,3 +2247,74 @@ def test_split_issue_from_project_skips_existing_constraints(ws_db):
     result = wp.split_issue_from_project(a)
 
     assert result["constraints_created"] == []
+
+
+def _close_issue_at(ws_db, issue_id, state, updated_at):
+    """Directly backdates updated_at after the state change - update_issue's
+    own touch_updated_at=True would otherwise stamp 'now', making it
+    impossible to construct a closed issue that's OLDER than the grace
+    period (same reasoning as the top-of-file _issue helper's opened_at
+    patch)."""
+    ws_db.update_issue(issue_id, state=state)
+    conn = ws_db._connect()
+    conn.execute("UPDATE issues SET updated_at = ? WHERE id = ?", (updated_at, issue_id))
+    conn.close()
+
+
+def test_candidate_pool_includes_open_issues_regardless_of_age(ws_db):
+    """Task #177: an OPEN issue stays in scope no matter how old - only
+    CLOSED issues age out. opened_at (not updated_at) is what's ancient
+    here; the issue is still 'active', which is what should matter."""
+    old_open = _issue(ws_db, "Ancient but still active", opened_at=time.time() - 400 * 86400)
+
+    pool_ids = {i["id"] for i in wp._candidate_pool()}
+
+    assert old_open in pool_ids
+
+
+def test_candidate_pool_excludes_closed_issues_past_the_default_grace_period(ws_db):
+    a = _issue(ws_db, "Closed long ago")
+    _close_issue_at(ws_db, a, "done", time.time() - (wp.GROUPING_LOOKBACK_GRACE_DAYS + 5) * 86400)
+
+    pool_ids = {i["id"] for i in wp._candidate_pool()}
+
+    assert a not in pool_ids
+
+
+def test_candidate_pool_includes_closed_issues_within_the_default_grace_period(ws_db):
+    a = _issue(ws_db, "Closed recently")
+    _close_issue_at(ws_db, a, "done", time.time() - (wp.GROUPING_LOOKBACK_GRACE_DAYS - 5) * 86400)
+
+    pool_ids = {i["id"] for i in wp._candidate_pool()}
+
+    assert a in pool_ids
+
+
+def test_candidate_pool_lookback_days_override_widens_the_window(ws_db):
+    """Marc's explicit follow-up: 'I do want to be able to use a worker via
+    chat to look back further if necessary' - a caller-supplied
+    lookback_days should surface something the default window would have
+    missed."""
+    a = _issue(ws_db, "Closed a year ago")
+    _close_issue_at(ws_db, a, "done", time.time() - 300 * 86400)
+
+    default_pool_ids = {i["id"] for i in wp._candidate_pool()}
+    wide_pool_ids = {i["id"] for i in wp._candidate_pool(lookback_days=365)}
+
+    assert a not in default_pool_ids
+    assert a in wide_pool_ids
+
+
+def test_scored_grouping_decision_lookback_days_surfaces_an_old_closed_match(ws_db):
+    """End-to-end: the same real match (2+ Ariba signals) is invisible to
+    the default-scoped decision once the sibling is closed-and-old, but
+    found again when a caller explicitly asks to look back further."""
+    old_sibling = _ariba_issue(ws_db, "JANE DOE", "PR991001", "Workday HCM SaaS", 75000.00)
+    _close_issue_at(ws_db, old_sibling, "done", time.time() - 300 * 86400)
+    new_issue = _ariba_issue(ws_db, "JANE DOE", None, "Workday HCM SaaS", 75050.00)
+
+    default_decision = wp.scored_grouping_decision(new_issue, ws_db.get_issue(new_issue))
+    wide_decision = wp.scored_grouping_decision(new_issue, ws_db.get_issue(new_issue), lookback_days=365)
+
+    assert default_decision["verdict"] == "no_match"
+    assert wide_decision["sibling_id"] == old_sibling

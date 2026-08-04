@@ -596,6 +596,46 @@ SCORE_WEIGHTS = {
 AUTO_MERGE_THRESHOLD = 0.65
 WEAK_SUGGESTION_FLOOR = 0.15  # preserves today's "one weak signal -> suggestion" behavior
 
+# Task #177 (2026-08-04, Marc's direct design ask): the scored model's own
+# candidate search used to scan EVERY issue ever created, forever, with no
+# time restriction at all - exactly the unscoped-corpus-scan Marc flagged
+# ("put a time restriction on it... never look back longer than x amount of
+# time... this significantly reduces the amount it needs to read through").
+# Default scope is "open, plus a short grace period after close" (his own
+# framing, which he confirmed: "your suggestion here... works") - an issue
+# still open is always in scope regardless of age; a CLOSED issue only stays
+# in scope for GROUPING_LOOKBACK_GRACE_DAYS after its last update. His
+# explicit follow-up ("I do want to be able to use a worker via chat to
+# look back further if necessary") is scored_grouping_decision's/
+# group_issue's own lookback_days override below - a real per-call escape
+# hatch, not a config toggle, since this is meant to be an occasional,
+# conversational "check further back for this one" ask, not a standing
+# setting.
+GROUPING_LOOKBACK_GRACE_DAYS = 45
+_OPEN_ISSUE_STATES = {"active", "waiting", "blocked"}
+
+
+def _candidate_pool(*, lookback_days: Optional[int] = None) -> list:
+    """The scored model's own candidate search space - every OPEN issue
+    (regardless of age) plus every CLOSED issue updated within the lookback
+    window (default GROUPING_LOOKBACK_GRACE_DAYS, override via
+    lookback_days for a deliberate deeper look). Still one full table scan
+    per call (ws.list_issues' own cost) - this doesn't make the query
+    cheaper, it makes the RESULT SET smaller, which is what actually cuts
+    the O(n) pairwise scoring work scored_grouping_decision does per
+    candidate."""
+    window_seconds = (lookback_days if lookback_days is not None else GROUPING_LOOKBACK_GRACE_DAYS) * 86400
+    cutoff = time.time() - window_seconds
+    out = []
+    for other in ws.list_issues(states=None, limit=10000):
+        if other.get("state") in _OPEN_ISSUE_STATES:
+            out.append(other)
+            continue
+        updated = other.get("updated_at")
+        if updated and updated >= cutoff:
+            out.append(other)
+    return out
+
 
 def _issue_signal_snapshot(issue_id: str, issue: Optional[dict] = None) -> dict:
     """Precomputed signal data for ONE issue, shared by both the live
@@ -821,13 +861,20 @@ def _pairwise_score_from_signature(a_id: str, a_sig: dict, a_topic_key: str, a_c
     return score, signals
 
 
-def scored_grouping_decision(issue_id: str, issue: dict) -> dict:
+def scored_grouping_decision(issue_id: str, issue: dict, *, lookback_days: Optional[int] = None) -> dict:
     """The scored model's verdict for ONE issue - always computed by
     group_issue() regardless of whether config('grouping',
     'scored_model_enabled') is on, so it can be shadow-logged for
     comparison against the real (ordered-model) decision before ever
     being trusted to act. Returns {verdict: auto_merge|suggest|no_match,
-    score, sibling_id, matched_signals}."""
+    score, sibling_id, matched_signals}.
+
+    lookback_days (task #177): the candidate search below defaults to
+    _candidate_pool's own scope (open issues, plus closed ones within
+    GROUPING_LOOKBACK_GRACE_DAYS) - pass an explicit override for the "look
+    back further" case Marc asked for as a real, occasional, worker-
+    triggered action (see group_issue's own lookback_days passthrough and
+    POST /api/workgraph/issues/{id}/regroup), not a standing setting."""
     m = _shared_reference_id(issue_id)
     if m:
         ref, sibling_id = m
@@ -863,8 +910,9 @@ def scored_grouping_decision(issue_id: str, issue: dict) -> dict:
     # already the pre-existing single-best-match behavior) since an
     # ungrouped-to-ungrouped match forms a brand NEW project, not a bridge.
     project_best: dict[str, tuple[float, str, list]] = {}
-    # Same limit fix as _shared_topic_key/_weak_signal_candidates above.
-    for other in ws.list_issues(states=None, limit=10000):
+    # Task #177: scoped to _candidate_pool's open-plus-grace-period window
+    # by default (was every issue ever created, no time bound at all).
+    for other in _candidate_pool(lookback_days=lookback_days):
         if other["id"] == issue_id:
             continue
         if my_project_id and my_project_id == other.get("project_id"):
@@ -1378,7 +1426,7 @@ def _suggestion_kind_for_scored_signals(matched_signals: list) -> Optional[str]:
     return None
 
 
-def group_issue(issue_id: str) -> dict:
+def group_issue(issue_id: str, *, lookback_days: Optional[int] = None) -> dict:
     """Runs the grouping logic for ONE issue. Safe to re-run -
     assign_issue_to_project and create_project_suggestion are both
     idempotent (the former no-ops if already assigned to the target project,
@@ -1397,14 +1445,23 @@ def group_issue(issue_id: str) -> dict:
     previously the shadow verdict was computed but discarded the moment
     this function returned, so there was no way to build a real historical
     dataset of live-vs-scored (dis)agreement to review before ever
-    reconsidering the scored model."""
+    reconsidering the scored model.
+
+    lookback_days (task #177): passed straight through to scored_grouping_
+    decision's own candidate search - honest about the fact that until
+    config('grouping','scored_model_enabled') is on (task #180), this only
+    widens what gets shadow-logged, not what actually happens; the ordered
+    model below has no lookback concept of its own and isn't getting one,
+    since it's the path this whole phase is retiring, not extending. Real
+    caller: POST /api/workgraph/issues/{id}/regroup, the worker-via-chat
+    'look back further' action Marc asked for."""
     issue = ws.get_issue(issue_id)
     if issue is None:
         return {"issue_id": issue_id, "action": "not_found"}
     if issue.get("project_id"):
         return {"issue_id": issue_id, "action": "already_grouped", "project_id": issue["project_id"]}
 
-    shadow_scored = scored_grouping_decision(issue_id, issue)
+    shadow_scored = scored_grouping_decision(issue_id, issue, lookback_days=lookback_days)
     scored_model_enabled = bool(config.get("grouping", "scored_model_enabled"))
 
     def _finish(action: str, *, signal: Optional[str] = None, sibling_id: Optional[str] = None, **extra) -> dict:

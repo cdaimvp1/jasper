@@ -110,3 +110,23 @@ a bridge without having looked at the other.
 Never confirm a bridge suggestion on the strength of its `reason` string alone — the deterministic
 score got it into your queue, but whether it's actually the same real-world relationship is exactly
 the judgment this routine exists for.
+
+## Looking back further (task #177, 2026-08-04, Marc's direct design ask)
+
+The scored model's own candidate search (`workgraph_projects.scored_grouping_decision`) only looks at
+issues that are still open, plus closed ones updated within the last `GROUPING_LOOKBACK_GRACE_DAYS`
+(45 days by default) — deliberately, so it isn't rescanning the entire lifetime corpus on every new
+item. Marc's own framing: "I do want to be able to use a worker via chat to look back further if
+necessary" — this is that escape hatch, not a setting to change permanently.
+
+If Marc (in chat, not through this routine's own wake) asks you to check further back for a specific
+standalone issue — "did anything like this come up with Acme last year?" — call:
+```
+POST /api/workgraph/issues/{issue_id}/regroup
+{"lookback_days": 365}
+```
+on the standalone issue in question (this is a no-op on an issue that already has a project — use
+`/split` first if the ask is really "this is grouped wrong, look elsewhere instead"). Report back
+honestly whether it found anything — a `no_match`/`suggested` action either way, never assume a
+suggestion appearing means it's correct; the same judgment rules above still apply to whatever it
+surfaces.

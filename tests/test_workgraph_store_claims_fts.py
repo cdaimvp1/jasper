@@ -43,12 +43,13 @@ def test_get_claims_revision_defaults_to_zero(ws_db):
     assert ws_db.get_claims_revision(iid) == 0
 
 
-def test_get_max_claims_revision_for_project(ws_db):
+def test_get_project_claims_fingerprint_changes_when_a_member_gets_a_claim(ws_db):
     pid = ws_db.create_project_with_new_id(name="P", category="other")
     iid1 = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
     iid2 = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
     ws_db.assign_issue_to_project(iid1, pid)
     ws_db.assign_issue_to_project(iid2, pid)
+    before = ws_db.get_project_claims_fingerprint(pid)
 
     rid = ws_db.insert_raw_item(
         source="outlook_mail", stable_key="fts1", thread_key="fts1", dedupe_key="fts1",
@@ -60,5 +61,26 @@ def test_get_max_claims_revision_for_project(ws_db):
     ws_db.insert_claim(issue_id=iid1, raw_item_id=rid, claim_type="ask", text="y",
                         author="marc", author_basis="direction")
 
-    assert ws_db.get_max_claims_revision_for_project(pid) == 2
+    after = ws_db.get_project_claims_fingerprint(pid)
+    assert before != after
+    assert ws_db.get_claims_revision(iid1) == 2
     assert ws_db.get_claims_revision(iid2) == 0
+
+
+def test_get_project_claims_fingerprint_stable_for_unchanged_members(ws_db):
+    pid = ws_db.create_project_with_new_id(name="P", category="other")
+    iid1 = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    ws_db.assign_issue_to_project(iid1, pid)
+
+    first = ws_db.get_project_claims_fingerprint(pid)
+    second = ws_db.get_project_claims_fingerprint(pid)
+    assert first == second
+
+
+def test_bump_claims_revision_increments_by_one(ws_db):
+    iid = ws_db.create_issue_with_new_id(title="X", state="active", category="other")
+    assert ws_db.get_claims_revision(iid) == 0
+    ws_db.bump_claims_revision(iid)
+    assert ws_db.get_claims_revision(iid) == 1
+    ws_db.bump_claims_revision(iid)
+    assert ws_db.get_claims_revision(iid) == 2

@@ -64,10 +64,12 @@ def compute_evidence_marker(entity_type: str, entity_id: str) -> str:
 
     A project's scope is still every constituent issue's claims activity
     (Marc's requirement: one synthesis per underlying negotiation, which can
-    span several issues/threads) - taken as the max revision across members,
-    computed at check time rather than kept as a synced second counter."""
+    span several issues/threads) - see get_project_claims_fingerprint's own
+    docstring for why this is a hash over every member's (id, revision)
+    pair, not just the max, computed at check time rather than kept as a
+    synced second counter."""
     if entity_type == "project":
-        rev = ws.get_max_claims_revision_for_project(entity_id)
+        rev = ws.get_project_claims_fingerprint(entity_id)
     elif entity_type == "issue":
         rev = ws.get_claims_revision(entity_id)
     else:

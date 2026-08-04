@@ -156,6 +156,18 @@ def materialize_claims_for_raw_item(raw_item_id: int) -> int:
         ws.log_claim_event(claim_id, "create", actor="curator", ts=ts)
         inserted += 1
 
+    # Fixed 2026-08-04 (architecture-review follow-up, P1): a key_fact is
+    # never a claim (there's no claim_type for it - see sync_checklist_
+    # action_to_claim's own docstring), so it was structurally invisible
+    # to every claims_revision bump above. A real new key fact IS material
+    # new information though, and synthesis' staleness marker is entirely
+    # claims_revision-driven (workgraph_synthesis.compute_evidence_marker)
+    # - without this, an issue/project could accumulate genuinely new
+    # extracted content while reading as perfectly fresh forever.
+    key_facts = blob.get("key_facts")
+    if isinstance(key_facts, list) and any(isinstance(f, str) and f.strip() for f in key_facts):
+        ws.bump_claims_revision(issue_id)
+
     return inserted
 
 

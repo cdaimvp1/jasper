@@ -32,8 +32,25 @@ def _material_raw_item(ws_db, issue_id, key, text, occurred_ts=None, direction="
 
 
 def _immaterial_raw_item(ws_db, issue_id, key, occurred_ts=None):
-    """A raw_item whose extraction has no ask/decision/commitment/date -
-    materializing it should NOT bump claims_revision."""
+    """A raw_item whose extraction has no ask/decision/commitment/date/
+    key_fact at all - materializing it should NOT bump claims_revision."""
+    rid = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key=key, thread_key=key, dedupe_key=key,
+        occurred_ts=occurred_ts if occurred_ts is not None else time.time(),
+        subject="s", from_actor="a@example.com", participants_json="[]", body_preview="fyi only",
+    )
+    ws_db.link_raw_item_to_issue(rid, issue_id)
+    ws_db.create_extraction(rid, json.dumps({}))
+    wc.materialize_claims_for_raw_item(rid)
+    return rid
+
+
+def _key_facts_only_raw_item(ws_db, issue_id, key, occurred_ts=None):
+    """A raw_item whose extraction has a key_fact but no ask/decision/
+    commitment/date - fixed 2026-08-04: a key_fact is never itself a
+    claim, but it IS real new material information, so materializing it
+    should still bump claims_revision (see workgraph_claims.
+    materialize_claims_for_raw_item's own docstring)."""
     rid = ws_db.insert_raw_item(
         source="outlook_mail", stable_key=key, thread_key=key, dedupe_key=key,
         occurred_ts=occurred_ts if occurred_ts is not None else time.time(),
@@ -64,7 +81,18 @@ def test_marker_does_not_bump_for_immaterial_evidence(ws_db):
     assert wsyn.compute_evidence_marker("issue", iid) == "rev:0"
 
 
-def test_project_marker_is_max_across_member_issues(ws_db):
+def test_marker_bumps_for_key_facts_only_evidence(ws_db):
+    """Fixed 2026-08-04: a key_fact is never a claim, but IS real new
+    material information - materializing it must still change the
+    marker, not leave it byte-for-byte identical."""
+    iid = _issue(ws_db)
+    before = wsyn.compute_evidence_marker("issue", iid)
+    _key_facts_only_raw_item(ws_db, iid, "m2b")
+    after = wsyn.compute_evidence_marker("issue", iid)
+    assert before != after
+
+
+def test_project_marker_changes_when_a_member_gets_a_new_claim(ws_db):
     pid = ws_db.create_project_with_new_id(name="P", category="other")
     iid1 = _issue(ws_db, "One")
     iid2 = _issue(ws_db, "Two")
@@ -74,7 +102,76 @@ def test_project_marker_is_max_across_member_issues(ws_db):
     _material_raw_item(ws_db, iid2, "m4", "ask two")
     _material_raw_item(ws_db, iid2, "m5", "ask three")
 
-    assert wsyn.compute_evidence_marker("project", pid) == "rev:2"
+    marker = wsyn.compute_evidence_marker("project", pid)
+    assert marker != "rev:0"
+    assert marker.startswith("rev:")
+
+
+def test_project_marker_changes_when_non_max_member_gets_a_new_claim(ws_db):
+    """Real aggregation bug this fix closes: MAX(claims_revision) across
+    members misses a non-max member's OWN revision changing (member A at
+    rev 10, member B goes 2 -> 3 doesn't move the max at all if A stays
+    at 10) - the fingerprint must change even when the CURRENT max member
+    isn't the one that got new activity."""
+    pid = ws_db.create_project_with_new_id(name="P", category="other")
+    high_rev_member = _issue(ws_db, "High")
+    low_rev_member = _issue(ws_db, "Low")
+    ws_db.assign_issue_to_project(high_rev_member, pid)
+    ws_db.assign_issue_to_project(low_rev_member, pid)
+    for i in range(5):
+        _material_raw_item(ws_db, high_rev_member, f"high{i}", f"ask {i}")
+    _material_raw_item(ws_db, low_rev_member, "low0", "ask zero")
+
+    before = wsyn.compute_evidence_marker("project", pid)
+    _material_raw_item(ws_db, low_rev_member, "low1", "ask one")  # low_rev_member still isn't the max
+    after = wsyn.compute_evidence_marker("project", pid)
+
+    assert ws_db.get_claims_revision(low_rev_member) < ws_db.get_claims_revision(high_rev_member)
+    assert before != after
+
+
+def test_project_marker_changes_when_a_member_is_added(ws_db):
+    pid = ws_db.create_project_with_new_id(name="P", category="other")
+    iid1 = _issue(ws_db, "One")
+    ws_db.assign_issue_to_project(iid1, pid)
+    _material_raw_item(ws_db, iid1, "add1", "ask one")
+
+    before = wsyn.compute_evidence_marker("project", pid)
+    iid2 = _issue(ws_db, "Two")
+    ws_db.assign_issue_to_project(iid2, pid)
+    after = wsyn.compute_evidence_marker("project", pid)
+
+    assert before != after
+
+
+def test_project_marker_changes_when_a_member_is_removed(ws_db):
+    pid = ws_db.create_project_with_new_id(name="P", category="other")
+    iid1 = _issue(ws_db, "One")
+    iid2 = _issue(ws_db, "Two")
+    ws_db.assign_issue_to_project(iid1, pid)
+    ws_db.assign_issue_to_project(iid2, pid)
+    _material_raw_item(ws_db, iid1, "rem1", "ask one")
+
+    before = wsyn.compute_evidence_marker("project", pid)
+    ws_db.update_issue(iid2, project_id=None)
+    after = wsyn.compute_evidence_marker("project", pid)
+
+    assert before != after
+
+
+def test_project_marker_stays_the_same_when_nothing_changes(ws_db):
+    pid = ws_db.create_project_with_new_id(name="P", category="other")
+    iid1 = _issue(ws_db, "One")
+    iid2 = _issue(ws_db, "Two")
+    ws_db.assign_issue_to_project(iid1, pid)
+    ws_db.assign_issue_to_project(iid2, pid)
+    _material_raw_item(ws_db, iid1, "same1", "ask one")
+    _material_raw_item(ws_db, iid2, "same2", "ask two")
+
+    first = wsyn.compute_evidence_marker("project", pid)
+    second = wsyn.compute_evidence_marker("project", pid)
+
+    assert first == second
 
 
 # --- list_stale_entities ---------------------------------------------

@@ -34,6 +34,7 @@ import re
 import sqlite3
 import threading
 import time
+import zlib
 from typing import Any, Optional
 
 from paths import WORKGRAPH_DB, ensure_dirs
@@ -5860,6 +5861,28 @@ def get_claim(claim_id: int) -> Optional[dict]:
     return dict(row) if row else None
 
 
+def bump_claims_revision(issue_id: str) -> None:
+    """Fixed 2026-08-04 (architecture-review follow-up, P1): insert_claim/
+    touch_claim/update_claim_status each already bump claims_revision
+    inline as part of their own write - but a genuinely new key_fact
+    (curator's extracted_json.key_facts field, surfaced read-only by
+    workgraph_key_facts.py) was never materialized as a claim at all, so
+    an issue/project could accumulate real new material information while
+    its synthesis marker stayed byte-for-byte unchanged. Callers that have
+    no claim row of their own to attach the bump to (workgraph_claims.
+    materialize_claims_for_raw_item, for a key-facts-only extraction) call
+    this directly instead of duplicating the inline UPDATE."""
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                "UPDATE issues SET claims_revision = claims_revision + 1 WHERE id = ?",
+                (issue_id,),
+            )
+        finally:
+            conn.close()
+
+
 def get_claims_revision(issue_id: str) -> int:
     with _lock:
         conn = _connect()
@@ -5872,20 +5895,37 @@ def get_claims_revision(issue_id: str) -> int:
     return row["claims_revision"] if row else 0
 
 
-def get_max_claims_revision_for_project(project_id: str) -> int:
+def get_project_claims_fingerprint(project_id: str) -> int:
     """Project-level revision is derived, not stored (Section 9.5) -
-    MAX(claims_revision) across member issues, computed at synthesis-check
-    time rather than kept as a second counter in sync with its members."""
+    computed at synthesis-check time rather than kept as a second counter
+    in sync with its members.
+
+    Fixed 2026-08-04 (architecture-review follow-up, P1): the previous
+    version returned bare MAX(claims_revision) across member issues, which
+    has two real aggregation gaps a live audit confirmed: (1) a NON-max
+    member's revision changing (e.g. member A sits at rev 10, member B goes
+    2 -> 3) leaves the MAX unchanged, so the project reads falsely fresh
+    even though real new claims activity happened; (2) adding or removing a
+    member doesn't touch any existing member's claims_revision at all, so
+    membership changes never invalidate synthesis either. A deterministic
+    hash (zlib.crc32, not Python's salted hash()) of the sorted (issue_id,
+    claims_revision) sequence across every member closes both gaps - any
+    member's revision changing, or the member SET itself changing, changes
+    the encoded string and therefore the fingerprint. Kept as a plain int
+    (not a hex string) so compute_evidence_marker's "rev:{n}" format and
+    list_stale_entities' _parse_rev sort key both keep working unchanged -
+    only what's fed into the aggregation changed, not the marker shape."""
     with _lock:
         conn = _connect()
         try:
-            row = conn.execute(
-                "SELECT MAX(claims_revision) AS m FROM issues WHERE project_id = ?",
+            rows = conn.execute(
+                "SELECT id, claims_revision FROM issues WHERE project_id = ? ORDER BY id",
                 (project_id,),
-            ).fetchone()
+            ).fetchall()
         finally:
             conn.close()
-    return (row["m"] if row and row["m"] is not None else 0)
+    encoded = "|".join(f"{r['id']}:{r['claims_revision']}" for r in rows)
+    return zlib.crc32(encoded.encode("utf-8"))
 
 
 def list_open_claims_for_issue(issue_id: str, claim_type: Optional[str] = None) -> list[dict]:

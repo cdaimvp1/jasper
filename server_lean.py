@@ -76,6 +76,7 @@ import workgraph_lessons
 import workgraph_socrates
 import workgraph_deadlines
 import workgraph_redline
+import workgraph_meetingprep
 import workgraph_signal_trends
 import workgraph_aristotle
 import workgraph_export
@@ -2136,6 +2137,27 @@ async def api_attachment_compare(attachment_id_a: int, attachment_id_b: int):
     except ValueError as e:
         raise HTTPException(404, str(e))
     return JSONResponse(sanitize_surrogates(result))
+
+
+@app.get("/api/workgraph/meeting-prep-candidates")
+async def api_meeting_prep_candidates():
+    """Enhancement idea panel #20: every open issue with a real upcoming
+    calendar meeting within the default lookahead window."""
+    candidates = workgraph_meetingprep.find_upcoming_meeting_prep_candidates(now=time.time())
+    return JSONResponse({"candidates": sanitize_surrogates(candidates)})
+
+
+@app.get("/api/workgraph/issues/{issue_id}/meeting_prep_draft")
+async def api_meeting_prep_draft(issue_id: str):
+    """Enhancement idea panel #20: the actual prep narrative for one
+    issue's nearest upcoming meeting - a genuine draft, same posture as
+    the weekly scorecard/renewal outreach drafts above."""
+    if wg.get_issue(issue_id) is None:
+        raise HTTPException(404, f"no such issue: {issue_id}")
+    draft = workgraph_meetingprep.meeting_prep_draft(issue_id, now=time.time())
+    if draft is None:
+        raise HTTPException(404, f"no upcoming meeting for issue: {issue_id}")
+    return JSONResponse(sanitize_surrogates(draft))
 
 
 class PartyCorrectionBody(BaseModel):

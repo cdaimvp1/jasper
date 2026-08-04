@@ -32,8 +32,10 @@ confirm or reject via workgraph_store.resolve_project_suggestion.
 from __future__ import annotations
 
 import json
+import re
 import sys
 import time
+from collections import Counter
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Optional
@@ -1081,6 +1083,94 @@ def reject_suggestion(suggestion_id: int) -> dict:
         ws.invalidate_work_object_signature(sugg["issue_id_a"])
         ws.invalidate_work_object_signature(sugg["issue_id_b"])
     return {"action": "rejected"}
+
+
+# reject_suggestion has created a durable identity_constraint on every
+# call since v2.4 (task #117) - but rejections that happened BEFORE that
+# shipped never got one, so the same pair could still resurface today
+# with no permanent veto. Real production data (2026-08-04) shows this
+# is NOT a simple "convert every rejected row" backfill: of 870 rejected
+# pending_project_suggestions rows, ~740 carry the identical auto-
+# generated same_category_proximity reason text (the exact weak-signal
+# flood Phase 0 (D2) later killed - see workgraph_store.
+# expire_stale_project_suggestions), and the overwhelming majority
+# resolve in dense same-second-or-tighter bursts of 2-40+ rows - the
+# unmistakable signature of a scripted bulk pass, not one-by-one review.
+# Only rows that are BOTH temporally isolated AND carry a specific,
+# non-boilerplate per-pair reason plausibly went through a genuine
+# reject_suggestion() review (a human click, or curator's own LLM
+# judgment on weak-signal residue - see reject_suggestion's own
+# docstring). This is deliberately conservative: a missed real rejection
+# just means that pair could resurface and get rejected again, which
+# costs nothing; a wrongly-backfilled constraint permanently blocks a
+# pair that was never actually reviewed.
+_WEAK_SIGNAL_PROXIMITY_REASON_RE = re.compile(
+    r"^same category \('[^']*'\) within \d+d, no shared external contact found$"
+)
+
+_BACKFILL_KIND_TO_CONSTRAINT_TYPE = {"merge": "cannot_merge", "link": "cannot_link"}
+
+
+def _is_explicit_review_rejection(row: dict, cluster_counts: Counter) -> bool:
+    reason = (row.get("reason") or "").strip()
+    if _WEAK_SIGNAL_PROXIMITY_REASON_RE.match(reason):
+        return False
+    resolved_ts = row.get("resolved_ts")
+    if resolved_ts is None:
+        return False
+    if cluster_counts.get(round(resolved_ts), 0) > 1:
+        return False
+    return True
+
+
+def backfill_identity_constraints_from_historical_rejections(*, apply: bool = False) -> dict:
+    """Selective backfill (task #156) - always computes and returns the
+    report; only WRITES identity_constraints when apply=True (the
+    explicit migration flag; the default is a dry run). Idempotent: a
+    pair that already has a durable constraint (from this backfill, or
+    from reject_suggestion itself) is skipped, not duplicated - safe to
+    re-run with apply=True after reviewing a dry-run report."""
+    rejected = ws.list_project_suggestions(status="rejected")
+    cluster_counts = Counter(round(r["resolved_ts"]) for r in rejected if r.get("resolved_ts"))
+
+    eligible = []
+    bulk_cleanup_artifact = 0
+    non_constraint_kind = 0
+    for row in rejected:
+        if row.get("suggestion_kind") not in _BACKFILL_KIND_TO_CONSTRAINT_TYPE:
+            non_constraint_kind += 1
+            continue
+        if not _is_explicit_review_rejection(row, cluster_counts):
+            bulk_cleanup_artifact += 1
+            continue
+        eligible.append(row)
+
+    already_constrained = 0
+    created = []
+    for row in eligible:
+        constraint_type = _BACKFILL_KIND_TO_CONSTRAINT_TYPE[row["suggestion_kind"]]
+        if ws.find_identity_constraint(constraint_type, row["issue_id_a"], row["issue_id_b"]) is not None:
+            already_constrained += 1
+            continue
+        if apply:
+            ws.create_identity_constraint(
+                constraint_type, row["issue_id_a"], row["issue_id_b"],
+                reason=f"backfilled from historical rejection of suggestion #{row['id']}: {row.get('reason') or ''}",
+                actor="marc",
+            )
+        created.append({"suggestion_id": row["id"], "constraint_type": constraint_type,
+                         "issue_id_a": row["issue_id_a"], "issue_id_b": row["issue_id_b"]})
+
+    return {
+        "rejected_rows_scanned": len(rejected),
+        "eligible_explicit_rejects": len(eligible),
+        "bulk_cleanup_artifact_rejects": bulk_cleanup_artifact,
+        "non_constraint_kind_rejects": non_constraint_kind,
+        "already_constrained": already_constrained,
+        "new_constraints": len(created),
+        "applied": apply,
+        "detail": created,
+    }
 
 
 def _suggestion_kind_for_scored_signals(matched_signals: list) -> Optional[str]:

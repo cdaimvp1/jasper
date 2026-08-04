@@ -1853,3 +1853,126 @@ def test_aggregate_parties_marks_primary_separately_per_affiliation(ws_db):
 def test_aggregate_parties_empty_project_returns_empty_list(ws_db):
     pid = ws_db.create_project_with_new_id(name="Empty", category="other")
     assert wp.aggregate_parties_for_project(pid) == []
+
+
+# --- backfill_identity_constraints_from_historical_rejections (task #156) --
+
+def _rejected_suggestion(ws_db, issue_id_a, issue_id_b, reason, resolved_ts, *,
+                          suggestion_kind="merge", created_ts=None):
+    """Direct SQL insert so the test can control resolved_ts precisely
+    (the timestamp-clustering signature the backfill's own selectivity
+    filter looks for) - the real create_project_suggestion/
+    resolve_project_suggestion path always uses wall-clock time.time(),
+    which can't reproduce a fixture with an exact past cluster."""
+    conn = ws_db._connect()
+    cur = conn.execute(
+        """INSERT INTO pending_project_suggestions
+           (issue_id_a, issue_id_b, reason, status, created_ts, resolved_ts, suggestion_kind)
+           VALUES (?, ?, ?, 'rejected', ?, ?, ?)""",
+        (issue_id_a, issue_id_b, reason, created_ts or (resolved_ts - 3600), resolved_ts, suggestion_kind),
+    )
+    conn.close()
+    return cur.lastrowid
+
+
+def test_backfill_dry_run_reports_eligible_row_without_writing(ws_db):
+    a = _issue(ws_db, "A")
+    b = _issue(ws_db, "B")
+    _rejected_suggestion(ws_db, a, b, "possibly related (not necessarily same project) - shared external party 'party-x'",
+                          resolved_ts=1000000.0, suggestion_kind="link")
+
+    result = wp.backfill_identity_constraints_from_historical_rejections(apply=False)
+
+    assert result["eligible_explicit_rejects"] == 1
+    assert result["new_constraints"] == 1
+    assert result["applied"] is False
+    assert ws_db.find_identity_constraint("cannot_link", a, b) is None
+
+
+def test_backfill_apply_creates_the_constraint(ws_db):
+    a = _issue(ws_db, "A")
+    b = _issue(ws_db, "B")
+    _rejected_suggestion(ws_db, a, b, "possibly related (not necessarily same project) - shared external party 'party-x'",
+                          resolved_ts=1000000.0, suggestion_kind="link")
+
+    result = wp.backfill_identity_constraints_from_historical_rejections(apply=True)
+
+    assert result["new_constraints"] == 1
+    assert result["applied"] is True
+    constraint = ws_db.find_identity_constraint("cannot_link", a, b)
+    assert constraint is not None
+    assert "suggestion" in constraint["reason"]
+
+
+def test_backfill_excludes_boilerplate_weak_signal_reason(ws_db):
+    a = _issue(ws_db, "A")
+    b = _issue(ws_db, "B")
+    _rejected_suggestion(ws_db, a, b, "same category ('contract') within 45d, no shared external contact found",
+                          resolved_ts=1000000.0, suggestion_kind="merge")
+
+    result = wp.backfill_identity_constraints_from_historical_rejections(apply=True)
+
+    assert result["eligible_explicit_rejects"] == 0
+    assert result["bulk_cleanup_artifact_rejects"] == 1
+    assert ws_db.find_identity_constraint("cannot_merge", a, b) is None
+
+
+def test_backfill_excludes_clustered_bulk_rejections(ws_db):
+    """A burst of rows all resolving within the same rounded second is a
+    scripted bulk pass, not one-by-one review - even with specific,
+    non-boilerplate-looking reason text."""
+    same_second = 2000000.0
+    pairs = []
+    for i in range(5):
+        a = _issue(ws_db, f"A{i}")
+        b = _issue(ws_db, f"B{i}")
+        pairs.append((a, b))
+        _rejected_suggestion(ws_db, a, b, f"scored signal (topic, score=0.{i})",
+                              resolved_ts=same_second + i * 0.1, suggestion_kind="link")
+
+    result = wp.backfill_identity_constraints_from_historical_rejections(apply=True)
+
+    assert result["eligible_explicit_rejects"] == 0
+    assert result["bulk_cleanup_artifact_rejects"] == 5
+    for a, b in pairs:
+        assert ws_db.find_identity_constraint("cannot_link", a, b) is None
+
+
+def test_backfill_skips_pairs_already_constrained(ws_db):
+    a = _issue(ws_db, "A")
+    b = _issue(ws_db, "B")
+    ws_db.create_identity_constraint("cannot_merge", a, b, reason="prior", actor="marc")
+    _rejected_suggestion(ws_db, a, b, "possibly related (not necessarily same project) - strong signal: shared external party",
+                          resolved_ts=1000000.0, suggestion_kind="merge")
+
+    result = wp.backfill_identity_constraints_from_historical_rejections(apply=True)
+
+    assert result["eligible_explicit_rejects"] == 1
+    assert result["already_constrained"] == 1
+    assert result["new_constraints"] == 0
+
+
+def test_backfill_skips_non_merge_link_suggestion_kind(ws_db):
+    a = _issue(ws_db, "A")
+    b = _issue(ws_db, "B")
+    _rejected_suggestion(ws_db, a, b, "collision between two established projects",
+                          resolved_ts=1000000.0, suggestion_kind="merge_projects")
+
+    result = wp.backfill_identity_constraints_from_historical_rejections(apply=True)
+
+    assert result["non_constraint_kind_rejects"] == 1
+    assert result["eligible_explicit_rejects"] == 0
+
+
+def test_backfill_apply_twice_is_idempotent(ws_db):
+    a = _issue(ws_db, "A")
+    b = _issue(ws_db, "B")
+    _rejected_suggestion(ws_db, a, b, "possibly related (not necessarily same project) - shared external party 'party-x'",
+                          resolved_ts=1000000.0, suggestion_kind="link")
+
+    first = wp.backfill_identity_constraints_from_historical_rejections(apply=True)
+    second = wp.backfill_identity_constraints_from_historical_rejections(apply=True)
+
+    assert first["new_constraints"] == 1
+    assert second["new_constraints"] == 0
+    assert second["already_constrained"] == 1

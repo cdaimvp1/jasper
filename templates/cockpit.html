@@ -2533,19 +2533,28 @@ window.theoRegisterThemeReflector(function(){
   --lk-nested:#EEDAAE; --lk-line:#E0C48D; --lk-line2:#CBA85E;
   --lk-ink:#22160A; --lk-ink2:#48331B; --lk-mut:#87643A; --lk-mut2:#87643A;
   --lk-pri:#CC5A22; --lk-pri-t:#F7D8BC;
-  --lk-emph:#146B62;
+  --lk-emph:#155E82;
   --lk-flag:#48331B; --lk-danger:#8B2013;
   --lk-bubble-me:#3D2A16; --lk-bubble-me-fg:#F8F1DC;
   --lk-r-s:8px; --lk-r-c:4px; --lk-r-x:12px;
   --lk-elev:0 1px 2px rgba(70,40,8,.08),0 2px 6px rgba(70,40,8,.10);
 }
-/* Walnut Night - the dark pair of the Sunset Harvest palette above. */
+/* Walnut Night - the dark pair of the Sunset Harvest palette above.
+   Task #63 (2026-08-04), Marc's ask: "add more blue" - --lk-emph (the
+   group-badge/flag/estimate-accent color, not the primary button) was a
+   green-leaning teal in light mode and an unrelated warm gold in dark
+   mode, so the palette read as entirely warm (orange/tan/gold) with no
+   cool color anywhere in Walnut Night. Shifted both to an actual
+   blue-leaning teal, kept dark enough (light) / muted enough (dark) to
+   still sit in the same earthy family rather than reading as a jarring
+   bright-blue accent - a first pass on a subjective call, easy to retune
+   further if this isn't the right amount/shade. */
 html[data-theme="dark"]{
   --lk-canvas:#231A12; --lk-surface:#2E2119; --lk-panel:#2A1F17;
   --lk-nested:#36271C; --lk-line:#4A3626; --lk-line2:#5C4630;
   --lk-ink:#F3E7D4; --lk-ink2:#D9C7AA; --lk-mut:#B29A78; --lk-mut2:#B29A78;
   --lk-pri:#F0916A; --lk-pri-t:#5A2C18;
-  --lk-emph:#F2C368;
+  --lk-emph:#5FA8D6;
   --lk-flag:#D9C7AA; --lk-danger:#F0483A;
   --lk-bubble-me:#F0916A; --lk-bubble-me-fg:#241207;
   --lk-elev:0 1px 3px rgba(0,0,0,.5),0 2px 8px rgba(0,0,0,.45);

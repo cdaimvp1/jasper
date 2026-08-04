@@ -64,6 +64,7 @@ import workgraph_store as wg
 import workgraph_classify
 import workgraph_nba
 import workgraph_recommend
+import skills_registry
 import deep_links
 import outlook_actions
 import workgraph_signals
@@ -2734,6 +2735,23 @@ COCKPIT_ACTION_IDEMPOTENCY_WINDOW_SECONDS = 300
 
 def _cockpit_action_idempotency_key(issue_id: str, action_kind: str, instructions: Optional[str]) -> str:
     return hashlib.sha256(f"{issue_id}|{action_kind}|{instructions or ''}".encode("utf-8")).hexdigest()
+
+
+@app.get("/api/skills")
+async def api_skills_list():
+    """Every real, runnable skill (task #112) - the UI's 'Run a skill' picker
+    reads this to offer ALL of them, not just the handful with a dedicated
+    button, so a skill installed later is immediately pickable with no
+    frontend change. skill_dir is a filesystem Path (worker-side detail,
+    not JSON-safe and not useful to the browser) - dropped here, never
+    exposed over the wire."""
+    registry = skills_registry.list_all()
+    skills = [
+        {"action_kind": action_kind, "display_name": entry.get("display_name"),
+         "label": entry.get("label"), "produces": entry.get("produces")}
+        for action_kind, entry in sorted(registry.items())
+    ]
+    return JSONResponse({"skills": skills})
 
 
 @app.post("/api/cockpit/actions")

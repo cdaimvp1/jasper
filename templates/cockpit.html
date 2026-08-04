@@ -3025,6 +3025,16 @@ html[data-theme="dark"]{
   border-radius:var(--lk-r-s);cursor:pointer;text-decoration:none;box-sizing:border-box}
 .pcc-actbtn:hover{background:var(--lk-nested)}
 .pcc-actbtn .ic{width:15px;text-align:center;flex:none;font-size:12px}
+/* Task #112: "Run a skill" picker - same visual weight as the action rail
+   above it (border/surface/radius tokens match .pcc-actbtn), a select+button
+   pair rather than one button per skill so 30+ installed skills don't turn
+   the rail into an unreadable wall of buttons. */
+.pcc-skillpicker-row{display:flex;gap:6px;margin-top:7px}
+.pcc-skillpicker-sel{flex:1;min-width:0;border:1px solid var(--lk-line2);background:var(--lk-surface);
+  color:var(--lk-ink);font:700 12px var(--sans);padding:8px 8px;border-radius:var(--lk-r-s);
+  box-sizing:border-box}
+.pcc-skillpicker-sel:disabled{color:var(--lk-mut);cursor:default}
+#pccRunSkillBtn{width:auto;flex:none;padding:9px 14px}
 .pcc-side-block{margin-bottom:22px}
 .pcc-side-hd{display:flex;align-items:center;justify-content:space-between;
   font:700 10px/1 var(--mono);text-transform:uppercase;color:var(--lk-mut2);margin:0 0 8px;letter-spacing:.04em}
@@ -7638,6 +7648,10 @@ html[data-theme="dark"]{
           <button class="pcc-actbtn" type="button" data-gen="summarize">Summarize thread</button>
           <button class="pcc-actbtn" type="button" data-act="archive">Archive as noise</button>
         </div>
+        <div class="pcc-skillpicker-row">
+          <select id="pccSkillSelect" class="pcc-skillpicker-sel" title="Run any installed skill against this issue"></select>
+          <button class="pcc-actbtn" type="button" id="pccRunSkillBtn">Run skill</button>
+        </div>
       </div>`;
 
     // Header redesign (2026-08-02, ported from the Detail-Panel mockup): title
@@ -7787,6 +7801,13 @@ html[data-theme="dark"]{
     body.querySelectorAll("[data-act]").forEach(btn => btn.addEventListener("click", () => pccRunDeterministic(issue.id, btn.getAttribute("data-act"))));
     body.querySelectorAll("[data-gen]").forEach(btn => btn.addEventListener("click", () => pccRunGenerative(issue.id, btn.getAttribute("data-gen"), btn.getAttribute("data-instructions"))));
     pccWireOpenActionButtons(body);
+    // Task #112: the select's options are populated from the cached catalog
+    // (fetched once at boot), not re-fetched per issue - re-applied here
+    // because sideActionsHtml's innerHTML, including the empty <select>,
+    // was just replaced wholesale by this render.
+    pccRefreshSkillPicker();
+    const runSkillBtn = document.getElementById("pccRunSkillBtn");
+    if (runSkillBtn) runSkillBtn.addEventListener("click", () => pccRunSelectedSkill(issue.id));
     // Kebab menu removed (2026-08-02, Marc's direct call) - its 3 actions
     // (Review contract/Summarize thread/Archive as noise) moved into the
     // sidebar Actions rail above instead of being deleted.
@@ -8014,6 +8035,47 @@ html[data-theme="dark"]{
     pccSelectIssue(issueId);  // re-render so the "pending" row shows up
   }
 
+  // --- Run a skill (task #112, 2026-08-04) --------------------------------
+  // Marc's explicit ask: the system should be able to run ANY registered
+  // skill on user confirmation/request, not just the couple with their own
+  // dedicated button (review_contract/summarize above). Reuses the exact
+  // same dispatch path (pccRunGenerative -> POST /api/cockpit/actions) - a
+  // skill's own registry key IS a valid action_kind already (skills_
+  // registry.get_skill_for_action keys off it directly), so no new backend
+  // route was needed for the dispatch itself, only GET /api/skills to
+  // discover what's runnable.
+  let pccSkillsCatalog = [];
+  async function pccLoadSkills() {
+    try {
+      const r = await fetch("/api/skills", { cache: "no-store" });
+      if (!r.ok) throw new Error(`skills fetch failed: ${r.status}`);
+      const d = await r.json();
+      pccSkillsCatalog = d.skills || [];
+    } catch (e) {
+      console.error("pccLoadSkills failed:", e);
+    }
+    pccRefreshSkillPicker();
+  }
+  function pccRefreshSkillPicker() {
+    const sel = document.getElementById("pccSkillSelect");
+    if (!sel) return;
+    if (!pccSkillsCatalog.length) { sel.innerHTML = `<option value="">No skills installed</option>`; sel.disabled = true; return; }
+    sel.disabled = false;
+    sel.innerHTML = pccSkillsCatalog.map(s =>
+      `<option value="${pccEsc(s.action_kind)}" title="${pccEsc(s.produces || "")}">${pccEsc(s.display_name || s.action_kind)}</option>`
+    ).join("");
+  }
+  function pccRunSelectedSkill(issueId) {
+    const sel = document.getElementById("pccSkillSelect");
+    const actionKind = sel && sel.value;
+    if (!actionKind) return;
+    // The select itself, plus this being a deliberate separate click after
+    // choosing from the list, IS the confirmation - same "the human click
+    // that reached this route is the approval" posture server_lean.py's
+    // route already documents for every other generative action here.
+    pccRunGenerative(issueId, actionKind, null);
+  }
+
   // --- page-level view toggle (PCC · Projects) -------------------
   // Projects is a second sibling view (added by the PROJECTS/PARTIES ADD script,
   // below) — this function only owns PCC, but always turns Projects off
@@ -8036,6 +8098,7 @@ html[data-theme="dark"]{
       pccSetLane("all");
       pccLoadIssues();
       setInterval(pccLoadIssues, 20000);
+      pccLoadSkills();  // task #112 - fetched once, cached; skills change rarely
       // Removed 2026-07-30: the Value-at-risk/Commitments/Asks-Decisions
       // rollup cards these fed are gone (see the removal comment above
       // cp-home-main) - no need to fetch data for a card that no longer

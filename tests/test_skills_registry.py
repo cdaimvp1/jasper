@@ -76,6 +76,60 @@ def test_resolves_a_real_registered_and_vendored_skill(tmp_path, monkeypatch):
     assert result["skill_dir"].exists()
 
 
+# --- list_all() (task #112, 2026-08-04) -------------------------------------
+# Marc's explicit ask: the system should be able to run ANY registered skill
+# on request, not just the couple with a dedicated button - the UI's "Run a
+# skill" picker (GET /api/skills) is powered by this function.
+
+def test_list_all_returns_empty_dict_when_registry_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(skills_registry, "REGISTRY_PATH", tmp_path / "no_such_file.json")
+    assert skills_registry.list_all() == {}
+
+
+def test_list_all_skips_entries_not_actually_vendored_on_disk(tmp_path, monkeypatch):
+    # Same honest-miss rule as get_skill_for_action, applied across the
+    # whole registry - a JSON entry with no real files backing it must
+    # never be offered to Marc as something runnable.
+    registry_path = tmp_path / "skills_registry.json"
+    registry_path.write_text(json.dumps({
+        "contract_review": {
+            "skill_name": "fake-skill", "skill_dir": "documents/reference/skills/fake-skill",
+            "display_name": "Fake Skill", "label": "Run Fake Skill",
+            "produces": "a fake output", "output_kind": "output",
+        },
+    }), encoding="utf-8")
+    monkeypatch.setattr(skills_registry, "REGISTRY_PATH", registry_path)
+    monkeypatch.setattr(skills_registry.paths, "DATA_DIR", tmp_path / "data_that_has_no_skills_dir")
+    assert skills_registry.list_all() == {}
+
+
+def test_list_all_returns_every_real_vendored_skill(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    for name in ("fake-skill-a", "fake-skill-b"):
+        skill_dir = data_dir / "documents" / "reference" / "skills" / name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(f"# {name}\n", encoding="utf-8")
+
+    registry_path = tmp_path / "skills_registry.json"
+    registry_path.write_text(json.dumps({
+        "should_cost": {
+            "skill_name": "fake-skill-a", "skill_dir": "documents/reference/skills/fake-skill-a",
+            "display_name": "Fake A", "label": "Run A", "produces": "a", "output_kind": "output",
+        },
+        "supplier_landscape": {
+            "skill_name": "fake-skill-b", "skill_dir": "documents/reference/skills/fake-skill-b",
+            "display_name": "Fake B", "label": "Run B", "produces": "b", "output_kind": "output",
+        },
+    }), encoding="utf-8")
+    monkeypatch.setattr(skills_registry, "REGISTRY_PATH", registry_path)
+    monkeypatch.setattr(skills_registry.paths, "DATA_DIR", data_dir)
+
+    result = skills_registry.list_all()
+    assert set(result.keys()) == {"should_cost", "supplier_landscape"}
+    assert result["should_cost"]["display_name"] == "Fake A"
+    assert result["supplier_landscape"]["skill_dir"] == data_dir / "documents" / "reference" / "skills" / "fake-skill-b"
+
+
 def _fake_source_skill(tmp_path, name="fake-skill", content="v1"):
     src = tmp_path / "sources" / f"{name}-{content}"
     src.mkdir(parents=True)

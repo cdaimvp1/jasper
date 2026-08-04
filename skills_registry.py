@@ -134,6 +134,19 @@ def install_skill(action_kind: str, source_dir: Path, *, skill_name: str, displa
     return registry[action_kind]
 
 
+def list_all() -> dict:
+    """Every registered action_kind -> its resolved entry (skill_dir as an
+    absolute Path, same shape as get_skill_for_action), skipping any entry
+    whose skill_dir doesn't actually exist on disk - same honest-miss rule
+    as get_skill_for_action, just applied across the whole registry at
+    once. Used by the UI (task #112) to offer Marc every real, runnable
+    skill as a pickable action, not just the handful with a dedicated
+    button - so a skill someone installs later is usable immediately, with
+    no code change on either side of the API."""
+    return {action_kind: resolved for action_kind in _load()
+            if (resolved := get_skill_for_action(action_kind)) is not None}
+
+
 def rollback_skill(action_kind: str) -> Optional[dict]:
     """Restores the most recent previous_versions entry as the active one for
     action_kind. Returns the restored entry, or None if action_kind has no

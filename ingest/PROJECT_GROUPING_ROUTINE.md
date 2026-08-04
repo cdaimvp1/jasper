@@ -68,3 +68,45 @@ partway through. Whatever you haven't resolved yet simply stays pending for the 
 is idempotent from the caller's side (confirming a suggestion whose issues are already in the same
 project is a safe no-op), but you should still only call resolve ONCE per suggestion per your own
 judgment, not re-confirm the same pair repeatedly.
+
+## Bridge candidates (task #169/#170/#174, 2026-08-04, Marc's direct design ask)
+
+A `reason` starting with `"bridge candidate - connects to project ..."` means the deterministic
+scorer (`workgraph_projects.scored_grouping_decision`) found this issue (`issue_id_a`) scoring at
+or above the auto-merge threshold against a member of an EXISTING, already-established project —
+and it found this for TWO OR MORE distinct projects at once, not just one. That's a real, common
+shape: one email/PR/notification can genuinely bridge two things that were previously tracked as
+separate — the exact case Marc described (a PR + a contract + other correspondence with the same
+supplier, filed as separate requisitions, that should live under one project). Each bridged project
+gets its OWN pending suggestion (same `issue_id_a`, different `issue_id_b`/project), so you'll see
+2+ suggestions sharing the same `issue_id_a` when this happens.
+
+**Before resolving any bridge-candidate suggestion, find its siblings first:**
+```
+GET /api/workgraph/project-suggestions
+```
+Group the results by `issue_id_a` yourself — any other pending suggestion with the SAME
+`issue_id_a` and a `reason` also starting with `"bridge candidate"` is part of the same bridge
+decision, not a separate, unrelated judgment call. Read all of them, plus the real content of
+`issue_id_a` and every bridged project's member issue, before deciding — never resolve one half of
+a bridge without having looked at the other.
+
+**Four real outcomes, not two:**
+- **Only one project is the real fit** → confirm that one suggestion, reject the other(s). This is
+  the common case: the bridging item genuinely belongs with one supplier engagement, and the other
+  match was coincidental (same descriptor text, different real deal).
+- **Both projects are genuinely the same underlying supplier relationship, just split apart
+  earlier** → confirm ALL of them. Confirming the second one after the first already succeeded will
+  naturally collide two now-non-trivial established projects — `resolve` already handles that
+  safely (it comes back as a new `merge_projects`-kind suggestion for you to confirm right there in
+  the same response, not a silent failure or a skipped step). Confirm that too if the read supports
+  it. The end state is intentional: one item pulling two previously-separate projects back into one,
+  which is the whole point of bridge detection existing at all.
+- **Neither project is a real fit** (the shared signal was coincidental — e.g. two different
+  reps' different requisitions at the same supplier that just happen to share a descriptor) →
+  reject all of them.
+- **Genuinely unsure** → same as any other suggestion: leave it pending rather than forcing a call.
+
+Never confirm a bridge suggestion on the strength of its `reason` string alone — the deterministic
+score got it into your queue, but whether it's actually the same real-world relationship is exactly
+the judgment this routine exists for.

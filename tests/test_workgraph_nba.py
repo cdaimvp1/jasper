@@ -190,6 +190,99 @@ def test_staleness_and_due_urgency_use_same_named_constant():
     assert abs(d - 0.5) < 0.01
 
 
+def test_staleness_urgency_accepts_custom_saturation_days():
+    """Enhancement idea panel #9: a category-specific saturation should
+    behave exactly like STALENESS_SATURATION_DAYS did before this feature -
+    same math, just a different denominator."""
+    now = time.time()
+    u = nba._staleness_urgency(now - 15 * nba.DAY, now, saturation_days=30.0)
+    assert abs(u - 0.5) < 1e-9  # 15 of 30 days
+    u_default = nba._staleness_urgency(now - 7 * nba.DAY, now)
+    assert abs(u_default - 0.5) < 1e-9  # unchanged default behavior
+
+
+# --- enhancement idea panel #9: category-relative staleness ---------------
+
+def _raw_item_at(ws_db, issue_id, key, occurred_ts):
+    rid = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key=key, thread_key=key, dedupe_key=key,
+        occurred_ts=occurred_ts, subject="s", from_actor="a@example.com", participants_json="[]",
+    )
+    ws_db.link_raw_item_to_issue(rid, issue_id)
+    return rid
+
+
+def test_compute_category_staleness_baselines_needs_a_minimum_gap_count(ws_db):
+    """A category with too few real gaps to draw from (below
+    _MIN_GAPS_FOR_CATEGORY_BASELINE) must be absent, not given a
+    single-thread-derived guess."""
+    now = time.time()
+    issue_id = ws_db.create_issue_with_new_id(title="A", state="active", category="thin-category")
+    _raw_item_at(ws_db, issue_id, "r1", now - 5 * nba.DAY)
+    _raw_item_at(ws_db, issue_id, "r2", now - 3 * nba.DAY)
+
+    baselines = nba.compute_category_staleness_baselines()
+
+    assert "thin-category" not in baselines
+
+
+def test_compute_category_staleness_baselines_uses_real_median_gap(ws_db):
+    now = time.time()
+    # 8 issues, each with exactly one real 10-day gap between two raw_items -
+    # meets _MIN_GAPS_FOR_CATEGORY_BASELINE with a clean, known median.
+    for n in range(8):
+        issue_id = ws_db.create_issue_with_new_id(title=f"C{n}", state="active", category="slow-cadence")
+        _raw_item_at(ws_db, issue_id, f"c{n}-r1", now - 20 * nba.DAY)
+        _raw_item_at(ws_db, issue_id, f"c{n}-r2", now - 10 * nba.DAY)
+
+    baselines = nba.compute_category_staleness_baselines()
+
+    assert abs(baselines["slow-cadence"] - 10.0) < 0.01
+
+
+def test_compute_category_staleness_baselines_floors_unusually_short_gaps(ws_db):
+    now = time.time()
+    for n in range(8):
+        issue_id = ws_db.create_issue_with_new_id(title=f"F{n}", state="active", category="fast-cadence")
+        _raw_item_at(ws_db, issue_id, f"f{n}-r1", now - 2 * nba.DAY)
+        _raw_item_at(ws_db, issue_id, f"f{n}-r2", now - 2 * nba.DAY + 3600)  # 1h gap
+
+    baselines = nba.compute_category_staleness_baselines()
+
+    assert baselines["fast-cadence"] == nba._CATEGORY_BASELINE_FLOOR_DAYS
+
+
+def test_score_issue_uses_category_baseline_when_given(ws_db):
+    now = time.time()
+    issue_id = ws_db.create_issue_with_new_id(title="A", state="active", category="slow-cadence")
+    ws_db.update_issue(issue_id, touch_updated_at=False, priority_score=0.0)
+    conn = ws_db._connect()
+    conn.execute("UPDATE issues SET updated_at = ? WHERE id = ?", (now - 15 * nba.DAY, issue_id))
+    conn.commit()
+    conn.close()
+    issue = ws_db.get_issue(issue_id)
+
+    score_flat, _, _ = nba.score_issue(issue, now)
+    score_relative, _, _ = nba.score_issue(
+        issue, now, category_staleness_baselines={"slow-cadence": 30.0})
+
+    # 15 days stale against a flat 14d saturation is already maxed (1.0);
+    # against a real 30d category baseline it's only half-stale - the whole
+    # point of this feature, confirmed by the scores actually differing.
+    assert score_relative < score_flat
+
+
+def test_score_issue_falls_back_to_flat_default_for_unlisted_category(ws_db):
+    now = time.time()
+    issue_id = ws_db.create_issue_with_new_id(title="A", state="active", category="never-seen-before")
+    issue = ws_db.get_issue(issue_id)
+
+    with_empty_baselines, _, _ = nba.score_issue(issue, now, category_staleness_baselines={})
+    with_none, _, _ = nba.score_issue(issue, now, category_staleness_baselines=None)
+
+    assert with_empty_baselines == with_none
+
+
 def test_due_date_naive_timestamp_uses_utc_not_local():
     """Fixed 2026-07-29: a bare date (no explicit tz) used to parse as naive
     and .timestamp() assumed LOCAL time while `now` is a UTC epoch - a

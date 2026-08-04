@@ -254,9 +254,69 @@ def _is_your_step(state: str) -> float:
     return {"active": 1.0, "blocked": 0.3}.get(state, 0.0)
 
 
-def _staleness_urgency(updated_at: float, now: float) -> float:
+def _staleness_urgency(updated_at: float, now: float, saturation_days: float = STALENESS_SATURATION_DAYS) -> float:
     days = max(0.0, (now - updated_at) / DAY)
-    return min(1.0, days / STALENESS_SATURATION_DAYS)  # same threshold Field Guide used
+    return min(1.0, days / saturation_days)  # same threshold Field Guide used, per-category override optional
+
+
+# Minimum real historical gaps required before trusting a category's own
+# median over the flat default - enhancement idea panel #9's real risk: a
+# category with only 1-2 issues (e.g. "onboarding: n=1" confirmed live this
+# session) would derive its "typical cadence" from a single thread's own
+# idiosyncratic gaps, not a real category pattern. 8 is a judgment call, not
+# a measured requirement - chosen so a category needs at least a small
+# handful of DIFFERENT issues' gaps contributing, not just one chatty thread.
+_MIN_GAPS_FOR_CATEGORY_BASELINE = 8
+# A category whose real median gap is unusually SHORT (e.g. a handful of
+# same-day back-and-forth threads) shouldn't make staleness trigger at 1-2
+# days for everything in that category - floor matches this module's other
+# staleness-adjacent minimum (STALENESS_SATURATION_DAYS's own order of
+# magnitude), not an arbitrary smaller number.
+_CATEGORY_BASELINE_FLOOR_DAYS = 3.0
+
+
+def compute_category_staleness_baselines() -> dict[str, float]:
+    """Enhancement idea panel #9: the flat STALENESS_SATURATION_DAYS (14d)
+    applies the same "gone quiet" threshold to every category - but a
+    contract negotiation with a law firm and a same-day Teams back-and-forth
+    have genuinely different natural cadences, confirmed by reading real
+    category data live this session. issues.updated_at alone can't ground
+    this: EVERY currently-open issue showed an update within the last 3.6
+    days on this exact live DB when checked (a real, current backlog-catch-
+    up effect, not a per-category cadence fact) - using today's snapshot
+    would just encode that transient artifact as every category's new
+    "normal." Grounded instead in the durable signal: the real gaps between
+    CONSECUTIVE raw_items on the SAME issue, across that category's full
+    history (not just currently-open issues) - a thread's own pacing is real
+    regardless of when the whole system last had a catch-up sweep.
+
+    Returns {category: saturation_days} only for categories with at least
+    _MIN_GAPS_FOR_CATEGORY_BASELINE real gaps to draw from; a thin category
+    is simply absent (caller falls back to STALENESS_SATURATION_DAYS), never
+    given a single-thread-derived guess."""
+    issues = ws.list_issues(states=None, limit=10000)
+    issue_ids = [i["id"] for i in issues]
+    category_by_issue = {i["id"]: (i.get("category") or "other") for i in issues}
+    raw_items_by_issue = ws.get_raw_items_for_issues(issue_ids)
+
+    gaps_by_category: dict[str, list[float]] = {}
+    for issue_id, raw_items in raw_items_by_issue.items():
+        category = category_by_issue.get(issue_id, "other")
+        ts_sorted = sorted(ri["occurred_ts"] for ri in raw_items if ri.get("occurred_ts"))
+        for prev, cur in zip(ts_sorted, ts_sorted[1:]):
+            gap_days = (cur - prev) / DAY
+            if gap_days > 0:
+                gaps_by_category.setdefault(category, []).append(gap_days)
+
+    baselines = {}
+    for category, gaps in gaps_by_category.items():
+        if len(gaps) < _MIN_GAPS_FOR_CATEGORY_BASELINE:
+            continue
+        gaps.sort()
+        mid = len(gaps) // 2
+        median = gaps[mid] if len(gaps) % 2 else (gaps[mid - 1] + gaps[mid]) / 2
+        baselines[category] = max(_CATEGORY_BASELINE_FLOOR_DAYS, median)
+    return baselines
 
 
 def _due_urgency(due_iso: str | None, now: float) -> float:
@@ -283,7 +343,8 @@ def _due_urgency(due_iso: str | None, now: float) -> float:
 
 
 def score_issue(issue: dict, now: float, weights: dict = DEFAULT_WEIGHTS,
-                 identity_anchors: Optional[list] = None) -> tuple[float, str, Optional[int]]:
+                 identity_anchors: Optional[list] = None,
+                 category_staleness_baselines: Optional[dict] = None) -> tuple[float, str, Optional[int]]:
     """Pure-ISH: the only non-arithmetic steps are reading this issue's own
     raw_items for the value regex, and looking up a matching Total Recall
     lesson (both just DB reads, still zero LLM calls).
@@ -296,6 +357,12 @@ def score_issue(issue: dict, now: float, weights: dict = DEFAULT_WEIGHTS,
     0.15, not an undeserved "no anchors -> full trust" reading (see
     context_accuracy's own docstring for why that default is right for the
     shim's OWN empty-list case but wrong here).
+
+    `category_staleness_baselines` (enhancement idea panel #9): the caller's
+    already-computed compute_category_staleness_baselines() result - one
+    call for every issue, not one per issue, same batching discipline as
+    identity_anchors. None/missing-category both fall back to the flat
+    STALENESS_SATURATION_DAYS, same as before this feature existed.
     Returns (priority_score, nba_reason, lesson_id_cited)."""
     if issue["state"] in ("done", "noise-archived", "dismissed"):
         return 0.0, "closed", None
@@ -303,7 +370,9 @@ def score_issue(issue: dict, now: float, weights: dict = DEFAULT_WEIGHTS,
     raw_items = ws.get_raw_items_for_issue(issue["id"])
 
     your_step = _is_your_step(issue["state"])
-    staleness = _staleness_urgency(issue["updated_at"], now)
+    saturation_days = (category_staleness_baselines or {}).get(
+        issue.get("category") or "other", STALENESS_SATURATION_DAYS)
+    staleness = _staleness_urgency(issue["updated_at"], now, saturation_days)
     due = _due_urgency(issue.get("due"), now)
     value_amount = _extract_value_amount(raw_items)
     value = _value_urgency(value_amount)
@@ -417,9 +486,17 @@ def recompute_all(now: float | None = None) -> dict:
     # identity_anchors, not one query per issue (list_identity_anchors_
     # for_issues, same batching discipline as list_parties_for_issues).
     anchors_by_issue = ws.list_identity_anchors_for_issues([i["id"] for i in issues])
+    # Enhancement idea panel #9: one category-baseline computation for this
+    # whole tick, not one per issue - same batching discipline as anchors
+    # above. Real DB-wide scan (list_issues(states=None) internally), so
+    # this deliberately isn't cheap enough to call per-issue.
+    category_staleness_baselines = compute_category_staleness_baselines()
     updated = 0
     for issue in issues:
-        score, reason, lesson_id = score_issue(issue, now, identity_anchors=anchors_by_issue.get(issue["id"]))
+        score, reason, lesson_id = score_issue(
+            issue, now, identity_anchors=anchors_by_issue.get(issue["id"]),
+            category_staleness_baselines=category_staleness_baselines,
+        )
         action_kind = "review" if issue["state"] == "active" else "wait"
         # task #55: reason's prefix is a fixed, owned string (workgraph_
         # aristotle.WARNING_PREFIX) - checking it here avoids recomputing

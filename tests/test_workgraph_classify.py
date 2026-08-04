@@ -1154,3 +1154,29 @@ def test_backfill_declines_when_only_part_is_redundant_with_topic(ws_db):
     result = wc.backfill_derived_titles()
     assert result["updated"] == 0
     assert ws_db.get_synthesis("issue", iid) is None
+
+
+def test_backfill_extracts_ariba_submitter_name_when_no_internal_party(ws_db):
+    """Real live-data bug found checking task #57's 'Your next move' strip
+    (2026-08-04): an Ariba PR-approval notification has no linked internal
+    party for the submitter (they're not a sender/recipient, just named in
+    the subject), so the function correctly had nothing to prepend and
+    declined - even though the real name is right there in the subject.
+    Submitting an Ariba requisition is inherently an internal-Lilly action,
+    so it's used as a fallback requestor."""
+    iid = _issue_with_parties(
+        ws_db,
+        "Action required: Approve the Requisition that ALICIA MORRIS submitted  - "
+        "PR854779-V4 - Conversational AI ($1,938,100.00 USD)",
+        external_company="Ariba",
+    )
+    result = wc.backfill_derived_titles()
+    assert result["updated"] == 1
+    title = ws_db.get_synthesis("issue", iid)["derived_title"]
+    assert title.startswith("Alicia Morris")
+    assert "Action required" not in title
+
+
+def test_titlecase_name_preserves_mc_surnames():
+    assert wc._titlecase_name("CORRINA MCCORKLE") == "Corrina McCorkle"
+    assert wc._titlecase_name("MARY MASON") == "Mary Mason"

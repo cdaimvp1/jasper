@@ -178,8 +178,24 @@ _MEETING_STARTING_SOON = re.compile(r'^\s*(?:\[external\]\s*)?your meeting\s+"(.
 # not a keyword guess" line this codebase holds elsewhere (Ariba expiration
 # dates, deadline_type/resolved_date).
 _ARIBA_REQUISITION_BOILERPLATE_RE = re.compile(
-    r"^\s*action required:\s*approve the requisition that\s+.+?\s+submitted\s*[-–—]?\s*", re.I,
+    r"^\s*action required:\s*approve the requisition that\s+(?P<submitter>.+?)\s+submitted\s*[-–—]?\s*", re.I,
 )
+
+
+def _titlecase_name(raw: str) -> str:
+    """Ariba's ALL-CAPS submitter name ('CORRINA MCCORKLE') needs casing to
+    read as a name rather than shouted text - plain .title() would flatten
+    'Mc' surnames (confirmed real in this corpus, e.g. 'McCorkle') to
+    'Mccorkle', so those get a second capitalization pass. Deliberately
+    narrow (only the unambiguous 'Mc' prefix) - a broader 'Ma'-style rule
+    would wrongly re-split real names like 'Mary' or 'Mason'."""
+    words = []
+    for w in raw.strip().split():
+        tw = w.capitalize()
+        if len(tw) > 3 and tw[:2] == "Mc":
+            tw = "Mc" + tw[2:].capitalize()
+        words.append(tw)
+    return " ".join(words)
 
 
 def strip_subject_prefix(subject: str) -> str:
@@ -453,7 +469,19 @@ def compute_deterministic_title(issue_id: str) -> Optional[str]:
       in the topic (e.g. "Alex Sohn Finance Intern Presentation") produced
       a literal duplicate ("Alex Sohn - Alex Sohn Finance Intern
       Presentation") - now skipped when redundant, same treatment for
-      `supplier`."""
+      `supplier`.
+
+    Third bug found live (2026-08-04, checking task #57's 'Your next move'
+    strip - the two highest-priority items after the first two fixes were
+    STILL raw Ariba boilerplate): an Ariba PR-approval notification has no
+    linked internal party for the submitter (they're not a sender/recipient
+    on the email, just named in its body/subject), so `internal` comes back
+    empty and the function correctly declined - but the submitter's real
+    name is sitting right there in the subject. Submitting an Ariba
+    requisition for internal approval is inherently an internal-Lilly
+    action, so that name is used as a fallback requestor when no linked
+    party already covers it - same mechanical-extraction reasoning as the
+    boilerplate strip itself, not a content judgment call."""
     issue = ws.get_issue(issue_id)
     if not issue:
         return None
@@ -469,6 +497,9 @@ def compute_deterministic_title(issue_id: str) -> Optional[str]:
         supplier = external[0].get("company") or external[0].get("display_name")
 
     topic = strip_subject_prefix(issue.get("title") or "")
+    ariba_match = _ARIBA_REQUISITION_BOILERPLATE_RE.match(topic)
+    if ariba_match and not requestor:
+        requestor = _titlecase_name(ariba_match.group("submitter"))
     topic = _ARIBA_REQUISITION_BOILERPLATE_RE.sub("", topic).strip(" -–—")
     if len(topic) > 60:
         topic = topic[:57].rstrip() + "..."

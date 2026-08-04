@@ -6150,10 +6150,11 @@ html[data-theme="dark"]{
     waiting:  { label: "Waiting" },
     meetings: { label: "Meetings" },
     comms:    { label: "Comms" },
+    done:     { label: "Done" },
     handover: { label: "Handover" },
     projects: { label: "Projects" },
   };
-  const PCC_LANE_ORDER = ["all", "issues", "waiting", "meetings", "comms", "handover", "projects"];
+  const PCC_LANE_ORDER = ["all", "issues", "waiting", "meetings", "comms", "done", "handover", "projects"];
   const PCC_SORT_META = { priority: "Priority", newest: "Newest", stale: "Oldest", deadline: "Deadline", confidence: "Confidence" };
   const MQ_ICON_DOT = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/></svg>';
   const MQ_ICON_CLOCK = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>';
@@ -6484,12 +6485,26 @@ html[data-theme="dark"]{
     return ts.length ? Math.max(...ts) : null;
   }
   function pccLaneIssues(lane) {
+    // Task #150 (Marc's direct report, 2026-08-03): "leaving all of the rows
+    // marked done in the inbox make it hard to use... it needs to move to a
+    // done folder" - reverses the prior "All means genuinely everything,
+    // including done/dismissed/noise-archived" design (task #20's own
+    // comment, now stale). "Done" is that folder: the one lane that DOES
+    // want these three states, so nothing is ever truly lost, just moved out
+    // of the way instead of cluttering every other lane forever.
+    if (lane === "done") {
+      return pccIssues.filter(i => i.state === "done" || i.state === "dismissed" || i.state === "noise-archived");
+    }
+    const isOpen = i => i.state !== "done" && i.state !== "dismissed" && i.state !== "noise-archived";
     let result;
-    if (lane === "all") result = pccIssues.slice();
+    if (lane === "all") result = pccIssues.filter(isOpen);
     else if (lane === "issues") result = pccIssues.filter(i => i.state === "active");
     else if (lane === "waiting") result = pccIssues.filter(i => i.state === "waiting" || i.state === "blocked");
-    else if (lane === "meetings") result = pccIssues.filter(i => pccEvidenceTypes(i.id).includes("calendar"));
+    // meetings/comms filter by evidence type only, not state - same clutter
+    // bug in a different lane, so isOpen applies here too now.
+    else if (lane === "meetings") result = pccIssues.filter(i => isOpen(i) && pccEvidenceTypes(i.id).includes("calendar"));
     else if (lane === "comms") result = pccIssues.filter(i => {
+      if (!isOpen(i)) return false;
       const t = pccEvidenceTypes(i.id);
       return t.includes("email") || t.includes("teams");
     });
@@ -6497,9 +6512,8 @@ html[data-theme="dark"]{
     // Task #20 (Marc's direct report on #62): dismissing/archiving a whole
     // PROJECT left its member issues sitting in the Inbox forever, since
     // that's a project-level decision that never touched each issue's own
-    // state. "All" stays exempt, same "genuinely everything" premise it
-    // already has for done/noise-archived issues - a hidden issue is still
-    // one click (lane: All) away, never actually lost.
+    // state. "All" stays exempt, so a still-open issue whose project got
+    // hidden is still one click (lane: All) away, never actually lost.
     return lane === "all" ? result : result.filter(i => !pccProjectIsHidden(i.project_id));
   }
 
@@ -6613,7 +6627,7 @@ html[data-theme="dark"]{
   function pccRenderLaneMenu() {
     const el = document.getElementById("pccLaneMenu");
     if (!el) return;
-    const ROW_LANES = new Set(["all", "issues", "waiting", "meetings", "comms"]);
+    const ROW_LANES = new Set(["all", "issues", "waiting", "meetings", "comms", "done"]);
     el.innerHTML = PCC_LANE_ORDER.map(key => {
       const ct = ROW_LANES.has(key) ? pccLaneIssues(key).length : null;
       return `<div class="pcc-dd-item${pccLane === key ? " on" : ""}" role="option" aria-selected="${pccLane === key}" data-lane="${key}">

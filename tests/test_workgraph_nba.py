@@ -283,6 +283,63 @@ def test_score_issue_falls_back_to_flat_default_for_unlisted_category(ws_db):
     assert with_empty_baselines == with_none
 
 
+# --- enhancement idea panel #10: snooze history surfacing -----------------
+
+def test_snooze_history_from_state_history_keeps_only_actored_waiting_transitions():
+    history = [
+        {"to_state": "waiting", "actor": "marc", "changed_ts": 100.0},   # real snooze
+        {"to_state": "waiting", "actor": None, "changed_ts": 200.0},     # organic wait - excluded
+        {"to_state": "done", "actor": "marc", "changed_ts": 300.0},      # not a waiting transition
+        {"to_state": "waiting", "actor": "marc", "changed_ts": 400.0},   # real snooze
+    ]
+    snoozes = nba.snooze_history_from_state_history(history)
+    assert [s["changed_ts"] for s in snoozes] == [100.0, 400.0]
+
+
+def test_snooze_history_from_state_history_empty_for_no_history():
+    assert nba.snooze_history_from_state_history([]) == []
+
+
+def test_apply_snooze_avoidance_boost_scales_with_count_and_caps():
+    assert nba._apply_snooze_avoidance_boost(0.5, 0) == 0.5
+    assert abs(nba._apply_snooze_avoidance_boost(0.5, 2) - 0.6) < 1e-9
+    # caps at _SNOOZE_BOOST_MAX_COUNT (5) - a 10th snooze adds no more than a 5th
+    five = nba._apply_snooze_avoidance_boost(0.5, 5)
+    ten = nba._apply_snooze_avoidance_boost(0.5, 10)
+    assert five == ten
+    # never exceeds 1.0
+    assert nba._apply_snooze_avoidance_boost(0.95, 5) == 1.0
+
+
+def test_score_issue_snoozed_issue_scores_higher_and_names_it_in_reason(ws_db):
+    now = time.time()
+    issue_id = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    issue = ws_db.get_issue(issue_id)
+    snoozed_history = [
+        {"to_state": "waiting", "actor": "marc", "changed_ts": now - 5 * nba.DAY},
+        {"to_state": "waiting", "actor": "marc", "changed_ts": now - 2 * nba.DAY},
+    ]
+
+    plain_score, plain_reason, _ = nba.score_issue(issue, now)
+    snoozed_score, snoozed_reason, _ = nba.score_issue(issue, now, state_history=snoozed_history)
+
+    assert snoozed_score > plain_score
+    assert "snoozed 2x" in snoozed_reason
+
+
+def test_score_issue_single_snooze_not_named_in_reason(ws_db):
+    """Only 2+ snoozes are worth calling out by name - one snooze is normal
+    triage, not yet a pattern worth flagging."""
+    now = time.time()
+    issue_id = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    issue = ws_db.get_issue(issue_id)
+    one_snooze = [{"to_state": "waiting", "actor": "marc", "changed_ts": now - 2 * nba.DAY}]
+
+    _, reason, _ = nba.score_issue(issue, now, state_history=one_snooze)
+
+    assert "snoozed" not in reason
+
+
 def test_due_date_naive_timestamp_uses_utc_not_local():
     """Fixed 2026-07-29: a bare date (no explicit tz) used to parse as naive
     and .timestamp() assumed LOCAL time while `now` is a UTC epoch - a

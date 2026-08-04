@@ -342,9 +342,38 @@ def _due_urgency(due_iso: str | None, now: float) -> float:
     return max(0.0, 1.0 - (days_until / STALENESS_SATURATION_DAYS))
 
 
+def snooze_history_from_state_history(state_history: list[dict]) -> list[dict]:
+    """Enhancement idea panel #10: a transition to 'waiting' with a real
+    actor recorded is a deliberate snooze (the single-issue and bulk-triage
+    action endpoints both pass actor=config('manager','id') on every such
+    call) - an ORGANIC wait (workgraph_classify.recompute_issue_state's
+    automated rule) calls update_issue with no actor at all, so actor is
+    NULL for those rows. issue_state_history already has everything needed
+    (task #22's own actor column) - no new table, no new write path."""
+    return [h for h in state_history if h.get("to_state") == "waiting" and h.get("actor")]
+
+
+# Snooze avoidance boost (enhancement idea panel #10): repeated snoozing is
+# itself a signal Marc keeps avoiding this, which should make it MORE
+# visible over time, not quietly disappear again every time. An additive,
+# bounded add-on applied after confidence damping - same shape as Total
+# Recall's apply_precedent_boost just above, not folded into DEFAULT_WEIGHTS
+# (rebalancing those is a bigger call than this pass makes, same reasoning
+# as E8's distinct-sender scaling). +0.05 per snooze, capped at 5 snoozes
+# (+0.25 max) - a judgment call, not a measured requirement.
+_SNOOZE_BOOST_PER_COUNT = 0.05
+_SNOOZE_BOOST_MAX_COUNT = 5
+
+
+def _apply_snooze_avoidance_boost(score: float, snooze_count: int) -> float:
+    boost = _SNOOZE_BOOST_PER_COUNT * min(snooze_count, _SNOOZE_BOOST_MAX_COUNT)
+    return min(1.0, score + boost)
+
+
 def score_issue(issue: dict, now: float, weights: dict = DEFAULT_WEIGHTS,
                  identity_anchors: Optional[list] = None,
-                 category_staleness_baselines: Optional[dict] = None) -> tuple[float, str, Optional[int]]:
+                 category_staleness_baselines: Optional[dict] = None,
+                 state_history: Optional[list] = None) -> tuple[float, str, Optional[int]]:
     """Pure-ISH: the only non-arithmetic steps are reading this issue's own
     raw_items for the value regex, and looking up a matching Total Recall
     lesson (both just DB reads, still zero LLM calls).
@@ -425,6 +454,9 @@ def score_issue(issue: dict, now: float, weights: dict = DEFAULT_WEIGHTS,
         lesson = workgraph_lessons.find_matching_lesson(issue)
     score = workgraph_lessons.apply_precedent_boost(base_score, lesson)
 
+    snoozes = snooze_history_from_state_history(state_history) if state_history else []
+    score = _apply_snooze_avoidance_boost(score, len(snoozes))
+
     days_quiet = int(max(0.0, (now - issue["updated_at"]) / DAY))
 
     # Aristotle (task #51) - a taught prerequisite check. Prepended, not
@@ -449,6 +481,9 @@ def score_issue(issue: dict, now: float, weights: dict = DEFAULT_WEIGHTS,
         reasons.append(f"${value_amount:,.0f}")
     if lesson:
         reasons.append(f"precedent: {lesson['statement']}")
+    if len(snoozes) >= 2:
+        last_snoozed_days = int(max(0.0, (now - snoozes[-1]["changed_ts"]) / DAY))
+        reasons.append(f"snoozed {len(snoozes)}x, last {last_snoozed_days}d ago")
     if not reasons:
         reasons.append("waiting on someone else")
 
@@ -491,11 +526,16 @@ def recompute_all(now: float | None = None) -> dict:
     # above. Real DB-wide scan (list_issues(states=None) internally), so
     # this deliberately isn't cheap enough to call per-issue.
     category_staleness_baselines = compute_category_staleness_baselines()
+    # Enhancement idea panel #10: one batched state-history query, same
+    # shape as anchors_by_issue above - list_issue_state_history_for_issues
+    # already exists (built for workgraph_alerts, same batching discipline).
+    state_history_by_issue = ws.list_issue_state_history_for_issues([i["id"] for i in issues])
     updated = 0
     for issue in issues:
         score, reason, lesson_id = score_issue(
             issue, now, identity_anchors=anchors_by_issue.get(issue["id"]),
             category_staleness_baselines=category_staleness_baselines,
+            state_history=state_history_by_issue.get(issue["id"]),
         )
         action_kind = "review" if issue["state"] == "active" else "wait"
         # task #55: reason's prefix is a fixed, owned string (workgraph_

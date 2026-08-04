@@ -1212,6 +1212,13 @@ async def api_workgraph_issue_detail(issue_id: str, log_choice: bool = False):
     # agenda, attendee response status) for issues that came from or
     # reference a calendar event - previously discarded at ingest.
     issue["calendar_meetings"] = wg.list_calendar_meetings_for_issue(issue_id)
+    # Enhancement idea panel #8: how many DIFFERENT people have pushed on
+    # this, not just whether it's been re-raised at all (claims.escalated
+    # is a flat boolean - see workgraph_nba.distinct_escalation_sender_count's
+    # own docstring for why this is computed at the issue level).
+    issue["distinct_escalation_senders"] = workgraph_nba.distinct_escalation_sender_count(
+        wg.get_raw_items_for_issue(issue_id)
+    )
     # Part E1 (2026-07-30): unified ranked candidate actions - read-time
     # only, see workgraph_nba.candidate_actions' own docstring. Falls back
     # to project_synthesis's suggested_actions when this issue's own

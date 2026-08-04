@@ -77,6 +77,65 @@ def test_score_claim_value_urgency_contributes(ws_db):
     assert high_value > low_value
 
 
+# --- enhancement idea panel #8: distinct-sender escalation count -----------
+
+def test_score_claim_more_distinct_senders_scores_higher_when_escalated():
+    now = time.time()
+    escalated = {"first_seen_ts": now - nba.DAY, "escalated": 1}
+    one_sender, reason1 = nba.score_claim(escalated, date_urgency=0.0, value_urgency_score=0.0,
+                                           now=now, distinct_sender_count=1)
+    three_senders, reason3 = nba.score_claim(escalated, date_urgency=0.0, value_urgency_score=0.0,
+                                              now=now, distinct_sender_count=3)
+    assert three_senders > one_sender
+    assert reason1 == "open" or "escalated" in reason1
+    assert "escalated by 3 different people" in reason3
+
+
+def test_score_claim_distinct_sender_count_ignored_when_not_escalated():
+    now = time.time()
+    plain = {"first_seen_ts": now - nba.DAY, "escalated": 0}
+    one, _ = nba.score_claim(plain, date_urgency=0.0, value_urgency_score=0.0, now=now, distinct_sender_count=1)
+    many, _ = nba.score_claim(plain, date_urgency=0.0, value_urgency_score=0.0, now=now, distinct_sender_count=5)
+    assert one == many
+
+
+def test_score_claim_distinct_sender_count_caps_at_three():
+    now = time.time()
+    escalated = {"first_seen_ts": now - nba.DAY, "escalated": 1}
+    three, _ = nba.score_claim(escalated, date_urgency=0.0, value_urgency_score=0.0, now=now, distinct_sender_count=3)
+    ten, _ = nba.score_claim(escalated, date_urgency=0.0, value_urgency_score=0.0, now=now, distinct_sender_count=10)
+    assert three == ten
+
+
+def test_score_claim_default_distinct_sender_count_matches_old_binary_behavior():
+    """Backward compatibility: any caller not yet passing distinct_sender_count
+    (the default of 1) gets exactly v1's old escalated=1.0-or-0.0 behavior."""
+    now = time.time()
+    escalated = {"first_seen_ts": now - nba.DAY, "escalated": 1}
+    default_score, _ = nba.score_claim(escalated, date_urgency=0.0, value_urgency_score=0.0, now=now)
+    explicit_one, _ = nba.score_claim(escalated, date_urgency=0.0, value_urgency_score=0.0,
+                                       now=now, distinct_sender_count=1)
+    assert default_score == explicit_one
+
+
+def test_distinct_escalation_sender_count_counts_unique_inbound_askers():
+    raw_items = [
+        {"from_actor": "alice@example.com", "direction": "inbound", "item_class": "ACTIONABLE-ASK"},
+        {"from_actor": "bob@example.com", "direction": "inbound", "item_class": "WAITING-ON-OTHERS"},
+        {"from_actor": "ALICE@example.com", "direction": "inbound", "item_class": "ACTIONABLE-ASK"},  # same person, different case
+        {"from_actor": "carol@example.com", "direction": "outbound", "item_class": "ACTIONABLE-ASK"},  # Marc's own ask - excluded
+        {"from_actor": "dave@example.com", "direction": "inbound", "item_class": "FYI-EVIDENCE"},  # not an ask/waiting - excluded
+    ]
+    assert nba.distinct_escalation_sender_count(raw_items) == 2
+
+
+def test_distinct_escalation_sender_count_zero_for_no_matching_items():
+    assert nba.distinct_escalation_sender_count([]) == 0
+    assert nba.distinct_escalation_sender_count([
+        {"from_actor": "a@example.com", "direction": "outbound", "item_class": "ACTIONABLE-ASK"},
+    ]) == 0
+
+
 # --- _issue_date_urgency ---------------------------------------------------
 
 def test_issue_date_urgency_ignores_owner():

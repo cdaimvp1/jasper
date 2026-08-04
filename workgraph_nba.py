@@ -583,8 +583,31 @@ def _issue_date_urgency(date_claims: list[dict]) -> float:
     return best
 
 
+def distinct_escalation_sender_count(raw_items: list[dict]) -> int:
+    """Enhancement idea panel #8: claims.escalated (Section 9.3) is a flat
+    boolean - it can't tell "the same one person nagged twice" from "three
+    different people independently pushed on this," and the second is a
+    real, stronger signal Marc should weigh higher. Claims don't record
+    which raw_item triggered each escalation touch (touch_claim just
+    updates the same row - see workgraph_claims.py), so this is computed at
+    the issue level instead: distinct inbound senders among ACTIONABLE-ASK/
+    WAITING-ON-OTHERS raw_items, which is exactly the population that
+    could have driven an escalation in the first place. Outbound items
+    (Marc's own asks) never count - this is about how many OTHER people are
+    pushing, not how many times Marc himself has asked."""
+    senders = {
+        (ri.get("from_actor") or "").strip().lower()
+        for ri in raw_items
+        if ri.get("direction") == "inbound"
+        and ri.get("item_class") in ("ACTIONABLE-ASK", "WAITING-ON-OTHERS")
+        and (ri.get("from_actor") or "").strip()
+    }
+    return len(senders)
+
+
 def score_claim(claim: dict, *, date_urgency: float, value_urgency_score: float,
-                 now: float, weights: dict = DEFAULT_CLAIM_WEIGHTS) -> tuple[float, str]:
+                 now: float, weights: dict = DEFAULT_CLAIM_WEIGHTS,
+                 distinct_sender_count: int = 1) -> tuple[float, str]:
     """Pure. staleness is keyed on the CLAIM's own first_seen_ts (how long
     THIS specific ask has sat open) - a more precise clock than score_issue
     has access to, which only ever sees the whole issue's updated_at.
@@ -592,15 +615,26 @@ def score_claim(claim: dict, *, date_urgency: float, value_urgency_score: float,
     escalation signal, previously computed but never consumed for
     anything) - v1 had no equivalent. Confidence damping is applied by the
     caller (rank_actions), not here - same issue-level context_accuracy
-    score_issue already computes, reused rather than recomputed per claim."""
+    score_issue already computes, reused rather than recomputed per claim.
+
+    distinct_sender_count (enhancement idea panel #8) scales the escalation
+    term instead of adding a new weight bucket - rebalancing DEFAULT_CLAIM_
+    WEIGHTS is a bigger call than this pass makes. 1 sender (the default,
+    and the floor - a claim can't be escalated by zero people) still gets
+    the same escalated=1.0 this always gave; 3+ distinct senders is full
+    credit; 2 is partial. Callers that don't know real sender counts (the
+    default of 1) get exactly v1's old binary behavior, unchanged."""
     staleness = _staleness_urgency(claim["first_seen_ts"], now)
-    escalation = 1.0 if claim.get("escalated") else 0.0
+    escalation = min(1.0, max(1, distinct_sender_count) / 3) if claim.get("escalated") else 0.0
     score = (weights["staleness"] * staleness + weights["due"] * date_urgency
              + weights["value"] * value_urgency_score + weights["escalation"] * escalation)
 
     reasons = []
     if claim.get("escalated"):
-        reasons.append("escalated")
+        if distinct_sender_count >= 2:
+            reasons.append(f"escalated by {distinct_sender_count} different people")
+        else:
+            reasons.append("escalated")
     days_open = int(max(0.0, (now - claim["first_seen_ts"]) / DAY))
     if days_open >= 7:
         reasons.append(f"open {days_open}d")
@@ -649,6 +683,7 @@ def rank_actions(limit: int = DEFAULT_RANK_ACTIONS_LIMIT, now: float | None = No
         date_urgency = _issue_date_urgency([c for c in claims if c["claim_type"] == "date"])
         raw_items = raw_items_by_issue.get(issue_id, [])
         value_score = _value_urgency(_extract_value_amount(raw_items))
+        distinct_sender_count = distinct_escalation_sender_count(raw_items)
 
         has_reference = any(ri.get("pr_number") for ri in raw_items)
         present = set()
@@ -667,7 +702,8 @@ def rank_actions(limit: int = DEFAULT_RANK_ACTIONS_LIMIT, now: float | None = No
 
         issue_candidates = []
         for claim in actionable:
-            base, reason = score_claim(claim, date_urgency=date_urgency, value_urgency_score=value_score, now=now)
+            base, reason = score_claim(claim, date_urgency=date_urgency, value_urgency_score=value_score,
+                                        now=now, distinct_sender_count=distinct_sender_count)
             score = confidence.effective_score(base, ctx["context_accuracy"])
             issue_candidates.append({
                 "claim_id": claim["id"], "issue_id": issue_id, "project_id": issue.get("project_id"),

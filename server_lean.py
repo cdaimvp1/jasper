@@ -1208,6 +1208,10 @@ async def api_workgraph_issue_detail(issue_id: str, log_choice: bool = False):
     # reflects Marc's own override, not the code default - previously only
     # visible in Settings' audit view, never on the issue it affects.
     issue["active_signal_overrides"] = wg.find_active_signal_overrides_for_issue(issue_id)
+    # Enhancement idea panel #7: real calendar/meeting data (location,
+    # agenda, attendee response status) for issues that came from or
+    # reference a calendar event - previously discarded at ingest.
+    issue["calendar_meetings"] = wg.list_calendar_meetings_for_issue(issue_id)
     # Part E1 (2026-07-30): unified ranked candidate actions - read-time
     # only, see workgraph_nba.candidate_actions' own docstring. Falls back
     # to project_synthesis's suggested_actions when this issue's own

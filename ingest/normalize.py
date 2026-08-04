@@ -104,7 +104,18 @@ def _calendar_series_key(ev: dict, eid: str, subject: str, organizer: str, start
 def _process_calendar(payload: dict) -> list[dict]:
     """Real shape observed this session: a list of event objects (id, subject,
     organizer, attendees[], start{dateTime,timeZone}, end{...}, summary,
-    isOrganizer, ...). thread_key: see _calendar_series_key."""
+    isOrganizer, ...). thread_key: see _calendar_series_key.
+
+    E7 (enhancement idea panel #7, 2026-08-03): live-verified against a real
+    outlook_calendar_search response this session that location, isCancelled,
+    webLink, showAs, importance, and recurrence are ALL already present in
+    that same response for free (no extra read_resource call needed) -
+    previously discarded entirely. Carried through as meta_json (see
+    workgraph_store.insert_raw_item) rather than new dedicated columns, since
+    these are calendar-only fields with no equivalent on the other three
+    sources. .get() everywhere below (not required keys) so a drop file
+    captured before GRAPH_INGEST_ROUTINE.md was updated to keep these still
+    parses fine, just with an empty meta."""
     events = payload.get("events") or []
     out = []
     for ev in events:
@@ -118,6 +129,31 @@ def _process_calendar(payload: dict) -> list[dict]:
         participants = [organizer] + list(attendees)
         source_ref = eid
         is_organizer = ev.get("isOrganizer")
+        meta = {
+            k: v for k, v in {
+                "location": ev.get("location"),
+                "is_cancelled": ev.get("isCancelled"),
+                "web_link": ev.get("webLink"),
+                "show_as": ev.get("showAs"),
+                "importance": ev.get("importance"),
+                "is_recurring": ev.get("recurrence") is not None,
+            }.items() if v is not None
+        }
+        # Lookahead-only enrichment (GRAPH_INGEST_ROUTINE.md's calendar step,
+        # E7) - attendees_detailed is the read_resource response's own
+        # attendees array verbatim ({name, address, type, responseStatus}),
+        # full_body_html is its body.content verbatim. Absent entirely for
+        # catch-up-window events (deliberately never enriched, cost
+        # discipline) - .get() everywhere, no assumption either is present.
+        attendees_detailed = ev.get("attendees_detailed")
+        if attendees_detailed:
+            meta["attendees_detailed"] = attendees_detailed
+        full_body_html = ev.get("full_body_html")
+        if full_body_html:
+            agenda_text = html.unescape(_HTML_TAG_RE.sub(" ", full_body_html)).strip()
+            agenda_text = re.sub(r"\s+", " ", agenda_text)
+            if agenda_text:
+                meta["full_agenda_text"] = agenda_text
         out.append({
             "source": "calendar",
             "stable_key": eid,
@@ -133,6 +169,7 @@ def _process_calendar(payload: dict) -> list[dict]:
             # legitimate "unknown" (confirmed inconsistently present across
             # capture calls), never silently defaulted to 0/False.
             "is_organizer": (1 if is_organizer is True else 0 if is_organizer is False else None),
+            "meta": meta,
         })
     return out
 
@@ -313,6 +350,7 @@ def process_file(path: Path) -> dict:
             body_preview=item.get("body_preview"),
             thread_key_source=item.get("thread_key_source"),
             is_organizer=item.get("is_organizer"),
+            meta_json=json.dumps(item["meta"], ensure_ascii=False) if item.get("meta") else None,
         )
         if row_id is None:
             duplicates += 1

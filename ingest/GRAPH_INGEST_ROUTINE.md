@@ -119,7 +119,20 @@ relay's only output is raw, provenanced JSON on disk.
      {"source": "calendar", "events": [ {...one event...}, {...} ]}
      ```
      Each event keeps its own fields as returned — `id`, `subject`, `organizer`, `attendees`,
-     `start.dateTime`, `summary`, `seriesMasterId` if present — nothing renamed or reshaped.
+     `start.dateTime`, `summary`, `seriesMasterId` if present, PLUS `location`, `isCancelled`,
+     `webLink`, `showAs`, `importance`, `recurrence` (E7, 2026-08-03 — all already present in
+     the search response for free, previously dropped) — nothing renamed or reshaped.
+   - **Enrichment for the LOOKAHEAD events only** (E7): the search response's `attendees` is
+     just a flat list of email strings and its `summary` is truncated — real per-attendee
+     accept/decline/tentative status and the FULL agenda text only come from a `read_resource`
+     call on `calendar:///events/{id}`, confirmed live this session (returns `attendees: [{name,
+     address, type, responseStatus}, ...]` and `body.content`, full HTML). That's one extra
+     Graph call per event, so only run it for the lookahead window's events (the same small,
+     real, near-term set the routine already treats specially, matching the SharePoint-search
+     cost discipline elsewhere in this file) — never for the catch-up window's potentially-large
+     historical backlog. For each lookahead event, add `attendees_detailed` (the read_resource
+     response's own `attendees` array, verbatim) and `full_body_html` (its `body.content`,
+     verbatim) onto that same event object before writing.
    - Write to `INBOX/calendar_<unix_ts>.json`.
 
 4. **SharePoint — enabled 2026-07-28, query derived from open issues (Marc's choice).**

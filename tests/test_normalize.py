@@ -132,6 +132,79 @@ def test_process_calendar_two_occurrences_of_same_series_share_thread_key():
     assert out[0]["thread_key"] == out[1]["thread_key"]
 
 
+# --- E7 (enhancement idea panel #7, 2026-08-03): richer calendar meta -----
+
+def test_process_calendar_captures_free_search_level_fields_into_meta():
+    ev = _event(location="Microsoft Teams Meeting", isCancelled=False,
+                 webLink="https://email.lilly.com/owa/?itemid=abc", showAs="tentative",
+                 importance="high", recurrence=None)
+    out = normalize._process_calendar({"source": "calendar", "events": [ev]})
+    meta = out[0]["meta"]
+    assert meta["location"] == "Microsoft Teams Meeting"
+    assert meta["is_cancelled"] is False
+    assert meta["web_link"] == "https://email.lilly.com/owa/?itemid=abc"
+    assert meta["show_as"] == "tentative"
+    assert meta["importance"] == "high"
+    assert meta["is_recurring"] is False
+
+
+def test_process_calendar_is_recurring_true_when_recurrence_present():
+    ev = _event(recurrence={"pattern": {"type": "weekly"}})
+    out = normalize._process_calendar({"source": "calendar", "events": [ev]})
+    assert out[0]["meta"]["is_recurring"] is True
+
+
+def test_process_calendar_meta_omits_absent_fields_rather_than_nulling():
+    """No isCancelled/webLink/etc at all (an old, pre-E7 drop file) - meta
+    should just lack those keys, not carry explicit None values that would
+    make a genuine future None indistinguishable from "never captured"."""
+    out = normalize._process_calendar({"source": "calendar", "events": [_event()]})
+    meta = out[0]["meta"]
+    assert "location" not in meta
+    assert "is_cancelled" not in meta
+    assert "web_link" not in meta
+    assert meta.get("is_recurring") is False  # recurrence key IS always checkable (absent -> None -> False)
+
+
+def test_process_calendar_captures_lookahead_enrichment_when_present():
+    ev = _event(attendees_detailed=[
+        {"name": "Marc Lane", "address": "lane_marc@lilly.com", "type": "required", "responseStatus": "accepted"},
+    ], full_body_html="<html><body><p>Agenda:</p><p>1. Review budget</p></body></html>")
+    out = normalize._process_calendar({"source": "calendar", "events": [ev]})
+    meta = out[0]["meta"]
+    assert meta["attendees_detailed"][0]["responseStatus"] == "accepted"
+    assert meta["full_agenda_text"] == "Agenda: 1. Review budget"
+
+
+def test_process_calendar_no_enrichment_keys_when_absent():
+    """Catch-up-window events are deliberately never enriched - meta must not
+    fabricate attendees_detailed/full_agenda_text that were never fetched."""
+    out = normalize._process_calendar({"source": "calendar", "events": [_event()]})
+    meta = out[0]["meta"]
+    assert "attendees_detailed" not in meta
+    assert "full_agenda_text" not in meta
+
+
+def test_process_file_persists_calendar_meta_as_json(ws_db, tmp_path):
+    ev = _event(id="evt-meta-1", location="Teams", isCancelled=False)
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    f = inbox / "calendar_1.json"
+    f.write_text(json.dumps({"source": "calendar", "events": [ev]}), encoding="utf-8")
+    result = normalize.process_file(f)
+    assert result["ok"] is True
+    conn = ws_db._connect()
+    try:
+        row = conn.execute(
+            "SELECT meta_json FROM raw_items WHERE source='calendar' AND stable_key='evt-meta-1'"
+        ).fetchone()
+    finally:
+        conn.close()
+    meta = json.loads(row["meta_json"])
+    assert meta["location"] == "Teams"
+    assert meta["is_cancelled"] is False
+
+
 # --- Phase 0 fix (D5, 2026-08-03): dead-letter shaped-but-empty stubs ------
 
 def test_claims_content_but_empty_detects_teams_stub_shape():

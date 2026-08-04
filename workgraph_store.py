@@ -1644,6 +1644,20 @@ def init_workgraph() -> None:
             except sqlite3.OperationalError:
                 pass
             try:
+                # E7 (enhancement idea panel #7, 2026-08-03): generic per-
+                # source JSON extras column, not a pile of source-specific
+                # NULL-for-everyone-else columns. First real use: calendar's
+                # location/isCancelled/webLink/showAs/importance/recurrence
+                # fields - all present for free in the outlook_calendar_
+                # search response (confirmed live this session) but
+                # discarded until now. A JSON blob here (rather than one
+                # column per field) keeps this table from growing a new
+                # ALTER TABLE for every source that eventually wants its own
+                # extra field.
+                conn.execute("ALTER TABLE raw_items ADD COLUMN meta_json TEXT")
+            except sqlite3.OperationalError:
+                pass
+            try:
                 # Outlook's own message identifier - the PS scan has always
                 # emitted this, but until now it was only used transiently to
                 # build stable_key/dedupe_key and never persisted. Needed to
@@ -1838,6 +1852,7 @@ def insert_raw_item(
     entry_id: Optional[str] = None,
     thread_key_source: Optional[str] = None,
     is_organizer: Optional[int] = None,
+    meta_json: Optional[str] = None,
 ) -> Optional[int]:
     """Insert one raw item. Returns the new row id, or None if it was a duplicate
     (dedupe_key already present — first write wins, matching the reference
@@ -1850,11 +1865,11 @@ def insert_raw_item(
                     """INSERT INTO raw_items
                        (source, stable_key, thread_key, dedupe_key, occurred_ts,
                         subject, from_actor, participants, body_preview, raw_ref, ingested_ts, entry_id,
-                        thread_key_source, is_organizer)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        thread_key_source, is_organizer, meta_json)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (source, stable_key, thread_key, dedupe_key, occurred_ts,
                      subject, from_actor, participants_json, body_preview, raw_ref, time.time(), entry_id,
-                     thread_key_source, is_organizer),
+                     thread_key_source, is_organizer, meta_json),
                 )
                 return cur.lastrowid
             except sqlite3.IntegrityError:
@@ -2748,6 +2763,31 @@ def compute_reply_latency_for_issue(issue_id: str) -> dict:
         "ping_pong_count": ping_pong_count,
         "avg_reply_latency_seconds": (sum(latencies) / len(latencies)) if latencies else None,
     }
+
+
+def list_calendar_meetings_for_issue(issue_id: str) -> list[dict]:
+    """Enhancement idea panel #7: the calendar-source raw_items already
+    linked to this issue, with their meta_json (location/isCancelled/
+    webLink/showAs/importance/is_recurring, plus attendees_detailed/
+    full_agenda_text when the lookahead-window enrichment ran - see
+    ingest/normalize.py's _process_calendar) parsed back out. Oldest first,
+    same convention as get_raw_items_for_issue - most issues will have at
+    most one or two calendar raw_items, this isn't a hot path."""
+    out = []
+    for item in get_raw_items_for_issue(issue_id):
+        if item.get("source") != "calendar":
+            continue
+        meta = json.loads(item["meta_json"]) if item.get("meta_json") else {}
+        out.append({
+            "raw_item_id": item["id"],
+            "subject": item.get("subject"),
+            "occurred_ts": item.get("occurred_ts"),
+            "organizer": item.get("from_actor"),
+            "is_organizer": item.get("is_organizer"),
+            "participants": json.loads(item["participants"]) if item.get("participants") else [],
+            **meta,
+        })
+    return out
 
 
 def list_raw_items_by_thread_key(source: str, thread_key: str) -> list[dict]:

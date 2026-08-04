@@ -2,6 +2,7 @@
 - ORDER BY tie-break on list_issues (task #30 enhancement)
 - create_issue_with_new_id / create_project_with_new_id / create_task retry
 """
+import json
 import sqlite3
 import time
 
@@ -2430,3 +2431,55 @@ def test_get_calendar_raw_items_for_remediation_only_returns_calendar_source(ws_
 
     assert len(rows) == 1
     assert rows[0]["subject"] == "cal"
+
+
+# --- richer calendar/meeting data (enhancement idea panel #7) -------------
+
+def test_list_calendar_meetings_for_issue_parses_meta_json(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    meta = {"location": "Teams", "is_cancelled": False, "web_link": "https://x", "is_recurring": True}
+    rid = ws_db.insert_raw_item(
+        source="calendar", stable_key="c1", thread_key="c1", dedupe_key="dkc1",
+        occurred_ts=100.0, subject="Weekly sync", from_actor="org@example.com",
+        participants_json='["org@example.com","marc@example.com"]', is_organizer=0,
+        meta_json=json.dumps(meta),
+    )
+    ws_db.link_raw_item_to_issue(rid, a)
+
+    meetings = ws_db.list_calendar_meetings_for_issue(a)
+
+    assert len(meetings) == 1
+    m = meetings[0]
+    assert m["subject"] == "Weekly sync"
+    assert m["organizer"] == "org@example.com"
+    assert m["is_organizer"] == 0
+    assert m["participants"] == ["org@example.com", "marc@example.com"]
+    assert m["location"] == "Teams"
+    assert m["is_cancelled"] is False
+    assert m["is_recurring"] is True
+
+
+def test_list_calendar_meetings_for_issue_excludes_non_calendar_sources(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    rid = ws_db.insert_raw_item(source="outlook_mail", stable_key="m1", thread_key="m1", dedupe_key="dkm1",
+                                 occurred_ts=100.0, subject="mail", from_actor="a@example.com", participants_json="[]")
+    ws_db.link_raw_item_to_issue(rid, a)
+
+    assert ws_db.list_calendar_meetings_for_issue(a) == []
+
+
+def test_list_calendar_meetings_for_issue_handles_no_meta_json(ws_db):
+    """A calendar raw_item ingested before E7 (meta_json column added but
+    never backfilled for old rows) - must not crash, just have no extra
+    fields beyond the base ones."""
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    rid = ws_db.insert_raw_item(source="calendar", stable_key="c1", thread_key="c1", dedupe_key="dkc1",
+                                 occurred_ts=100.0, subject="Old event", from_actor="org@example.com",
+                                 participants_json="[]")
+    ws_db.link_raw_item_to_issue(rid, a)
+
+    meetings = ws_db.list_calendar_meetings_for_issue(a)
+
+    assert len(meetings) == 1
+    assert meetings[0]["subject"] == "Old event"
+    assert "location" not in meetings[0]

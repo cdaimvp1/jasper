@@ -7697,7 +7697,16 @@ html[data-theme="dark"]{
     const metaBits = [];
     metaBits.push(`Owner ${pccEsc(issue.owner === "marc" ? "Marc Lane" : (issue.owner || "Marc Lane"))}`);
     if (issue.category) metaBits.push(pccEsc(pccCategoryLabel(issue.category)));
-    if (project) metaBits.push(`Project: ${pccEsc(project.name)}`);
+    // Task #176: the deterministic grouper can put an issue into a project
+    // with no human ever having looked at that specific call (an auto-merge
+    // or bridge-merge) - membership_state stays 'provisional' until a real
+    // confirm event (confirm_suggestion). Surfaced here, not as a separate
+    // zone, since it's a qualifier on the project fact right next to it,
+    // not a new fact on its own.
+    if (project) {
+      const unconfirmed = issue.grouping_membership_state === "provisional";
+      metaBits.push(`Project: ${pccEsc(project.name)}${unconfirmed ? " (grouping unconfirmed)" : ""}`);
+    }
     if (issue.due) metaBits.push(`Due ${pccEsc(issue.due)}`);
     // Enhancement #88: dollar value in play - already computed for Value-at-
     // risk/the Supplier Dashboard, never previously shown on the issue itself.

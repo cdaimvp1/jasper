@@ -1208,6 +1208,15 @@ async def api_workgraph_issue_detail(issue_id: str, log_choice: bool = False):
     # issues - either a merge lagging behind, or a real cannot_merge veto
     # (v2.4) Marc should be able to see, not just infer.
     issue["reference_id_collisions"] = workgraph_projects.find_reference_id_collisions_for_issue(issue_id, issue)
+    # Task #176: surface whether this issue's own grouping was ever human-
+    # confirmed (wg.confirm_work_object_membership, called from
+    # confirm_suggestion) vs still 'provisional' (an auto-merge/bridge-merge
+    # the deterministic matcher made with no human review yet) - schema and
+    # write-path already existed from task #121, just never read back out
+    # anywhere until now, so Marc had no way to see which project
+    # assignments are still unreviewed guesses.
+    membership = wg.get_work_object_membership_exposure(issue_id) if issue.get("project_id") else None
+    issue["grouping_membership_state"] = membership["membership_state"] if membership else None
     # Enhancement idea panel #4: show when this issue's classification
     # reflects Marc's own override, not the code default - previously only
     # visible in Settings' audit view, never on the issue it affects.

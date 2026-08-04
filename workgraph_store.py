@@ -480,7 +480,7 @@ def init_workgraph() -> None:
                 CREATE TABLE IF NOT EXISTS alerts (
                     id           INTEGER PRIMARY KEY AUTOINCREMENT,
                     issue_id     TEXT,
-                    kind         TEXT NOT NULL CHECK (kind IN ('stale','high_priority_ask','anomaly','stuck_action','unmet_prerequisite')),
+                    kind         TEXT NOT NULL CHECK (kind IN ('stale','high_priority_ask','anomaly','stuck_action','unmet_prerequisite','reference_id_collision')),
                     severity     TEXT NOT NULL CHECK (severity IN ('info','warn','critical')),
                     summary      TEXT NOT NULL,
                     source_ref   TEXT,
@@ -523,7 +523,7 @@ def init_workgraph() -> None:
                         CREATE TABLE alerts (
                             id           INTEGER PRIMARY KEY AUTOINCREMENT,
                             issue_id     TEXT,
-                            kind         TEXT NOT NULL CHECK (kind IN ('stale','high_priority_ask','anomaly','stuck_action','unmet_prerequisite')),
+                            kind         TEXT NOT NULL CHECK (kind IN ('stale','high_priority_ask','anomaly','stuck_action','unmet_prerequisite','reference_id_collision')),
                             severity     TEXT NOT NULL CHECK (severity IN ('info','warn','critical')),
                             summary      TEXT NOT NULL,
                             source_ref   TEXT,
@@ -539,6 +539,44 @@ def init_workgraph() -> None:
                                created_ts, dismissed, dismissed_ts FROM alerts_pre_task55
                     """)
                     conn.execute("DROP TABLE alerts_pre_task55")
+                    conn.execute("COMMIT")
+                except sqlite3.OperationalError:
+                    try:
+                        conn.execute("ROLLBACK")
+                    except sqlite3.OperationalError:
+                        pass  # no transaction was actually open (e.g. BEGIN itself failed) - nothing to roll back
+            # Same rebuild-and-copy pattern as the task #55 migration just
+            # above, for enhancement idea panel #14's new 'reference_id_
+            # collision' kind - a table created before today still enforces
+            # the OLD (pre-#14) constraint even though CREATE TABLE IF NOT
+            # EXISTS above is a no-op against it.
+            existing_sql = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='alerts'"
+            ).fetchone()
+            if existing_sql and "reference_id_collision" not in (existing_sql["sql"] or ""):
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    conn.execute("ALTER TABLE alerts RENAME TO alerts_pre_e14")
+                    conn.execute("""
+                        CREATE TABLE alerts (
+                            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                            issue_id     TEXT,
+                            kind         TEXT NOT NULL CHECK (kind IN ('stale','high_priority_ask','anomaly','stuck_action','unmet_prerequisite','reference_id_collision')),
+                            severity     TEXT NOT NULL CHECK (severity IN ('info','warn','critical')),
+                            summary      TEXT NOT NULL,
+                            source_ref   TEXT,
+                            created_ts   REAL NOT NULL,
+                            dismissed    INTEGER NOT NULL DEFAULT 0,
+                            dismissed_ts REAL
+                        )
+                    """)
+                    conn.execute("""
+                        INSERT INTO alerts (id, issue_id, kind, severity, summary, source_ref,
+                                             created_ts, dismissed, dismissed_ts)
+                        SELECT id, issue_id, kind, severity, summary, source_ref,
+                               created_ts, dismissed, dismissed_ts FROM alerts_pre_e14
+                    """)
+                    conn.execute("DROP TABLE alerts_pre_e14")
                     conn.execute("COMMIT")
                 except sqlite3.OperationalError:
                     try:
@@ -2981,6 +3019,34 @@ def list_issues_for_reference_any_state(pr_number_base: str) -> list[dict]:
                    JOIN raw_items r ON r.issue_id = i.id
                    WHERE r.pr_number_base = ?""",
                 (pr_number_base,),
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def list_all_reference_base_id_pairs() -> list[dict]:
+    """Enhancement idea panel #14 (Reference-ID cross-check worker
+    capability): every distinct (pr_number_base, issue) pairing across the
+    WHOLE board, in one query - the DB-wide sweep workgraph_alerts.run()
+    needs to proactively flag a same-PR/PO collision, since Marc would
+    otherwise only ever see one via find_reference_id_collisions_for_issue
+    (panel #2) if he happened to already be looking at one of the two
+    issues. Only touches raw_items rows that actually HAVE a reference
+    (idx_raw_pr_number_base-backed), not a full table scan of every issue -
+    same discipline as list_issues_for_reference_any_state above. Returns
+    {ref, issue_id, title, project_id, state} per row; grouping/pairing/
+    same-project filtering is workgraph_projects.find_all_reference_id_
+    collisions' job, not this function's."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                """SELECT DISTINCT r.pr_number_base AS ref, i.id AS issue_id,
+                          i.title AS title, i.project_id AS project_id, i.state AS state
+                   FROM raw_items r
+                   JOIN issues i ON i.id = r.issue_id
+                   WHERE r.pr_number_base IS NOT NULL AND r.pr_number_base != ''"""
             ).fetchall()
         finally:
             conn.close()

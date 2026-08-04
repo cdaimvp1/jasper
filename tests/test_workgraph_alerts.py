@@ -86,3 +86,49 @@ def test_unmet_prerequisite_alert_not_generated_when_flag_is_zero(ws_db, bus_db)
     ws_db.create_issue_with_new_id(title="Fine", state="active", category="other")
     result = wa.run(now=time.time())
     assert result["by_kind"]["unmet_prerequisite"] == 0
+
+
+def _issue_with_reference(ws_db, title, subject, key, ref="PR9999999"):
+    iid = ws_db.create_issue_with_new_id(title=title, state="active", category="other")
+    rid = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key=key, thread_key=key, dedupe_key=key,
+        occurred_ts=time.time(), subject=subject, from_actor="a@example.com", participants_json="[]",
+    )
+    ws_db.link_raw_item_to_issue(rid, iid)
+    conn = ws_db._connect()
+    conn.execute("UPDATE raw_items SET pr_number = ?, pr_number_base = ? WHERE id = ?", (ref, ref, rid))
+    conn.commit()
+    conn.close()
+    return iid
+
+
+# --- enhancement idea panel #14: reference-ID cross-check worker capability
+
+def test_reference_id_collision_alert_generated_end_to_end(ws_db, bus_db):
+    a = _issue_with_reference(ws_db, "Issue A", "Approve PR9999999", "alert-coll-a")
+    b = _issue_with_reference(ws_db, "Issue B", "Re: PR9999999", "alert-coll-b")
+
+    result = wa.run(now=time.time())
+
+    assert result["by_kind"]["reference_id_collision"] == 1
+    alerts = ws_db.list_alerts(dismissed=False)
+    match = next(al for al in alerts if al["kind"] == "reference_id_collision")
+    assert match["issue_id"] in (a, b)
+    assert "PR9999999" in match["summary"]
+
+
+def test_reference_id_collision_alert_deduped_across_runs(ws_db, bus_db):
+    _issue_with_reference(ws_db, "Issue A", "Approve PR8888800", "alert-dedup-a", ref="PR8888800")
+    _issue_with_reference(ws_db, "Issue B", "Re: PR8888800", "alert-dedup-b", ref="PR8888800")
+
+    first = wa.run(now=time.time())
+    second = wa.run(now=time.time())
+
+    assert first["by_kind"]["reference_id_collision"] == 1
+    assert second["by_kind"]["reference_id_collision"] == 0  # already alerted, not re-created
+
+
+def test_reference_id_collision_alert_not_generated_without_collision(ws_db, bus_db):
+    ws_db.create_issue_with_new_id(title="Fine", state="active", category="other")
+    result = wa.run(now=time.time())
+    assert result["by_kind"]["reference_id_collision"] == 0

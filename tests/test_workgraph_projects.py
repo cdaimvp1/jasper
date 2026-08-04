@@ -121,6 +121,74 @@ def test_find_reference_id_collisions_empty_when_no_reference(ws_db):
     assert wp.find_reference_id_collisions_for_issue(a) == []
 
 
+# --- enhancement idea panel #14: reference-ID cross-check worker capability
+
+def test_find_all_reference_id_collisions_flags_ungrouped_pair(ws_db):
+    """The DB-wide sweep version of panel #2 - finds the same pair without
+    the caller having to already know to check issue A."""
+    a = _issue(ws_db, "A")
+    b = _issue(ws_db, "B")
+    _raw_item(ws_db, a, "Approve PR3333333 - SAP RISE", "sweep1")
+    _raw_item(ws_db, b, "Re: PR3333333 approval needed", "sweep2")
+
+    collisions = wp.find_all_reference_id_collisions()
+
+    assert len(collisions) == 1
+    pair = collisions[0]
+    assert {pair["issue_a"], pair["issue_b"]} == {a, b}
+    assert pair["shared_reference_ids"] == ["PR3333333"]
+
+
+def test_find_all_reference_id_collisions_excludes_same_project_pair(ws_db):
+    a = _issue(ws_db, "A")
+    b = _issue(ws_db, "B")
+    proj = ws_db.create_project_with_new_id(name="P", category="other")
+    ws_db.assign_issue_to_project(a, proj)
+    ws_db.assign_issue_to_project(b, proj)
+    _raw_item(ws_db, a, "Approve PR4444444", "sweep3")
+    _raw_item(ws_db, b, "Re: PR4444444", "sweep4")
+
+    assert wp.find_all_reference_id_collisions() == []
+
+
+def test_find_all_reference_id_collisions_excludes_closed_issues(ws_db):
+    """A collision with a done/dismissed issue is still visible via panel
+    #2's per-issue lookup (audit intent), but the DB-wide sweep behind the
+    proactive alert deliberately skips it - nothing to act on right now."""
+    a = _issue(ws_db, "A")
+    b = _issue(ws_db, "B")
+    ws_db.update_issue(b, state="done")
+    _raw_item(ws_db, a, "Approve PR5555555", "sweep5")
+    _raw_item(ws_db, b, "Re: PR5555555", "sweep6")
+
+    assert wp.find_all_reference_id_collisions() == []
+
+
+def test_find_all_reference_id_collisions_empty_when_no_shared_reference(ws_db):
+    a = _issue(ws_db, "A")
+    b = _issue(ws_db, "B")
+    _raw_item(ws_db, a, "Approve PR6666666", "sweep7")
+    _raw_item(ws_db, b, "Approve PR7777777", "sweep8")
+
+    assert wp.find_all_reference_id_collisions() == []
+
+
+def test_find_all_reference_id_collisions_handles_three_way_collision(ws_db):
+    """Same reference on 3 different issues must produce 3 distinct pairs
+    (a-b, a-c, b-c), each carrying the shared reference - not just one."""
+    a = _issue(ws_db, "A")
+    b = _issue(ws_db, "B")
+    c = _issue(ws_db, "C")
+    _raw_item(ws_db, a, "Approve PR8888888", "sweep9")
+    _raw_item(ws_db, b, "Re: PR8888888", "sweep10")
+    _raw_item(ws_db, c, "Fwd: PR8888888", "sweep11")
+
+    collisions = wp.find_all_reference_id_collisions()
+
+    pairs_found = {frozenset((p["issue_a"], p["issue_b"])) for p in collisions}
+    assert pairs_found == {frozenset((a, b)), frozenset((a, c)), frozenset((b, c))}
+
+
 def test_reference_ids_extracts_po_number(ws_db):
     iid = _issue(ws_db, "PO notice")
     _raw_item(ws_db, iid, "Your PO4200703817 has shipped", "r3")

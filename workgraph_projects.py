@@ -155,6 +155,52 @@ def find_reference_id_collisions_for_issue(issue_id: str, issue: Optional[dict] 
     ]
 
 
+_CLOSED_STATES = ("done", "dismissed", "noise-archived")
+
+
+def find_all_reference_id_collisions() -> list[dict]:
+    """Enhancement idea panel #14 (Reference-ID cross-check worker
+    capability): the DB-wide sweep behind workgraph_alerts.py's proactive
+    reference_id_collision alert - unlike find_reference_id_collisions_
+    for_issue (panel #2, a per-issue, on-demand lookup that only surfaces
+    anything if Marc is already looking at one of the two issues), this
+    scans every issue at once and can surface a pair Marc would otherwise
+    never think to cross-check manually.
+
+    Deliberately restricted to issues BOTH currently open (not done/
+    dismissed/noise-archived) - unlike panel #2's version, which keeps
+    closed-issue collisions visible for audit on request, an unprompted
+    alert about a thread Marc already closed out isn't something to act
+    on right now. Same same-project skip as panel #2 (already grouped
+    together is not a collision worth flagging)."""
+    rows = ws.list_all_reference_base_id_pairs()
+    by_ref: dict[str, dict[str, dict]] = {}
+    for row in rows:
+        if row["state"] in _CLOSED_STATES:
+            continue
+        by_ref.setdefault(row["ref"], {})[row["issue_id"]] = row
+
+    pairs: dict[tuple[str, str], dict] = {}
+    for ref, by_issue in by_ref.items():
+        issue_ids = sorted(by_issue.keys())
+        for i, a in enumerate(issue_ids):
+            for b in issue_ids[i + 1:]:
+                project_a, project_b = by_issue[a]["project_id"], by_issue[b]["project_id"]
+                if project_a and project_a == project_b:
+                    continue  # already grouped together - not a collision worth flagging
+                key = (a, b)
+                entry = pairs.setdefault(key, {
+                    "issue_a": a, "title_a": by_issue[a]["title"],
+                    "issue_b": b, "title_b": by_issue[b]["title"],
+                    "shared_reference_ids": set(),
+                })
+                entry["shared_reference_ids"].add(ref)
+    return [
+        {**entry, "shared_reference_ids": sorted(entry["shared_reference_ids"])}
+        for entry in pairs.values()
+    ]
+
+
 def _vetoed_by_reference_mismatch(issue_id: str, sibling_id: str) -> bool:
     """True when BOTH issues have at least one identified PR/PO reference
     BASE and the sets are disjoint - a real, structured signal that

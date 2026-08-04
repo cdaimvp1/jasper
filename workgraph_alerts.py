@@ -5,22 +5,27 @@ workgraph_nba.py).
 
 Not a generic notification firehose — a short, curated surface for things
 that need Marc's attention beyond what the issue list itself already shows.
-Five concrete kinds, each with its own pure `_evaluate_*` helper:
+Six concrete kinds, each with its own pure `_evaluate_*` helper:
 
-  stale               — a waiting/blocked issue gone quiet too long.
-  high_priority_ask   — a newly-classified ACTIONABLE-ASK on a high-priority issue.
-  anomaly             — an off-channel-style anomaly flagged during classification.
-  stuck_action        — a pending_actions row that never resolved.
-  unmet_prerequisite  — an Aristotle prerequisite (task #51) still unconfirmed
-                         (task #55). Previously this only ever showed up buried in
-                         nba_reason, seen only on the rare low-confidence "abstain"
-                         card - this makes it visible for every issue, regardless
-                         of confidence tier.
+  stale                  — a waiting/blocked issue gone quiet too long.
+  high_priority_ask      — a newly-classified ACTIONABLE-ASK on a high-priority issue.
+  anomaly                — an off-channel-style anomaly flagged during classification.
+  stuck_action           — a pending_actions row that never resolved.
+  unmet_prerequisite     — an Aristotle prerequisite (task #51) still unconfirmed
+                            (task #55). Previously this only ever showed up buried in
+                            nba_reason, seen only on the rare low-confidence "abstain"
+                            card - this makes it visible for every issue, regardless
+                            of confidence tier.
+  reference_id_collision — enhancement idea panel #14: a same-PR/PO pair across
+                            two OPEN, not-yet-grouped issues, found by a DB-wide
+                            sweep - unlike panel #2's per-issue lookup, this
+                            surfaces a pair even when Marc never opens either
+                            issue's own detail panel.
 
 Idempotent by construction: every alert kind is deduped against the set of
 currently-undismissed alerts before `run()` creates anything, keyed by
-(issue_id, kind) for issue-scoped kinds and by (kind, source_ref) for the two
-kinds that key off a specific raw_item/pending_action row instead. Once an
+(issue_id, kind) for issue-scoped kinds and by (kind, source_ref) for kinds
+that key off a specific raw_item/pending_action/issue-pair instead. Once an
 alert is dismissed, a genuinely new occurrence of the same condition is free
 to raise a fresh one — dismissal means "seen", not "never alert on this
 issue again".
@@ -35,6 +40,7 @@ from types import MappingProxyType
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import workgraph_store as ws
+import workgraph_projects
 
 DAY = 86400.0
 
@@ -98,6 +104,14 @@ def _evaluate_unmet_prerequisite(issue: dict):
     return "warn", issue.get("nba_reason") or f"Unmet prerequisite — {issue['title']}"
 
 
+def _evaluate_reference_id_collision(pair: dict):
+    """Pure. Always fires (caller already dropped same-project and closed-
+    issue pairs)."""
+    refs = ", ".join(pair["shared_reference_ids"])
+    summary = f"Same reference ({refs}) on 2 open issues — {pair['title_a']} / {pair['title_b']}"
+    return "warn", summary
+
+
 def run(now: float | None = None, thresholds: dict = DEFAULT_THRESHOLDS) -> dict:
     """Scan all 4 conditions and create any new, non-duplicate alerts. Called
     right after workgraph_nba.recompute_all() everywhere that's called, so
@@ -110,7 +124,8 @@ def run(now: float | None = None, thresholds: dict = DEFAULT_THRESHOLDS) -> dict
     existing_issue_kind = {(a["issue_id"], a["kind"]) for a in existing if a["issue_id"]}
     existing_source_ref = {(a["kind"], a["source_ref"]) for a in existing if a["source_ref"]}
 
-    by_kind = {"stale": 0, "high_priority_ask": 0, "anomaly": 0, "stuck_action": 0, "unmet_prerequisite": 0}
+    by_kind = {"stale": 0, "high_priority_ask": 0, "anomaly": 0, "stuck_action": 0,
+               "unmet_prerequisite": 0, "reference_id_collision": 0}
 
     # 1. Stale waiting/blocked issues. Evidence + state history fetched ONCE for
     # the whole batch (fixed 2026-07-29: this used to be 2 queries per issue
@@ -186,6 +201,22 @@ def run(now: float | None = None, thresholds: dict = DEFAULT_THRESHOLDS) -> dict
         ws.create_alert(issue_id=issue["id"], kind="unmet_prerequisite", severity=severity, summary=summary)
         existing_issue_kind.add((issue["id"], "unmet_prerequisite"))
         by_kind["unmet_prerequisite"] += 1
+
+    # 6. Cross-issue reference-ID collisions (enhancement idea panel #14) - a
+    #    same-PR/PO pair Marc would otherwise only ever see if he happened to
+    #    open one of the two issues' own detail panel (panel #2's on-demand
+    #    lookup). Dedup keys off the canonical ISSUE PAIR, not issue_id alone -
+    #    a single issue can legitimately collide with more than one other
+    #    issue over time, and each is a distinct thing worth its own alert.
+    for pair in workgraph_projects.find_all_reference_id_collisions():
+        source_ref = f"{pair['issue_a']}:{pair['issue_b']}"
+        if ("reference_id_collision", source_ref) in existing_source_ref:
+            continue
+        severity, summary = _evaluate_reference_id_collision(pair)
+        ws.create_alert(issue_id=pair["issue_a"], kind="reference_id_collision", severity=severity,
+                         summary=summary, source_ref=source_ref)
+        existing_source_ref.add(("reference_id_collision", source_ref))
+        by_kind["reference_id_collision"] += 1
 
     return {"created": sum(by_kind.values()), "by_kind": by_kind}
 

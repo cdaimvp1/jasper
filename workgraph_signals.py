@@ -196,7 +196,14 @@ _SYSTEM_SENDER = re.compile(r"^(no-?reply|do-?not-?reply|notifications?|automate
 # merged purely because every Adobe Sign envelope notification shares this
 # one address.
 _MACHINE_SIGNAL_DOMAINS = ["ansmtp.ariba.com", "ariba.com", "adobesign.com",
-                           "docusign.net", "contractpodai.com", "concursolutions.com"]
+                           "docusign.net", "contractpodai.com", "concursolutions.com",
+                           "alerts.ondemand.com"]
+# alerts.ondemand.com added task #169/#170 (2026-08-04, Marc's direct report):
+# SAP's own bulk alert feed ("SAP CloudSupport Alerts <sapcloudsupport@
+# alerts.ondemand.com>") is a DIFFERENT domain than plain sap.com, so it was
+# never covered here - a real @sap.com address belonging to an actual person
+# (an account rep, a real contact) stays a genuine party/company signal;
+# only this specific bulk-alert domain is excluded.
 
 
 def _is_machine_signal_domain(email: str) -> bool:
@@ -214,6 +221,45 @@ def is_automated_sender(email: str) -> bool:
     addresses entirely."""
     email = email or ""
     return bool(_SYSTEM_SENDER.match(email)) or _is_machine_signal_domain(email)
+
+
+_ARIBA_REQUISITION_FIELDS_RE = re.compile(
+    r"approve the requisition that\s+(?P<requester>.+?)\s+submitted\s*[-–—]+\s*"
+    r"(?:(?P<pr_number>PR\d+(?:-V\d+)?)\s*[-–—]+\s*)?"
+    r"(?P<descriptor>.+?)\s*\(\$\s*(?P<amount>[\d,]+(?:\.\d+)?)\s*(?:usd)?\)",
+    re.I,
+)
+
+
+def extract_ariba_requisition_fields(subject: str) -> Optional[dict]:
+    """Real fields out of an Ariba requisition-approval subject - task
+    #169/#170 (2026-08-04, Marc's direct design ask): the scored grouping
+    model's existing 'company'/'party' signals can't discriminate between
+    two DIFFERENT Ariba requisitions from the same automated sender at all
+    (that address is excluded from party/company matching entirely, by
+    design - see is_automated_sender's own callers), so two genuinely
+    unrelated PRs and two PRs that are really the same underlying deal
+    (a version bump, a re-submission) looked identical to the grouping
+    signature. Confirmed real format from live subjects: 'Action required:
+    Approve the Requisition that THOMAS TURNER submitted  - PR1193376 -
+    Workday HCM SaaS ($53,702,143.00 USD)' - requester, PR#, the descriptor
+    naming what's being purchased (often the supplier/product name), and
+    the dollar amount are all real, matchable content, not just boilerplate.
+    Returns None (never guesses) when the subject doesn't match this exact
+    shape - most subjects legitimately won't."""
+    m = _ARIBA_REQUISITION_FIELDS_RE.search(subject or "")
+    if not m:
+        return None
+    try:
+        amount = float(m.group("amount").replace(",", ""))
+    except ValueError:
+        amount = None
+    return {
+        "requester": m.group("requester").strip(),
+        "pr_number": (m.group("pr_number") or "").upper() or None,
+        "descriptor": m.group("descriptor").strip(" -–—"),
+        "amount": amount,
+    }
 
 
 def _escalation_target_is_owner(subject: str) -> bool:

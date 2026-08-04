@@ -1270,8 +1270,10 @@ def test_scored_grouping_decision_shared_party_alone_is_suggest_not_auto_merge(w
 
 def test_scored_grouping_decision_two_signals_without_a_real_anchor_only_suggests(ws_db):
     """Confidence spine v1 (2026-08-03): a 2-signal heuristic match
-    (party+topic, raw 0.80, isolated from company by leaving it unset on
-    both sides) now correctly stays at "suggest," never "auto_merge" -
+    (party+topic, raw 0.90 - bumped from 0.80 task #169/#170, 2026-08-04,
+    party/topic weights 0.40->0.45 - isolated from company by leaving it
+    unset on both sides) now correctly stays at "suggest," never
+    "auto_merge" -
     without ANY real structural anchor (a reference), referential_
     resolution is 0 on this pair regardless of how rich the surrounding
     context is, capping effective_score below AUTO_MERGE_THRESHOLD. This
@@ -1288,7 +1290,7 @@ def test_scored_grouping_decision_two_signals_without_a_real_anchor_only_suggest
     decision = wp.scored_grouping_decision(a, ws_db.get_issue(a))
 
     assert decision["verdict"] == "suggest"
-    assert decision["score"] == 0.8  # the raw score is still high...
+    assert decision["score"] == 0.9  # the raw score is still high...
     assert decision["effective_score"] < wp.AUTO_MERGE_THRESHOLD  # ...but the damped one decides
     assert "party" in decision["matched_signals"]
 
@@ -1976,3 +1978,204 @@ def test_backfill_apply_twice_is_idempotent(ws_db):
     assert first["new_constraints"] == 1
     assert second["new_constraints"] == 0
     assert second["already_constrained"] == 1
+
+
+# --- new content-extracted pairwise signals (task #169/#170, 2026-08-04) ----
+# ariba_descriptor/ariba_requester/amount/attachment, added to _pairwise_
+# score_from_signature so "supplier + one other real data point" (Marc's
+# stated rule) actually has enough combinable signals to clear
+# AUTO_MERGE_THRESHOLD for Ariba's automated notifications specifically -
+# is_automated_sender already excludes the notification address itself from
+# party/company matching, so without these, two different Ariba requisitions
+# (or two versions of the same one) looked identical to the signature.
+
+def _sig(**overrides):
+    base = {
+        "definitive_ids": [], "accepted_lineages": [], "containers": [],
+        "external_orgs": [], "participant_roles": [], "active_period_start": None,
+        "active_period_end": None, "positive_vocabulary": None, "negative_vocabulary": None,
+        "cannot_link_ids": [],
+    }
+    base.update(overrides)
+    return base
+
+
+def test_pairwise_score_ariba_descriptor_and_requester_together_merges():
+    a = _sig(positive_vocabulary={"ariba_requester": "Thomas Turner", "ariba_descriptor": "Workday HCM SaaS", "value_amount": None})
+    b = _sig(positive_vocabulary={"ariba_requester": "Thomas Turner", "ariba_descriptor": "Workday HCM SaaS", "value_amount": None})
+    score, signals = wp._pairwise_score_from_signature("a", a, "", None, "b", b, "", None)
+    assert "ariba_descriptor" in signals
+    assert "ariba_requester" in signals
+    assert score >= wp.AUTO_MERGE_THRESHOLD
+
+
+def test_pairwise_score_ariba_descriptor_alone_does_not_reach_threshold():
+    a = _sig(positive_vocabulary={"ariba_requester": None, "ariba_descriptor": "Workday HCM SaaS", "value_amount": None})
+    b = _sig(positive_vocabulary={"ariba_requester": None, "ariba_descriptor": "Workday HCM SaaS", "value_amount": None})
+    score, signals = wp._pairwise_score_from_signature("a", a, "", None, "b", b, "", None)
+    assert signals == ["ariba_descriptor"]
+    assert score < wp.AUTO_MERGE_THRESHOLD
+
+
+def test_pairwise_score_descriptor_plus_amount_merges():
+    a = _sig(positive_vocabulary={"ariba_requester": None, "ariba_descriptor": "Workday HCM SaaS", "value_amount": 53702143.0})
+    b = _sig(positive_vocabulary={"ariba_requester": None, "ariba_descriptor": "Workday HCM SaaS", "value_amount": 53702143.0})
+    score, signals = wp._pairwise_score_from_signature("a", a, "", None, "b", b, "", None)
+    assert "amount" in signals
+    assert score >= wp.AUTO_MERGE_THRESHOLD
+
+
+def test_pairwise_score_amount_requires_close_match_not_exact():
+    """A 1% tolerance is real-world tolerant (rounding, currency
+    conversion noise) without being so loose two unrelated deals coincide."""
+    a = _sig(positive_vocabulary={"ariba_requester": None, "ariba_descriptor": None, "value_amount": 100000.0})
+    b = _sig(positive_vocabulary={"ariba_requester": None, "ariba_descriptor": None, "value_amount": 100500.0})
+    score, signals = wp._pairwise_score_from_signature("a", a, "", None, "b", b, "", None)
+    assert "amount" in signals
+
+    c = _sig(positive_vocabulary={"ariba_requester": None, "ariba_descriptor": None, "value_amount": 150000.0})
+    score2, signals2 = wp._pairwise_score_from_signature("a", a, "", None, "c", c, "", None)
+    assert "amount" not in signals2
+
+
+def test_pairwise_score_attachment_lineage_overlap_matches():
+    a = _sig(accepted_lineages=["lineage-abc123"])
+    b = _sig(accepted_lineages=["lineage-abc123", "lineage-def456"])
+    score, signals = wp._pairwise_score_from_signature("a", a, "", None, "b", b, "", None)
+    assert "attachment" in signals
+
+
+def test_pairwise_score_no_new_signals_when_vocab_empty():
+    a = _sig()
+    b = _sig()
+    score, signals = wp._pairwise_score_from_signature("a", a, "", None, "b", b, "", None)
+    assert score == 0.0
+    assert signals == []
+
+
+def test_suggestion_kind_company_alone_stays_link():
+    assert wp._suggestion_kind_for_scored_signals(["company"]) == "link"
+    assert wp._suggestion_kind_for_scored_signals(["company", "sender"]) == "link"
+    assert wp._suggestion_kind_for_scored_signals(["company", "topic"]) == "link"
+
+
+def test_suggestion_kind_company_plus_precise_signal_merges():
+    """Task #169/#170: company + a real precise content signal (amount,
+    attachment, an Ariba descriptor/requester match) is trustworthy enough
+    to merge - unlike company+topic, these don't share the same-company-
+    different-requisition coincidental-overlap risk (see the module-level
+    comment above this function)."""
+    assert wp._suggestion_kind_for_scored_signals(["company", "amount"]) == "merge"
+    assert wp._suggestion_kind_for_scored_signals(["company", "ariba_descriptor"]) == "merge"
+
+
+def test_suggestion_kind_combined_new_signals_merge():
+    """This function is a pure signal-name-set -> kind mapping - it doesn't
+    itself know whether the underlying score crossed AUTO_MERGE_THRESHOLD
+    (that's SCORE_WEIGHTS' job; amount=0.25 alone never reaches 0.65, so
+    scored_grouping_decision never calls this with signals=['amount']
+    alone in practice)."""
+    assert wp._suggestion_kind_for_scored_signals(["ariba_descriptor", "ariba_requester"]) == "merge"
+    assert wp._suggestion_kind_for_scored_signals([]) is None
+
+
+def test_suggestion_kind_party_and_topic_semantics_unchanged():
+    assert wp._suggestion_kind_for_scored_signals(["party"]) == "link"
+    assert wp._suggestion_kind_for_scored_signals(["party", "topic"]) == "merge"
+    assert wp._suggestion_kind_for_scored_signals(["topic"]) == "merge"
+
+
+# --- connected-components candidate search + bridge detection --------------
+# (task #169/#170, 2026-08-04, Marc's direct design ask). The OLD
+# scored_grouping_decision excluded any candidate already in a DIFFERENT
+# project than the issue being scored - meaning an ungrouped item could
+# NEVER join an existing, already-established project via this path, and a
+# real chain (A-B share 2 points, B-C share 2 DIFFERENT points) could never
+# be discovered once B had a project. Now searches the whole corpus and
+# tracks the best match PER distinct project, so it can also detect when an
+# item bridges two already-separate, already-established projects.
+
+def _ariba_issue(ws_db, requester, pr_number, descriptor, amount, *, category="financial"):
+    """Real Ariba requisition-approval shape (see workgraph_signals.
+    extract_ariba_requisition_fields) - requester/descriptor come from the
+    issue title, amount comes from value_amount_for_issue's own raw_items
+    scan, so a real raw_item with the dollar figure in its subject is
+    needed too, not just the issue title. pr_number=None omits the PR
+    segment entirely (a real Ariba shape too - some notifications reference
+    a supplier/requester without yet having an assigned PR#) - needed for
+    bridge tests, since two issues with DIFFERENT real PR numbers are
+    correctly vetoed to 0 by the disjoint-reference-id check regardless of
+    any other signal (each real PR# is its own true transaction) - bridging
+    across distinct requisitions has to go through an item that doesn't
+    itself carry a conflicting PR#."""
+    pr_segment = f"{pr_number} - " if pr_number else ""
+    title = f"Action required: Approve the Requisition that {requester} submitted  - {pr_segment}{descriptor} (${amount:,.2f} USD)"
+    iid = _issue(ws_db, title)
+    ws_db.update_issue(iid, category=category)
+    _raw_item(ws_db, iid, title, f"key-{iid}")
+    return iid
+
+
+def test_scored_grouping_decision_can_now_join_an_existing_established_project(ws_db):
+    p1 = ws_db.create_project_with_new_id(name="Existing project", category="other")
+    member = _ariba_issue(ws_db, "JANE DOE", "PR991001", "Workday HCM SaaS", 75000.00)
+    ws_db.assign_issue_to_project(member, p1)
+
+    new_issue = _ariba_issue(ws_db, "JANE DOE", None, "Workday HCM SaaS", 75050.00)
+
+    decision = wp.scored_grouping_decision(new_issue, ws_db.get_issue(new_issue))
+
+    # ariba_requester+ariba_descriptor clears threshold - the exact combo
+    # the OLD candidate-exclusion made structurally impossible to even
+    # consider once `member` already had a project.
+    assert decision["sibling_id"] == member
+    assert p1 in decision["bridged_projects"]
+
+
+def test_scored_grouping_decision_detects_a_real_bridge_between_two_projects(ws_db):
+    """Marc's exact example: a new item can share 2+ points with a member
+    of project P1 AND 2+ (possibly DIFFERENT) points with a member of
+    project P2 - a real bridge between two already-established groups, not
+    a clean single-project match. Must be flagged for real judgment, not
+    silently resolved to whichever scored highest."""
+    p1 = ws_db.create_project_with_new_id(name="Project one", category="other")
+    a = _ariba_issue(ws_db, "JANE DOE", "PR991001", "Workday HCM SaaS", 50000.00)
+    ws_db.assign_issue_to_project(a, p1)
+
+    p2 = ws_db.create_project_with_new_id(name="Project two", category="other")
+    c = _ariba_issue(ws_db, "BOB SMITH", "PR991002", "Workday HCM SaaS", 100050.00)
+    ws_db.assign_issue_to_project(c, p2)
+
+    # b bridges both: shares (requester+descriptor) with a, shares
+    # (descriptor+amount) with c - two DIFFERENT signal pairs, against two
+    # DIFFERENT already-established projects.
+    b = _ariba_issue(ws_db, "JANE DOE", None, "Workday HCM SaaS", 100050.00)
+
+    decision = wp.scored_grouping_decision(b, ws_db.get_issue(b))
+
+    assert decision["verdict"] == "bridge"
+    assert set(decision["bridged_projects"].keys()) == {p1, p2}
+
+
+def test_group_issue_bridge_creates_a_suggestion_per_bridged_project(ws_db, monkeypatch, tmp_path):
+    config = _isolate_config(monkeypatch, tmp_path)
+    config.set_value(True, "grouping", "scored_model_enabled")
+
+    p1 = ws_db.create_project_with_new_id(name="Project one", category="other")
+    a = _ariba_issue(ws_db, "JANE DOE", "PR991001", "Workday HCM SaaS", 50000.00)
+    ws_db.assign_issue_to_project(a, p1)
+
+    p2 = ws_db.create_project_with_new_id(name="Project two", category="other")
+    c = _ariba_issue(ws_db, "BOB SMITH", "PR991002", "Workday HCM SaaS", 100050.00)
+    ws_db.assign_issue_to_project(c, p2)
+
+    b = _ariba_issue(ws_db, "JANE DOE", None, "Workday HCM SaaS", 100050.00)
+
+    result = wp.group_issue(b)
+
+    assert result["action"] == "bridge_suggested"
+    assert result["count"] == 2
+    bridged_project_ids = {entry["project_id"] for entry in result["bridges"]}
+    assert bridged_project_ids == {p1, p2}
+    pending = ws_db.list_project_suggestions(status="pending")
+    assert len(pending) == 2

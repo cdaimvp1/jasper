@@ -46,6 +46,7 @@ import workgraph_store as ws
 import workgraph_confidence as confidence
 import workgraph_lessons
 import workgraph_signals
+import workgraph_nba
 
 WEAK_SIGNAL_WINDOW_DAYS = 45
 
@@ -577,7 +578,21 @@ def _weak_signal_candidates(issue: dict) -> list:
 # real 3-signal alignment (party+company+sender=1.0), just never enough
 # alone with a single weak partner, the same discipline D4 already
 # applied to party.
-SCORE_WEIGHTS = {"company": 0.40, "topic": 0.40, "sender": 0.20, "category": 0.15, "party": 0.40}
+SCORE_WEIGHTS = {
+    "company": 0.45, "topic": 0.45, "sender": 0.20, "category": 0.15, "party": 0.45,
+    # Added task #169/#170 (2026-08-04, Marc's direct design ask): company/
+    # party/topic bumped 0.40->0.45 so "supplier + one other real signal"
+    # (e.g. company+sender=0.65) actually clears AUTO_MERGE_THRESHOLD -
+    # confirmed live that it didn't before (0.40+0.20=0.60), directly
+    # contradicting the stated rule. ariba_descriptor plays the same
+    # supplier-anchor role as company/party for Ariba's automated
+    # notifications specifically (is_automated_sender excludes the sender
+    # address itself from company/party matching entirely, so those two
+    # signals structurally can't fire for two different Ariba requisitions -
+    # this fills that gap). None of amount/attachment/ariba_requester reach
+    # 0.65 alone - by design, each needs a real second signal alongside it.
+    "ariba_descriptor": 0.45, "ariba_requester": 0.30, "amount": 0.25, "attachment": 0.35,
+}
 AUTO_MERGE_THRESHOLD = 0.65
 WEAK_SUGGESTION_FLOOR = 0.15  # preserves today's "one weak signal -> suggestion" behavior
 
@@ -622,13 +637,29 @@ def compute_work_object_signature(work_object_id: str, issue: Optional[dict] = N
     cannot_link_ids - a check _issue_signal_snapshot/_pairwise_score never
     had at all - and artifact_lineages (v2.6) for accepted_lineages, a gap
     that stayed an honest [] until that table existed to answer it.
-    positive_vocabulary/negative_vocabulary stay None - no real vocabulary-
-    extraction producer exists yet, same named-not-silently-dropped gap as
-    identity_constraints' 8 unused types. Returns plain Python values
-    (lists/sets as lists) - get_or_compute_work_object_signature is what
-    JSON-encodes for the cache."""
+
+    positive_vocabulary now has a real producer (task #169/#170, 2026-08-04,
+    Marc's direct design ask): Ariba requester/descriptor/PR fields (is_
+    automated_sender already excludes the notification address itself from
+    party/company matching, so without this, two different Ariba
+    requisitions - or two versions of the same one - look identical to the
+    grouping signature) plus a real dollar-amount extraction
+    (workgraph_nba.value_amount_for_issue, task #24's heuristic, previously
+    unused for grouping). negative_vocabulary stays None - still no real
+    producer for it. Returns plain Python values (lists/sets as lists) -
+    get_or_compute_work_object_signature is what JSON-encodes for the
+    cache."""
     if issue is None:
         issue = ws.get_issue(work_object_id)
+    ariba_fields = workgraph_signals.extract_ariba_requisition_fields(issue.get("title") or "") if issue else None
+    value_amount = workgraph_nba.value_amount_for_issue(work_object_id)
+    positive_vocabulary = None
+    if ariba_fields or value_amount:
+        positive_vocabulary = {
+            "ariba_requester": (ariba_fields or {}).get("requester"),
+            "ariba_descriptor": (ariba_fields or {}).get("descriptor"),
+            "value_amount": value_amount or None,
+        }
     parties = ws.list_parties_for_issue(work_object_id)
     real_parties = [
         p for p in parties
@@ -661,7 +692,7 @@ def compute_work_object_signature(work_object_id: str, issue: Optional[dict] = N
         "participant_roles": participant_roles,
         "active_period_start": min(period_bounds) if period_bounds else None,
         "active_period_end": max(period_bounds) if period_bounds else None,
-        "positive_vocabulary": None,
+        "positive_vocabulary": positive_vocabulary,
         "negative_vocabulary": None,
         "cannot_link_ids": cannot_link_ids,
     }
@@ -764,6 +795,29 @@ def _pairwise_score_from_signature(a_id: str, a_sig: dict, a_topic_key: str, a_c
     if a_category and a_category != "other" and a_category == b_category:
         score += SCORE_WEIGHTS["category"]
         signals.append("category")
+
+    # Added task #169/#170 (2026-08-04): real content-extracted signals,
+    # stored in positive_vocabulary (see compute_work_object_signature).
+    a_vocab, b_vocab = a_sig.get("positive_vocabulary") or {}, b_sig.get("positive_vocabulary") or {}
+    a_desc, b_desc = a_vocab.get("ariba_descriptor"), b_vocab.get("ariba_descriptor")
+    if a_desc and b_desc:
+        norm_a, norm_b = a_desc.lower().strip(), b_desc.lower().strip()
+        m = SequenceMatcher(None, norm_a, norm_b).find_longest_match(0, len(norm_a), 0, len(norm_b))
+        if m.size >= MIN_TOPIC_KEY_LEN:
+            score += SCORE_WEIGHTS["ariba_descriptor"]
+            signals.append("ariba_descriptor")
+    a_req, b_req = a_vocab.get("ariba_requester"), b_vocab.get("ariba_requester")
+    if a_req and b_req and a_req.lower().strip() == b_req.lower().strip():
+        score += SCORE_WEIGHTS["ariba_requester"]
+        signals.append("ariba_requester")
+    a_amt, b_amt = a_vocab.get("value_amount"), b_vocab.get("value_amount")
+    if a_amt and b_amt and abs(a_amt - b_amt) <= max(a_amt, b_amt) * 0.01:
+        score += SCORE_WEIGHTS["amount"]
+        signals.append("amount")
+    if (a_sig["accepted_lineages"] and b_sig["accepted_lineages"]
+            and not set(a_sig["accepted_lineages"]).isdisjoint(b_sig["accepted_lineages"])):
+        score += SCORE_WEIGHTS["attachment"]
+        signals.append("attachment")
     return score, signals
 
 
@@ -791,22 +845,56 @@ def scored_grouping_decision(issue_id: str, issue: dict) -> dict:
     my_sig = get_or_compute_work_object_signature(issue_id, issue)
     my_topic_key = _topic_key_for_signature(issue, my_sig)
     best_score, best_sibling, best_signals = 0.0, None, []
+    # best-per-project (task #169/#170, 2026-08-04, Marc's direct design ask):
+    # the OLD version below excluded any candidate already in a DIFFERENT
+    # project than mine outright - meaning an ungrouped item could never
+    # join an existing, already-established project via this path at all,
+    # and a chain like A-B-C (A and B share 2 points, B and C share 2
+    # DIFFERENT points, A and C alone might share only 0-1) could never be
+    # discovered, since B's own project would just get skipped as a
+    # candidate source once it existed. Now tracks the best-scoring match
+    # PER DISTINCT existing project (keyed by that project's id, or the
+    # sibling's own id when it's ungrouped) so group_issue() below can tell
+    # a clean single-project match from a genuine bridge between two
+    # already-established projects.
+    # project_id -> (score, sibling_id, matched_signals) for the best-scoring
+    # member of that REAL, already-established project. Ungrouped siblings
+    # are tracked separately (best_score/best_sibling/best_signals above,
+    # already the pre-existing single-best-match behavior) since an
+    # ungrouped-to-ungrouped match forms a brand NEW project, not a bridge.
+    project_best: dict[str, tuple[float, str, list]] = {}
     # Same limit fix as _shared_topic_key/_weak_signal_candidates above.
     for other in ws.list_issues(states=None, limit=10000):
         if other["id"] == issue_id:
             continue
         if my_project_id and my_project_id == other.get("project_id"):
-            continue
-        if other.get("project_id") and other.get("project_id") != my_project_id:
-            continue  # never target an issue already in a DIFFERENT project - same rule as _weak_signal_candidates
+            continue  # already the same project - nothing to decide
         other_sig = get_or_compute_work_object_signature(other["id"], other)
         other_topic_key = _topic_key_for_signature(other, other_sig)
         score, signals = _pairwise_score_from_signature(
             issue_id, my_sig, my_topic_key, issue.get("category"),
             other["id"], other_sig, other_topic_key, other.get("category"),
         )
+        if score <= 0:
+            continue
+        other_project_id = other.get("project_id")
+        if other_project_id:
+            current = project_best.get(other_project_id)
+            if current is None or score > current[0]:
+                project_best[other_project_id] = (score, other["id"], signals)
         if score > best_score:
             best_score, best_sibling, best_signals = score, other["id"], signals
+
+    # Bridge detection: 2+ DISTINCT already-established projects each with
+    # their own qualifying member at/above AUTO_MERGE_THRESHOLD means this
+    # item connects two real, separate groups - exactly the case that needs
+    # a real judgment call (which one, both, or neither), not a blind pick
+    # of whichever scored highest.
+    bridged_projects = {
+        pid: (score, sibling_id, signals)
+        for pid, (score, sibling_id, signals) in project_best.items()
+        if score >= AUTO_MERGE_THRESHOLD
+    }
 
     # Confidence spine v1 (2026-08-03) - the verdict below now decides on
     # the DAMPED score, not the raw ordered one. Deferred from v0/v1's own
@@ -835,8 +923,17 @@ def scored_grouping_decision(issue_id: str, issue: dict) -> dict:
         verdict = "suggest"
     else:
         verdict = "no_match"
+    if len(bridged_projects) >= 2:
+        # Overrides whatever the single-best-match verdict above would have
+        # been - this is a structural fact (the item connects two already-
+        # separate, already-established projects), not a confidence
+        # question, and group_issue() needs to route it to real judgment
+        # rather than silently picking whichever one scored highest.
+        verdict = "bridge"
 
     return {"verdict": verdict, "score": round(best_score, 2),
+            "bridged_projects": {pid: {"score": round(s, 2), "sibling_id": sib, "matched_signals": sig}
+                                  for pid, (s, sib, sig) in bridged_projects.items()},
             "sibling_id": best_sibling if verdict != "no_match" else None, "matched_signals": best_signals,
             "context_accuracy": ctx["context_accuracy"], "effective_score": effective_score}
 
@@ -1198,11 +1295,26 @@ def _suggestion_kind_for_scored_signals(matched_signals: list) -> Optional[str]:
     either (same-category-proximity suggestions are config-gated off by
     default) - returns None so the caller treats it as no_match, not a
     new suggestion class the ordered model never had."""
-    if "party" in matched_signals:
-        return "merge" if "topic" in matched_signals else "link"
-    if "company" in matched_signals:
-        return "link"
-    if "topic" in matched_signals:
+    signals = set(matched_signals)
+    if "party" in signals:
+        return "merge" if "topic" in signals else "link"
+    if "company" in signals:
+        # Added task #169/#170 (2026-08-04): company + only topic/sender/
+        # category still stays link, unchanged - the exact false-positive
+        # shape above (two different Ariba reps' different requisitions at
+        # the same company routinely share a topic-key match too, since
+        # neither discriminates the actual transaction). company + one of
+        # the NEW, more precise content signals (amount/attachment/an Ariba
+        # descriptor or requester match) is trustworthy enough to merge -
+        # those don't share that same coincidental-overlap risk.
+        precise = signals & {"ariba_descriptor", "ariba_requester", "amount", "attachment"}
+        return "merge" if precise else "link"
+    if "topic" in signals:
+        return "merge"
+    if signals & {"ariba_descriptor", "ariba_requester", "amount", "attachment"}:
+        # None of these alone reaches AUTO_MERGE_THRESHOLD (see SCORE_
+        # WEIGHTS) - reaching this branch at all means 2+ combined, a real,
+        # specific content match, not a coincidental single weak overlap.
         return "merge"
     return None
 
@@ -1264,6 +1376,28 @@ def group_issue(issue_id: str) -> dict:
         return _finish("auto_merged", signal=signal, sibling_id=sibling_id, project_id=result["project_id"])
 
     if scored_model_enabled:
+        if shadow_scored["verdict"] == "bridge":
+            # Added task #169/#170 (2026-08-04, Marc's direct design ask):
+            # this item connects 2+ already-established, previously-
+            # separate projects - real judgment territory (which one, both
+            # meaning they should merge, or neither), not safe to auto-pick
+            # whichever scored highest. The real LLM judgment call this
+            # deserves isn't built yet (tracked separately) - in the
+            # meantime, surface a suggestion against EVERY bridged
+            # project's best-matching member so a human reviewing the
+            # existing suggestion queue sees the real ambiguity, rather
+            # than this silently collapsing to a single guess or a dropped
+            # no_match.
+            created = []
+            for pid, info in shadow_scored["bridged_projects"].items():
+                kind = _suggestion_kind_for_scored_signals(info["matched_signals"]) or "link"
+                reason = (f"bridge candidate - connects to project {pid} via scored signal "
+                          f"({','.join(info['matched_signals'])}, score={info['score']})")
+                ws.create_project_suggestion(
+                    issue_id_a=issue_id, issue_id_b=info["sibling_id"], reason=reason, suggestion_kind=kind,
+                )
+                created.append({"project_id": pid, "sibling_id": info["sibling_id"]})
+            return _finish("bridge_suggested", signal="scored", count=len(created), bridges=created)
         if shadow_scored["verdict"] == "auto_merge":
             reason_label = f"scored signal ({','.join(shadow_scored['matched_signals'])}, score={shadow_scored['score']})"
             return _merge_or_defer(shadow_scored["sibling_id"], reason_label, "scored")

@@ -168,3 +168,49 @@ def test_is_automated_sender_false_for_a_real_person():
 def test_is_automated_sender_false_for_none_or_empty():
     assert sig.is_automated_sender(None) is False
     assert sig.is_automated_sender("") is False
+
+
+# --- extract_ariba_requisition_fields (task #169/#170, 2026-08-04) ----------
+# Real fields out of an Ariba requisition-approval subject, for the grouping
+# model's Ariba-specific matching signal - is_automated_sender already
+# excludes the notification address itself from party/company matching, so
+# without this, two different Ariba requisitions (or two versions of the
+# same one) look structurally identical to the grouping signature.
+
+def test_extract_ariba_requisition_fields_real_subject():
+    fields = sig.extract_ariba_requisition_fields(
+        "Action required: Approve the Requisition that THOMAS TURNER submitted  - "
+        "PR1193376 - Workday HCM SaaS ($53,702,143.00 USD)"
+    )
+    assert fields == {
+        "requester": "THOMAS TURNER",
+        "pr_number": "PR1193376",
+        "descriptor": "Workday HCM SaaS",
+        "amount": 53702143.0,
+    }
+
+
+def test_extract_ariba_requisition_fields_versioned_pr():
+    fields = sig.extract_ariba_requisition_fields(
+        "Action required: Approve the Requisition that ALICIA MORRIS submitted  - "
+        "PR854779-V4 - Conversational AI ($1,938,100.00 USD)"
+    )
+    assert fields["pr_number"] == "PR854779-V4"
+    assert fields["amount"] == 1938100.0
+
+
+def test_extract_ariba_requisition_fields_none_for_unrelated_subject():
+    assert sig.extract_ariba_requisition_fields("Some unrelated subject with no requisition info") is None
+
+
+def test_extract_ariba_requisition_fields_none_for_empty():
+    assert sig.extract_ariba_requisition_fields("") is None
+    assert sig.extract_ariba_requisition_fields(None) is None
+
+
+def test_is_automated_sender_covers_sap_alert_domain():
+    """Task #169/#170 (2026-08-04, Marc's direct report): SAP's bulk alert
+    feed uses alerts.ondemand.com, a different domain than plain sap.com -
+    a real @sap.com person address must stay a genuine party signal."""
+    assert sig.is_automated_sender("sapcloudsupport@alerts.ondemand.com") is True
+    assert sig.is_automated_sender("real.rep@sap.com") is False

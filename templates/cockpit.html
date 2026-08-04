@@ -3055,16 +3055,18 @@ html[data-theme="dark"]{
   border-radius:var(--lk-r-s);cursor:pointer;text-decoration:none;box-sizing:border-box}
 .pcc-actbtn:hover{background:var(--lk-nested)}
 .pcc-actbtn .ic{width:15px;text-align:center;flex:none;font-size:12px}
-/* Task #112: "Run a skill" picker - same visual weight as the action rail
-   above it (border/surface/radius tokens match .pcc-actbtn), a select+button
-   pair rather than one button per skill so 30+ installed skills don't turn
-   the rail into an unreadable wall of buttons. */
+/* Task #112, moved per-checklist-row task #112-followup (2026-08-04): "Run a
+   skill" picker - same visual weight as the action rail (border/surface/
+   radius tokens match .pcc-actbtn), a select+button pair rather than one
+   button per skill so 30+ installed skills don't turn a row into an
+   unreadable wall of buttons. One of these per checklist row now (see
+   pccCheckRowHtml), not a single issue-level one in the side rail. */
 .pcc-skillpicker-row{display:flex;gap:6px;margin-top:7px}
 .pcc-skillpicker-sel{flex:1;min-width:0;border:1px solid var(--lk-line2);background:var(--lk-surface);
   color:var(--lk-ink);font:700 12px var(--sans);padding:8px 8px;border-radius:var(--lk-r-s);
   box-sizing:border-box}
 .pcc-skillpicker-sel:disabled{color:var(--lk-mut);cursor:default}
-#pccRunSkillBtn{width:auto;flex:none;padding:9px 14px}
+.pcc-row-skillpicker .pcc-actbtn{width:auto;flex:none;padding:9px 14px}
 .pcc-side-block{margin-bottom:22px}
 .pcc-side-hd{display:flex;align-items:center;justify-content:space-between;
   font:700 10px/1 var(--mono);text-transform:uppercase;color:var(--lk-mut2);margin:0 0 8px;letter-spacing:.04em}
@@ -3172,25 +3174,6 @@ html[data-theme="dark"]{
    quiet --lk-line outline the per-worker buttons use. */
 .cp-wake-all-btn{border-color:var(--lk-pri);color:var(--lk-pri);font-weight:800;margin-right:6px}
 .cp-wake-all-btn:hover{background:var(--lk-pri-fill);color:#fff}
-
-/* Task #57 (2026-08-02): "Your next move" strip - deliberately plain. The
-   removed rollup cards (0ffeecc) tried to look important with dollar
-   totals and a colored banner and got the underlying math wrong. This is
-   just the top few already-scored, already-grouped issues (pccRenderNextMove
-   below) - same visual weight as a normal list row, not a bigger claim than
-   the data actually supports. */
-#pccNextMove{margin-bottom:14px;border:1px solid var(--lk-line2);background:var(--lk-surface)}
-.pcc-nextmove-hd{font:800 11px var(--sans);text-transform:uppercase;letter-spacing:.05em;color:var(--lk-mut2);
-  padding:9px 14px 7px;border-bottom:1px solid var(--lk-line2)}
-.pcc-nextmove-rows{display:flex;flex-direction:column}
-.pcc-nextmove-row{display:flex;align-items:baseline;gap:10px;padding:9px 14px;cursor:pointer;
-  border-bottom:1px solid var(--lk-line2)}
-.pcc-nextmove-row:last-child{border-bottom:none}
-.pcc-nextmove-row:hover{background:var(--lk-panel)}
-.pcc-nextmove-title{font:700 13px var(--sans);color:var(--lk-ink);flex:none;max-width:45%;
-  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.pcc-nextmove-reason{font:400 12.5px var(--sans);color:var(--lk-mut2);flex:1;min-width:0;
-  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 /* ── Telemetry page (task #48/#51) - everything scoped under #cp-view-telemetry
    so these fairly generic class names (.pill/.section/etc in the original
@@ -3375,14 +3358,13 @@ html[data-theme="dark"]{
 
     <!-- ════ PCC ADD: Personal Command Center board — real workgraph data ════ -->
     <div id="cp-view-pcc">
-     <!-- Task #57 (Marc's direct report, 2026-08-02): the removed rollup
-          cards (task #124-adjacent, 0ffeecc) tried to distill everything
-          into dollar totals and got the math wrong (a real ~$6.3M double-
-          count). This is a different shape on purpose - no new aggregate
-          math, just the top few already-scored, already-grouped issues
-          surfaced above the flat list, so 249 open items don't all read as
-          equally Marc's. See pccRenderNextMove() below. -->
-     <div id="pccNextMove" style="display:none"></div>
+     <!-- Task #165 (Marc's direct report, 2026-08-04): the "Your next move"
+          strip (task #57) was removed - it duplicated the Inbox's own default
+          sort, which is already priority_score DESC (see pccSortMode below),
+          so it just re-showed the top of the list sitting right below it.
+          The Inbox's existing priority sort IS the "one setting prioritized by
+          what Jasper thinks you should work on next" Marc asked for; no
+          separate module needed on top of it. -->
      <div class="cp-home-split" id="cpHomeSplit">
       <!-- Back Office moved 2026-07-28 (Tia): now lives inside the ambient chat
            drawer (click the dino icon, top of the masthead) instead of a fixed
@@ -6270,7 +6252,7 @@ html[data-theme="dark"]{
       const d = await r.json();
       pccProjectNameById = {};
       pccProjectStatusById = {};
-      (d.projects || []).forEach(p => { pccProjectNameById[p.id] = p.name; pccProjectStatusById[p.id] = p.status; });
+      (d.projects || []).forEach(p => { pccProjectNameById[p.id] = p.display_title || p.name; pccProjectStatusById[p.id] = p.status; });
     } catch (e) { /* search/hiding just won't reflect project changes until the next successful load */ }
   }
   // A dismissed/archived project's own member issues keep their own
@@ -6288,6 +6270,19 @@ html[data-theme="dark"]{
   let pccLane = "all";
   let pccSortMode = "priority";     // "priority" (server order) | "stale" (longest untouched first)
   let pccSelectedId = null;
+  // Task #166 fix (2026-08-04, Marc's direct report): pccSelectIssue always
+  // fires a background re-fetch right after the initial render (line ~7129),
+  // and pccRenderDetail used to unconditionally reset the detail tab bar back
+  // to "Overview" on EVERY call - including this immediate same-issue re-
+  // render, not just a genuine switch to a different issue. Since that
+  // background refresh lands within a fraction of a second, clicking into
+  // "Thread & Web"/"Project" and having it silently snap back to Overview
+  // (discarding whatever had just loaded) was the normal case, not an edge
+  // case - which reads as "these tabs are always empty" even though the data
+  // itself is fine. These two track the tab across same-issue re-renders so
+  // it can be restored instead of reset.
+  let pccLastRenderedIssueId = null;
+  let pccLastActiveDetailTab = "overview";
   let pccInited = false;
   let pccSearchQuery = "";
   let pccProjectNameById = {};      // project_id -> name (search needs it - see pccLoadProjectNames)
@@ -6385,54 +6380,9 @@ html[data-theme="dark"]{
       } catch (e) { /* lane bucketing just skips this one */ }
     }));
     pccUpdateCounts();
-    pccRenderNextMove();
     pccRenderList();
     pccUpdateGreeting();
     if (pccSelectedId && pccDetailCache[pccSelectedId]) pccRenderDetail(pccDetailCache[pccSelectedId]);
-  }
-
-  // Task #57 (Marc's direct report + design review, 2026-08-02): "Your next
-  // move" - the top few items by the SAME real priority_score/nba_reason
-  // workgraph_nba.py already computes, through the SAME project-collapsing
-  // pccGroupByProject already does (task #53) - reused, not reinvented, so
-  // a project with 5 messages shows as ONE recommended action here too,
-  // never 5. No new aggregate math, no dollar totals - the removed rollup
-  // cards' exact failure mode. Deliberately called BEFORE pccRenderList()
-  // below - pccGroupByProject has a real side effect (it rebuilds the
-  // shared pccProjectGroupMembers map used by the Inbox list's own click
-  // routing), so pccRenderList's own call needs to run LAST and "win" for
-  // the currently-active lane. This function never reads that shared map -
-  // its own click handlers close directly over the group objects it just
-  // built locally, so the overwrite that happens right after doesn't matter.
-  function pccRenderNextMove() {
-    const el = document.getElementById("pccNextMove");
-    if (!el) return;
-    const open = pccIssues.filter(i => i.state === "active" || i.state === "waiting" || i.state === "blocked");
-    if (!open.length) { el.style.display = "none"; el.innerHTML = ""; return; }
-    const top = pccGroupByProject(open).slice()
-      .sort((a, b) => (b.priority_score || 0) - (a.priority_score || 0))
-      .slice(0, 3);
-    el.style.display = "";
-    el.innerHTML = `
-      <div class="pcc-nextmove-hd">Your next move</div>
-      <div class="pcc-nextmove-rows">
-        ${top.map((iss, idx) => `
-          <div class="pcc-nextmove-row" data-idx="${idx}">
-            <span class="pcc-nextmove-title">${pccEsc(iss.display_title || iss.title)}</span>
-            <span class="pcc-nextmove-reason">${pccEsc(iss.nba_reason || iss.preview || "")}</span>
-          </div>`).join("")}
-      </div>`;
-    el.querySelectorAll(".pcc-nextmove-row").forEach(row => {
-      const iss = top[Number(row.getAttribute("data-idx"))];
-      row.addEventListener("click", () => {
-        if (iss.__isProjectGroup) {
-          if (window.pjShowView) window.pjShowView();
-          if (window.pjSelectProject) window.pjSelectProject(iss.project_id);
-        } else {
-          pccSelectIssue(iss.id);
-        }
-      });
-    });
   }
 
   // --- task #65: Value-at-risk rollup banner -------------------------------
@@ -7199,6 +7149,11 @@ html[data-theme="dark"]{
 
   function pccRenderDetail(d) {
     const issue = d.issue, evidence = d.evidence || [], pending = d.pending_actions || [];
+    // Task #166: restore the tab the user was on if this is a re-render of the
+    // SAME issue (the background refresh in pccSelectIssue), reset to Overview
+    // only on a genuine switch to a different issue.
+    const pccRestoreTab = (pccLastRenderedIssueId === issue.id) ? pccLastActiveDetailTab : "overview";
+    pccLastRenderedIssueId = issue.id;
     const tasks = d.tasks || [], stateHistory = d.state_history || [];
     const parties = d.parties || [], project = d.project || null;
     const asks = d.asks || [], decisions = d.decisions || [], keyFacts = d.key_facts || [];
@@ -7446,6 +7401,10 @@ html[data-theme="dark"]{
           ${rationaleHtml}
           ${attachHtml}
           ${linkHtml ? `<div class="pcc-check-link">${linkHtml}</div>` : '<div class="pcc-nolink">no deep link yet</div>'}
+          <div class="pcc-skillpicker-row pcc-row-skillpicker" data-row-skillpicker>
+            <select class="pcc-skillpicker-sel" title="Run any installed skill against this issue"></select>
+            <button class="pcc-actbtn" type="button">Run skill</button>
+          </div>
         </div>
       </div>`;
     };
@@ -7671,9 +7630,23 @@ html[data-theme="dark"]{
     // Visual-fidelity pass (2026-08-02): Dismiss + Open email/Draft reply/
     // Draft forward were in the mockup's Actions rail but got dropped
     // during the port - restoring them here as real .pcc-actbtn rows.
-    // Dismiss is real (task #44). Review contract/Summarize thread/Archive
-    // as noise moved here from the now-removed kebab menu (Marc's direct
-    // call, 2026-08-02) - same data-gen/data-act handlers, just relocated.
+    // Dismiss is real (task #44). Archive as noise moved here from the
+    // now-removed kebab menu (Marc's direct call, 2026-08-02) - same
+    // data-act handler, just relocated.
+    // Task #112-followup (2026-08-04, Marc's direct report): "Review
+    // contract"/"Summarize thread" and the "run any installed skill" picker
+    // used to sit here too, unconditionally, on every single issue - Marc's
+    // call: none of these belong at the issue level, they belong on the
+    // specific checklist item they're actually relevant to, and only when
+    // they're actually relevant. workgraph_recommend.py already computes
+    // exactly that (contract_review/summarize/audit_invoice as per-evidence-
+    // row candidates, gated on real content matches - see candidate_actions
+    // in workgraph_nba.py) and it already flows into each checklist row's
+    // own action buttons via raw_item_id scoping - these three were a
+    // second, ungated, always-visible copy of the same capability. Removed;
+    // the "run any skill Jasper didn't already suggest" escape hatch task
+    // #112 was built for moved to a per-row control (see pccCheckRowHtml)
+    // instead of one ambiguous issue-level button.
     // The mail actions reuse the SAME deep-link data already wired for
     // Progress rows (pccDeepLinkHtml's data-open-action/data-raw-item-id),
     // taken from the first evidence item that actually has any - never
@@ -7692,13 +7665,7 @@ html[data-theme="dark"]{
           <button class="pcc-actbtn" type="button" data-act="snooze"><span class="ic">${PCC_BELL_SVG}</span>Snooze 3d</button>
           <button class="pcc-actbtn" type="button" style="border-color:var(--lk-danger);color:var(--lk-danger)" data-act="dismiss"><span class="ic">&#10005;</span>Dismiss</button>
           ${primaryMailActionsHtml}
-          <button class="pcc-actbtn" type="button" data-gen="review_contract">Review contract</button>
-          <button class="pcc-actbtn" type="button" data-gen="summarize">Summarize thread</button>
           <button class="pcc-actbtn" type="button" data-act="archive">Archive as noise</button>
-        </div>
-        <div class="pcc-skillpicker-row">
-          <select id="pccSkillSelect" class="pcc-skillpicker-sel" title="Run any installed skill against this issue"></select>
-          <button class="pcc-actbtn" type="button" id="pccRunSkillBtn">Run skill</button>
         </div>
       </div>`;
 
@@ -7833,15 +7800,19 @@ html[data-theme="dark"]{
     // task #124 follow-on: tab switching + lazy-load for Thread & Web/Project
     // (both need a separate project-scoped fetch - never fetched up front,
     // only if the tab is actually opened). webLoaded/projLoaded are local to
-    // this render call, so switching issues always resets them correctly.
+    // this render call (a rebuilt DOM has no data in the panes yet regardless),
+    // but WHICH tab is showing now persists across a same-issue re-render via
+    // pccLastActiveDetailTab (task #166) - see pccRestoreTab above.
     let webLoaded = false, projLoaded = false;
     function pccSwitchDetailTab(name) {
+      pccLastActiveDetailTab = name;
       body.querySelectorAll(".pcc-detail-subtab").forEach(b => b.classList.toggle("on", b.getAttribute("data-sub") === name));
       body.querySelectorAll(".pcc-detail-subpane").forEach(p => p.classList.toggle("on", p.getAttribute("data-pane") === name));
       if (name === "web" && !webLoaded && project) { webLoaded = true; pccRenderThreadWeb(document.getElementById("pccWebPane"), project); }
       if (name === "project" && !projLoaded && project) { projLoaded = true; pccRenderProjectTab(document.getElementById("pccProjectPane"), project, issue.id); }
     }
     body.querySelectorAll(".pcc-detail-subtab").forEach(btn => btn.addEventListener("click", () => pccSwitchDetailTab(btn.getAttribute("data-sub"))));
+    if (pccRestoreTab !== "overview") pccSwitchDetailTab(pccRestoreTab);
 
     // Task add/toggle listeners removed with the Tasks zone - the elements they
     // bound to no longer render, and getElementById().addEventListener would
@@ -7849,16 +7820,12 @@ html[data-theme="dark"]{
     body.querySelectorAll("[data-act]").forEach(btn => btn.addEventListener("click", () => pccRunDeterministic(issue.id, btn.getAttribute("data-act"))));
     body.querySelectorAll("[data-gen]").forEach(btn => btn.addEventListener("click", () => pccRunGenerative(issue.id, btn.getAttribute("data-gen"), btn.getAttribute("data-instructions"))));
     pccWireOpenActionButtons(body);
-    // Task #112: the select's options are populated from the cached catalog
-    // (fetched once at boot), not re-fetched per issue - re-applied here
-    // because sideActionsHtml's innerHTML, including the empty <select>,
-    // was just replaced wholesale by this render.
-    pccRefreshSkillPicker();
-    const runSkillBtn = document.getElementById("pccRunSkillBtn");
-    if (runSkillBtn) runSkillBtn.addEventListener("click", () => pccRunSelectedSkill(issue.id));
-    // Kebab menu removed (2026-08-02, Marc's direct call) - its 3 actions
-    // (Review contract/Summarize thread/Archive as noise) moved into the
-    // sidebar Actions rail above instead of being deleted.
+    // Task #112-followup (2026-08-04): one picker per checklist row now,
+    // not one issue-level picker (see the removal comment above
+    // sideActionsHtml) - options come from the cached catalog (fetched once
+    // at boot), re-applied per row here since this render just replaced
+    // every row's HTML, including each empty <select>, wholesale.
+    body.querySelectorAll("[data-row-skillpicker]").forEach(row => pccWireRowSkillPicker(row, issue.id));
   }
 
   // Task #62: extracted so the Project Detail ("pj") scope's own checklist
@@ -8083,11 +8050,20 @@ html[data-theme="dark"]{
     pccSelectIssue(issueId);  // re-render so the "pending" row shows up
   }
 
-  // --- Run a skill (task #112, 2026-08-04) --------------------------------
-  // Marc's explicit ask: the system should be able to run ANY registered
-  // skill on user confirmation/request, not just the couple with their own
-  // dedicated button (review_contract/summarize above). Reuses the exact
-  // same dispatch path (pccRunGenerative -> POST /api/cockpit/actions) - a
+  // --- Run a skill (task #112, 2026-08-04; moved per-row task #112-followup,
+  // 2026-08-04) --------------------------------------------------------------
+  // Marc's explicit ask (#112): the system should be able to run ANY
+  // registered skill on user confirmation/request, not just the ones with
+  // their own dedicated recommendation (contract_review/summarize/
+  // audit_invoice, computed with real applicability logic in workgraph_
+  // recommend.py). This is the deliberate manual-override escape hatch for
+  // when Marc judges a skill relevant and Jasper's own detection didn't
+  // catch it - so, unlike those, it has no applicability gate of its own.
+  // Marc's follow-up ask: it shouldn't be one ambiguous issue-level button,
+  // it should be attached to the specific checklist item he wants to run it
+  // against - one picker per row (pccCheckRowHtml) instead of one picker for
+  // the whole issue. Reuses the exact same dispatch path (pccRunGenerative
+  // -> POST /api/cockpit/actions) regardless of which row triggered it - a
   // skill's own registry key IS a valid action_kind already (skills_
   // registry.get_skill_for_action keys off it directly), so no new backend
   // route was needed for the dispatch itself, only GET /api/skills to
@@ -8102,10 +8078,12 @@ html[data-theme="dark"]{
     } catch (e) {
       console.error("pccLoadSkills failed:", e);
     }
-    pccRefreshSkillPicker();
+    // Re-populate every row picker already on screen (a boot-time catalog
+    // fetch can resolve after the first render) - harmless no-op if none yet.
+    document.querySelectorAll("[data-row-skillpicker]").forEach(row => pccFillRowSkillPicker(row));
   }
-  function pccRefreshSkillPicker() {
-    const sel = document.getElementById("pccSkillSelect");
+  function pccFillRowSkillPicker(row) {
+    const sel = row.querySelector(".pcc-skillpicker-sel");
     if (!sel) return;
     if (!pccSkillsCatalog.length) { sel.innerHTML = `<option value="">No skills installed</option>`; sel.disabled = true; return; }
     sel.disabled = false;
@@ -8113,15 +8091,20 @@ html[data-theme="dark"]{
       `<option value="${pccEsc(s.action_kind)}" title="${pccEsc(s.produces || "")}">${pccEsc(s.display_name || s.action_kind)}</option>`
     ).join("");
   }
-  function pccRunSelectedSkill(issueId) {
-    const sel = document.getElementById("pccSkillSelect");
-    const actionKind = sel && sel.value;
-    if (!actionKind) return;
-    // The select itself, plus this being a deliberate separate click after
-    // choosing from the list, IS the confirmation - same "the human click
-    // that reached this route is the approval" posture server_lean.py's
-    // route already documents for every other generative action here.
-    pccRunGenerative(issueId, actionKind, null);
+  function pccWireRowSkillPicker(row, issueId) {
+    pccFillRowSkillPicker(row);
+    const sel = row.querySelector(".pcc-skillpicker-sel");
+    const btn = row.querySelector(".pcc-actbtn");
+    if (!btn) return;
+    btn.addEventListener("click", () => {
+      const actionKind = sel && sel.value;
+      if (!actionKind) return;
+      // The select itself, plus this being a deliberate separate click after
+      // choosing from the list, IS the confirmation - same "the human click
+      // that reached this route is the approval" posture server_lean.py's
+      // route already documents for every other generative action here.
+      pccRunGenerative(issueId, actionKind, null);
+    });
   }
 
   // --- page-level view toggle (PCC · Projects) -------------------
@@ -8881,16 +8864,21 @@ html[data-theme="dark"]{
     // Fixed 2026-07-31 (Marc's direct report): project id (e.g. "proj-013")
     // was never shown as text anywhere, and there was no way to search by
     // it - it only ever existed as an internal click-routing attribute.
+    // Task #167/#168 (2026-08-04, Marc's direct report): display_title
+    // (backend now prefers the deterministic/curator-derived title over the
+    // raw name, see workgraph_store.list_projects) - falls back to p.name
+    // for the rare project neither ever got a derived_title for.
     const visible = pjSearchQuery
-      ? pjProjects.filter(p => `${p.id} ${p.name} ${p.category || ""}`.toLowerCase().includes(pjSearchQuery))
+      ? pjProjects.filter(p => `${p.id} ${p.display_title || p.name} ${p.category || ""}`.toLowerCase().includes(pjSearchQuery))
       : pjProjects;
     if (!visible.length) { el.innerHTML = `<div class="pcc-empty">${pjProjects.length ? "No projects match." : "No projects yet."}</div>`; return; }
     el.innerHTML = visible.map(p => {
       const active = p.id === pjSelectedProjectId ? " is-active" : "";
+      const title = p.display_title || p.name;
       return `<button type="button" class="mqwrow${active}" data-id="${pjEsc(p.id)}">
         <div class="mqwic issue">${PJ_ICON_DOT}</div>
         <div class="mqwmid">
-          <div class="mqwt" title="${pjEsc(p.name)}">${pjEsc(p.name)}</div>
+          <div class="mqwt" title="${pjEsc(title)}">${pjEsc(title)}</div>
           <div class="mqwmeta"><span class="pcc-deadline-badge" style="background:var(--bg);color:var(--mut2)">${pjEsc(p.id)}</span> ${pjEsc(p.category || "other")} · ${pjEsc(p.status)}</div>
         </div>
       </button>`;

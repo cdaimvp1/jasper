@@ -2590,6 +2590,24 @@ def list_issue_ids_missing_derived_title() -> list[str]:
     return [r["id"] for r in rows]
 
 
+def list_project_ids_missing_derived_title() -> list[str]:
+    """Project counterpart to list_issue_ids_missing_derived_title above
+    (task #167/#168, 2026-08-04) - live-DB check found 0 of 52 projects had
+    ever gotten a derived_title, so every project's name stayed whatever
+    workgraph_projects._project_name_for picked at creation, forever."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute("""
+                SELECT p.id FROM projects p
+                LEFT JOIN synthesis s ON s.entity_type = 'project' AND s.entity_id = p.id
+                WHERE s.entity_id IS NULL OR s.derived_title IS NULL OR s.derived_title = ''
+            """).fetchall()
+        finally:
+            conn.close()
+    return [r["id"] for r in rows]
+
+
 def get_last_refresh_ts() -> Optional[float]:
     """Best-effort 'how fresh is what's on screen' - the most recent
     issues.updated_at across the whole graph. Simpler and more reliably
@@ -4309,20 +4327,32 @@ def set_project_status(project_id: str, status: str) -> None:
 
 
 def list_projects(status: Optional[list[str]] = None) -> list[dict]:
-    sql = "SELECT * FROM projects"
+    """`display_title` prefers the deterministic/curator-derived title over the
+    raw `name` (task #167/#168, 2026-08-04) - list_issues (line ~2624) already
+    did this; list_projects never got the same treatment, so a project's list
+    row stayed the raw, boilerplate-heavy subject line _project_name_for fell
+    back to at creation even after a better title existed in synthesis."""
+    sql = """SELECT projects.*, synthesis.derived_title AS synth_derived_title
+             FROM projects
+             LEFT JOIN synthesis ON synthesis.entity_type = 'project' AND synthesis.entity_id = projects.id"""
     args: list[Any] = []
     if status:
         placeholders = ", ".join("?" for _ in status)
-        sql += f" WHERE status IN ({placeholders})"
+        sql += f" WHERE projects.status IN ({placeholders})"
         args.extend(status)
-    sql += " ORDER BY updated_at DESC"
+    sql += " ORDER BY projects.updated_at DESC"
     with _lock:
         conn = _connect()
         try:
             rows = conn.execute(sql, args).fetchall()
         finally:
             conn.close()
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["display_title"] = d.get("synth_derived_title") or d["name"]
+        out.append(d)
+    return out
 
 
 def mark_project_deep_dived(project_id: str, note: str) -> None:

@@ -486,17 +486,77 @@ def compute_deterministic_title(issue_id: str) -> Optional[str]:
     if not issue:
         return None
     parties = ws.list_parties_for_issue(issue_id)
-    internal = [p for p in parties if p.get("affiliation") == "internal" and p.get("display_name")]
+    return _compute_deterministic_title_from_parties(parties, issue.get("title") or "")
+
+
+def compute_deterministic_project_title(project_id: str) -> Optional[str]:
+    """Project counterpart to compute_deterministic_title above (task #167/
+    #168, 2026-08-04, Marc's direct report). The issue-side function got three
+    real quality fixes (boilerplate strip, redundant-name skip, Ariba-
+    submitter fallback) that never carried over to projects - projects.name
+    is set once at creation by workgraph_projects._project_name_for (the
+    ORIGINAL, unimproved logic) and then never revisited, so every Ariba
+    requisition-approval project (an automated sender, so its own external-
+    party check always misses) permanently keeps its raw, boilerplate-heavy
+    subject as its name forever. That also turns out to be the real driver
+    behind Marc's separate "why is everything a PR" perception (task #167) -
+    the actual category split isn't PR-dominated, but every Ariba-sourced
+    project is stuck showing the same repetitive "Action required: Approve
+    the Requisition that ... submitted" boilerplate, which reads as "PR" at
+    a glance regardless of its real category.
+
+    Aggregates parties across every member issue (not just one) since a
+    project's real external/internal contacts can be split across its
+    issues, then reuses the exact same topic/party logic as the issue
+    version via the shared helper. Topic comes from the earliest-created
+    member issue's title - the same one workgraph_projects._project_name_for
+    already treats as the project's representative subject."""
+    project = ws.get_project(project_id)
+    if not project:
+        return None
+    member_issues = ws.list_issues_for_project(project_id)
+    if not member_issues:
+        return None
+    parties = []
+    for iss in member_issues:
+        parties.extend(ws.list_parties_for_issue(iss["id"]))
+    seed = min(member_issues, key=lambda i: i.get("created_at") or 0)
+    return _compute_deterministic_title_from_parties(parties, seed.get("title") or "")
+
+
+def _compute_deterministic_title_from_parties(parties: list, raw_title: str) -> Optional[str]:
+    """Shared party-resolution + topic-cleanup core of compute_deterministic_
+    title/compute_deterministic_project_title (split out task #167/#168,
+    2026-08-04, so the project path gets the exact same boilerplate-strip/
+    redundant-name/Ariba-submitter-fallback treatment instead of a second,
+    inevitably-drifting copy).
+
+    Sorts both lists by first_seen_ts ascending before picking [0] (added
+    task #167/#168, 2026-08-04, checking real live output against
+    multi-issue projects) - the project path aggregates parties across
+    every member issue, so an unordered pick here has real multi-company
+    exposure the original single-issue version didn't (confirmed live:
+    proj-046 has both a Nebius and a Databricks contact across its two
+    issues - an unordered [0] could pick either, depending on unspecified
+    JOIN/dict-insertion order). Same real, stable tie-break workgraph_
+    projects._project_name_for already uses for the same reason."""
+    internal = sorted(
+        [p for p in parties if p.get("affiliation") == "internal" and p.get("display_name")],
+        key=lambda p: p.get("first_seen_ts") or 0,
+    )
     # A no-reply/system sender's domain-derived "company" (e.g. 'Ansmtp' from
     # no-reply@ansmtp.ariba.com) isn't a real supplier name - skip those.
-    external = [p for p in parties if p.get("affiliation") == "external"
-                and not workgraph_signals.is_automated_sender(p.get("primary_email") or "")]
+    external = sorted(
+        [p for p in parties if p.get("affiliation") == "external"
+         and not workgraph_signals.is_automated_sender(p.get("primary_email") or "")],
+        key=lambda p: p.get("first_seen_ts") or 0,
+    )
     requestor = internal[0]["display_name"] if internal else None
     supplier = None
     if external:
         supplier = external[0].get("company") or external[0].get("display_name")
 
-    topic = strip_subject_prefix(issue.get("title") or "")
+    topic = strip_subject_prefix(raw_title)
     ariba_match = _ARIBA_REQUISITION_BOILERPLATE_RE.match(topic)
     if ariba_match and not requestor:
         requestor = _titlecase_name(ariba_match.group("submitter"))
@@ -527,7 +587,14 @@ def backfill_derived_titles() -> dict:
     first classification, so an issue compute_deterministic_title
     couldn't title on cycle 1 may become titleable on a later cycle.
     Never overwrites an existing title (curator's own, or a prior
-    deterministic one) - only fills a genuine gap."""
+    deterministic one) - only fills a genuine gap.
+
+    Extended task #167/#168 (2026-08-04) to also cover projects - live-DB
+    check found 0 of 52 projects had ever gotten a derived_title (curator's
+    synthesis wake writes real summaries for projects but wasn't reliably
+    supplying derived_title on those writes), which is why every project's
+    list-row name was still the raw, boilerplate-heavy subject line Marc
+    kept seeing. Same never-overwrite guarantee applies."""
     issue_ids = ws.list_issue_ids_missing_derived_title()
     updated = 0
     for issue_id in issue_ids:
@@ -535,7 +602,17 @@ def backfill_derived_titles() -> dict:
         if title:
             ws.set_derived_title("issue", issue_id, title)
             updated += 1
-    return {"checked": len(issue_ids), "updated": updated}
+    project_ids = ws.list_project_ids_missing_derived_title()
+    projects_updated = 0
+    for project_id in project_ids:
+        title = compute_deterministic_project_title(project_id)
+        if title:
+            ws.set_derived_title("project", project_id, title)
+            projects_updated += 1
+    return {
+        "checked": len(issue_ids), "updated": updated,
+        "projects_checked": len(project_ids), "projects_updated": projects_updated,
+    }
 
 
 def derive_target_state(issue_id: str) -> str:

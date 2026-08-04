@@ -1177,6 +1177,92 @@ def test_backfill_extracts_ariba_submitter_name_when_no_internal_party(ws_db):
     assert "Action required" not in title
 
 
+# --- project-level derived titles (task #167/#168, 2026-08-04) --------------
+# Live-DB check found 0 of 52 projects had ever gotten a derived_title -
+# compute_deterministic_title's boilerplate-strip/redundant-name/Ariba-
+# submitter fixes above never carried over to projects, so projects.name
+# stayed whatever _project_name_for picked at creation, forever. This also
+# turned out to be the real driver behind Marc's separate "why is everything
+# a PR" report - see compute_deterministic_project_title's own docstring.
+
+def _project_with_issue(ws_db, title, *, internal_name=None, external_company=None):
+    pid = ws_db.create_project_with_new_id(name=title[:50], category="other")
+    iid = _issue_with_parties(ws_db, title, internal_name=internal_name, external_company=external_company)
+    ws_db.assign_issue_to_project(iid, pid)
+    return pid, iid
+
+
+def test_missing_derived_title_finds_project_with_no_synthesis_row(ws_db):
+    pid = ws_db.create_project_with_new_id(name="Project", category="other")
+    assert pid in ws_db.list_project_ids_missing_derived_title()
+
+
+def test_missing_derived_title_excludes_project_with_a_real_title(ws_db):
+    pid = ws_db.create_project_with_new_id(name="Project", category="other")
+    ws_db.set_derived_title("project", pid, "Real Title")
+    assert pid not in ws_db.list_project_ids_missing_derived_title()
+
+
+def test_backfill_sets_project_title_from_member_issue_parties(ws_db):
+    pid, iid = _project_with_issue(ws_db, "RE: pricing", internal_name="Jane Doe", external_company="UneeQ")
+    result = wc.backfill_derived_titles()
+    assert result["projects_updated"] == 1
+    synth = ws_db.get_synthesis("project", pid)
+    assert synth["derived_title"] == "Jane Doe - UneeQ - pricing"
+
+
+def test_backfill_project_skips_project_with_no_member_issues(ws_db):
+    pid = ws_db.create_project_with_new_id(name="Empty project", category="other")
+    result = wc.backfill_derived_titles()
+    assert result["projects_updated"] == 0
+    assert ws_db.get_synthesis("project", pid) is None
+
+
+def test_backfill_project_strips_ariba_boilerplate_same_as_issue_path(ws_db):
+    """The exact bug that made Marc's inbox read as PR-dominated: an Ariba
+    requisition project kept its raw boilerplate name forever because this
+    path never got the issue-side fix - confirms the project path reuses
+    the SAME cleanup, not a second, drifted copy of it."""
+    pid, iid = _project_with_issue(
+        ws_db,
+        "Action required: Approve the Requisition that ALICIA MORRIS submitted  - "
+        "PR854779-V4 - Conversational AI ($1,938,100.00 USD)",
+        external_company="Ariba",
+    )
+    result = wc.backfill_derived_titles()
+    assert result["projects_updated"] == 1
+    title = ws_db.get_synthesis("project", pid)["derived_title"]
+    assert title.startswith("Alicia Morris")
+    assert "Action required" not in title
+
+
+def test_backfill_project_never_overwrites_an_existing_title(ws_db):
+    pid, iid = _project_with_issue(ws_db, "RE: pricing", internal_name="Jane Doe", external_company="UneeQ")
+    ws_db.set_derived_title("project", pid, "Curator's own real title")
+
+    result = wc.backfill_derived_titles()
+
+    assert result["projects_checked"] == 0
+    assert ws_db.get_synthesis("project", pid)["derived_title"] == "Curator's own real title"
+
+
+def test_backfill_project_aggregates_parties_across_member_issues(ws_db):
+    """A project's real contacts can be split across its issues - the
+    project path must look at every member issue's parties, not just one."""
+    pid = ws_db.create_project_with_new_id(name="Multi-issue project", category="other")
+    iid1 = _issue_with_parties(ws_db, "First thread", internal_name="Jane Doe")
+    iid2 = _issue_with_parties(ws_db, "Second thread", external_company="UneeQ")
+    ws_db.assign_issue_to_project(iid1, pid)
+    ws_db.assign_issue_to_project(iid2, pid)
+
+    result = wc.backfill_derived_titles()
+
+    assert result["projects_updated"] == 1
+    title = ws_db.get_synthesis("project", pid)["derived_title"]
+    assert "Jane Doe" in title
+    assert "UneeQ" in title
+
+
 def test_titlecase_name_preserves_mc_surnames():
     assert wc._titlecase_name("CORRINA MCCORKLE") == "Corrina McCorkle"
     assert wc._titlecase_name("MARY MASON") == "Mary Mason"

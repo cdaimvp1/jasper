@@ -360,6 +360,60 @@ def test_sweep_unread_also_persists_entry_id_and_body(ws_db, isolated_paths, mon
     assert not staged_dir.exists()
 
 
+# --- task #149: stale local Outlook cache diagnostic ----------------------
+
+def test_cold_start_diagnostic_persisted_true(ws_db, isolated_paths, monkeypatch):
+    def fake_run(*a, **kw):
+        return _FakeCompletedProcess("", stderr="JASPER_DIAG: outlook_was_running=False\n")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = oci.run(folder="Careful")
+
+    assert result["outlook_cold_started"] is True
+    assert ws_db.get_cursor("outlook_mail", "last_scan_outlook_cold_started") == "true"
+    assert ws_db.get_cursor("outlook_mail", "consecutive_cold_starts") == "1"
+
+
+def test_cold_start_diagnostic_persisted_false_resets_streak(ws_db, isolated_paths, monkeypatch):
+    ws_db.set_cursor("outlook_mail", "consecutive_cold_starts", "2")
+
+    def fake_run(*a, **kw):
+        return _FakeCompletedProcess("", stderr="JASPER_DIAG: outlook_was_running=True\n")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = oci.run(folder="Careful")
+
+    assert result["outlook_cold_started"] is False
+    assert ws_db.get_cursor("outlook_mail", "consecutive_cold_starts") == "0"
+
+
+def test_cold_start_streak_increments_across_runs(ws_db, isolated_paths, monkeypatch):
+    def fake_run(*a, **kw):
+        return _FakeCompletedProcess("", stderr="JASPER_DIAG: outlook_was_running=False\n")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    oci.run(folder="Careful")
+    oci.run(folder="Careful")
+    result = oci.run(folder="Careful")
+
+    assert result["outlook_cold_started"] is True
+    assert ws_db.get_cursor("outlook_mail", "consecutive_cold_starts") == "3"
+
+
+def test_missing_diagnostic_line_leaves_cursor_untouched(ws_db, isolated_paths, monkeypatch):
+    """No JASPER_DIAG line at all (e.g. an older outlook_scan.ps1, or a
+    catastrophic COM failure before the diagnostic could even print) must
+    not crash the run or write a misleading cursor value."""
+    def fake_run(*a, **kw):
+        return _FakeCompletedProcess("", stderr="some unrelated stderr text\n")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = oci.run(folder="Careful")
+
+    assert result["outlook_cold_started"] is None
+    assert ws_db.get_cursor("outlook_mail", "last_scan_outlook_cold_started") is None
+
+
 def test_schema_migration_entry_id_column_idempotent(ws_db):
     """init_workgraph()'s ALTER TABLE ADD COLUMN entry_id must be safe to run
     against an already-migrated DB (every real wake calls init_workgraph()

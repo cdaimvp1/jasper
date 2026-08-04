@@ -247,6 +247,45 @@ def test_suggestion_queue_empty_is_ok_with_no_age(ws_db):
     assert result["oldest_pending_age_hours"] is None
 
 
+# --- check_outlook_cache_freshness (task #149) ----------------------------
+
+def test_outlook_cache_freshness_ok_with_no_prior_run(ws_db):
+    result = hc.check_outlook_cache_freshness()
+    assert result["ok"] is True
+    assert result["detail"] == "no ingestion run recorded yet"
+
+
+def test_outlook_cache_freshness_ok_on_a_single_cold_start(ws_db):
+    ws_db.set_cursor("outlook_mail", "last_scan_outlook_cold_started", "true")
+    ws_db.set_cursor("outlook_mail", "consecutive_cold_starts", "1")
+
+    result = hc.check_outlook_cache_freshness()
+
+    assert result["ok"] is True
+    assert result["last_scan_cold_started"] is True
+    assert result["consecutive_cold_starts"] == 1
+
+
+def test_outlook_cache_freshness_flags_a_real_streak(ws_db):
+    ws_db.set_cursor("outlook_mail", "last_scan_outlook_cold_started", "true")
+    ws_db.set_cursor("outlook_mail", "consecutive_cold_starts", "3")
+
+    result = hc.check_outlook_cache_freshness()
+
+    assert result["ok"] is False
+    assert result["consecutive_cold_starts"] == 3
+
+
+def test_outlook_cache_freshness_ok_when_already_running(ws_db):
+    ws_db.set_cursor("outlook_mail", "last_scan_outlook_cold_started", "false")
+    ws_db.set_cursor("outlook_mail", "consecutive_cold_starts", "0")
+
+    result = hc.check_outlook_cache_freshness()
+
+    assert result["ok"] is True
+    assert result["last_scan_cold_started"] is False
+
+
 def test_daily_gate_runs_once_per_day(ws_db):
     struct = time.localtime()
     now = time.mktime((struct.tm_year, struct.tm_mon, struct.tm_mday, 12, 0, 0, 0, 0, -1))

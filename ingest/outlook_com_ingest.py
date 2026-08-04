@@ -184,6 +184,33 @@ def run(folder: str = "Careful", max_items: int = 500) -> dict:
     # alongside the salvaged counts instead of in place of them.
     had_error = proc.returncode not in (0,)
 
+    # Task #149 (stale local Outlook cache blocking ingestion): outlook_
+    # scan.ps1 always emits this diagnostic to stderr, regardless of exit
+    # code - checked here unconditionally (stderr used to be read only on
+    # error, discarding this on every normal run). cold_started=True means
+    # THIS scan's own COM connection is what launched Outlook - its local
+    # Cached Exchange Mode store had no chance to sync before the scan ran,
+    # so an empty/thin result from this specific run should be treated as
+    # "possibly stale," not "confirmed no new mail." Persisted via the same
+    # generic (source, cursor_key) store the forward cursor itself already
+    # uses - deliberately reused rather than a new table for one flag.
+    cold_started = None
+    for line in proc.stderr.splitlines():
+        if line.startswith("JASPER_DIAG: outlook_was_running="):
+            cold_started = line.rsplit("=", 1)[1].strip().lower() != "true"
+            break
+    if cold_started is not None:
+        ws.set_cursor(_SOURCE, "last_scan_outlook_cold_started", "true" if cold_started else "false")
+        # Consecutive-cold-start counter (not a one-shot flag): a single
+        # cold start is normal (Outlook closed overnight, first scan of the
+        # day launches it) - the real signal worth Marc's attention is
+        # Outlook essentially NEVER staying open between scheduled scans,
+        # which health_check.py's own check reads and flags past a real
+        # threshold, not on the first occurrence.
+        streak = int(ws.get_cursor(_SOURCE, "consecutive_cold_starts") or "0")
+        streak = streak + 1 if cold_started else 0
+        ws.set_cursor(_SOURCE, "consecutive_cold_starts", str(streak))
+
     inserted = 0
     duplicates = 0
     attachments_absorbed = 0
@@ -243,7 +270,8 @@ def run(folder: str = "Careful", max_items: int = 500) -> dict:
         ws.set_cursor(_SOURCE, f"folder:{folder}", str(max_seen_ts))
 
     result = {"ok": not had_error, "inserted": inserted, "duplicates": duplicates,
-              "attachments_absorbed": attachments_absorbed, "cursor": max_seen_ts}
+              "attachments_absorbed": attachments_absorbed, "cursor": max_seen_ts,
+              "outlook_cold_started": cold_started}
     if had_error:
         result["error"] = proc.stderr.strip() or f"exit code {proc.returncode}"
     return result

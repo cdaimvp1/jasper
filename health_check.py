@@ -28,6 +28,11 @@ Checks:
      one fix shipped the same day added 63 pending suggestions in one run,
      with no visibility anywhere into how many exist or how stale the
      oldest one is
+  9. Outlook not staying open across scheduled scans (task #149) - every
+     ingestion cycle's own COM connection silently cold-starts Outlook if
+     it isn't already running; a freshly-launched Cached Exchange Mode
+     profile hasn't had time to sync before the scan reads it. Flags 3+
+     consecutive cold-started scans, not a single one (which is normal)
 
 Each check returns {"ok": bool, "detail": str, ...check-specific fields}.
 """
@@ -271,6 +276,31 @@ def check_suggestion_queue_not_unboundedly_growing(now: float) -> dict:
             "oldest_pending_age_hours": oldest_age_hours}
 
 
+COLD_START_STREAK_THRESHOLD = 3  # 3 scheduled scans in a row cold-starting Outlook is the real signal
+
+
+def check_outlook_cache_freshness() -> dict:
+    """Task #149: outlook_com_ingest.run() persists (via the same generic
+    ingest_cursors store the forward cursor itself uses) whether its OWN
+    COM connection had to cold-start Outlook, plus a running streak of
+    consecutive cold starts. A single cold start is normal (Outlook closed
+    overnight, the first scan of the day launches it, and outlook_scan.ps1
+    now also forces a real SendAndReceive before scanning) - the real
+    signal worth flagging is Outlook essentially NEVER staying open
+    between scheduled scans, past COLD_START_STREAK_THRESHOLD in a row,
+    since every one of those scans ran against a freshly-launched, not-yet-
+    synced local cache with no time to catch up before the read."""
+    last_cold_started = ws.get_cursor("outlook_mail", "last_scan_outlook_cold_started")
+    if last_cold_started is None:
+        return {"ok": True, "detail": "no ingestion run recorded yet"}
+    streak = int(ws.get_cursor("outlook_mail", "consecutive_cold_starts") or "0")
+    return {
+        "ok": streak < COLD_START_STREAK_THRESHOLD,
+        "last_scan_cold_started": last_cold_started == "true",
+        "consecutive_cold_starts": streak,
+    }
+
+
 def run(now: float | None = None) -> dict:
     if now is None:
         now = time.time()
@@ -283,6 +313,7 @@ def run(now: float | None = None) -> dict:
         "claude_process_count": check_claude_process_count(now),
         "classify_link_progressing": check_classify_link_progressing(now),
         "suggestion_queue_depth": check_suggestion_queue_not_unboundedly_growing(now),
+        "outlook_cache_freshness": check_outlook_cache_freshness(),
     }
     # persist today's disk snapshot for TOMORROW's growth comparison
     ws.set_cursor(_SNAPSHOT_CURSOR_SOURCE, _SNAPSHOT_CURSOR_KEY, json.dumps(retention.disk_usage_report()))

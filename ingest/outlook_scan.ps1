@@ -152,8 +152,35 @@ function Resolve-SenderSmtp($item) {
 }
 
 try {
+    # Task #149: New-Object -ComObject Outlook.Application silently COLD-
+    # STARTS Outlook if it isn't already running (rather than failing) -
+    # every scheduled ingestion cycle does this, and a freshly-launched
+    # Outlook profile in Cached Exchange Mode needs real wall-clock time to
+    # sync down anything that arrived while it was closed. A scan that runs
+    # immediately after a cold start can read a genuinely stale local cache
+    # and report "no new mail" when mail is really just not synced down yet
+    # - this is the concrete, checkable version of "stale local Outlook
+    # cache blocking mail ingestion." Checked BEFORE creating the COM
+    # object, since creating it is what would start the process. Emitted to
+    # stderr (never stdout - that's the strict JSON-lines mail stream) as a
+    # single parseable diagnostic line outlook_com_ingest.py reads
+    # regardless of exit code, not just on failure.
+    $outlookWasRunning = [bool](Get-Process -Name OUTLOOK -ErrorAction SilentlyContinue)
+    [Console]::Error.WriteLine("JASPER_DIAG: outlook_was_running=$outlookWasRunning")
+
     $outlook = New-Object -ComObject Outlook.Application
     $ns = $outlook.GetNamespace("MAPI")
+
+    # SendAndReceive kicks off a real sync for every account/group right
+    # now - the same effect as a user pressing F9. There is no COM-exposed
+    # synchronous "wait until this sync finishes" callback (SyncObjects'
+    # own events aren't reachable from a one-shot script like this), so
+    # this can't GUARANTEE the cache is fresh by the time the scan below
+    # runs - it only ensures a sync was actually requested rather than
+    # relying on whatever background interval Outlook happens to be on.
+    # ShowProgressDialog=$false - never pop a visible dialog on Marc's
+    # screen for an unattended scheduled scan.
+    try { $ns.SendAndReceive($false) } catch { }
 
     $target = $null
     foreach ($store in $ns.Folders) {

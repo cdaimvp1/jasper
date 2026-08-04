@@ -718,6 +718,90 @@ def test_score_issue_handles_missing_open_claims_gracefully(ws_db):
     assert "open asks" not in reason
 
 
+# --- enhancement idea panel #13: attached-document value corroboration -----
+
+def test_dollar_values_in_text_finds_multiple_figures_with_suffixes():
+    values = nba._dollar_values_in_text("Total is $2.5 million, deposit $10,000")
+    assert values == {2_500_000.0, 10_000.0}
+
+
+def test_dollar_values_in_text_empty_for_no_text():
+    assert nba._dollar_values_in_text(None) == set()
+    assert nba._dollar_values_in_text("") == set()
+
+
+def test_attachment_corroborates_value_false_below_value_floor():
+    assert nba.attachment_corroborates_value([{"id": 1}], 500.0) is False  # below _VALUE_FLOOR
+
+
+def test_attachment_corroborates_value_true_when_attachment_has_exact_figure(ws_db):
+    item = {"id": 300}
+    ws_db.create_attachment(
+        entity_type="raw_item", entity_id="300", kind="reference", filename="order_form.pdf",
+        stored_path="raw_items/300/order_form.pdf", content_type=None, size_bytes=1234,
+        sha256_hex="corrob1", uploaded_by="test",
+        extracted_text="The total contract value is $30,500,000 for this term.",
+    )
+
+    assert nba.attachment_corroborates_value([item], 30_500_000.0) is True
+
+
+def test_attachment_corroborates_value_false_when_figures_dont_match(ws_db):
+    item = {"id": 301}
+    ws_db.create_attachment(
+        entity_type="raw_item", entity_id="301", kind="reference", filename="order_form.pdf",
+        stored_path="raw_items/301/order_form.pdf", content_type=None, size_bytes=1234,
+        sha256_hex="corrob2", uploaded_by="test",
+        extracted_text="A completely unrelated figure: $999.",
+    )
+
+    assert nba.attachment_corroborates_value([item], 30_500_000.0) is False
+
+
+def test_attachment_corroborates_value_false_with_no_attachments(ws_db):
+    item = {"id": 302}
+    assert nba.attachment_corroborates_value([item], 30_500_000.0) is False
+
+
+def _issue_with_value_and_attachment(ws_db, title, key, amount_text, attach_extracted_text=None):
+    issue_id = ws_db.create_issue_with_new_id(title=title, state="active", category="other")
+    row_id = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key=key, thread_key=key, dedupe_key=key,
+        occurred_ts=time.time(), subject=amount_text, from_actor="a@example.com",
+        participants_json="[]", body_preview="",
+    )
+    ws_db.link_raw_item_to_issue(row_id, issue_id)
+    if attach_extracted_text is not None:
+        ws_db.create_attachment(
+            entity_type="raw_item", entity_id=str(row_id), kind="reference", filename="doc.pdf",
+            stored_path=f"raw_items/{row_id}/doc.pdf", content_type=None, size_bytes=1,
+            sha256_hex=f"corrob-{key}", uploaded_by="test", extracted_text=attach_extracted_text,
+        )
+    return issue_id
+
+
+def test_score_issue_corroborated_value_scores_higher_than_uncorroborated_twin(ws_db):
+    now = time.time()
+    corroborated_id = _issue_with_value_and_attachment(
+        ws_db, "Corroborated", "corrob-yes", "Total contract value is $5,000,000",
+        attach_extracted_text="Order form total: $5,000,000",
+    )
+    uncorroborated_id = _issue_with_value_and_attachment(
+        ws_db, "Uncorroborated", "corrob-no", "Total contract value is $5,000,000",
+    )
+
+    corroborated_score, corroborated_reason, _ = nba.score_issue(ws_db.get_issue(corroborated_id), now)
+    uncorroborated_score, uncorroborated_reason, _ = nba.score_issue(ws_db.get_issue(uncorroborated_id), now)
+
+    assert corroborated_score > uncorroborated_score
+    assert "value confirmed by attachment" in corroborated_reason
+    assert "value confirmed by attachment" not in uncorroborated_reason
+
+
+def test_value_corroboration_boost_constant_is_small_and_bounded():
+    assert 0.0 < nba._VALUE_CORROBORATION_BOOST < 0.2
+
+
 # --- task #65: value_at_risk_rollup ------------------------------------------
 
 def _open_issue_with_value(ws_db, title, amount_text, key):

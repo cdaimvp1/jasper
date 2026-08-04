@@ -401,6 +401,61 @@ def _apply_ask_density_boost(score: float, ask_count: int) -> float:
     return min(1.0, score + boost)
 
 
+# Enhancement idea panel #13: attached-document value corroboration. Since
+# E6 (attachment_extract.py) started giving real attachments actual
+# extracted TEXT (not just filename/hash metadata), _extract_item_candidates
+# above already folds that text into the SAME candidate pool the email body
+# contributes to - a real improvement, but it only WIDENS what counts as a
+# candidate figure, it can't tell "this issue's chosen deal value happens to
+# also sit inside a real order form/SOW" from "this figure was only ever
+# mentioned once, in a single email." Those are different confidence levels:
+# a party can misstate a number in a quick reply; a genuine attached
+# document independently carrying the identical figure is real corroborating
+# evidence. This is deliberately EXACT-value matching, not "any large figure
+# in an attachment" - a document quoting some OTHER number isn't
+# corroboration of the value this issue is scored on.
+_VALUE_CORROBORATION_BOOST = 0.05
+
+
+def _dollar_values_in_text(text: Optional[str]) -> set[float]:
+    """Every raw dollar figure present in `text` (suffix multiplier applied),
+    as a set of rounded floats - same regex/suffix table as
+    _extract_item_candidates, but without the preferred/downweighted cue
+    bookkeeping, since corroboration only needs to know WHICH numbers are
+    present, not which one score_issue should prefer."""
+    if not text:
+        return set()
+    values = set()
+    for match in _DOLLAR_RE.finditer(text):
+        suffix = (match.group(3) or "").lower()
+        multiplier = _DOLLAR_SUFFIX_MULTIPLIER.get(suffix, 1)
+        for group in (match.group(1), match.group(2)):
+            if group is not None:
+                values.add(round(float(group.replace(",", "")) * multiplier, 2))
+    return values
+
+
+def attachment_corroborates_value(raw_items: list[dict], value_amount: float) -> bool:
+    """True if `value_amount` (the figure _extract_value_amount already
+    chose for this issue) also appears, independently, in a real
+    attachment's extracted_text - not merely somewhere in the combined
+    candidate pool. False below _VALUE_FLOOR (nothing to corroborate) and
+    false when the issue has no attachments with extracted text at all
+    (attachment_extract.py hasn't run on them, or they're not text-bearing
+    file types)."""
+    if value_amount < _VALUE_FLOOR:
+        return False
+    target = round(value_amount, 2)
+    for item in raw_items:
+        key = item.get("id")
+        if key is None:
+            continue
+        for att in ws.list_attachments("raw_item", str(key)):
+            if target in _dollar_values_in_text(att.get("extracted_text")):
+                return True
+    return False
+
+
 def score_issue(issue: dict, now: float, weights: dict = DEFAULT_WEIGHTS,
                  identity_anchors: Optional[list] = None,
                  category_staleness_baselines: Optional[dict] = None,
@@ -492,6 +547,10 @@ def score_issue(issue: dict, now: float, weights: dict = DEFAULT_WEIGHTS,
     ask_count = ask_density_for_issue(open_claims) if open_claims else 0
     score = _apply_ask_density_boost(score, ask_count)
 
+    value_corroborated = attachment_corroborates_value(raw_items, value_amount)
+    if value_corroborated:
+        score = min(1.0, score + _VALUE_CORROBORATION_BOOST)
+
     days_quiet = int(max(0.0, (now - issue["updated_at"]) / DAY))
 
     # Aristotle (task #51) - a taught prerequisite check. Prepended, not
@@ -526,6 +585,8 @@ def score_issue(issue: dict, now: float, weights: dict = DEFAULT_WEIGHTS,
         reasons.append(f"${value_amount / 1_000_000:,.1f}M")
     elif value_amount >= _VALUE_FLOOR:
         reasons.append(f"${value_amount:,.0f}")
+    if value_corroborated:
+        reasons.append("value confirmed by attachment")
     if lesson:
         reasons.append(f"precedent: {lesson['statement']}")
     if len(snoozes) >= 2:

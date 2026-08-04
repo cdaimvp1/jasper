@@ -1230,6 +1230,14 @@ async def api_workgraph_issue_detail(issue_id: str, log_choice: bool = False):
     issue["ask_density"] = workgraph_nba.ask_density_for_issue(
         wg.list_open_claims_for_issue(issue_id, claim_type="ask")
     )
+    # Enhancement idea panel #13: does this issue's chosen deal-value figure
+    # also show up, independently, in a real attachment's extracted text
+    # (E6) - not just somewhere in the same candidate pool the regex already
+    # draws from. Reuses raw_items already fetched above; value_found was
+    # just computed a few lines up.
+    issue["value_corroborated_by_attachment"] = workgraph_nba.attachment_corroborates_value(
+        wg.get_raw_items_for_issue(issue_id), issue["value_found"]
+    )
     # Part E1 (2026-07-30): unified ranked candidate actions - read-time
     # only, see workgraph_nba.candidate_actions' own docstring. Falls back
     # to project_synthesis's suggested_actions when this issue's own

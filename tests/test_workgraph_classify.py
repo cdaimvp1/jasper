@@ -4,6 +4,7 @@
   False on a real cue match, so confidence tier H is actually reachable
 - backfill_reclassify writes the FRESH result, not stale item[...] values
 """
+import json
 import time
 
 import pytest
@@ -216,18 +217,18 @@ def test_backfill_reclassify_updates_pr_number_only_change(ws_db):
 # --- Part C (2026-07-30): raw-item-to-issue linking via reference ID -----
 
 def _pending_item(ws_db, thread_key, subject, pr_number=None, item_class="ACTIONABLE-ASK", from_actor="a@example.com",
-                   jasper_ref_issue_id=None, source="outlook_mail"):
+                   jasper_ref_issue_id=None, source="outlook_mail", topic="other", participants_json="[]"):
     """A classified-but-not-yet-linked raw_item, ready for cluster_and_link().
     Each thread_key is deliberately unique per call so thread_map_lookup
     never resolves it - the whole point is testing the NO-thread-match
     fallback path."""
     rid = ws_db.insert_raw_item(
         source=source, stable_key=thread_key, thread_key=thread_key, dedupe_key=thread_key,
-        occurred_ts=time.time(), subject=subject, from_actor=from_actor, participants_json="[]",
+        occurred_ts=time.time(), subject=subject, from_actor=from_actor, participants_json=participants_json,
     )
     ws_db.classify_raw_item(
         rid, item_class=item_class, direction="inbound", direction_inferred=False,
-        topic="other", topic_inferred=True, sentiment="neutral", sentiment_inferred=True,
+        topic=topic, topic_inferred=True, sentiment="neutral", sentiment_inferred=True,
         anomaly_flag=False, signal_type=None, pr_number=pr_number,
         pr_number_base=workgraph_signals.reference_base(pr_number),
         jasper_ref_issue_id=jasper_ref_issue_id,
@@ -670,6 +671,139 @@ def test_cluster_and_link_unmatched_teams_fyi_still_uses_fyi_path_not_teams_path
     assert result["fyi_standalone_skipped"] == 1
     assert result["teams_standalone_skipped"] == 0
     assert ws_db.get_raw_item(rid)["issue_id"] is None
+
+
+# --- Task #179 (2026-08-04, Marc's direct design ask): Teams sender-anchored
+# matching - "the sender being the main link... match the sender's message to
+# any where the sender... was also the sender of the email or copied on the
+# email, along with one other data point." -----------------------------------
+
+def _issue_with_email_evidence(ws_db, title, category, from_actor):
+    """An open issue with one real email raw_item already attached - the
+    'existing evidence' a Teams sender gets cross-checked against."""
+    iid = ws_db.create_issue_with_new_id(title=title, state="active", category=category)
+    rid = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key=f"ev-{iid}", thread_key=f"ev-{iid}", dedupe_key=f"ev-{iid}",
+        occurred_ts=time.time(), subject=title, from_actor=from_actor, participants_json="[]",
+    )
+    ws_db.link_raw_item_to_issue(rid, iid)
+    return iid
+
+
+def test_teams_sender_anchor_would_attach_but_stays_report_only_by_default(ws_db):
+    """Same discipline as reference_id_auto_attach_enabled/subject_match_
+    auto_attach_enabled/jasper_ref_auto_attach_enabled - always computed and
+    counted, never acted on until the flag is explicitly turned on."""
+    _issue_with_email_evidence(ws_db, "Workday renewal", "financial", "vendor@example.com")
+    rid = _pending_item(ws_db, "tsa1", "any update?", item_class="ACTIONABLE-ASK", source="teams_chat",
+                         from_actor="vendor@example.com", topic="financial")
+
+    result = wc.cluster_and_link()
+
+    assert result["would_attach_via_teams_sender_anchor"] == 1
+    assert result["attached_via_teams_sender_anchor"] == 0
+    assert result["teams_standalone_skipped"] == 1
+    assert ws_db.get_raw_item(rid)["issue_id"] is None
+
+
+def test_teams_sender_anchor_attaches_when_enabled_sender_email_plus_category(ws_db, monkeypatch, tmp_path):
+    config = _isolate_config(ws_db, monkeypatch, tmp_path)
+    config.set_value(True, "grouping", "teams_sender_anchor_auto_attach_enabled")
+
+    iid = _issue_with_email_evidence(ws_db, "Workday renewal", "financial", "vendor@example.com")
+    rid = _pending_item(ws_db, "tsa2", "any update?", item_class="ACTIONABLE-ASK", source="teams_chat",
+                         from_actor="vendor@example.com", topic="financial")
+
+    result = wc.cluster_and_link()
+
+    assert result["attached_via_teams_sender_anchor"] == 1
+    assert result["teams_standalone_skipped"] == 0
+    assert ws_db.get_raw_item(rid)["issue_id"] == iid
+
+
+def test_teams_sender_anchor_requires_corroboration_not_sender_alone(ws_db, monkeypatch, tmp_path):
+    """The 'along with one other data point' half of the design - a real
+    sender match with NO category match and NO topic-key overlap must NOT
+    attach, even with the flag on. Same false-positive class task #81
+    already fixed for company-alone matches."""
+    config = _isolate_config(ws_db, monkeypatch, tmp_path)
+    config.set_value(True, "grouping", "teams_sender_anchor_auto_attach_enabled")
+
+    _issue_with_email_evidence(ws_db, "Workday renewal", "financial", "vendor@example.com")
+    rid = _pending_item(ws_db, "tsa3", "unrelated ask", item_class="ACTIONABLE-ASK", source="teams_chat",
+                         from_actor="vendor@example.com", topic="hr")
+
+    result = wc.cluster_and_link()
+
+    assert result["would_attach_via_teams_sender_anchor"] == 0
+    assert result["teams_standalone_skipped"] == 1
+    assert ws_db.get_raw_item(rid)["issue_id"] is None
+
+
+def test_teams_sender_anchor_resolves_a_bare_display_name_via_party_index(ws_db, monkeypatch, tmp_path):
+    """Marc's own real-world shape: Teams' from_actor is often a display
+    name, not an email - resolved via workgraph_parties' existing bare-name
+    resolver (never a fuzzy guess)."""
+    config = _isolate_config(ws_db, monkeypatch, tmp_path)
+    config.set_value(True, "grouping", "teams_sender_anchor_auto_attach_enabled")
+    ws_db.upsert_party(id="p1", primary_email="jane.doe@vendor.com", display_name="Jane Doe",
+                        affiliation="external", affiliation_confidence="H",
+                        affiliation_source="domain", company="vendor")
+
+    iid = _issue_with_email_evidence(ws_db, "Workday renewal", "financial", "jane.doe@vendor.com")
+    rid = _pending_item(ws_db, "tsa4", "any update?", item_class="ACTIONABLE-ASK", source="teams_chat",
+                         from_actor="Jane Doe", topic="financial")
+
+    result = wc.cluster_and_link()
+
+    assert result["attached_via_teams_sender_anchor"] == 1
+    assert ws_db.get_raw_item(rid)["issue_id"] == iid
+
+
+def test_teams_sender_anchor_abstains_on_an_ambiguous_display_name(ws_db, monkeypatch, tmp_path):
+    """Two different real parties sharing a display_name must abstain, not
+    guess - same discipline as workgraph_parties._resolve_bare_name's own
+    ambiguous-exact-match test."""
+    config = _isolate_config(ws_db, monkeypatch, tmp_path)
+    config.set_value(True, "grouping", "teams_sender_anchor_auto_attach_enabled")
+    ws_db.upsert_party(id="p1", primary_email="jane.doe@vendor.com", display_name="Jane Doe",
+                        affiliation="external", affiliation_confidence="H",
+                        affiliation_source="domain", company="vendor")
+    ws_db.upsert_party(id="p2", primary_email="jane.doe@othercorp.com", display_name="Jane Doe",
+                        affiliation="external", affiliation_confidence="H",
+                        affiliation_source="domain", company="othercorp")
+    _issue_with_email_evidence(ws_db, "Workday renewal", "financial", "jane.doe@vendor.com")
+    rid = _pending_item(ws_db, "tsa5", "any update?", item_class="ACTIONABLE-ASK", source="teams_chat",
+                         from_actor="Jane Doe", topic="financial")
+
+    result = wc.cluster_and_link()
+
+    assert result["would_attach_via_teams_sender_anchor"] == 0
+    assert result["teams_standalone_skipped"] == 1
+    assert ws_db.get_raw_item(rid)["issue_id"] is None
+
+
+def test_teams_sender_anchor_matches_via_participant_not_just_from_actor(ws_db, monkeypatch, tmp_path):
+    """'the sender of the team's message was also the sender of the email
+    OR copied on the email' - the participants_json side of that, not just
+    from_actor equality."""
+    config = _isolate_config(ws_db, monkeypatch, tmp_path)
+    config.set_value(True, "grouping", "teams_sender_anchor_auto_attach_enabled")
+
+    iid = ws_db.create_issue_with_new_id(title="Workday renewal", state="active", category="financial")
+    rid_ev = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key="ev-cc", thread_key="ev-cc", dedupe_key="ev-cc",
+        occurred_ts=time.time(), subject="Workday renewal", from_actor="lead@example.com",
+        participants_json=json.dumps(["vendor@example.com"]),
+    )
+    ws_db.link_raw_item_to_issue(rid_ev, iid)
+    rid = _pending_item(ws_db, "tsa6", "any update?", item_class="ACTIONABLE-ASK", source="teams_chat",
+                         from_actor="vendor@example.com", topic="financial")
+
+    result = wc.cluster_and_link()
+
+    assert result["attached_via_teams_sender_anchor"] == 1
+    assert ws_db.get_raw_item(rid)["issue_id"] == iid
 
 
 # --- Teams session-scoped grouping key (2026-08-03, Section 3.2/8) --------

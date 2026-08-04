@@ -24,6 +24,7 @@ import json
 import re
 import sys
 import time
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Optional
 
@@ -713,6 +714,95 @@ def _sender_domain_seen_on_issue(issue_id: str, from_actor: Optional[str]) -> bo
     return False
 
 
+def _build_teams_sender_email_index() -> dict[str, set[str]]:
+    """email (lowercased) -> set of OPEN issue ids with at least one raw_item
+    carrying that email as from_actor or a participant. Task #179 (Marc's
+    direct design ask): 'the sender being the main link... you'd match the
+    sender's message to any where the sender of the team's message was
+    also the sender of the email or copied on the email.' Built once per
+    cluster_and_link() run, same discipline as open_issues_by_subject just
+    above it - a per-item DB scan for every pending Teams message would be
+    needlessly expensive when the candidate set (open issues) is small and
+    stable within one run."""
+    index: dict[str, set[str]] = {}
+    for iss in ws.list_issues(states=["active", "waiting", "blocked"], limit=5000):
+        for raw in ws.get_raw_items_for_issue(iss["id"]):
+            emails = set()
+            frm = (raw.get("from_actor") or "").strip().lower()
+            if "@" in frm:
+                emails.add(frm)
+            try:
+                participants = json.loads(raw.get("participants") or "[]")
+            except (TypeError, ValueError):
+                participants = []
+            for p in participants:
+                p = (p or "").strip().lower()
+                if "@" in p:
+                    emails.add(p)
+            for email in emails:
+                index.setdefault(email, set()).add(iss["id"])
+    return index
+
+
+def _teams_sender_emails(from_actor: Optional[str], by_display_name: dict, by_local_part: dict) -> set[str]:
+    """Resolves a Teams item's sender to a real email identity - direct if
+    from_actor already looks like an email (Graph sometimes returns one),
+    otherwise via workgraph_parties' existing bare-name resolver, which
+    only ever returns an EXISTING, unambiguous party (never invents one,
+    never guesses through a display-name collision). Returns an empty set
+    - not a fuzzy best-guess - when neither applies, since a wrong sender
+    identity here would misattach a real Teams ask to the wrong project."""
+    frm = (from_actor or "").strip()
+    if not frm:
+        return set()
+    if "@" in frm:
+        return {frm.lower()}
+    resolved = workgraph_parties._resolve_bare_name(frm, by_display_name, by_local_part)
+    return {resolved["primary_email"].lower()} if resolved else set()
+
+
+def _teams_item_has_corroborating_signal(item: dict, issue: dict) -> bool:
+    """The 'along with one other data point' half of Marc's design - a
+    matching sender alone is exactly the kind of single-signal match that
+    caused real false-positive merges elsewhere in this codebase (task #81).
+    Two independent checks, either is enough: a real (non-'other') category
+    match, or a genuine topic-key overlap between the Teams item's own
+    subject/title and the candidate issue's title (same longest-common-
+    substring approach and length floor as workgraph_projects._shared_topic_
+    key, deliberately reused rather than re-invented)."""
+    category = item.get("topic")
+    if category and category != "other" and category == issue.get("category"):
+        return True
+    item_key = ws.normalize_topic_key(item.get("subject") or "")
+    issue_key = ws.normalize_topic_key(issue.get("title") or "")
+    if len(item_key) >= workgraph_projects.MIN_TOPIC_KEY_LEN and len(issue_key) >= workgraph_projects.MIN_TOPIC_KEY_LEN:
+        m = SequenceMatcher(None, item_key, issue_key).find_longest_match(0, len(item_key), 0, len(issue_key))
+        if m.size >= workgraph_projects.MIN_TOPIC_KEY_LEN:
+            return True
+    return False
+
+
+def _teams_sender_anchor_match(
+    item: dict, sender_email_index: dict, by_display_name: dict, by_local_part: dict,
+) -> Optional[str]:
+    """Task #179 end-to-end: resolve the Teams item's sender to an email,
+    find every OPEN issue that email appears as sender-or-participant on,
+    and return the first one that also clears the corroborating-signal bar
+    above. None (never a guess) if the sender doesn't resolve, resolves to
+    no candidate issues, or no candidate clears the corroboration bar."""
+    emails = _teams_sender_emails(item.get("from_actor"), by_display_name, by_local_part)
+    if not emails:
+        return None
+    candidate_ids: set[str] = set()
+    for email in emails:
+        candidate_ids |= sender_email_index.get(email, set())
+    for issue_id in candidate_ids:
+        issue = ws.get_issue(issue_id)
+        if issue and _teams_item_has_corroborating_signal(item, issue):
+            return issue_id
+    return None
+
+
 def _effective_thread_key(item: dict) -> str:
     """The real grouping key for this item — the bare thread_key for every
     source except `teams_chat`, where it's session-scoped instead (Section
@@ -791,6 +881,10 @@ def cluster_and_link(limit: int = 500) -> dict:
     # as reference_id_auto_attach_enabled/subject_match_auto_attach_enabled
     # - this is a brand-new extraction path with no bake-in history yet.
     jasper_ref_auto_attach = bool(config.get("grouping", "jasper_ref_auto_attach_enabled"))
+    # Task #179: same report-only-first discipline as the three flags above -
+    # ships OFF, always computed/counted (would_attach_via_teams_sender_
+    # anchor) regardless, no backtest path yet either.
+    teams_sender_anchor_auto_attach = bool(config.get("grouping", "teams_sender_anchor_auto_attach_enabled"))
     now = time.time()
     with_pending = ws.get_items_pending_link(limit)
     open_issues_by_subject: dict[str, str] = {}
@@ -798,6 +892,15 @@ def cluster_and_link(limit: int = 500) -> dict:
         key = normalize_subject_for_matching(iss.get("title") or "")
         if key:
             open_issues_by_subject.setdefault(key, iss["id"])
+    # Only built when there's at least one pending Teams item - both indexes
+    # are a real scan over every open issue's evidence/parties, no reason to
+    # pay that cost on a run with nothing to use it for.
+    teams_sender_index: dict[str, set[str]] = {}
+    teams_by_display_name: dict = {}
+    teams_by_local_part: dict = {}
+    if any(i.get("source") == "teams_chat" for i in with_pending):
+        teams_sender_index = _build_teams_sender_email_index()
+        teams_by_display_name, teams_by_local_part = workgraph_parties._build_party_indexes()
     created = 0
     linked = 0
     skipped_noise = 0
@@ -809,6 +912,8 @@ def cluster_and_link(limit: int = 500) -> dict:
     would_attach_via_subject_match = 0
     attached_via_jasper_ref = 0
     would_attach_via_jasper_ref = 0
+    attached_via_teams_sender_anchor = 0
+    would_attach_via_teams_sender_anchor = 0
     touched_issues = set()
     # 2026-07-31: tracks which touched issues had a genuinely NEW
     # ACTIONABLE-ASK item land this run (vs. just an FYI/waiting reply) -
@@ -827,6 +932,7 @@ def cluster_and_link(limit: int = 500) -> dict:
         is_new_issue = False
         reference_match = None
         jasper_ref_match = None
+        teams_sender_match = None
         if issue_id is None:
             # Task #36: checked FIRST, ahead of the PR/PO reference match
             # below - a Jasper ref tag names the exact issue directly
@@ -873,6 +979,27 @@ def cluster_and_link(limit: int = 500) -> dict:
                         skipped_fyi_standalone += 1
                         ws.mark_link_checked(item["id"], now)
                         continue
+                # Task #179 (2026-08-04, Marc's direct design ask), tried
+                # BEFORE the task #54/#55 hold-aside below: "the sender being
+                # the main link... you'd match the sender's message to any
+                # where the sender of the team's message was also the sender
+                # of the email or copied on the email, along with one other
+                # data point." A Teams ask that clears this bar has real
+                # signal a bare "can you look at X" doesn't - it's not the
+                # guess the hold-aside fix below was written to stop, it's an
+                # actual identified counterparty PLUS a category/topic
+                # corroboration, same two-signals-minimum discipline as the
+                # rest of this grouping-v3 phase.
+                teams_sender_match = None
+                if item.get("source") == "teams_chat" and item["item_class"] in ("ACTIONABLE-ASK", "WAITING-ON-OTHERS"):
+                    teams_sender_match = _teams_sender_anchor_match(
+                        item, teams_sender_index, teams_by_display_name, teams_by_local_part)
+                    if teams_sender_match:
+                        would_attach_via_teams_sender_anchor += 1
+                        if teams_sender_anchor_auto_attach:
+                            issue_id = teams_sender_match
+                            ws.thread_map_set(thread_key, issue_id)
+                            attached_via_teams_sender_anchor += 1
                 # Task #54/#55 (2026-08-02, Marc's direct report): "not every
                 # individual message... in Teams should go into the system" -
                 # confirmed live: 100% of Teams ACTIONABLE-ASK/WAITING-ON-
@@ -889,7 +1016,7 @@ def cluster_and_link(limit: int = 500) -> dict:
                 # email/calendar asks keep their existing behavior unchanged;
                 # this is a Teams-specific clutter problem Marc reported, not
                 # a general "distrust every new ask" policy change.
-                if item.get("source") == "teams_chat" and item["item_class"] in ("ACTIONABLE-ASK", "WAITING-ON-OTHERS"):
+                if issue_id is None and item.get("source") == "teams_chat" and item["item_class"] in ("ACTIONABLE-ASK", "WAITING-ON-OTHERS"):
                     skipped_teams_standalone += 1
                     ws.mark_link_checked(item["id"], now)
                     continue
@@ -915,6 +1042,8 @@ def cluster_and_link(limit: int = 500) -> dict:
         elif subject_match_auto_attach and item["item_class"] == "FYI-EVIDENCE" and issue_id == open_issues_by_subject.get(
                 normalize_subject_for_matching(item.get("subject") or "")):
             summary = f"{summary} [auto-attached via matching subject + sender]"
+        elif teams_sender_match and issue_id == teams_sender_match and teams_sender_anchor_auto_attach:
+            summary = f"{summary} [auto-attached via Teams sender anchor + corroborating signal]"
         ws.link_raw_item_to_issue(item["id"], issue_id)
         ws.add_evidence(
             issue_id=issue_id,
@@ -961,6 +1090,9 @@ def cluster_and_link(limit: int = 500) -> dict:
             "attached_via_jasper_ref": attached_via_jasper_ref,
             "would_attach_via_jasper_ref": would_attach_via_jasper_ref,
             "jasper_ref_auto_attach_enabled": jasper_ref_auto_attach,
+            "attached_via_teams_sender_anchor": attached_via_teams_sender_anchor,
+            "would_attach_via_teams_sender_anchor": would_attach_via_teams_sender_anchor,
+            "teams_sender_anchor_auto_attach_enabled": teams_sender_anchor_auto_attach,
             "parties": party_result, "projects": project_result}
 
 

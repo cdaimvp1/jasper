@@ -1086,11 +1086,25 @@ async def api_cohorts():
 # ═══════════════════════════════════════════════════════════════════════════
 @app.get("/cockpit", response_class=HTMLResponse)
 async def cockpit_page(request: Request):
-    return templates.TemplateResponse(request, "cockpit.html", {
+    # Real gap found 2026-08-03 while investigating Marc's repeat report that
+    # project-panel buttons "still don't work" after multiple server-side
+    # fixes had already landed and been verified working via direct API
+    # calls: this route sent no Cache-Control header at all, while every
+    # single fetch() call inside cockpit.html's own JS already uses
+    # {cache: "no-store"} for API calls - the ~700KB HTML+JS page itself
+    # (the thing that actually contains the button-wiring code) had no such
+    # protection. A browser (or an already-open tab never re-fetching at
+    # all) could keep running JS from before any given fix indefinitely,
+    # which would look exactly like "still broken" no matter how many real
+    # server-side fixes land. Same no-store discipline this page's own JS
+    # already applies to its data, now applied to the page itself.
+    response = templates.TemplateResponse(request, "cockpit.html", {
         "active_page": "cockpit",
         "manager_tag": config.get("manager", "tag") or config.get("manager", "id") or "manager",
         "now_iso": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     })
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 class WorkgraphIssueStatusBody(BaseModel):

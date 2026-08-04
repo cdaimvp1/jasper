@@ -2915,6 +2915,38 @@ def list_open_issue_ids_for_reference(pr_number_base: str) -> list[str]:
     return [r["id"] for r in rows]
 
 
+def list_issues_for_reference_any_state(pr_number_base: str) -> list[dict]:
+    """Same idx_raw_pr_number_base-indexed lookup as list_open_issue_ids_
+    for_reference above, but across every state, not just active/waiting/
+    blocked - needed by workgraph_projects.find_reference_id_collisions_
+    for_issue (enhancement idea #2), which deliberately wants to surface a
+    collision with a done/dismissed issue too (a merge that never
+    happened is still worth seeing, whatever state either side ended up
+    in). Real perf fix, 2026-08-03: that function used to fall back to a
+    full ws.list_issues(states=None, limit=10000) Python-side scan plus a
+    signature lookup per candidate - profiled live at ~1.5s per call, and
+    cockpit.html's pccLoadIssues() calls the issue-detail route (which
+    calls this) once per issue on every load, so a 345-issue board turned
+    one page load into ~345 x 1.5s of largely serialized work. Returns
+    {issue_id, title, project_id} per row - just enough for the caller to
+    skip same-project pairs and display a title without a second lookup."""
+    if not pr_number_base:
+        return []
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                """SELECT DISTINCT i.id AS issue_id, i.title AS title, i.project_id AS project_id
+                   FROM issues i
+                   JOIN raw_items r ON r.issue_id = i.id
+                   WHERE r.pr_number_base = ?""",
+                (pr_number_base,),
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
 def list_evidence(issue_id: str) -> list[dict]:
     with _lock:
         conn = _connect()

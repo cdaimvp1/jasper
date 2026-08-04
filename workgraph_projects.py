@@ -118,31 +118,41 @@ def find_reference_id_collisions_for_issue(issue_id: str, issue: Optional[dict] 
     pair that is NOT already in the same project - either a merge that
     hasn't caught up yet, or one deliberately blocked by a v2.4 cannot_
     merge/cannot_link constraint (both worth Marc seeing, for different
-    reasons). Reads definitive_ids off the cached signature (Section 12.7)
-    rather than re-deriving reference_base_ids_for_issue per candidate -
-    same real perf win backtest_scored_model/scored_grouping_decision
-    already get from that cache."""
+    reasons).
+
+    Real perf fix, 2026-08-03: this used to loop over ws.list_issues(states=
+    None, limit=10000) in Python and call get_or_compute_work_object_
+    signature on every candidate - profiled live at ~1.5s per call on a
+    345-issue board, and cockpit.html's pccLoadIssues() calls the issue-
+    detail route (which calls this) once per issue on every page load, so
+    that was ~345 x 1.5s of largely-serialized work behind workgraph_
+    store.py's single global write lock. definitive_ids IS just reference_
+    base_ids_for_issue's output (see compute_work_object_signature) - so
+    this now goes straight to ws.list_issues_for_reference_any_state's
+    idx_raw_pr_number_base-indexed query, one per reference this issue
+    actually has (almost always 0 or 1), instead of a full-table scan."""
     if issue is None:
         issue = ws.get_issue(issue_id)
-    my_sig = get_or_compute_work_object_signature(issue_id, issue)
-    my_refs = set(my_sig["definitive_ids"])
+    my_refs = reference_base_ids_for_issue(issue_id)
     if not my_refs:
         return []
     my_project_id = issue.get("project_id")
-    collisions = []
-    for other in ws.list_issues(states=None, limit=10000):
-        if other["id"] == issue_id:
-            continue
-        if my_project_id and my_project_id == other.get("project_id"):
-            continue  # already grouped together - not a collision worth flagging
-        other_sig = get_or_compute_work_object_signature(other["id"], other)
-        shared = my_refs & set(other_sig["definitive_ids"])
-        if shared:
-            collisions.append({
-                "issue_id": other["id"], "title": other.get("title"),
-                "shared_reference_ids": sorted(shared),
-            })
-    return collisions
+    by_sibling: dict[str, dict] = {}
+    for ref in sorted(my_refs):
+        for row in ws.list_issues_for_reference_any_state(ref):
+            sibling_id = row["issue_id"]
+            if sibling_id == issue_id:
+                continue
+            if my_project_id and my_project_id == row.get("project_id"):
+                continue  # already grouped together - not a collision worth flagging
+            entry = by_sibling.setdefault(
+                sibling_id, {"issue_id": sibling_id, "title": row.get("title"), "shared_reference_ids": set()}
+            )
+            entry["shared_reference_ids"].add(ref)
+    return [
+        {**entry, "shared_reference_ids": sorted(entry["shared_reference_ids"])}
+        for entry in by_sibling.values()
+    ]
 
 
 def _vetoed_by_reference_mismatch(issue_id: str, sibling_id: str) -> bool:

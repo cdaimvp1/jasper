@@ -4,7 +4,10 @@ dedup, idempotency, and the claims_revision counter."""
 from __future__ import annotations
 
 import json
+import sqlite3
 import time
+
+import pytest
 
 import workgraph_claims as wc
 
@@ -344,6 +347,213 @@ def test_claim_events_record_raw_item_id_provenance_on_create_and_touch(ws_db):
     raw_item_ids = [e["raw_item_id"] for e in events]
     assert rid1 in raw_item_ids
     assert rid2 in raw_item_ids
+
+
+# --- corrected-extraction reconciliation (2026-08-04) ---------------------
+
+def _reextract(ws_db, rid, extracted_json):
+    """Overwrites raw_item_id's extraction (create_extraction is an
+    UPSERT) - simulates curator re-running extraction on the SAME
+    raw_item after a correction, which changes content_hash."""
+    ws_db.create_extraction(rid, json.dumps(extracted_json))
+
+
+def test_first_materialization_marks_extraction_materialized(ws_db):
+    iid = _issue(ws_db)
+    rid = _raw_item(ws_db, iid, "rec1", {"asks": ["please send the SOW"]}, direction="outbound")
+    wc.materialize_claims_for_raw_item(rid)
+
+    extraction = ws_db.get_extraction(rid)
+    assert extraction["materialized_hash"] == extraction["content_hash"]
+
+
+def test_unchanged_extraction_is_a_true_noop_on_rerun(ws_db):
+    iid = _issue(ws_db)
+    rid = _raw_item(ws_db, iid, "rec2", {"asks": ["please send the SOW"]}, direction="outbound")
+    wc.materialize_claims_for_raw_item(rid)
+
+    second = wc.materialize_claims_for_raw_item(rid)
+
+    assert second == 0
+    assert len(wc.list_open_claims_for_issue(iid, claim_type="ask")) == 1
+
+
+def test_correction_adds_a_new_claim(ws_db):
+    """Addition: the corrected extraction has an extra ask the first pass
+    never saw."""
+    iid = _issue(ws_db)
+    rid = _raw_item(ws_db, iid, "rec3", {"asks": ["please send the SOW"]}, direction="outbound")
+    wc.materialize_claims_for_raw_item(rid)
+
+    _reextract(ws_db, rid, {"asks": ["please send the SOW", "please also send the MSA"]})
+    inserted = wc.materialize_claims_for_raw_item(rid)
+
+    assert inserted == 1
+    claims = {c["text"] for c in wc.list_open_claims_for_issue(iid, claim_type="ask")}
+    assert claims == {"please send the SOW", "please also send the MSA"}
+
+
+def test_correction_removes_a_claim_as_superseded_not_done(ws_db):
+    """Deletion: the corrected extraction drops an ask that never really
+    existed - the old claim must be marked superseded (an extraction
+    correction), never 'done' (completed real-world work)."""
+    iid = _issue(ws_db)
+    rid = _raw_item(ws_db, iid, "rec4", {"asks": ["please send the SOW", "please send the MSA"]},
+                     direction="outbound")
+    wc.materialize_claims_for_raw_item(rid)
+    removed_claim = next(c for c in wc.list_open_claims_for_issue(iid, claim_type="ask")
+                          if c["text"] == "please send the MSA")
+
+    _reextract(ws_db, rid, {"asks": ["please send the SOW"]})
+    wc.materialize_claims_for_raw_item(rid)
+
+    open_claims = wc.list_open_claims_for_issue(iid, claim_type="ask")
+    assert [c["text"] for c in open_claims] == ["please send the SOW"]
+    removed = ws_db.get_claim(removed_claim["id"])
+    assert removed["status"] == "superseded"
+    events = ws_db.list_claim_events_for_claim(removed_claim["id"])
+    assert any(e["event_type"] == "dismiss" and "not completed real-world work" in (e["note"] or "")
+               for e in events)
+
+
+def test_correction_wording_change_supersedes_old_and_inserts_new(ws_db):
+    """Wording correction: no fuzzy matching, so a changed wording shows
+    up as one remove + one add - the old, wrongly-worded claim is
+    superseded, and a new claim with the corrected text is inserted."""
+    iid = _issue(ws_db)
+    rid = _raw_item(ws_db, iid, "rec5", {"asks": ["please send the sow"]}, direction="outbound")
+    wc.materialize_claims_for_raw_item(rid)
+    old_claim = wc.list_open_claims_for_issue(iid, claim_type="ask")[0]
+
+    _reextract(ws_db, rid, {"asks": ["please send the SIGNED sow by Friday"]})
+    inserted = wc.materialize_claims_for_raw_item(rid)
+
+    assert inserted == 1
+    open_claims = wc.list_open_claims_for_issue(iid, claim_type="ask")
+    assert len(open_claims) == 1
+    assert open_claims[0]["text"] == "please send the SIGNED sow by Friday"
+    assert ws_db.get_claim(old_claim["id"])["status"] == "superseded"
+
+
+def test_correction_owner_change_supersedes_and_reinserts(ws_db):
+    """Owner/type change: correcting the extraction's claim_type (e.g. a
+    decision that was really an ask) or direction (which flips owner) has
+    no reliable 1:1 mapping to the old row either - same remove+add
+    treatment."""
+    iid = _issue(ws_db)
+    rid = _raw_item(ws_db, iid, "rec6", {"decisions": ["going with vendor B"]}, direction="outbound")
+    wc.materialize_claims_for_raw_item(rid)
+    old_decision = wc.list_open_claims_for_issue(iid, claim_type="decision")[0]
+
+    _reextract(ws_db, rid, {"asks": ["going with vendor B"]})
+    inserted = wc.materialize_claims_for_raw_item(rid)
+
+    assert inserted == 1
+    assert wc.list_open_claims_for_issue(iid, claim_type="decision") == []
+    new_ask = wc.list_open_claims_for_issue(iid, claim_type="ask")[0]
+    assert new_ask["text"] == "going with vendor B"
+    assert ws_db.get_claim(old_decision["id"])["status"] == "superseded"
+
+
+def test_correction_is_idempotent_second_rerun_is_noop(ws_db):
+    iid = _issue(ws_db)
+    rid = _raw_item(ws_db, iid, "rec7", {"asks": ["please send the SOW"]}, direction="outbound")
+    wc.materialize_claims_for_raw_item(rid)
+    _reextract(ws_db, rid, {"asks": ["please send the signed SOW"]})
+
+    first = wc.materialize_claims_for_raw_item(rid)
+    second = wc.materialize_claims_for_raw_item(rid)
+
+    assert first == 1
+    assert second == 0
+    assert len(wc.list_open_claims_for_issue(iid, claim_type="ask")) == 1
+
+
+def test_correction_leaves_already_resolved_claim_untouched(ws_db):
+    """A claim a real human action already resolved (done/dismissed)
+    before the correction landed must never be silently reopened OR
+    re-touched by a later extraction diff."""
+    iid = _issue(ws_db)
+    rid = _raw_item(ws_db, iid, "rec8", {"asks": ["please send the SOW"]}, direction="outbound")
+    wc.materialize_claims_for_raw_item(rid)
+    resolved_claim = wc.list_open_claims_for_issue(iid, claim_type="ask")[0]
+    ws_db.update_claim_status(resolved_claim["id"], "done", actor="marc")
+
+    _reextract(ws_db, rid, {"asks": ["a completely different ask"]})
+    wc.materialize_claims_for_raw_item(rid)
+
+    untouched = ws_db.get_claim(resolved_claim["id"])
+    assert untouched["status"] == "done"
+    new_claims = wc.list_open_claims_for_issue(iid, claim_type="ask")
+    assert [c["text"] for c in new_claims] == ["a completely different ask"]
+
+
+def test_correction_only_key_facts_change_marks_materialized_with_no_claim_writes(ws_db):
+    iid = _issue(ws_db)
+    rid = _raw_item(ws_db, iid, "rec9", {"asks": ["please send the SOW"], "key_facts": ["old fact"]},
+                     direction="outbound")
+    wc.materialize_claims_for_raw_item(rid)
+    rev_before = ws_db.get_claims_revision(iid)
+
+    _reextract(ws_db, rid, {"asks": ["please send the SOW"], "key_facts": ["a brand new fact"]})
+    inserted = wc.materialize_claims_for_raw_item(rid)
+
+    assert inserted == 0
+    assert len(wc.list_open_claims_for_issue(iid, claim_type="ask")) == 1
+    assert ws_db.get_claims_revision(iid) > rev_before  # the new key fact still bumps revision
+    extraction = ws_db.get_extraction(rid)
+    assert extraction["materialized_hash"] == extraction["content_hash"]
+
+
+def test_reconciliation_rolls_back_completely_on_failure(ws_db):
+    """Forces a REAL sqlite3 constraint violation partway through
+    reconcile_extraction_claims's own transaction (a second to_insert spec
+    with an invalid claim_type, violating the claims.claim_type CHECK
+    constraint) instead of mocking the connection layer - wrapping
+    _connect() with even a fully transparent passthrough proxy was found
+    to corrupt unrelated, already-committed data on the raw on-disk file
+    in ways real SQLite semantics never would, so this exercises the
+    actual rollback path with a genuine failure rather than a simulated
+    one."""
+    iid = _issue(ws_db)
+    rid = _raw_item(ws_db, iid, "rec10", {"asks": ["please send the SOW"]}, direction="outbound")
+    wc.materialize_claims_for_raw_item(rid)
+    extraction_before = ws_db.get_extraction(rid)
+
+    valid_spec = {
+        "claim_type": "ask", "text": "please also send the MSA", "owner": None,
+        "date_kind": None, "canonical_key": None, "author": "counterparty",
+        "author_basis": "direction",
+    }
+    invalid_spec = {
+        "claim_type": "not_a_real_claim_type", "text": "this insert must fail", "owner": None,
+        "date_kind": None, "canonical_key": None, "author": "counterparty",
+        "author_basis": "direction",
+    }
+
+    with pytest.raises(sqlite3.IntegrityError):
+        ws_db.reconcile_extraction_claims(
+            issue_id=iid, raw_item_id=rid, to_insert=[valid_spec, invalid_spec],
+            to_supersede=[], new_materialized_hash="fake-hash-that-must-not-stick",
+        )
+
+    # The failed attempt must have rolled back completely - no orphaned
+    # insert from the valid spec that ran (and would otherwise have
+    # committed) before the invalid one failed.
+    open_claims = ws_db.list_open_claims_for_issue(iid, claim_type="ask")
+    assert [c["text"] for c in open_claims] == ["please send the SOW"]
+    extraction = ws_db.get_extraction(rid)
+    assert extraction["materialized_hash"] == extraction_before["materialized_hash"]
+    assert extraction["materialized_hash"] != "fake-hash-that-must-not-stick"
+
+    # A subsequent, valid call must still succeed cleanly and completely -
+    # the failed attempt didn't leave anything half-applied behind.
+    ws_db.reconcile_extraction_claims(
+        issue_id=iid, raw_item_id=rid, to_insert=[valid_spec], to_supersede=[],
+        new_materialized_hash="a-real-hash",
+    )
+    open_claims_after = ws_db.list_open_claims_for_issue(iid, claim_type="ask")
+    assert {c["text"] for c in open_claims_after} == {"please send the SOW", "please also send the MSA"}
 
 
 # --- claims_revision (Section 9.5) --------------------------------------

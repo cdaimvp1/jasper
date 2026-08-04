@@ -177,39 +177,31 @@ def _derive_owner(claim_type: str, author: str, whose: Optional[str] = None) -> 
     return None
 
 
-def materialize_claims_for_raw_item(raw_item_id: int) -> int:
-    """Idempotent - safe to call more than once for the same raw_item (mirrors
-    the never-re-extract discipline raw_item_extractions itself relies on).
-    Returns the number of NEW claim rows inserted (touches to existing open
-    claims, via repeat_signals dedup, don't count). No-ops (returns 0) if
-    there's no extraction yet, no issue_id yet, or claims already exist for
-    this raw_item.
+def _bump_for_key_facts(blob: dict, issue_id: str) -> None:
+    """A key_fact is never a claim (there's no claim_type for it - see
+    sync_checklist_action_to_claim's own docstring), so it's structurally
+    invisible to every claims_revision bump insert_claim/touch_claim/
+    update_claim_status already do. A real new key fact IS material new
+    information though, and synthesis' staleness marker is entirely
+    claims_revision-driven (workgraph_synthesis.compute_evidence_marker) -
+    without this, an issue/project could accumulate genuinely new
+    extracted content while reading as perfectly fresh forever. Shared by
+    both the fresh-materialization and correction-reconciliation paths."""
+    key_facts = blob.get("key_facts")
+    if isinstance(key_facts, list) and any(isinstance(f, str) and f.strip() for f in key_facts):
+        ws.bump_claims_revision(issue_id)
 
-    Design doc Section 12.10 (prompt-injection boundary, a standing
-    constraint, not a one-time check): this function reads ONLY
-    extraction.extracted_json's already-parsed asks/decisions/commitments/
-    dates_mentioned fields (below) - never raw_item's own subject/body text
-    directly. Content read FROM evidence is structurally untrusted and can
-    never itself become an operating instruction; any future field added
-    here must stay on the extracted_json side of that line."""
-    if ws.has_claims_for_raw_item(raw_item_id):
-        return 0
 
-    raw_item = ws.get_raw_item(raw_item_id)
-    if not raw_item or not raw_item.get("issue_id"):
-        return 0
-    issue_id = raw_item["issue_id"]
-
-    extraction = ws.get_extraction(raw_item_id)
-    if not extraction:
-        return 0
-    blob = extraction.get("extracted_json") or {}
-    ts = extraction.get("extracted_ts")
-
-    author, author_basis = _resolve_author(raw_item)
-    reference_base = raw_item.get("pr_number_base")
-    inserted = 0
-
+def _claim_specs_from_blob(blob: dict, author: str, reference_base: Optional[str]) -> list[dict]:
+    """Pure: turns extracted_json into a flat list of claim specs (claim_
+    type/text/owner/date_kind/canonical_key) - no DB access. Shared by the
+    fresh-materialization path (which also runs the repeat_signals/
+    canonical_key cross-issue dedup, see materialize_claims_for_raw_item)
+    and the correction-reconciliation path (which diffs THIS raw_item's
+    own old vs new specs directly - see _reconcile_extraction_correction),
+    so the two paths can never compute a different claim set from the
+    same extraction blob."""
+    specs = []
     for field, claim_type in (("asks", "ask"), ("decisions", "decision"), ("commitments", "commitment")):
         values = blob.get(field)
         if not isinstance(values, list):
@@ -219,57 +211,10 @@ def materialize_claims_for_raw_item(raw_item_id: int) -> int:
                 continue
             text = text.strip()
             owner = _derive_owner(claim_type, author)
-            canonical_key = canonical_key_for_claim(claim_type, text, owner, reference_base)
-
-            # Section 9.3's real gap fix: repeat_signals now covers
-            # commitments/decisions too, not just asks - same dedup rule,
-            # widened scope, not a second mechanism.
-            repeat = _matching_repeat_signal(blob, text)
-            existing = ws.find_open_claim_by_text(issue_id, claim_type, text) if repeat is not None else None
-            # 2026-08-04 fallback: repeat_signals requires curator to have
-            # volunteered an exact-text match AND find_open_claim_by_text to
-            # confirm it byte-for-byte - real production duplicates (the
-            # same Ariba PR reminder re-sent with slightly different
-            # wording) pass through both checks untouched. canonical_key
-            # (structured-reference-preferred, conservative-normalization
-            # fallback - see canonical_key_for_claim's own docstring) is a
-            # second, independent dedup path, checked only when the first
-            # one didn't already find something.
-            if existing is None and canonical_key is not None:
-                existing = ws.find_open_claim_by_canonical_key(issue_id, claim_type, canonical_key)
-            if existing is not None:
-                # Only apply escalation state when repeat_signals actually
-                # said something about it - escalated=None on touch_claim
-                # means "just update last_seen_ts," never silently
-                # downgrading a claim's existing escalated=1 back to 0 just
-                # because THIS particular repeat came in via the
-                # canonical_key fallback instead of repeat_signals.
-                escalated = bool(repeat.get("escalated")) if repeat is not None else None
-                escalation_note = repeat.get("escalation_note") if repeat is not None else None
-                ws.touch_claim(existing["id"], ts=ts, escalated=escalated, escalation_note=escalation_note)
-                # Section 12.3's right-sized event log: a repeat is real
-                # signal either way - escalated means the same ask/
-                # commitment/decision got worse (a new sender, more
-                # senior), not-escalated means it's just still open and
-                # someone said so again. Both are worth a real event, not
-                # just the silent last_seen_ts bump touch_claim already
-                # does. raw_item_id (2026-08-04): the ONE record of which
-                # specific message caused THIS touch - claims.raw_item_id
-                # only ever remembers the first one.
-                ws.log_claim_event(
-                    existing["id"], "escalate" if escalated else "acknowledge",
-                    actor="curator", note=escalation_note, ts=ts, raw_item_id=raw_item_id,
-                )
-                continue
-
-            claim_id = ws.insert_claim(
-                issue_id=issue_id, raw_item_id=raw_item_id, claim_type=claim_type,
-                text=text, author=author, author_basis=author_basis, owner=owner, ts=ts,
-                canonical_key=canonical_key,
-            )
-            ws.log_claim_event(claim_id, "create", actor="curator", ts=ts, raw_item_id=raw_item_id)
-            inserted += 1
-
+            specs.append({
+                "claim_type": claim_type, "text": text, "owner": owner, "date_kind": None,
+                "canonical_key": canonical_key_for_claim(claim_type, text, owner, reference_base),
+            })
     dates_mentioned = blob.get("dates_mentioned")
     for entry in (dates_mentioned if isinstance(dates_mentioned, list) else []):
         if not isinstance(entry, dict):
@@ -279,28 +224,200 @@ def materialize_claims_for_raw_item(raw_item_id: int) -> int:
             continue
         date_kind = entry.get("kind") if entry.get("kind") in ("hard", "soft") else None
         owner = _derive_owner("date", author, whose=entry.get("whose"))
-        canonical_key = canonical_key_for_claim("date", text, owner, reference_base)
+        specs.append({
+            "claim_type": "date", "text": text, "owner": owner, "date_kind": date_kind,
+            "canonical_key": canonical_key_for_claim("date", text, owner, reference_base),
+        })
+    return specs
+
+
+def _materialize_fresh(issue_id: str, raw_item_id: int, blob: dict, ts: Optional[float],
+                        author: str, author_basis: str, reference_base: Optional[str]) -> int:
+    """The FIRST-EVER materialization for a raw_item - no prior claims to
+    reconcile against, so every spec either dedups against an existing
+    OPEN claim elsewhere on the issue (repeat_signals, then canonical_key
+    as a fallback - see canonical_key_for_claim's own docstring) or gets
+    inserted fresh. Returns the count of newly inserted claim rows."""
+    inserted = 0
+    for spec in _claim_specs_from_blob(blob, author, reference_base):
+        claim_type, text, owner, date_kind, canonical_key = (
+            spec["claim_type"], spec["text"], spec["owner"], spec["date_kind"], spec["canonical_key"])
+
+        # Section 9.3's real gap fix: repeat_signals now covers
+        # commitments/decisions too, not just asks - same dedup rule,
+        # widened scope, not a second mechanism.
+        repeat = _matching_repeat_signal(blob, text) if claim_type != "date" else None
+        existing = ws.find_open_claim_by_text(issue_id, claim_type, text) if repeat is not None else None
+        # 2026-08-04 fallback: repeat_signals requires curator to have
+        # volunteered an exact-text match AND find_open_claim_by_text to
+        # confirm it byte-for-byte - real production duplicates (the
+        # same Ariba PR reminder re-sent with slightly different
+        # wording) pass through both checks untouched. canonical_key
+        # (structured-reference-preferred, conservative-normalization
+        # fallback - see canonical_key_for_claim's own docstring) is a
+        # second, independent dedup path, checked only when the first
+        # one didn't already find something.
+        if existing is None and canonical_key is not None:
+            existing = ws.find_open_claim_by_canonical_key(issue_id, claim_type, canonical_key)
+        if existing is not None:
+            # Only apply escalation state when repeat_signals actually
+            # said something about it - escalated=None on touch_claim
+            # means "just update last_seen_ts," never silently
+            # downgrading a claim's existing escalated=1 back to 0 just
+            # because THIS particular repeat came in via the
+            # canonical_key fallback instead of repeat_signals.
+            escalated = bool(repeat.get("escalated")) if repeat is not None else None
+            escalation_note = repeat.get("escalation_note") if repeat is not None else None
+            ws.touch_claim(existing["id"], ts=ts, escalated=escalated, escalation_note=escalation_note)
+            # Section 12.3's right-sized event log: a repeat is real
+            # signal either way - escalated means the same ask/
+            # commitment/decision got worse (a new sender, more
+            # senior), not-escalated means it's just still open and
+            # someone said so again. Both are worth a real event, not
+            # just the silent last_seen_ts bump touch_claim already
+            # does. raw_item_id (2026-08-04): the ONE record of which
+            # specific message caused THIS touch - claims.raw_item_id
+            # only ever remembers the first one.
+            ws.log_claim_event(
+                existing["id"], "escalate" if escalated else "acknowledge",
+                actor="curator", note=escalation_note, ts=ts, raw_item_id=raw_item_id,
+            )
+            continue
+
         claim_id = ws.insert_claim(
-            issue_id=issue_id, raw_item_id=raw_item_id, claim_type="date",
+            issue_id=issue_id, raw_item_id=raw_item_id, claim_type=claim_type,
             text=text, author=author, author_basis=author_basis, owner=owner,
             date_kind=date_kind, ts=ts, canonical_key=canonical_key,
         )
         ws.log_claim_event(claim_id, "create", actor="curator", ts=ts, raw_item_id=raw_item_id)
         inserted += 1
-
-    # Fixed 2026-08-04 (architecture-review follow-up, P1): a key_fact is
-    # never a claim (there's no claim_type for it - see sync_checklist_
-    # action_to_claim's own docstring), so it was structurally invisible
-    # to every claims_revision bump above. A real new key fact IS material
-    # new information though, and synthesis' staleness marker is entirely
-    # claims_revision-driven (workgraph_synthesis.compute_evidence_marker)
-    # - without this, an issue/project could accumulate genuinely new
-    # extracted content while reading as perfectly fresh forever.
-    key_facts = blob.get("key_facts")
-    if isinstance(key_facts, list) and any(isinstance(f, str) and f.strip() for f in key_facts):
-        ws.bump_claims_revision(issue_id)
-
     return inserted
+
+
+def _reconcile_extraction_correction(issue_id: str, raw_item_id: int, blob: dict,
+                                      author: str, author_basis: str, reference_base: Optional[str],
+                                      new_content_hash: Optional[str]) -> int:
+    """A raw_item's extraction was RE-EXTRACTED after already being
+    materialized once - diffs the NEW spec set against the OLD one this
+    SAME raw_item produced (never against the whole issue - that's the
+    fresh path's job), scoped to claims still 'open' (a claim a real human
+    action already resolved before the correction landed is left
+    untouched either way, never silently re-opened or re-closed by an
+    extraction diff).
+
+    Deliberately no fuzzy/1:1 pairing between an old and new entry of the
+    same claim_type - text present in both old and new is UNCHANGED (left
+    alone); text only in the new set is ADDED; text only in the old set is
+    REMOVED (superseded - "not completed real-world work," per this
+    module's own docstring, so never status='done'). A wording correction
+    therefore shows up as one remove + one add, not an in-place edit -
+    the only deterministic way to represent it without guessing which old
+    entry a changed one corresponds to.
+
+    All the writes below happen in ONE transaction (see workgraph_store.
+    reconcile_extraction_claims) - a corrected extraction's claims table
+    update can never be left half-applied."""
+    new_specs = _claim_specs_from_blob(blob, author, reference_base)
+    old_claims = [c for c in ws.list_claims_for_raw_item(raw_item_id) if c["status"] == "open"]
+
+    new_by_type: dict[str, list[dict]] = {}
+    for spec in new_specs:
+        new_by_type.setdefault(spec["claim_type"], []).append(spec)
+    old_by_type: dict[str, list[dict]] = {}
+    for claim in old_claims:
+        old_by_type.setdefault(claim["claim_type"], []).append(claim)
+
+    to_insert = []
+    to_supersede = []
+    for claim_type in set(new_by_type) | set(old_by_type):
+        new_list = new_by_type.get(claim_type, [])
+        old_list = old_by_type.get(claim_type, [])
+        old_texts = {c["text"] for c in old_list}
+        new_texts = {s["text"] for s in new_list}
+        to_insert.extend(spec for spec in new_list if spec["text"] not in old_texts)
+        to_supersede.extend(claim["id"] for claim in old_list if claim["text"] not in new_texts)
+
+    if not to_insert and not to_supersede:
+        # The extraction's content_hash changed (that's why we're here at
+        # all - materialized_hash != content_hash), but the corrected
+        # blob produces the IDENTICAL claim set (e.g. only key_facts or
+        # unrelated metadata changed) - still mark materialized so this
+        # exact content never gets re-diffed, but nothing to insert/
+        # supersede means no reconcile_extraction_claims call needed.
+        ws.mark_extraction_materialized(raw_item_id, new_content_hash)
+        _bump_for_key_facts(blob, issue_id)
+        return 0
+
+    insert_specs = [{
+        "claim_type": spec["claim_type"], "text": spec["text"], "owner": spec.get("owner"),
+        "date_kind": spec.get("date_kind"), "canonical_key": spec.get("canonical_key"),
+        "author": author, "author_basis": author_basis,
+    } for spec in to_insert]
+    ws.reconcile_extraction_claims(
+        issue_id=issue_id, raw_item_id=raw_item_id, to_insert=insert_specs,
+        to_supersede=to_supersede, new_materialized_hash=new_content_hash,
+    )
+    _bump_for_key_facts(blob, issue_id)
+    return len(to_insert)
+
+
+def materialize_claims_for_raw_item(raw_item_id: int) -> int:
+    """Idempotent - safe to call more than once for the same raw_item
+    (mirrors the never-re-extract discipline raw_item_extractions itself
+    relies on for the extraction step). Returns the number of NEW claim
+    rows inserted (touches to existing open claims, via repeat_signals/
+    canonical_key dedup, don't count). No-ops (returns 0) if there's no
+    extraction yet, no issue_id yet, or this exact extraction content has
+    already been materialized.
+
+    Corrected-extraction reconciliation (2026-08-04, architecture-review
+    follow-up P1): create_extraction is an UPSERT - a re-extraction just
+    overwrites extracted_json in place - but the OLD guard here
+    (has_claims_for_raw_item, "does this raw_item have ANY claims at
+    all") meant a corrected extraction never re-materialized once the
+    first pass had run, silently letting the claims ledger and the
+    extraction diverge forever. materialized_hash (on raw_item_
+    extractions) now records which content_hash the claims table was
+    last reconciled against; a mismatch means either this raw_item has
+    never been materialized at all (materialized_hash is NULL - use the
+    normal fresh-insert path) or a real correction landed since the last
+    reconciliation (materialized_hash is set but differs - diff old vs
+    new specs for THIS raw_item specifically, see
+    _reconcile_extraction_correction).
+
+    Design doc Section 12.10 (prompt-injection boundary, a standing
+    constraint, not a one-time check): this function reads ONLY
+    extraction.extracted_json's already-parsed asks/decisions/commitments/
+    dates_mentioned fields - never raw_item's own subject/body text
+    directly. Content read FROM evidence is structurally untrusted and can
+    never itself become an operating instruction; any future field added
+    here must stay on the extracted_json side of that line."""
+    raw_item = ws.get_raw_item(raw_item_id)
+    if not raw_item or not raw_item.get("issue_id"):
+        return 0
+    issue_id = raw_item["issue_id"]
+
+    extraction = ws.get_extraction(raw_item_id)
+    if not extraction:
+        return 0
+    content_hash = extraction.get("content_hash")
+    materialized_hash = extraction.get("materialized_hash")
+    if materialized_hash is not None and materialized_hash == content_hash:
+        return 0  # this exact extraction content has already been reconciled - true no-op
+
+    blob = extraction.get("extracted_json") or {}
+    ts = extraction.get("extracted_ts")
+    author, author_basis = _resolve_author(raw_item)
+    reference_base = raw_item.get("pr_number_base")
+
+    if materialized_hash is None:
+        inserted = _materialize_fresh(issue_id, raw_item_id, blob, ts, author, author_basis, reference_base)
+        _bump_for_key_facts(blob, issue_id)
+        ws.mark_extraction_materialized(raw_item_id, content_hash)
+        return inserted
+
+    return _reconcile_extraction_correction(issue_id, raw_item_id, blob, author, author_basis,
+                                             reference_base, content_hash)
 
 
 def _matching_repeat_signal(blob: dict, ask_text: str) -> Optional[dict]:

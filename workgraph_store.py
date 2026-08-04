@@ -903,6 +903,30 @@ def init_workgraph() -> None:
                 )
             """)
 
+            try:
+                # Corrected-extraction reconciliation (2026-08-04,
+                # architecture-review follow-up P1): create_extraction is an
+                # UPSERT (a re-extraction just overwrites extracted_json in
+                # place), but materialize_claims_for_raw_item's OLD guard
+                # (has_claims_for_raw_item) only ever asked "does this
+                # raw_item have ANY claims at all" - a corrected extraction
+                # silently never re-materialized, so the claims ledger and
+                # the extraction blob could diverge forever with no way to
+                # tell. content_hash is a canonical-JSON hash of the CURRENT
+                # extracted_json (set automatically by create_extraction on
+                # every write); materialized_hash records which hash the
+                # claims table was last reconciled against - the two
+                # differing is exactly "a correction landed that claims
+                # hasn't caught up to yet" (see workgraph_claims.
+                # materialize_claims_for_raw_item's own docstring).
+                conn.execute("ALTER TABLE raw_item_extractions ADD COLUMN content_hash TEXT")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute("ALTER TABLE raw_item_extractions ADD COLUMN materialized_hash TEXT")
+            except sqlite3.OperationalError:
+                pass
+
             # --- Per-entity synthesis (Project, or a standalone Issue not yet
             # grouped into one) - ONE synthesis reflecting the whole underlying
             # negotiation, not one per thread. synthesized_from_marker is the
@@ -5457,16 +5481,66 @@ def list_audit_log(entity_type: str, entity_id: str) -> list[dict]:
 # only so a worker can correct a bad extraction; the "never recomputed" rule
 # is a routine-level discipline, not a DB constraint.
 
+def canonical_json_hash(extracted_json: str) -> str:
+    """Deterministic hash of the extraction's REAL content, not its byte
+    representation - re-parses and re-serializes with sorted keys and no
+    whitespace variance first, so two calls that produced logically
+    identical JSON (different key order, different indent) still hash
+    identically. Used both to detect a real correction (content_hash
+    changing) and as the guard against re-reconciling an unchanged
+    extraction (materialized_hash == content_hash)."""
+    try:
+        parsed = json.loads(extracted_json)
+    except (TypeError, ValueError):
+        parsed = extracted_json
+    canonical = json.dumps(parsed, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def create_extraction(raw_item_id: int, extracted_json: str) -> None:
+    content_hash = canonical_json_hash(extracted_json)
     with _lock:
         conn = _connect()
         try:
             conn.execute(
-                """INSERT INTO raw_item_extractions (raw_item_id, extracted_json, extracted_ts)
-                   VALUES (?, ?, ?)
+                """INSERT INTO raw_item_extractions (raw_item_id, extracted_json, extracted_ts, content_hash)
+                   VALUES (?, ?, ?, ?)
                    ON CONFLICT(raw_item_id) DO UPDATE SET
-                       extracted_json = excluded.extracted_json, extracted_ts = excluded.extracted_ts""",
-                (raw_item_id, extracted_json, time.time()),
+                       extracted_json = excluded.extracted_json, extracted_ts = excluded.extracted_ts,
+                       content_hash = excluded.content_hash""",
+                (raw_item_id, extracted_json, time.time(), content_hash),
+            )
+        finally:
+            conn.close()
+
+
+def set_extraction_content_hash(raw_item_id: int, content_hash: str) -> None:
+    """Backfill-only setter (2026-08-04) - create_extraction computes
+    content_hash automatically for every NEW/re-extracted row; this is
+    for workgraph_claims_backfill's one-time pass over extraction rows
+    written before this feature existed."""
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                "UPDATE raw_item_extractions SET content_hash = ? WHERE raw_item_id = ?",
+                (content_hash, raw_item_id),
+            )
+        finally:
+            conn.close()
+
+
+def mark_extraction_materialized(raw_item_id: int, content_hash: Optional[str]) -> None:
+    """Records that the claims table has been reconciled against THIS
+    extraction content - the counterpart materialize_claims_for_raw_item
+    checks (materialized_hash == content_hash) before deciding a
+    correction needs reconciling at all."""
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                "UPDATE raw_item_extractions SET materialized_hash = ? WHERE raw_item_id = ?",
+                (content_hash, raw_item_id),
             )
         finally:
             conn.close()
@@ -5560,6 +5634,72 @@ def list_all_open_claims() -> list[dict]:
         finally:
             conn.close()
     return [dict(r) for r in rows]
+
+
+def reconcile_extraction_claims(*, issue_id: str, raw_item_id: int, to_insert: list[dict],
+                                 to_supersede: list[int], new_materialized_hash: Optional[str]) -> list[int]:
+    """Atomically applies a corrected-extraction reconciliation (2026-08-04,
+    architecture-review follow-up P1): inserts every new claim spec in
+    `to_insert` (each a dict with claim_type/text/owner/date_kind/
+    canonical_key), marks every id in `to_supersede` as status='superseded'
+    (no superseded_by - no reliable 1:1 link between an old removed claim
+    and a specific new one, so this deliberately doesn't guess a pairing),
+    logs a real claim_event for each change, bumps claims_revision ONCE for
+    the whole reconciliation (not once per claim), and updates the
+    extraction's materialized_hash - ALL in one transaction. A prior
+    reconciliation attempt that crashed mid-way must never leave the claims
+    table half-corrected while materialized_hash still reads as stale (which
+    would make a retry re-apply the same half-done changes again) - see the
+    workgraph_claims_backfill test that verifies a forced failure rolls back
+    completely, not partially. Returns the new claim ids inserted."""
+    now = time.time()
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            inserted_ids = []
+            for spec in to_insert:
+                cur = conn.execute(
+                    """INSERT INTO claims
+                       (issue_id, raw_item_id, claim_type, text, author, author_basis,
+                        owner, date_kind, status, first_seen_ts, last_seen_ts, canonical_key)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)""",
+                    (issue_id, raw_item_id, spec["claim_type"], spec["text"], spec["author"],
+                     spec["author_basis"], spec.get("owner"), spec.get("date_kind"), now, now,
+                     spec.get("canonical_key")),
+                )
+                claim_id = cur.lastrowid
+                inserted_ids.append(claim_id)
+                conn.execute(
+                    """INSERT INTO claim_events (claim_id, event_type, ts, actor, note, raw_item_id)
+                       VALUES (?, 'create', ?, 'curator', ?, ?)""",
+                    (claim_id, now, "added by a corrected extraction", raw_item_id),
+                )
+            for claim_id in to_supersede:
+                conn.execute(
+                    "UPDATE claims SET status = 'superseded', last_seen_ts = ? WHERE id = ?",
+                    (now, claim_id),
+                )
+                conn.execute(
+                    """INSERT INTO claim_events (claim_id, event_type, ts, actor, note, raw_item_id)
+                       VALUES (?, 'dismiss', ?, 'curator', ?, ?)""",
+                    (claim_id, now, "removed by a corrected extraction, not completed real-world work", raw_item_id),
+                )
+            if to_insert or to_supersede:
+                conn.execute(
+                    "UPDATE issues SET claims_revision = claims_revision + 1 WHERE id = ?", (issue_id,)
+                )
+            conn.execute(
+                "UPDATE raw_item_extractions SET materialized_hash = ? WHERE raw_item_id = ?",
+                (new_materialized_hash, raw_item_id),
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.close()
+    return inserted_ids
 
 
 def list_raw_item_ids_with_extractions() -> list[int]:
@@ -6044,6 +6184,26 @@ def list_claims_for_issue(issue_id: str) -> list[dict]:
         try:
             rows = conn.execute(
                 "SELECT * FROM claims WHERE issue_id = ? ORDER BY first_seen_ts ASC", (issue_id,)
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def list_claims_for_raw_item(raw_item_id: int) -> list[dict]:
+    """Every claim THIS raw_item ever produced, any status - the diff base
+    for corrected-extraction reconciliation (2026-08-04): comparing the
+    still-OPEN ones against a re-extraction's new content is how
+    workgraph_claims.materialize_claims_for_raw_item tells apart an
+    unchanged claim, a real correction, and a genuine addition. A claim
+    already resolved by a real human action (done/dismissed) before the
+    correction landed is deliberately excluded from that comparison by
+    the caller, not by this function - it stays untouched either way."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM claims WHERE raw_item_id = ? ORDER BY first_seen_ts ASC", (raw_item_id,)
             ).fetchall()
         finally:
             conn.close()

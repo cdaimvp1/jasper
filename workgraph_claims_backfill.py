@@ -26,6 +26,18 @@ for Phase 3 (design doc Section 9):
                               by materialize_claims_for_raw_item's own
                               canonical_key fallback, so there's nothing new
                               for a daily re-run of this to find.
+  backfill_extraction_content_hashes() — one-time migration (2026-08-04)
+                              for corrected-extraction reconciliation:
+                              backfills content_hash for pre-existing
+                              extraction rows, and grandfathers in
+                              materialized_hash=content_hash for every
+                              raw_item already materialized under the OLD
+                              scheme - so this migration doesn't treat
+                              every already-correct extraction as an
+                              unreconciled correction the moment it ships.
+                              Must run BEFORE relying on materialize_
+                              claims_for_raw_item's reconciliation path on
+                              a pre-existing DB.
 
 Same "one-time backfill, then a daily-if-due sweep for anything that landed
 since" shape as workgraph_identity.backfill_identity_anchors /
@@ -35,6 +47,7 @@ both current for raw_items that arrive after the first run.
 """
 from __future__ import annotations
 
+import json
 import time
 
 import text_extract
@@ -69,6 +82,43 @@ def backfill_claims(*, limit: int | None = None) -> dict:
         "claims_inserted": inserted,
         "already_materialized": skipped_already_materialized,
         "skipped_no_issue_id": skipped_no_issue,
+    }
+
+
+def backfill_extraction_content_hashes() -> dict:
+    """One-time migration (2026-08-04, corrected-extraction reconciliation,
+    architecture-review follow-up P1): computes content_hash for every
+    existing raw_item_extractions row that doesn't have one yet (rows
+    written before create_extraction started computing it automatically),
+    and GRANDFATHERS IN materialized_hash = content_hash for every raw_item
+    that already has real claims (materialized under the pre-reconciliation
+    scheme, via the old has_claims_for_raw_item guard) - so this migration
+    does NOT retroactively treat every already-correct, unchanged
+    extraction as needing a from-scratch reconciliation diff the moment
+    this ships. Extractions with NO claims yet (immaterial, or simply not
+    yet processed) are deliberately left with materialized_hash=NULL -
+    same as any real never-materialized raw_item, so the normal first-time
+    insert-only path in materialize_claims_for_raw_item still applies to
+    them on the next backfill_claims() run."""
+    raw_item_ids = ws.list_raw_item_ids_with_extractions()
+    hashes_backfilled = 0
+    grandfathered = 0
+    for rid in raw_item_ids:
+        extraction = ws.get_extraction(rid)
+        if not extraction:
+            continue
+        content_hash = extraction.get("content_hash")
+        if content_hash is None:
+            content_hash = ws.canonical_json_hash(json.dumps(extraction["extracted_json"]))
+            ws.set_extraction_content_hash(rid, content_hash)
+            hashes_backfilled += 1
+        if extraction.get("materialized_hash") is None and ws.has_claims_for_raw_item(rid):
+            ws.mark_extraction_materialized(rid, content_hash)
+            grandfathered += 1
+    return {
+        "raw_items_scanned": len(raw_item_ids),
+        "hashes_backfilled": hashes_backfilled,
+        "grandfathered": grandfathered,
     }
 
 

@@ -1462,6 +1462,218 @@ def test_group_issue_flag_on_single_weak_signal_creates_suggestion_not_merge(ws_
     assert ws_db.get_issue(a)["project_id"] is None
 
 
+# --- 2026-08-04 regression fix: scored-enabled path must preserve the -----
+# --- merge / link / no-match distinction, not collapse every "suggest" ---
+# --- verdict into a generic merge suggestion --------------------------
+
+def test_suggestion_kind_for_scored_signals_party_with_topic_is_merge():
+    assert wp._suggestion_kind_for_scored_signals(["party", "topic"]) == "merge"
+
+
+def test_suggestion_kind_for_scored_signals_party_without_topic_is_link():
+    assert wp._suggestion_kind_for_scored_signals(["party"]) == "link"
+
+
+def test_suggestion_kind_for_scored_signals_company_alone_is_link():
+    assert wp._suggestion_kind_for_scored_signals(["company"]) == "link"
+
+
+def test_suggestion_kind_for_scored_signals_company_with_topic_is_still_link():
+    """A shared company NEVER proves the same transaction on its own, even
+    with topic overlap - the exact boilerplate false-positive shape task
+    #81 already fixed for _shared_topic_key (Ariba's own requisition-
+    approval template text produces a real topic-key match between two
+    DIFFERENT reps' DIFFERENT requisitions at the same company)."""
+    assert wp._suggestion_kind_for_scored_signals(["company", "topic"]) == "link"
+
+
+def test_suggestion_kind_for_scored_signals_topic_alone_is_merge():
+    assert wp._suggestion_kind_for_scored_signals(["topic"]) == "merge"
+
+
+def test_suggestion_kind_for_scored_signals_sender_and_category_alone_is_none():
+    """No external identity (party/company) and no topic overlap - never
+    reached a suggestion under the ordered model either (same-category-
+    proximity suggestions are config-gated off by default)."""
+    assert wp._suggestion_kind_for_scored_signals(["sender", "category"]) is None
+
+
+def test_group_issue_flag_on_same_supplier_different_work_creates_link_suggestion(ws_db, monkeypatch, tmp_path):
+    """The regression's real shape: same Acme company, two DIFFERENT reps,
+    two DIFFERENT Ariba requisition emails whose subjects nonetheless share
+    Ariba's own boilerplate phrasing - matched_signals ends up ['company',
+    'topic'], and the FIX must still classify this as suggestion_kind=
+    'link' (same supplier, different work), not the pre-fix bug's blanket
+    'merge'."""
+    config = _isolate_config(monkeypatch, tmp_path)
+    config.set_value(True, "grouping", "scored_model_enabled")
+
+    a = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted")
+    _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
+    b = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted again")
+    _link_party(ws_db, b, "p2", "other@acme.com", company="Acme")
+
+    result = wp.group_issue(a)
+
+    assert result["action"] == "suggested"
+    assert result["suggestion_kind"] == "link"
+    pending = ws_db.list_project_suggestions(status="pending")
+    assert len(pending) == 1
+    assert pending[0]["suggestion_kind"] == "link"
+
+
+def test_group_issue_flag_on_shared_definitive_reference_still_auto_merges(ws_db, monkeypatch, tmp_path):
+    config = _isolate_config(monkeypatch, tmp_path)
+    config.set_value(True, "grouping", "scored_model_enabled")
+
+    a = _issue(ws_db, "First notice")
+    _raw_item(ws_db, a, "PR9112233 approval needed", "regr-ref-a")
+    b = _issue(ws_db, "Totally different subject")
+    _raw_item(ws_db, b, "REMINDER PR9112233", "regr-ref-b")
+
+    result = wp.group_issue(a)
+
+    assert result["action"] == "auto_merged"
+    assert ws_db.get_issue(a)["project_id"] is not None
+    assert ws_db.get_issue(a)["project_id"] == ws_db.get_issue(b)["project_id"]
+
+
+def test_group_issue_flag_on_disjoint_definitive_references_vetoes_match(ws_db, monkeypatch, tmp_path):
+    """Two issues at the same company but with DIFFERENT, disjoint PR
+    numbers must not merge OR link - a_ids/b_ids both non-empty and
+    disjoint zeroes the score outright inside _pairwise_score_from_
+    signature, unchanged by this fix."""
+    config = _isolate_config(monkeypatch, tmp_path)
+    config.set_value(True, "grouping", "scored_model_enabled")
+
+    a = _issue(ws_db, "Approve PR1000111")
+    _raw_item(ws_db, a, "Approve PR1000111", "regr-vet-a")
+    _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
+    b = _issue(ws_db, "Approve PR2000222")
+    _raw_item(ws_db, b, "Approve PR2000222", "regr-vet-b")
+    _link_party(ws_db, b, "p2", "other@acme.com", company="Acme")
+
+    result = wp.group_issue(a)
+
+    assert result["action"] == "no_match"
+    assert ws_db.list_project_suggestions(status="pending") == []
+
+
+def test_group_issue_flag_on_cannot_link_constraint_blocks_suggestion(ws_db, monkeypatch, tmp_path):
+    """A durable cannot_link constraint (v2.4) is caught even earlier than
+    create_project_suggestion's own veto check: _pairwise_score_from_
+    signature zeroes this pair's score to 0.0 outright (compute_work_
+    object_signature's cannot_link_ids), so it never even becomes the
+    scored model's best_sibling candidate - confirmed via no_match, not a
+    create-then-drop."""
+    config = _isolate_config(monkeypatch, tmp_path)
+    config.set_value(True, "grouping", "scored_model_enabled")
+
+    a = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted")
+    _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
+    b = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted again")
+    _link_party(ws_db, b, "p2", "other@acme.com", company="Acme")
+    ws_db.create_identity_constraint("cannot_link", a, b, "confirmed separate", actor="marc")
+
+    result = wp.group_issue(a)
+
+    assert result["action"] == "no_match"
+    assert ws_db.list_project_suggestions(status="pending") == []
+
+
+def test_group_issue_flag_on_no_duplicate_suggestion_on_replay(ws_db, monkeypatch, tmp_path):
+    """group_issue() is documented idempotent - calling it twice for the
+    same still-ungrouped pair must not create a second pending 'link' row."""
+    config = _isolate_config(monkeypatch, tmp_path)
+    config.set_value(True, "grouping", "scored_model_enabled")
+
+    a = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted")
+    _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
+    b = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted again")
+    _link_party(ws_db, b, "p2", "other@acme.com", company="Acme")
+
+    wp.group_issue(a)
+    wp.group_issue(a)
+
+    assert len(ws_db.list_project_suggestions(status="pending")) == 1
+
+
+# --- replay_scored_merge_link_regression -----------------------------------
+
+def test_replay_repairs_a_wrongly_classified_merge_suggestion_into_link(ws_db):
+    """Simulates the actual pre-fix bug: a pending 'merge' suggestion
+    exists (as create_project_suggestion's old no-suggestion_kind call
+    would have created it) for a pair whose live signals are really
+    company-alone - the replay must expire the wrong row and create the
+    correct 'link' suggestion in its place."""
+    a = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted")
+    _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
+    b = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted again")
+    _link_party(ws_db, b, "p2", "other@acme.com", company="Acme")
+    bad_sid = ws_db.create_project_suggestion(
+        issue_id_a=a, issue_id_b=b,
+        reason="scored signal (company,topic, score=0.8)", suggestion_kind="merge",
+    )
+
+    result = wp.replay_scored_merge_link_regression(since_ts=0.0)
+
+    assert result["repaired"] == 1
+    assert ws_db.get_project_suggestion(bad_sid)["status"] == "expired"
+    pending = ws_db.list_project_suggestions(status="pending")
+    assert len(pending) == 1
+    assert pending[0]["suggestion_kind"] == "link"
+
+
+def test_replay_leaves_correctly_classified_merge_suggestions_alone(ws_db):
+    a = _issue(ws_db, "First notice")
+    _raw_item(ws_db, a, "PR7223344 approval needed", "regr-replay-ref-a")
+    b = _issue(ws_db, "REMINDER PR7223344")
+    _raw_item(ws_db, b, "REMINDER PR7223344", "regr-replay-ref-b")
+    good_sid = ws_db.create_project_suggestion(
+        issue_id_a=a, issue_id_b=b,
+        reason="scored signal (topic, score=0.4)", suggestion_kind="merge",
+    )
+
+    result = wp.replay_scored_merge_link_regression(since_ts=0.0)
+
+    assert result["repaired"] == 0
+    assert ws_db.get_project_suggestion(good_sid)["status"] == "pending"
+
+
+def test_replay_ignores_suggestions_before_since_ts(ws_db):
+    a = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted")
+    _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
+    b = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted again")
+    _link_party(ws_db, b, "p2", "other@acme.com", company="Acme")
+    old_sid = ws_db.create_project_suggestion(
+        issue_id_a=a, issue_id_b=b,
+        reason="scored signal (company,topic, score=0.8)", suggestion_kind="merge",
+    )
+
+    result = wp.replay_scored_merge_link_regression(since_ts=time.time() + 1000)
+
+    assert result["repaired"] == 0
+    assert ws_db.get_project_suggestion(old_sid)["status"] == "pending"
+
+
+def test_replay_is_idempotent(ws_db):
+    a = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted")
+    _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
+    b = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted again")
+    _link_party(ws_db, b, "p2", "other@acme.com", company="Acme")
+    ws_db.create_project_suggestion(
+        issue_id_a=a, issue_id_b=b,
+        reason="scored signal (company,topic, score=0.8)", suggestion_kind="merge",
+    )
+
+    first = wp.replay_scored_merge_link_regression(since_ts=0.0)
+    second = wp.replay_scored_merge_link_regression(since_ts=0.0)
+
+    assert first["repaired"] == 1
+    assert second["repaired"] == 0  # already-repaired pair has no pending 'merge' row left to touch
+    assert len(ws_db.list_project_suggestions(status="pending")) == 1
+
+
 def test_group_issue_same_category_flood_off_by_default_creates_no_suggestion(ws_db):
     """Phase 0 fix (D2): same-category-proximity candidate generation is
     OFF by default. A bare same-category pair with no other signal must not

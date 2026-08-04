@@ -1083,6 +1083,40 @@ def reject_suggestion(suggestion_id: int) -> dict:
     return {"action": "rejected"}
 
 
+def _suggestion_kind_for_scored_signals(matched_signals: list) -> Optional[str]:
+    """Regression fix (2026-08-04): maps scored_grouping_decision's
+    matched_signals to the same merge-vs-link verdict _strong_signal_match
+    already encodes for the ordered model, so group_issue()'s scored-
+    enabled path stops collapsing every "suggest" verdict into a generic
+    merge suggestion (create_project_suggestion's own default) - the bug
+    that made "relationships are not projects" dead code the moment
+    scored_model_enabled went on (link suggestions/day: 67 -> 0 on
+    2026-08-03, the day the flag flipped).
+
+    Not just "topic present -> merge": a shared PARTY only proves the same
+    transaction if the topic keys ALSO overlap (mirrors _topic_keys_match,
+    the exact discriminator _strong_signal_match uses for its own "party"
+    kind) - otherwise it's the same contact on a different deal (link). A
+    shared COMPANY ALONE is always link, even WITH topic overlap - checked
+    before falling through to topic, because Ariba's own requisition-
+    approval boilerplate ("Action required: Approve the Requisition that
+    BRIAN submitted") routinely produces a real topic-key match between
+    two DIFFERENT reps' DIFFERENT requisitions at the same company - the
+    exact false-positive shape task #81 already fixed for _shared_topic_
+    key. A signal set with none of party/company/topic (e.g. sender+
+    category alone) never reached a suggestion under the ordered model
+    either (same-category-proximity suggestions are config-gated off by
+    default) - returns None so the caller treats it as no_match, not a
+    new suggestion class the ordered model never had."""
+    if "party" in matched_signals:
+        return "merge" if "topic" in matched_signals else "link"
+    if "company" in matched_signals:
+        return "link"
+    if "topic" in matched_signals:
+        return "merge"
+    return None
+
+
 def group_issue(issue_id: str) -> dict:
     """Runs the grouping logic for ONE issue. Safe to re-run -
     assign_issue_to_project and create_project_suggestion are both
@@ -1149,11 +1183,19 @@ def group_issue(issue_id: str) -> dict:
                 return _merge_or_defer(shadow_scored["sibling_id"],
                                         "auto-resolved by precedent (repeated confirmed pattern)", "precedent")
             if precedent != "rejected":
+                matched_signals = shadow_scored["matched_signals"]
+                suggestion_kind = _suggestion_kind_for_scored_signals(matched_signals)
+                if suggestion_kind is None:
+                    return _finish("no_match")
+                reason = f"scored signal ({','.join(matched_signals)}, score={shadow_scored['score']})"
+                if suggestion_kind == "link":
+                    reason = f"possibly related (not necessarily same project) - {reason}"
                 ws.create_project_suggestion(
                     issue_id_a=issue_id, issue_id_b=shadow_scored["sibling_id"],
-                    reason=f"scored signal ({','.join(shadow_scored['matched_signals'])}, score={shadow_scored['score']})",
+                    reason=reason, suggestion_kind=suggestion_kind,
                 )
-                return _finish("suggested", signal="scored", sibling_id=shadow_scored["sibling_id"], count=1)
+                return _finish("suggested", signal="scored", sibling_id=shadow_scored["sibling_id"],
+                                count=1, suggestion_kind=suggestion_kind)
         return _finish("no_match")
 
     match = _strong_signal_match(issue_id, issue)
@@ -1300,6 +1342,74 @@ def backfill_regroup_by_reference() -> dict:
         action = group_issue(issue["id"])["action"]
         results[action] = results.get(action, 0) + 1
     return results
+
+
+def replay_scored_merge_link_regression(since_ts: float) -> dict:
+    """One-time repair pass for the 2026-08-04 merge/link regression fix
+    (see _suggestion_kind_for_scored_signals): while scored_model_enabled
+    was on (2026-08-03 onward, until this fix), EVERY scored "suggest"
+    verdict created a suggestion_kind='merge' row regardless of its real
+    signals - a company/party-alone pair that should have been "link"
+    instead sat as a pending merge suggestion. Idempotent - safe to
+    re-run: finds still-PENDING 'merge' suggestions created since
+    `since_ts` whose reason marks them as scored-model-originated
+    ("scored signal"), re-derives the correct kind for THIS EXACT stored
+    pair against its CURRENT live signatures, and for every one that
+    should have been 'link': expires the wrong pending 'merge' row
+    (status='expired' - reversible bookkeeping, never a delete, same
+    convention as expire_stale_project_suggestions) and creates the
+    correct 'link' suggestion via create_project_suggestion (itself
+    idempotent - reuses an existing pending 'link' row for this exact
+    pair if one is already there, so a second run of this function is a
+    no-op). Rows this fix would already have classified 'merge' are left
+    untouched.
+
+    Deliberately re-scores the STORED pair directly via _pairwise_score_
+    from_signature rather than calling scored_grouping_decision(issue_a_
+    id, ...) again - that function only returns issue_a's single best-
+    scoring candidate across the WHOLE corpus today, which on a live,
+    still-growing corpus is very often a DIFFERENT issue than the one
+    originally suggested (confirmed live: of 69 real pending scored-merge
+    suggestions since 2026-08-03, scored_grouping_decision's 'still-best-
+    match' framing skipped 61 of them as 'moved on', even though most of
+    those specific PAIRS were themselves still a real company/party-alone
+    match worth repairing). This function answers "was THIS suggested
+    pair itself wrongly classified," not "is this pair still issue_a's
+    single best match today" - the two are different questions, and only
+    the first is what this repair is actually for. Any cannot_merge/
+    cannot_link veto is still respected automatically (create_project_
+    suggestion's own check), same as the live path."""
+    candidates = [
+        s for s in ws.list_project_suggestions(status="pending")
+        if s["suggestion_kind"] == "merge" and s["created_ts"] >= since_ts
+        and "scored signal" in (s.get("reason") or "")
+    ]
+    repaired = 0
+    for sugg in candidates:
+        issue_a_id, issue_b_id = sugg["issue_id_a"], sugg["issue_id_b"]
+        issue_a, issue_b = ws.get_issue(issue_a_id), ws.get_issue(issue_b_id)
+        if issue_a is None or issue_b is None:
+            continue
+        if issue_a.get("project_id") or issue_b.get("project_id"):
+            continue  # already resolved one way or another since - not this fix's job to re-litigate
+        sig_a = get_or_compute_work_object_signature(issue_a_id, issue_a)
+        sig_b = get_or_compute_work_object_signature(issue_b_id, issue_b)
+        topic_a = _topic_key_for_signature(issue_a, sig_a)
+        topic_b = _topic_key_for_signature(issue_b, sig_b)
+        score, matched_signals = _pairwise_score_from_signature(
+            issue_a_id, sig_a, topic_a, issue_a.get("category"),
+            issue_b_id, sig_b, topic_b, issue_b.get("category"),
+        )
+        correct_kind = _suggestion_kind_for_scored_signals(matched_signals)
+        if correct_kind != "link":
+            continue  # already correctly 'merge', vetoed to 0, or no longer resolves to any suggestion
+        ws.resolve_project_suggestion(sugg["id"], "expired")
+        reason = (f"possibly related (not necessarily same project) - "
+                  f"scored signal ({','.join(matched_signals)}, score={score})")
+        ws.create_project_suggestion(issue_id_a=issue_a_id, issue_id_b=issue_b_id,
+                                      reason=reason, suggestion_kind="link")
+        repaired += 1
+    return {"checked": len(candidates), "repaired": repaired}
 
 
 def find_relationship_links_for_grouped_issues() -> dict:

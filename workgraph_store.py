@@ -41,12 +41,52 @@ from paths import WORKGRAPH_DB, ensure_dirs
 _lock = threading.Lock()
 
 
+class _MigrationAlreadyDone(Exception):
+    """Internal sentinel only - never escapes init_workgraph(). Signals
+    that a losing process's wait for the work_objects migration lock
+    ended AFTER a different process already completed the migration, so
+    the loser should cleanly skip the migration body rather than re-run
+    it against data that's no longer in its original shape."""
+
+
 def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(WORKGRAPH_DB, isolation_level=None, check_same_thread=False)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.row_factory = sqlite3.Row
-    return conn
+    # Real, reproducible bug found while running the full suite for an
+    # unrelated change (E6): with no busy_timeout, even the very first
+    # PRAGMA journal_mode=WAL on a freshly-created database file can raise
+    # "database is locked" immediately, with zero retry, when 2+ processes
+    # race to initialize the same brand-new file - confirmed live via
+    # test_multiprocess_concurrency.py failing intermittently with exactly
+    # that error at exactly this line.
+    #
+    # busy_timeout=5000 alone was NOT sufficient - re-verified live with a
+    # 5x-repeated run of that same test AFTER adding it, and it still
+    # failed once (1/5) with the identical "database is locked" error at
+    # this same WAL pragma. On this machine that's consistent with Windows
+    # file-lock contention (e.g. AV/EDR scan pauses on a corporate host)
+    # occasionally outlasting a single connection's busy_timeout budget,
+    # not just an in-process SQLITE_BUSY retry gap. So this now has two
+    # layers of defense: SQLite's own internal busy-handler (busy_timeout,
+    # handles ordinary short contention without any Python-level retry)
+    # plus an outer retry-with-backoff loop here (handles the rarer longer
+    # stalls that outlast busy_timeout entirely). Every OTHER lock-
+    # contention path in this file already retries by hand (merge_issues_
+    # txn's own BEGIN IMMEDIATE loop, etc.) - this was the one gap with no
+    # retry at all, because it fires before any of that code runs.
+    last_exc: Optional[sqlite3.OperationalError] = None
+    for attempt in range(8):
+        try:
+            conn = sqlite3.connect(WORKGRAPH_DB, isolation_level=None, check_same_thread=False)
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.row_factory = sqlite3.Row
+            return conn
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower() or attempt == 7:
+                raise
+            last_exc = exc
+            time.sleep(0.1 * (2 ** attempt))
+    raise last_exc
 
 
 def init_workgraph() -> None:
@@ -1216,6 +1256,29 @@ def init_workgraph() -> None:
             if not work_objects_exists:
                 try:
                     conn.execute("BEGIN IMMEDIATE")
+                    # Real, reproducible race (same live-suite run that
+                    # found the busy_timeout gap above): with busy_timeout
+                    # now set, a process that loses this lock WAITS instead
+                    # of failing instantly - but that means by the time it
+                    # finally acquires the lock, another process may have
+                    # ALREADY completed this exact migration (issues
+                    # already renamed to issues_pre_workobjects, work_
+                    # objects already populated). Without this re-check,
+                    # re-running the INSERTs below would hit a PRIMARY KEY
+                    # collision (sqlite3.IntegrityError, NOT caught by the
+                    # OperationalError handler below - a hard crash, not a
+                    # graceful skip) since the SAME issue ids would already
+                    # be in work_objects. work_objects_exists (checked
+                    # BEFORE this process even tried for the lock) is
+                    # stale the moment any other process could have raced
+                    # ahead of it, so it's not safe to trust here - only a
+                    # check taken AFTER actually holding the write lock is.
+                    issues_still_a_table = conn.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='issues'"
+                    ).fetchone() is not None
+                    if not issues_still_a_table:
+                        conn.execute("COMMIT")
+                        raise _MigrationAlreadyDone()
                     # Real issue columns, driven by PRAGMA table_info rather than
                     # a hardcoded guess - same "never assume the column set"
                     # discipline as every other rename+rebuild migration in this
@@ -1252,6 +1315,8 @@ def init_workgraph() -> None:
                     conn.execute("ALTER TABLE issues RENAME TO issues_pre_workobjects")
                     conn.execute("ALTER TABLE projects RENAME TO projects_pre_workobjects")
                     conn.execute("COMMIT")
+                except _MigrationAlreadyDone:
+                    pass  # already committed above - nothing to roll back
                 except sqlite3.OperationalError:
                     try:
                         conn.execute("ROLLBACK")
@@ -5966,6 +6031,41 @@ def create_attachment(
         if len(group) >= 2:  # a genuinely unique hash never gets a speculative lineage of its own
             _ensure_artifact_versions(group)  # also invalidates the owning signature - see its own docstring
     return new_id
+
+
+def list_attachments_missing_extracted_text(extensions: tuple[str, ...]) -> list[dict]:
+    """Enhancement idea panel #7 (E6): every attachment whose filename
+    matches one of these extensions (case-insensitive) but has no
+    extracted_text yet - the real backfill target for a file type that
+    only just got a real extractor (e.g. .docx, attachment_extract.py).
+    NULL/empty extracted_text both count as 'missing' - a prior attempt
+    that legitimately found nothing (a scanned-image PDF) is
+    indistinguishable from 'never tried' at the column level, which is
+    fine here: re-running extraction on either is cheap and idempotent."""
+    with _lock:
+        conn = _connect()
+        try:
+            placeholders = " OR ".join("LOWER(filename) LIKE ?" for _ in extensions)
+            params = [f"%{ext.lower()}" for ext in extensions]
+            rows = conn.execute(
+                f"SELECT * FROM attachments WHERE (extracted_text IS NULL OR extracted_text = '') "
+                f"AND ({placeholders})",
+                params,
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def update_attachment_extracted_text(attachment_id: int, extracted_text: Optional[str]) -> None:
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                "UPDATE attachments SET extracted_text = ? WHERE id = ?", (extracted_text, attachment_id)
+            )
+        finally:
+            conn.close()
 
 
 def find_attachment_by_hash(sha256_hex: str) -> Optional[dict]:

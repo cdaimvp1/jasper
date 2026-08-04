@@ -14,6 +14,8 @@ much bigger feature if ever needed.
 """
 from __future__ import annotations
 
+import zipfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import openpyxl
@@ -54,17 +56,45 @@ def extract_xlsx_text(path: Path) -> str:
         return ""
 
 
+_DOCX_WORD_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+
+
+def extract_docx_text(path: Path) -> str:
+    """Enhancement idea panel #7/worker capability #6's real blocker,
+    closed: every paragraph's text runs, newline-joined between
+    paragraphs, space-joined within one (no attempt to reconstruct
+    tables/formatting, same "only feeds keyword/regex extraction, never
+    rendered for a human" philosophy as extract_xlsx_text above). Pure
+    stdlib (zipfile + XML) - no new dependency added, the same OOXML-via-
+    stdlib approach the claudeskills docx-redline proof-of-concept
+    already confirmed works reliably. Empty string (never an exception)
+    for a corrupt, encrypted, or malformed .docx - one bad attachment
+    must never break the ingest batch it arrived in."""
+    try:
+        with zipfile.ZipFile(path) as zf:
+            xml_bytes = zf.read("word/document.xml")
+        root = ET.fromstring(xml_bytes)
+        paragraphs = []
+        for p in root.iter(f"{_DOCX_WORD_NS}p"):
+            runs = [t.text for t in p.iter(f"{_DOCX_WORD_NS}t") if t.text]
+            if runs:
+                paragraphs.append("".join(runs))
+        return "\n".join(paragraphs)
+    except Exception:
+        return ""
+
+
 _EXTRACTORS = {
     ".pdf": extract_pdf_text,
     ".xlsx": extract_xlsx_text,
     ".xlsm": extract_xlsx_text,
+    ".docx": extract_docx_text,
 }
 
 
 def extract_text(path: Path) -> str:
     """Dispatches on file extension. Empty string for any type with no
-    registered extractor (e.g. .docx today - a real gap, not silently
-    pretended to be handled; add a real extractor before claiming
-    coverage for a new type, never a placeholder that returns junk)."""
+    registered extractor - add a real extractor before claiming coverage
+    for a new type, never a placeholder that returns junk."""
     extractor = _EXTRACTORS.get(path.suffix.lower())
     return extractor(path) if extractor else ""

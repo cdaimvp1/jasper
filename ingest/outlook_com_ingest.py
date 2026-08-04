@@ -78,6 +78,38 @@ def _absorb_body(row_id: int, item_staged_dir: str | None, text_file: str | None
     return json.dumps(ref, ensure_ascii=False) if ref else None
 
 
+def backfill_docx_extracted_text() -> dict:
+    """One-time backfill (enhancement idea panel #7/E6): attachment_
+    extract.py just got a real .docx extractor - this re-extracts text
+    for every already-stored .docx attachment that predates it (114 real
+    rows found live, all with extracted_text NULL). Idempotent - only
+    ever selects rows still missing extracted_text
+    (list_attachments_missing_extracted_text), so a partial prior run or
+    a re-run after new .docx attachments arrive only picks up what's
+    left. Skips (leaves NULL) a row whose stored_path is missing on disk
+    or whose real extraction comes back empty - never fabricates
+    content, matching attachment_extract's own fail-open discipline."""
+    candidates = ws.list_attachments_missing_extracted_text((".docx",))
+    updated = 0
+    skipped_missing_file = 0
+    skipped_empty_extraction = 0
+    for att in candidates:
+        full_path = paths.DOCUMENTS_DIR / att["stored_path"]
+        if not full_path.is_file():
+            skipped_missing_file += 1
+            continue
+        text = attachment_extract.extract_text(full_path)
+        if not text:
+            skipped_empty_extraction += 1
+            continue
+        ws.update_attachment_extracted_text(att["id"], text)
+        updated += 1
+    return {
+        "candidates_found": len(candidates), "updated": updated,
+        "skipped_missing_file": skipped_missing_file, "skipped_empty_extraction": skipped_empty_extraction,
+    }
+
+
 def _absorb_attachments(row_id: int, staged: list[dict]) -> int:
     """Move each staged file (saved by outlook_scan.ps1 via Outlook COM) into
     the real document library under this raw_item's id, and register one

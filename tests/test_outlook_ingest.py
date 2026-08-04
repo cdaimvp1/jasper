@@ -161,6 +161,100 @@ def test_absorb_attachments_extracts_text_from_a_real_xlsx(ws_db, isolated_paths
     assert "53702143" in rows[0]["extracted_text"]
 
 
+def test_absorb_attachments_extracts_text_from_a_real_docx(ws_db, isolated_paths, tmp_path):
+    """Enhancement idea panel #7's real remaining gap, closed - a redline/
+    contract .docx now gets its text extracted the same way a .pdf/.xlsx
+    already did."""
+    import zipfile
+    staging_dir = tmp_path / "att_staging_docx"
+    staging_dir.mkdir()
+    docx_path = staging_dir / "contract.docx"
+    ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    document_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<w:document xmlns:w="{ns}"><w:body>'
+        '<w:p><w:r><w:t>Total contract value: $53,702,143</w:t></w:r></w:p>'
+        '</w:body></w:document>'
+    ).encode()
+    with zipfile.ZipFile(docx_path, "w") as zf:
+        zf.writestr("[Content_Types].xml", b"<Types/>")
+        zf.writestr("word/document.xml", document_xml)
+    staged = [{"filename": "contract.docx", "staged_path": str(docx_path), "size_bytes": docx_path.stat().st_size}]
+
+    absorbed = oci._absorb_attachments(107, staged)
+
+    assert absorbed == 1
+    rows = ws_db.list_attachments("raw_item", "107")
+    assert len(rows) == 1
+    assert "Total contract value: $53,702,143" in rows[0]["extracted_text"]
+
+
+# --- backfill_docx_extracted_text (E6) -------------------------------------
+
+def _docx_bytes(text):
+    import zipfile
+    import io
+    ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    document_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<w:document xmlns:w="{ns}"><w:body><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:body></w:document>'
+    ).encode()
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("[Content_Types].xml", b"<Types/>")
+        zf.writestr("word/document.xml", document_xml)
+    return buf.getvalue()
+
+
+def test_backfill_docx_extracted_text_fills_in_real_preexisting_rows(ws_db, isolated_paths):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    doc_dir = isolated_paths.DOCUMENTS_DIR / "raw_items" / "1"
+    doc_dir.mkdir(parents=True)
+    (doc_dir / "contract.docx").write_bytes(_docx_bytes("real contract text $99"))
+    aid = ws_db.create_attachment(
+        entity_type="issue", entity_id=a, kind="upload", filename="contract.docx",
+        stored_path="raw_items/1/contract.docx", content_type=None, size_bytes=10,
+        sha256_hex=None, uploaded_by="marc",
+    )
+
+    result = oci.backfill_docx_extracted_text()
+
+    assert result["updated"] == 1
+    assert "real contract text $99" in ws_db.get_attachment(aid)["extracted_text"]
+
+
+def test_backfill_docx_extracted_text_is_idempotent(ws_db, isolated_paths):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    doc_dir = isolated_paths.DOCUMENTS_DIR / "raw_items" / "2"
+    doc_dir.mkdir(parents=True)
+    (doc_dir / "contract.docx").write_bytes(_docx_bytes("text"))
+    ws_db.create_attachment(
+        entity_type="issue", entity_id=a, kind="upload", filename="contract.docx",
+        stored_path="raw_items/2/contract.docx", content_type=None, size_bytes=10,
+        sha256_hex=None, uploaded_by="marc",
+    )
+
+    first = oci.backfill_docx_extracted_text()
+    second = oci.backfill_docx_extracted_text()
+
+    assert first["updated"] == 1
+    assert second["updated"] == 0  # already filled in - nothing left to do
+
+
+def test_backfill_docx_extracted_text_skips_missing_file(ws_db, isolated_paths):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    ws_db.create_attachment(
+        entity_type="issue", entity_id=a, kind="upload", filename="ghost.docx",
+        stored_path="raw_items/3/ghost.docx", content_type=None, size_bytes=10,
+        sha256_hex=None, uploaded_by="marc",
+    )
+
+    result = oci.backfill_docx_extracted_text()
+
+    assert result["updated"] == 0
+    assert result["skipped_missing_file"] == 1
+
+
 def test_absorb_attachments_dedupes_byte_identical_files_across_raw_items(ws_db, isolated_paths, tmp_path):
     """The exact real gap: the same real document forwarded across several
     emails used to get copied and text-extracted once per email. A second
@@ -238,9 +332,11 @@ def test_absorb_attachments_different_content_same_name_stores_both(ws_db, isola
 
 
 def test_absorb_attachments_unsupported_extension_stores_null_extracted_text(ws_db, isolated_paths, tmp_path):
+    """.pptx has no registered extractor (unlike .docx, now real - see
+    attachment_extract.py's extract_docx_text)."""
     staging_dir = tmp_path / "att_staging_4"
     staging_dir.mkdir()
-    staged = [_staged_attachment(staging_dir, "notes.docx", b"some docx bytes, not really parsed")]
+    staged = [_staged_attachment(staging_dir, "notes.pptx", b"some pptx bytes, not really parsed")]
 
     oci._absorb_attachments(106, staged)
 

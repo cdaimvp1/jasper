@@ -1754,6 +1754,53 @@ def test_list_other_occurrences_for_attachment_none_title_for_unresolved_work_ob
     assert occurrences[0]["work_object_title"] is None
 
 
+# --- attachment extracted_text backfill support (E6) -----------------------
+
+def test_list_attachments_missing_extracted_text_matches_extension_case_insensitively(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    aid = ws_db.create_attachment(
+        entity_type="issue", entity_id=a, kind="upload", filename="Notice.DOCX",
+        stored_path="p.docx", content_type=None, size_bytes=10, sha256_hex=None, uploaded_by="marc",
+    )
+
+    found = ws_db.list_attachments_missing_extracted_text((".docx",))
+
+    assert [f["id"] for f in found] == [aid]
+
+
+def test_list_attachments_missing_extracted_text_excludes_already_extracted(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    ws_db.create_attachment(
+        entity_type="issue", entity_id=a, kind="upload", filename="notice.docx",
+        stored_path="p.docx", content_type=None, size_bytes=10, sha256_hex=None, uploaded_by="marc",
+        extracted_text="already has real text",
+    )
+
+    assert ws_db.list_attachments_missing_extracted_text((".docx",)) == []
+
+
+def test_list_attachments_missing_extracted_text_excludes_other_extensions(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    ws_db.create_attachment(
+        entity_type="issue", entity_id=a, kind="upload", filename="notice.pdf",
+        stored_path="p.pdf", content_type=None, size_bytes=10, sha256_hex=None, uploaded_by="marc",
+    )
+
+    assert ws_db.list_attachments_missing_extracted_text((".docx",)) == []
+
+
+def test_update_attachment_extracted_text_persists(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    aid = ws_db.create_attachment(
+        entity_type="issue", entity_id=a, kind="upload", filename="notice.docx",
+        stored_path="p.docx", content_type=None, size_bytes=10, sha256_hex=None, uploaded_by="marc",
+    )
+
+    ws_db.update_attachment_extracted_text(aid, "real extracted text")
+
+    assert ws_db.get_attachment(aid)["extracted_text"] == "real extracted text"
+
+
 def test_work_object_id_for_attachment_resolves_via_raw_item(ws_db):
     a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
     rid = ws_db.insert_raw_item(

@@ -13,12 +13,15 @@
      Switched 2026-08-02 to the gecko mark as primary - jasper-focus-* kept on disk
      as backup, unreferenced, nothing deleted.
      Switched 2026-08-04 (task #146) to the approved dog mark (Jasper_Dog_Icon_Pack.zip)
-     - jasper-gecko-* kept on disk as backup, unreferenced, nothing deleted. -->
-<!-- ?v=3 cache-busts Chromium's separate favicon store, which a normal
+     - jasper-gecko-* kept on disk as backup, unreferenced, nothing deleted.
+     Content swapped again same day to the revised Jasper_Dog_Transparent_Icon_Pack.zip
+     (Marc: fixes filled-square backgrounds + small-size legibility) - same file
+     paths, only the underlying bytes changed. -->
+<!-- ?v=4 cache-busts Chromium's separate favicon store, which a normal
      (even hard) refresh does not clear - bump this query string any time
      the favicon file's content changes again in the future. -->
-<link rel="icon" href="/static/jasper-dog-favicon.ico?v=3" sizes="any">
-<link rel="icon" href="/static/jasper-dog-favicon-adaptive.svg?v=3" type="image/svg+xml">
+<link rel="icon" href="/static/jasper-dog-favicon.ico?v=4" sizes="any">
+<link rel="icon" href="/static/jasper-dog-favicon-adaptive.svg?v=4" type="image/svg+xml">
 <link rel="manifest" href="/static/site.webmanifest">
 <!-- Static fallback for the instant before the theme-bootstrap script (in this
      same <head>, see "theo-theme") runs; that script immediately overwrites this

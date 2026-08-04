@@ -2099,6 +2099,30 @@ async def api_supplier_weekly_scorecard(company: str):
     return JSONResponse(sanitize_surrogates(draft))
 
 
+@app.get("/api/workgraph/renewal-outreach-candidates")
+async def api_renewal_outreach_candidates():
+    """Enhancement idea panel #18: every open issue with a real, curator-
+    resolved renewal/expiration date landing in the outreach window - a
+    'Renewal Radar' list, computed fresh on every call."""
+    candidates = workgraph_deadlines.find_renewal_outreach_candidates(now=time.time())
+    return JSONResponse({"candidates": sanitize_surrogates(candidates)})
+
+
+@app.get("/api/workgraph/issues/{issue_id}/renewal_outreach_draft")
+async def api_renewal_outreach_draft(issue_id: str):
+    """Enhancement idea panel #18: the actual draft content (recipient,
+    subject, body) for one issue's renewal candidate - a genuine DRAFT,
+    same posture as the weekly scorecard route above. Never sends
+    anything; no live Outlook 'compose new mail' action exists yet
+    (task #35) to wire this into."""
+    if wg.get_issue(issue_id) is None:
+        raise HTTPException(404, f"no such issue: {issue_id}")
+    draft = workgraph_deadlines.renewal_outreach_draft(issue_id, now=time.time())
+    if draft is None:
+        raise HTTPException(404, f"no renewal outreach candidate for issue: {issue_id}")
+    return JSONResponse(sanitize_surrogates(draft))
+
+
 class PartyCorrectionBody(BaseModel):
     affiliation: str  # internal | external
     company: Optional[str] = None

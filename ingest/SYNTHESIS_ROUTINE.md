@@ -64,7 +64,10 @@ different jobs.
    POST /api/workgraph/raw_items/{raw_item_id}/extraction
    {"extracted_json": {"asks": [...], "decisions": [...],
                         "dates_mentioned": [{"text": "...", "kind": "hard"|"soft",
-                                             "whose": "marc"|"counterparty"|"shared"|"unclear"}, ...],
+                                             "whose": "marc"|"counterparty"|"shared"|"unclear",
+                                             "deadline_type": "renewal_notice"|"contract_expiration"|
+                                                              "signature_deadline"|"sla_cutoff"|"other",
+                                             "resolved_date": "YYYY-MM-DD"}, ...],
                         "commitments": [...], "key_facts": [...],
                         "repeat_signals": [{"ask_text": "...", "days_since_first_ask": 6,
                                              "escalated": true,
@@ -148,6 +151,30 @@ different jobs.
    - Plain strings (the old shape, from before this date) still work and just show as
      unclassified — don't go back and re-extract old raw_items to backfill `kind` (violates the
      "computed once, permanently" rule above); this only applies going forward.
+
+   **`deadline_type` and `resolved_date` (added 2026-08-04, task #141, renewal-window early-
+   outreach draft) — ONLY for `kind: "hard"` entries, both optional, both omitted rather than
+   guessed when you're not confident:**
+   - `deadline_type`: what KIND of hard deadline this is — `"renewal_notice"` (a notice-of-non-
+     renewal or auto-renewal cutoff — miss it and the contract silently renews or silently
+     lapses), `"contract_expiration"` (the contract/agreement's own end date, distinct from a
+     notice deadline), `"signature_deadline"` (a must-sign-by date), `"sla_cutoff"` (a service-
+     level deadline), or `"other"` for any other real hard deadline that doesn't fit the first
+     four. This drives which hard deadlines Jasper treats as renewal-relevant (only `renewal_
+     notice`/`contract_expiration` feed the early-outreach draft) — never guess this from a
+     keyword downstream; it only exists because you're reading the actual email.
+   - `resolved_date`: the actual calendar date this deadline falls on, as `"YYYY-MM-DD"` —
+     ONLY when you can resolve it with real confidence from what's in front of you (an explicit
+     date already in the text, or unambiguous arithmetic from THIS message's own date, e.g. "60
+     days from today" where you know today's date). If the text is vague ("sometime next
+     quarter," "before it auto-renews" with no actual date visible anywhere), omit `resolved_
+     date` entirely rather than guess — a downstream date-guess from an already-lossy summary is
+     exactly the failure mode that made the old Ariba expiration-date signal wrong ~98% of the
+     time (task #61/#72); the same discipline applies here, one level earlier, where you still
+     have the real email in front of you and don't need to guess at all if you're confident.
+   - Example: `{"text": "Notice of non-renewal must be sent 90 days before the anniversary date
+     (2026-11-01)", "kind": "hard", "deadline_type": "renewal_notice", "resolved_date":
+     "2026-11-01"}`.
 
 4. **Write the updated synthesis** — a 2-4 sentence narrative (who asked what, what's happened,
    where it stands now, informed by the prior synthesis plus what's new), `next_steps` grounded in

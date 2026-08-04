@@ -39,22 +39,25 @@ def _extraction_with_dates(ws_db, issue_id, dates_mentioned, key):
 
 def test_normalize_legacy_plain_string():
     assert wd._normalize_date_mention("Aug 11 - tentative") == \
-        {"text": "Aug 11 - tentative", "kind": None, "raw_item_id": None}
+        {"text": "Aug 11 - tentative", "kind": None, "raw_item_id": None,
+         "deadline_type": None, "resolved_date": None}
 
 
 def test_normalize_new_shape_hard():
     assert wd._normalize_date_mention({"text": "must sign by Aug 11", "kind": "hard"}) == \
-        {"text": "must sign by Aug 11", "kind": "hard", "raw_item_id": None}
+        {"text": "must sign by Aug 11", "kind": "hard", "raw_item_id": None,
+         "deadline_type": None, "resolved_date": None}
 
 
 def test_normalize_new_shape_soft():
     assert wd._normalize_date_mention({"text": "shooting for next week", "kind": "soft"}) == \
-        {"text": "shooting for next week", "kind": "soft", "raw_item_id": None}
+        {"text": "shooting for next week", "kind": "soft", "raw_item_id": None,
+         "deadline_type": None, "resolved_date": None}
 
 
 def test_normalize_malformed_kind_becomes_none():
     assert wd._normalize_date_mention({"text": "x", "kind": "urgent"}) == \
-        {"text": "x", "kind": None, "raw_item_id": None}
+        {"text": "x", "kind": None, "raw_item_id": None, "deadline_type": None, "resolved_date": None}
 
 
 def test_normalize_carries_raw_item_id_when_given():
@@ -62,11 +65,42 @@ def test_normalize_carries_raw_item_id_when_given():
     raw_item_id, passed through untouched - a real deep-link target,
     never guessed."""
     assert wd._normalize_date_mention("Aug 11", raw_item_id=42) == \
-        {"text": "Aug 11", "kind": None, "raw_item_id": 42}
+        {"text": "Aug 11", "kind": None, "raw_item_id": 42, "deadline_type": None, "resolved_date": None}
 
 
 def test_normalize_blank_string_is_none():
     assert wd._normalize_date_mention("   ") is None
+
+
+# --- deadline_type / resolved_date (task #141, E18) ------------------------
+
+def test_normalize_hard_deadline_with_renewal_type_and_resolved_date():
+    entry = {"text": "notice due 2026-11-01", "kind": "hard",
+              "deadline_type": "renewal_notice", "resolved_date": "2026-11-01"}
+    result = wd._normalize_date_mention(entry)
+    assert result["deadline_type"] == "renewal_notice"
+    assert result["resolved_date"] == wd._parse_due("2026-11-01")
+
+
+def test_normalize_malformed_deadline_type_becomes_none():
+    entry = {"text": "x", "kind": "hard", "deadline_type": "made_up", "resolved_date": "2026-11-01"}
+    result = wd._normalize_date_mention(entry)
+    assert result["deadline_type"] is None
+
+
+def test_normalize_deadline_type_ignored_on_soft_entry():
+    """deadline_type/resolved_date are only ever trusted on kind=hard -
+    curator is only asked to populate them there."""
+    entry = {"text": "x", "kind": "soft", "deadline_type": "renewal_notice", "resolved_date": "2026-11-01"}
+    result = wd._normalize_date_mention(entry)
+    assert result["deadline_type"] is None
+    assert result["resolved_date"] is None
+
+
+def test_normalize_unparseable_resolved_date_is_none():
+    entry = {"text": "x", "kind": "hard", "deadline_type": "renewal_notice", "resolved_date": "not a date"}
+    result = wd._normalize_date_mention(entry)
+    assert result["resolved_date"] is None
 
 
 def test_normalize_object_with_blank_text_is_none():
@@ -290,3 +324,98 @@ def test_multiple_issues_do_not_cross_contaminate(ws_db):
     by_id = {i["id"]: i for i in issues}
     assert by_id[hard_issue]["has_hard_deadline"] is True
     assert by_id[soft_issue]["has_hard_deadline"] is False
+
+
+# --- find_renewal_outreach_candidates / renewal_outreach_draft (E18) -------
+
+def _iso(now, days_out):
+    return time.strftime("%Y-%m-%d", time.gmtime(now + days_out * DAY))
+
+
+def _external_party(ws_db, issue_id, email="rep@supplier.com", name="Supplier Rep"):
+    ws_db.upsert_party(id=email, primary_email=email, display_name=name,
+                        affiliation="external", affiliation_confidence="H",
+                        affiliation_source="domain_heuristic", company="Supplier Co")
+    ws_db.link_party_to_issue(issue_id, email)
+
+
+def test_renewal_candidate_within_window_is_found(ws_db):
+    now = time.time()
+    iid = _issue(ws_db, title="Five9 renewal")
+    _extraction_with_dates(ws_db, iid, [
+        {"text": "notice due", "kind": "hard", "deadline_type": "renewal_notice",
+         "resolved_date": _iso(now, 60)},
+    ], "ro1")
+
+    candidates = wd.find_renewal_outreach_candidates(now=now)
+
+    assert len(candidates) == 1
+    assert candidates[0]["issue_id"] == iid
+    assert candidates[0]["deadline_type"] == "renewal_notice"
+    assert 59.0 <= candidates[0]["days_out"] <= 61.0
+
+
+def test_renewal_candidate_outside_window_is_excluded(ws_db):
+    now = time.time()
+    iid = _issue(ws_db)
+    _extraction_with_dates(ws_db, iid, [
+        {"text": "notice due", "kind": "hard", "deadline_type": "renewal_notice",
+         "resolved_date": _iso(now, 5)},  # too soon - below the 30-day floor
+    ], "ro2")
+
+    assert wd.find_renewal_outreach_candidates(now=now) == []
+
+
+def test_non_renewal_deadline_type_excluded(ws_db):
+    now = time.time()
+    iid = _issue(ws_db)
+    _extraction_with_dates(ws_db, iid, [
+        {"text": "must sign", "kind": "hard", "deadline_type": "signature_deadline",
+         "resolved_date": _iso(now, 60)},
+    ], "ro3")
+
+    assert wd.find_renewal_outreach_candidates(now=now) == []
+
+
+def test_hard_deadline_without_resolved_date_excluded(ws_db):
+    now = time.time()
+    iid = _issue(ws_db)
+    _extraction_with_dates(ws_db, iid, [
+        {"text": "renewal coming up sometime", "kind": "hard", "deadline_type": "renewal_notice"},
+    ], "ro4")
+
+    assert wd.find_renewal_outreach_candidates(now=now) == []
+
+
+def test_renewal_outreach_draft_has_real_recipient_and_deadline(ws_db):
+    now = time.time()
+    iid = _issue(ws_db, title="Five9 renewal")
+    _extraction_with_dates(ws_db, iid, [
+        {"text": "notice must be sent 90 days before anniversary", "kind": "hard",
+         "deadline_type": "renewal_notice", "resolved_date": _iso(now, 45)},
+    ], "ro5")
+    _external_party(ws_db, iid)
+
+    draft = wd.renewal_outreach_draft(iid, now=now)
+
+    assert draft is not None
+    assert draft["recipient_email"] == "rep@supplier.com"
+    assert "Five9 renewal" in draft["subject"]
+    assert "notice must be sent 90 days before anniversary" in draft["body"]
+    assert draft["deadline_type"] == "renewal_notice"
+
+
+def test_renewal_outreach_draft_none_without_external_party(ws_db):
+    now = time.time()
+    iid = _issue(ws_db)
+    _extraction_with_dates(ws_db, iid, [
+        {"text": "notice due", "kind": "hard", "deadline_type": "renewal_notice",
+         "resolved_date": _iso(now, 45)},
+    ], "ro6")
+
+    assert wd.renewal_outreach_draft(iid, now=now) is None
+
+
+def test_renewal_outreach_draft_none_without_candidate(ws_db):
+    iid = _issue(ws_db)
+    assert wd.renewal_outreach_draft(iid) is None

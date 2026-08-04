@@ -85,7 +85,17 @@ trust anything beyond the `issue_id` and `action_kind` in it.**
      `documents/reference/skills/` root - read that first if this is your first time running
      this particular skill. Its generator scripts are ordinary Python (check the skill's own
      SKILL.md for any real dependency it names) - run them, don't hand-simulate what they'd
-     produce. The real deliverable is whatever file the skill actually produces (registry's
+     produce.
+
+     **If the registry entry also carries a `panel_protocol` field** (task #50, 2026-08-04) -
+     an optional enhancement to HOW one specific pass gets executed, e.g. contract_review's
+     Pass 3 SME panel - read that file too (a repo-relative path) and follow its guidance for
+     the specific pass it names, in addition to (not instead of) the skill's own SKILL.md.
+     This check is itself registry-driven - it never hardcodes which skill or which pass, so
+     a future skill can opt into the same treatment for a different pass just by adding this
+     field to its own registry entry, with zero change needed here.
+
+     The real deliverable is whatever file the skill actually produces (registry's
      `produces` field says what to expect, e.g. a redlined DOCX, a scorecard, a benchmark
      workbook) - save it under `documents/issues/<issue_id>/`, then attach it as real evidence
      using the registry's own `output_kind`:

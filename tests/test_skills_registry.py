@@ -76,6 +76,33 @@ def test_resolves_a_real_registered_and_vendored_skill(tmp_path, monkeypatch):
     assert result["skill_dir"].exists()
 
 
+def test_get_skill_for_action_passes_through_arbitrary_extra_fields(tmp_path, monkeypatch):
+    """get_skill_for_action's dict(entry) copy must carry any extra field
+    an entry has, not just the fixed set this module itself writes - task
+    #50's panel_protocol (an optional pass-execution hint) is the real
+    case this covers, added to config/skills_registry.json by hand, not
+    through install_skill."""
+    data_dir = tmp_path / "data"
+    skill_dir = data_dir / "documents" / "reference" / "skills" / "fake-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# Fake Skill\n", encoding="utf-8")
+
+    registry_path = tmp_path / "skills_registry.json"
+    registry_path.write_text(json.dumps({
+        "contract_review": {
+            "skill_name": "fake-skill", "skill_dir": "documents/reference/skills/fake-skill",
+            "display_name": "Fake Skill", "label": "Run Fake Skill",
+            "produces": "a fake output", "output_kind": "output",
+            "panel_protocol": "ingest/CONTRACT_REVIEW_PANEL_ROUTINE.md",
+        },
+    }), encoding="utf-8")
+    monkeypatch.setattr(skills_registry, "REGISTRY_PATH", registry_path)
+    monkeypatch.setattr(skills_registry.paths, "DATA_DIR", data_dir)
+
+    result = skills_registry.get_skill_for_action("contract_review")
+    assert result["panel_protocol"] == "ingest/CONTRACT_REVIEW_PANEL_ROUTINE.md"
+
+
 # --- list_all() (task #112, 2026-08-04) -------------------------------------
 # Marc's explicit ask: the system should be able to run ANY registered skill
 # on request, not just the couple with a dedicated button - the UI's "Run a

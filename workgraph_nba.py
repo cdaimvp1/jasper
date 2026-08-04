@@ -200,6 +200,43 @@ def _extract_value_amount(raw_items: list[dict]) -> float:
     return 0.0
 
 
+def conflicting_value_figures_for_issue(raw_items: list[dict]) -> list[dict]:
+    """Enhancement idea panel #16 (worker capability): _extract_value_amount
+    above silently picks the max preferred-tier figure and moves on - it has
+    no way to say "two different messages on this issue quote two different
+    numbers for the SAME thing." That's a real, different signal: a stale
+    figure lingering after an amendment, a typo, or a genuine discrepancy
+    between what two parties think the deal is worth - all worth Marc's
+    attention, none of which "just take the max" can surface.
+
+    Deliberately per-MESSAGE, not per-candidate: takes each raw_item's own
+    SINGLE best (max) preferred-tier figure, then compares those across
+    items. A real production SOW/order-form email routinely has several
+    internally legitimate preferred-cued figures of its own (milestone
+    totals, a grand total, a per-unit price near the word "total") - naively
+    collecting every preferred candidate across the whole thread flagged
+    those as a false "15 disagreeing figures" conflict on real live data
+    (confirmed during verification). Comparing each message's OWN headline
+    total against the others' is what "two messages disagree" actually
+    means. Returns one entry per distinct headline total found - {amount,
+    raw_item_id, occurred_ts} - sorted highest-first. 0 or 1 distinct
+    amounts means no conflict; callers should treat len(result) >= 2 as a
+    real disagreement worth flagging."""
+    per_item_best: dict = {}
+    for item in raw_items:
+        preferred_values = [v for v, is_preferred, _ in _extract_item_candidates(item) if is_preferred]
+        if preferred_values:
+            key = item.get("id")
+            per_item_best[key] = {
+                "amount": max(preferred_values), "raw_item_id": key,
+                "occurred_ts": item.get("occurred_ts"),
+            }
+    distinct: dict[float, dict] = {}
+    for entry in per_item_best.values():
+        distinct.setdefault(entry["amount"], entry)
+    return sorted(distinct.values(), key=lambda e: e["amount"], reverse=True)
+
+
 def value_amount_for_issue(issue_id: str) -> float:
     """Public wrapper around _extract_value_amount for other modules
     (task #75, Supplier Relationship Dashboard) that need the same

@@ -146,6 +146,68 @@ def test_extract_value_amount_reads_attachment_extracted_text(ws_db, isolated_pa
     assert nba._extract_value_amount([item]) == 30_500_000.0
 
 
+# --- enhancement idea panel #16: conflicting dollar-figure flag ------------
+
+def test_conflicting_value_figures_single_entry_when_all_messages_agree():
+    item_a = {"id": 401, "subject": "Total contract value is $50,000", "body_preview": ""}
+    item_b = {"id": 402, "subject": "Confirming total contract value $50,000", "body_preview": ""}
+
+    figures = nba.conflicting_value_figures_for_issue([item_a, item_b])
+
+    assert len(figures) == 1  # same figure everywhere - not a conflict
+
+
+def test_conflicting_value_figures_flags_two_disagreeing_preferred_amounts():
+    item_a = {"id": 411, "subject": "Total contract value is $50,000", "body_preview": "", "occurred_ts": 100.0}
+    item_b = {"id": 412, "subject": "Updated: total contract value is $75,000", "body_preview": "", "occurred_ts": 200.0}
+
+    figures = nba.conflicting_value_figures_for_issue([item_a, item_b])
+
+    assert len(figures) == 2
+    assert [f["amount"] for f in figures] == [75_000.0, 50_000.0]  # highest first
+    assert {f["raw_item_id"] for f in figures} == {411, 412}
+
+
+def test_conflicting_value_figures_ignores_non_preferred_figures():
+    """Two different NON-preferred numbers (no total/contract-value cue)
+    aren't a real conflict about the deal's own value - only disagreement
+    among PREFERRED-tier figures counts."""
+    item_a = {"id": 421, "subject": "See attached, $1,200 for shipping", "body_preview": ""}
+    item_b = {"id": 422, "subject": "Also $900 for handling", "body_preview": ""}
+
+    figures = nba.conflicting_value_figures_for_issue([item_a, item_b])
+
+    assert figures == []
+
+
+def test_conflicting_value_figures_single_entry_for_single_raw_item():
+    item = {"id": 431, "subject": "Total contract value is $50,000", "body_preview": ""}
+    assert len(nba.conflicting_value_figures_for_issue([item])) == 1
+
+
+def test_conflicting_value_figures_empty_for_no_raw_items():
+    assert nba.conflicting_value_figures_for_issue([]) == []
+
+
+def test_conflicting_value_figures_ignores_multiple_totals_within_one_message(ws_db):
+    """Real bug caught during live verification: a single SOW/order-form
+    message routinely has several internally legitimate preferred-cued
+    figures of its own (milestone totals, a grand total) - collecting every
+    preferred candidate across the whole thread flagged that as a false
+    multi-way "conflict" on real production data. Only comparing each
+    MESSAGE's own single best figure against other messages' should treat
+    a lone multi-total message as zero conflict, not len>=2."""
+    item = {
+        "id": 441,
+        "subject": "SOW",
+        "body_preview": "Milestone 1 total: $58,800. Milestone 2 total: $10,800. Grand total: $135,000.",
+    }
+    figures = nba.conflicting_value_figures_for_issue([item])
+
+    assert len(figures) == 1  # one message, one headline figure - not a conflict
+    assert figures[0]["amount"] == 135_000.0  # this message's own MAX preferred figure
+
+
 def test_default_weights_is_immutable():
     with pytest.raises(TypeError):
         nba.DEFAULT_WEIGHTS["value"] = 999

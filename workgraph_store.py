@@ -480,7 +480,7 @@ def init_workgraph() -> None:
                 CREATE TABLE IF NOT EXISTS alerts (
                     id           INTEGER PRIMARY KEY AUTOINCREMENT,
                     issue_id     TEXT,
-                    kind         TEXT NOT NULL CHECK (kind IN ('stale','high_priority_ask','anomaly','stuck_action','unmet_prerequisite','reference_id_collision')),
+                    kind         TEXT NOT NULL CHECK (kind IN ('stale','high_priority_ask','anomaly','stuck_action','unmet_prerequisite','reference_id_collision','conflicting_value_figures')),
                     severity     TEXT NOT NULL CHECK (severity IN ('info','warn','critical')),
                     summary      TEXT NOT NULL,
                     source_ref   TEXT,
@@ -523,7 +523,7 @@ def init_workgraph() -> None:
                         CREATE TABLE alerts (
                             id           INTEGER PRIMARY KEY AUTOINCREMENT,
                             issue_id     TEXT,
-                            kind         TEXT NOT NULL CHECK (kind IN ('stale','high_priority_ask','anomaly','stuck_action','unmet_prerequisite','reference_id_collision')),
+                            kind         TEXT NOT NULL CHECK (kind IN ('stale','high_priority_ask','anomaly','stuck_action','unmet_prerequisite','reference_id_collision','conflicting_value_figures')),
                             severity     TEXT NOT NULL CHECK (severity IN ('info','warn','critical')),
                             summary      TEXT NOT NULL,
                             source_ref   TEXT,
@@ -561,7 +561,7 @@ def init_workgraph() -> None:
                         CREATE TABLE alerts (
                             id           INTEGER PRIMARY KEY AUTOINCREMENT,
                             issue_id     TEXT,
-                            kind         TEXT NOT NULL CHECK (kind IN ('stale','high_priority_ask','anomaly','stuck_action','unmet_prerequisite','reference_id_collision')),
+                            kind         TEXT NOT NULL CHECK (kind IN ('stale','high_priority_ask','anomaly','stuck_action','unmet_prerequisite','reference_id_collision','conflicting_value_figures')),
                             severity     TEXT NOT NULL CHECK (severity IN ('info','warn','critical')),
                             summary      TEXT NOT NULL,
                             source_ref   TEXT,
@@ -577,6 +577,41 @@ def init_workgraph() -> None:
                                created_ts, dismissed, dismissed_ts FROM alerts_pre_e14
                     """)
                     conn.execute("DROP TABLE alerts_pre_e14")
+                    conn.execute("COMMIT")
+                except sqlite3.OperationalError:
+                    try:
+                        conn.execute("ROLLBACK")
+                    except sqlite3.OperationalError:
+                        pass  # no transaction was actually open (e.g. BEGIN itself failed) - nothing to roll back
+            # Same rebuild-and-copy pattern again, for enhancement idea panel
+            # #16's new 'conflicting_value_figures' kind.
+            existing_sql = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='alerts'"
+            ).fetchone()
+            if existing_sql and "conflicting_value_figures" not in (existing_sql["sql"] or ""):
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    conn.execute("ALTER TABLE alerts RENAME TO alerts_pre_e16")
+                    conn.execute("""
+                        CREATE TABLE alerts (
+                            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                            issue_id     TEXT,
+                            kind         TEXT NOT NULL CHECK (kind IN ('stale','high_priority_ask','anomaly','stuck_action','unmet_prerequisite','reference_id_collision','conflicting_value_figures')),
+                            severity     TEXT NOT NULL CHECK (severity IN ('info','warn','critical')),
+                            summary      TEXT NOT NULL,
+                            source_ref   TEXT,
+                            created_ts   REAL NOT NULL,
+                            dismissed    INTEGER NOT NULL DEFAULT 0,
+                            dismissed_ts REAL
+                        )
+                    """)
+                    conn.execute("""
+                        INSERT INTO alerts (id, issue_id, kind, severity, summary, source_ref,
+                                             created_ts, dismissed, dismissed_ts)
+                        SELECT id, issue_id, kind, severity, summary, source_ref,
+                               created_ts, dismissed, dismissed_ts FROM alerts_pre_e16
+                    """)
+                    conn.execute("DROP TABLE alerts_pre_e16")
                     conn.execute("COMMIT")
                 except sqlite3.OperationalError:
                     try:

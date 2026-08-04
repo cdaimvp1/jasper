@@ -1238,6 +1238,13 @@ async def api_workgraph_issue_detail(issue_id: str, log_choice: bool = False):
     issue["value_corroborated_by_attachment"] = workgraph_nba.attachment_corroborates_value(
         wg.get_raw_items_for_issue(issue_id), issue["value_found"]
     )
+    # Enhancement idea panel #16: distinct preferred-tier dollar figures
+    # across this issue's own messages - len() >= 2 means two messages
+    # disagree about the deal's own value, not just "many numbers appear
+    # somewhere in the thread."
+    issue["conflicting_value_figures"] = workgraph_nba.conflicting_value_figures_for_issue(
+        wg.get_raw_items_for_issue(issue_id)
+    )
     # Part E1 (2026-07-30): unified ranked candidate actions - read-time
     # only, see workgraph_nba.candidate_actions' own docstring. Falls back
     # to project_synthesis's suggested_actions when this issue's own

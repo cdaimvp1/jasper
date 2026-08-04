@@ -5,22 +5,27 @@ workgraph_nba.py).
 
 Not a generic notification firehose — a short, curated surface for things
 that need Marc's attention beyond what the issue list itself already shows.
-Six concrete kinds, each with its own pure `_evaluate_*` helper:
+Seven concrete kinds, each with its own pure `_evaluate_*` helper:
 
-  stale                  — a waiting/blocked issue gone quiet too long.
-  high_priority_ask      — a newly-classified ACTIONABLE-ASK on a high-priority issue.
-  anomaly                — an off-channel-style anomaly flagged during classification.
-  stuck_action           — a pending_actions row that never resolved.
-  unmet_prerequisite     — an Aristotle prerequisite (task #51) still unconfirmed
-                            (task #55). Previously this only ever showed up buried in
-                            nba_reason, seen only on the rare low-confidence "abstain"
-                            card - this makes it visible for every issue, regardless
-                            of confidence tier.
-  reference_id_collision — enhancement idea panel #14: a same-PR/PO pair across
-                            two OPEN, not-yet-grouped issues, found by a DB-wide
-                            sweep - unlike panel #2's per-issue lookup, this
-                            surfaces a pair even when Marc never opens either
-                            issue's own detail panel.
+  stale                     — a waiting/blocked issue gone quiet too long.
+  high_priority_ask         — a newly-classified ACTIONABLE-ASK on a high-priority issue.
+  anomaly                   — an off-channel-style anomaly flagged during classification.
+  stuck_action              — a pending_actions row that never resolved.
+  unmet_prerequisite        — an Aristotle prerequisite (task #51) still unconfirmed
+                               (task #55). Previously this only ever showed up buried in
+                               nba_reason, seen only on the rare low-confidence "abstain"
+                               card - this makes it visible for every issue, regardless
+                               of confidence tier.
+  reference_id_collision    — enhancement idea panel #14: a same-PR/PO pair across
+                               two OPEN, not-yet-grouped issues, found by a DB-wide
+                               sweep - unlike panel #2's per-issue lookup, this
+                               surfaces a pair even when Marc never opens either
+                               issue's own detail panel.
+  conflicting_value_figures — enhancement idea panel #16: two or more messages
+                               on the SAME open issue quoting different preferred-
+                               tier dollar figures - workgraph_nba._extract_value_
+                               amount silently picks the max and moves on; this
+                               surfaces the disagreement itself.
 
 Idempotent by construction: every alert kind is deduped against the set of
 currently-undismissed alerts before `run()` creates anything, keyed by
@@ -41,6 +46,7 @@ from types import MappingProxyType
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import workgraph_store as ws
 import workgraph_projects
+import workgraph_nba
 
 DAY = 86400.0
 
@@ -112,6 +118,13 @@ def _evaluate_reference_id_collision(pair: dict):
     return "warn", summary
 
 
+def _evaluate_conflicting_value_figures(issue: dict, figures: list[dict]):
+    """Pure. Always fires (caller already filtered to len(figures) >= 2)."""
+    amounts = ", ".join(f"${f['amount']:,.0f}" for f in figures)
+    summary = f"Different messages quote different totals ({amounts}) — {issue['title']}"
+    return "warn", summary
+
+
 def run(now: float | None = None, thresholds: dict = DEFAULT_THRESHOLDS) -> dict:
     """Scan all 4 conditions and create any new, non-duplicate alerts. Called
     right after workgraph_nba.recompute_all() everywhere that's called, so
@@ -125,7 +138,7 @@ def run(now: float | None = None, thresholds: dict = DEFAULT_THRESHOLDS) -> dict
     existing_source_ref = {(a["kind"], a["source_ref"]) for a in existing if a["source_ref"]}
 
     by_kind = {"stale": 0, "high_priority_ask": 0, "anomaly": 0, "stuck_action": 0,
-               "unmet_prerequisite": 0, "reference_id_collision": 0}
+               "unmet_prerequisite": 0, "reference_id_collision": 0, "conflicting_value_figures": 0}
 
     # 1. Stale waiting/blocked issues. Evidence + state history fetched ONCE for
     # the whole batch (fixed 2026-07-29: this used to be 2 queries per issue
@@ -217,6 +230,26 @@ def run(now: float | None = None, thresholds: dict = DEFAULT_THRESHOLDS) -> dict
                          summary=summary, source_ref=source_ref)
         existing_source_ref.add(("reference_id_collision", source_ref))
         by_kind["reference_id_collision"] += 1
+
+    # 7. Conflicting dollar-figure flag across messages (enhancement idea
+    #    panel #16) - 2+ raw_items on the SAME open issue disagreeing about
+    #    a preferred-tier dollar figure. Batched: one raw_items fetch across
+    #    every open issue, not one query per issue - same discipline as the
+    #    stale-alert batching above.
+    value_conflict_candidates = ws.list_issues(states=["active", "waiting", "blocked"], limit=1000)
+    raw_items_for_value_conflict = ws.get_raw_items_for_issues([i["id"] for i in value_conflict_candidates])
+    for issue in value_conflict_candidates:
+        if (issue["id"], "conflicting_value_figures") in existing_issue_kind:
+            continue
+        figures = workgraph_nba.conflicting_value_figures_for_issue(
+            raw_items_for_value_conflict.get(issue["id"], [])
+        )
+        if len(figures) < 2:
+            continue
+        severity, summary = _evaluate_conflicting_value_figures(issue, figures)
+        ws.create_alert(issue_id=issue["id"], kind="conflicting_value_figures", severity=severity, summary=summary)
+        existing_issue_kind.add((issue["id"], "conflicting_value_figures"))
+        by_kind["conflicting_value_figures"] += 1
 
     return {"created": sum(by_kind.values()), "by_kind": by_kind}
 

@@ -132,3 +132,58 @@ def test_reference_id_collision_alert_not_generated_without_collision(ws_db, bus
     ws_db.create_issue_with_new_id(title="Fine", state="active", category="other")
     result = wa.run(now=time.time())
     assert result["by_kind"]["reference_id_collision"] == 0
+
+
+# --- enhancement idea panel #16: conflicting dollar-figure flag ------------
+
+def _issue_with_two_disagreeing_figures(ws_db):
+    iid = ws_db.create_issue_with_new_id(title="Disputed deal", state="active", category="other")
+    r1 = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key="conflict-a", thread_key="conflict-a", dedupe_key="conflict-a",
+        occurred_ts=time.time(), subject="Total contract value is $50,000",
+        from_actor="a@example.com", participants_json="[]",
+    )
+    ws_db.link_raw_item_to_issue(r1, iid)
+    r2 = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key="conflict-b", thread_key="conflict-b", dedupe_key="conflict-b",
+        occurred_ts=time.time(), subject="Updated: total contract value is $75,000",
+        from_actor="a@example.com", participants_json="[]",
+    )
+    ws_db.link_raw_item_to_issue(r2, iid)
+    return iid
+
+
+def test_conflicting_value_figures_alert_generated_end_to_end(ws_db, bus_db):
+    iid = _issue_with_two_disagreeing_figures(ws_db)
+
+    result = wa.run(now=time.time())
+
+    assert result["by_kind"]["conflicting_value_figures"] == 1
+    alerts = ws_db.list_alerts(dismissed=False)
+    match = next(al for al in alerts if al["kind"] == "conflicting_value_figures")
+    assert match["issue_id"] == iid
+    assert "$75,000" in match["summary"] and "$50,000" in match["summary"]
+
+
+def test_conflicting_value_figures_alert_deduped_across_runs(ws_db, bus_db):
+    _issue_with_two_disagreeing_figures(ws_db)
+
+    first = wa.run(now=time.time())
+    second = wa.run(now=time.time())
+
+    assert first["by_kind"]["conflicting_value_figures"] == 1
+    assert second["by_kind"]["conflicting_value_figures"] == 0  # already alerted, not re-created
+
+
+def test_conflicting_value_figures_alert_not_generated_for_single_figure(ws_db, bus_db):
+    iid = ws_db.create_issue_with_new_id(title="Fine", state="active", category="other")
+    rid = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key="single-fig", thread_key="single-fig", dedupe_key="single-fig",
+        occurred_ts=time.time(), subject="Total contract value is $50,000",
+        from_actor="a@example.com", participants_json="[]",
+    )
+    ws_db.link_raw_item_to_issue(rid, iid)
+
+    result = wa.run(now=time.time())
+
+    assert result["by_kind"]["conflicting_value_figures"] == 0

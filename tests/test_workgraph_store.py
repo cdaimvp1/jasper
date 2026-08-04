@@ -97,6 +97,106 @@ def test_get_raw_items_for_issues_empty_list_is_safe(ws_db):
     assert ws_db.get_raw_items_for_issues([]) == {}
 
 
+# --- reply-latency / ping-pong count (enhancement idea panel #1) ----------
+
+def _raw_item_with_direction(ws_db, issue_id, key, occurred_ts, direction):
+    rid = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key=key, thread_key=key, dedupe_key=key,
+        occurred_ts=occurred_ts, subject="s", from_actor="a@example.com", participants_json="[]",
+    )
+    ws_db.link_raw_item_to_issue(rid, issue_id)
+    conn = ws_db._connect()
+    conn.execute("UPDATE raw_items SET direction = ? WHERE id = ?", (direction, rid))
+    conn.commit()
+    conn.close()
+    return rid
+
+
+def test_reply_latency_counts_real_alternations_only(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    _raw_item_with_direction(ws_db, a, "r1", 100.0, "inbound")
+    _raw_item_with_direction(ws_db, a, "r2", 200.0, "outbound")   # alternation (+100)
+    _raw_item_with_direction(ws_db, a, "r3", 250.0, "outbound")   # same side, not an alternation
+    _raw_item_with_direction(ws_db, a, "r4", 400.0, "inbound")    # alternation (+150)
+
+    result = ws_db.compute_reply_latency_for_issue(a)
+
+    assert result["ping_pong_count"] == 2
+    assert result["avg_reply_latency_seconds"] == 125.0  # (100 + 150) / 2
+
+
+def test_reply_latency_excludes_internal_and_unknown_direction(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    _raw_item_with_direction(ws_db, a, "r1", 100.0, "inbound")
+    _raw_item_with_direction(ws_db, a, "r2", 150.0, "internal")   # excluded - neither real side
+    _raw_item_with_direction(ws_db, a, "r3", 200.0, "outbound")   # still a real alternation vs r1
+
+    result = ws_db.compute_reply_latency_for_issue(a)
+
+    assert result["ping_pong_count"] == 1
+    assert result["avg_reply_latency_seconds"] == 100.0
+
+
+def test_reply_latency_none_for_one_sided_thread(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    _raw_item_with_direction(ws_db, a, "r1", 100.0, "outbound")
+    _raw_item_with_direction(ws_db, a, "r2", 200.0, "outbound")
+
+    result = ws_db.compute_reply_latency_for_issue(a)
+
+    assert result["ping_pong_count"] == 0
+    assert result["avg_reply_latency_seconds"] is None
+
+
+def test_reply_latency_zero_for_issue_with_no_raw_items(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+
+    result = ws_db.compute_reply_latency_for_issue(a)
+
+    assert result == {"ping_pong_count": 0, "avg_reply_latency_seconds": None}
+
+
+# --- active signal-treatment overrides (enhancement idea panel #4) --------
+
+def _raw_item_with_signal_type(ws_db, issue_id, key, signal_type):
+    rid = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key=key, thread_key=key, dedupe_key=key,
+        occurred_ts=time.time(), subject="s", from_actor="a@example.com", participants_json="[]",
+    )
+    ws_db.link_raw_item_to_issue(rid, issue_id)
+    conn = ws_db._connect()
+    conn.execute("UPDATE raw_items SET signal_type = ? WHERE id = ?", (signal_type, rid))
+    conn.commit()
+    conn.close()
+    return rid
+
+
+def test_find_active_signal_overrides_returns_the_real_override(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    _raw_item_with_signal_type(ws_db, a, "s1", "ariba_notification")
+    ws_db.set_signal_treatment("ariba_notification", "actionable", reason="always needs a reply", set_by="marc")
+
+    overrides = ws_db.find_active_signal_overrides_for_issue(a)
+
+    assert len(overrides) == 1
+    assert overrides[0]["signal_type"] == "ariba_notification"
+    assert overrides[0]["treatment"] == "actionable"
+    assert overrides[0]["reason"] == "always needs a reply"
+
+
+def test_find_active_signal_overrides_empty_when_no_override_set(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    _raw_item_with_signal_type(ws_db, a, "s2", "docusign_notification")
+
+    assert ws_db.find_active_signal_overrides_for_issue(a) == []
+
+
+def test_find_active_signal_overrides_empty_when_no_signal_type(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+
+    assert ws_db.find_active_signal_overrides_for_issue(a) == []
+
+
 def test_get_raw_items_for_issues_issue_with_none_omitted(ws_db):
     iid = ws_db.create_issue_with_new_id(title="No items", state="active", category="other")
     assert ws_db.get_raw_items_for_issues([iid]) == {}

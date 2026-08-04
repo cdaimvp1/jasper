@@ -1182,6 +1182,18 @@ async def api_workgraph_issue_detail(issue_id: str, log_choice: bool = False):
     # Enhancement #88: dollar value in play, already computed for Value-at-
     # risk/the Supplier Dashboard, just never attached to the issue itself.
     issue["value_found"] = workgraph_nba.value_amount_for_issue(issue_id)
+    # Enhancement idea panel #1: real back-and-forth activity from data
+    # already captured at ingest (raw_items.direction/occurred_ts) - never
+    # read back out until now.
+    issue["reply_latency"] = wg.compute_reply_latency_for_issue(issue_id)
+    # Enhancement idea panel #2: same PR/PO number on 2 NOT-yet-grouped
+    # issues - either a merge lagging behind, or a real cannot_merge veto
+    # (v2.4) Marc should be able to see, not just infer.
+    issue["reference_id_collisions"] = workgraph_projects.find_reference_id_collisions_for_issue(issue_id, issue)
+    # Enhancement idea panel #4: show when this issue's classification
+    # reflects Marc's own override, not the code default - previously only
+    # visible in Settings' audit view, never on the issue it affects.
+    issue["active_signal_overrides"] = wg.find_active_signal_overrides_for_issue(issue_id)
     # Part E1 (2026-07-30): unified ranked candidate actions - read-time
     # only, see workgraph_nba.candidate_actions' own docstring. Falls back
     # to project_synthesis's suggested_actions when this issue's own

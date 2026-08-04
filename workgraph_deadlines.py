@@ -36,6 +36,7 @@ import time
 from typing import Optional
 
 import workgraph_store as ws
+import deep_links
 
 CALENDAR_LOOKAHEAD_DAYS = 14.0  # matches workgraph_nba.py / workgraph_recommend.py
 DAY = 86400.0
@@ -65,15 +66,19 @@ def _nearest_upcoming_calendar_ts(evidence: list[dict], now: float) -> Optional[
     return min(upcoming) if upcoming else None
 
 
-def _normalize_date_mention(entry) -> Optional[dict]:
+def _normalize_date_mention(entry, raw_item_id: Optional[int] = None) -> Optional[dict]:
     """Accepts either the current {"text": str, "kind": "hard"|"soft"}
     shape or a legacy plain string (written before this classification
-    existed) - returns {"text": str, "kind": "hard"|"soft"|None}, or None
-    if the entry is blank/unusable. A malformed kind value normalizes to
-    None (unclassified) rather than being silently miscategorized."""
+    existed) - returns {"text": str, "kind": "hard"|"soft"|None,
+    "raw_item_id": int|None}, or None if the entry is blank/unusable. A
+    malformed kind value normalizes to None (unclassified) rather than
+    being silently miscategorized. raw_item_id (enhancement idea panel
+    #5) is the enclosing extraction's own raw_item_id - a real deep-link
+    target the extraction row already carries (rie.raw_item_id), never
+    guessed."""
     if isinstance(entry, str):
         text = entry.strip()
-        return {"text": text, "kind": None} if text else None
+        return {"text": text, "kind": None, "raw_item_id": raw_item_id} if text else None
     if isinstance(entry, dict):
         text = entry.get("text")
         if not isinstance(text, str) or not text.strip():
@@ -81,7 +86,7 @@ def _normalize_date_mention(entry) -> Optional[dict]:
         kind = entry.get("kind")
         if kind not in ("hard", "soft"):
             kind = None
-        return {"text": text.strip(), "kind": kind}
+        return {"text": text.strip(), "kind": kind, "raw_item_id": raw_item_id}
     return None
 
 
@@ -116,9 +121,15 @@ def attach_deadline_info(issues: list[dict], now: Optional[float] = None) -> lis
         mentions = []
         for extraction in extractions_by_issue.get(issue["id"], []):
             for raw in (extraction.get("extracted_json") or {}).get("dates_mentioned") or []:
-                normalized = _normalize_date_mention(raw)
+                normalized = _normalize_date_mention(raw, raw_item_id=extraction.get("raw_item_id"))
                 if normalized:
                     mentions.append(normalized)
+        # Enhancement idea panel #5: deep-link each deadline mention to its
+        # source email/chat - reuses deep_links.attach_deep_links verbatim
+        # (the SAME mechanism evidence rows already get), not a second
+        # link-building path, now that each mention carries a real
+        # raw_item_id above.
+        deep_links.attach_deep_links(mentions)
         issue["deadline_mentions"] = mentions
         issue["has_hard_deadline"] = (
             issue["due_date_info"] is not None or any(m["kind"] == "hard" for m in mentions)

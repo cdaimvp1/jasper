@@ -87,6 +87,40 @@ def test_reference_ids_extracts_versioned_pr_number(ws_db):
     assert wp.reference_ids_for_issue(iid) == {"PR416079-V33"}
 
 
+def test_find_reference_id_collisions_flags_same_pr_on_ungrouped_issues(ws_db):
+    """Enhancement idea panel #2: a real, visible signal - the same PR/PO
+    base id on 2 issues that are NOT already in the same project, either
+    because grouping hasn't caught up yet or because a v2.4 cannot_merge
+    constraint deliberately blocked it."""
+    a = _issue(ws_db, "A")
+    b = _issue(ws_db, "B")
+    _raw_item(ws_db, a, "Approve PR1111865 - SAP RISE", "coll1")
+    _raw_item(ws_db, b, "Re: PR1111865 approval needed", "coll2")
+
+    collisions = wp.find_reference_id_collisions_for_issue(a)
+
+    assert len(collisions) == 1
+    assert collisions[0]["issue_id"] == b
+    assert collisions[0]["shared_reference_ids"] == ["PR1111865"]
+
+
+def test_find_reference_id_collisions_excludes_same_project_issues(ws_db):
+    a = _issue(ws_db, "A")
+    b = _issue(ws_db, "B")
+    proj = ws_db.create_project_with_new_id(name="P", category="other")
+    ws_db.assign_issue_to_project(a, proj)
+    ws_db.assign_issue_to_project(b, proj)
+    _raw_item(ws_db, a, "Approve PR2222222", "coll3")
+    _raw_item(ws_db, b, "Re: PR2222222", "coll4")
+
+    assert wp.find_reference_id_collisions_for_issue(a) == []
+
+
+def test_find_reference_id_collisions_empty_when_no_reference(ws_db):
+    a = _issue(ws_db, "A")
+    assert wp.find_reference_id_collisions_for_issue(a) == []
+
+
 def test_reference_ids_extracts_po_number(ws_db):
     iid = _issue(ws_db, "PO notice")
     _raw_item(ws_db, iid, "Your PO4200703817 has shipped", "r3")

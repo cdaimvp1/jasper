@@ -169,18 +169,44 @@ def other_gated_open_issue_count_for_company(company: str, exclude_issue_id: str
     )
 
 
+def other_open_portfolio_value_for_company(company: str, exclude_issue_id: str) -> dict:
+    """Enhancement idea panel #3: real dollar-value context for this
+    supplier's OTHER open issues, on the issue panel itself - previously
+    only visible by visiting the Supplier Dashboard drill-down
+    (supplier_detail). Reuses the exact same batched value lookup
+    supplier_detail already calls (workgraph_nba.value_amounts_for_issues)
+    - not a second value-extraction path."""
+    open_issues = [
+        i for i in _issue_dicts_for_company(company)
+        if i["id"] != exclude_issue_id and i["state"] in _OPEN_STATES
+    ]
+    if not open_issues:
+        return {"other_open_issue_count": 0, "other_open_value_total": 0.0}
+    value_by_issue = workgraph_nba.value_amounts_for_issues([i["id"] for i in open_issues])
+    return {
+        "other_open_issue_count": len(open_issues),
+        "other_open_value_total": sum(value_by_issue.values()),
+    }
+
+
 def attach_supplier_precedent(issue: dict) -> dict:
     """Mutates and returns `issue`: adds `supplier_precedent` (dict or
     None) - the most recently closed issue with the SAME real external
-    supplier company, excluding this issue itself - and
+    supplier company, excluding this issue itself -
     `supplier_other_gated_count` - how many of this supplier's OTHER open
-    issues are currently gated (enhancement #89)."""
+    issues are currently gated (enhancement #89) - and
+    `supplier_portfolio` - this supplier's other-open-issue count/value
+    total (enhancement idea panel #3)."""
     company = _resolved_company_for_issue(issue["id"])
     issue["supplier_precedent"] = (
         last_closed_issue_for_company(company, exclude_issue_id=issue["id"]) if company else None
     )
     issue["supplier_other_gated_count"] = (
         other_gated_open_issue_count_for_company(company, exclude_issue_id=issue["id"]) if company else 0
+    )
+    issue["supplier_portfolio"] = (
+        other_open_portfolio_value_for_company(company, exclude_issue_id=issue["id"]) if company else
+        {"other_open_issue_count": 0, "other_open_value_total": 0.0}
     )
     return issue
 

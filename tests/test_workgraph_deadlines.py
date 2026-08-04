@@ -38,21 +38,31 @@ def _extraction_with_dates(ws_db, issue_id, dates_mentioned, key):
 # --- _normalize_date_mention -------------------------------------------
 
 def test_normalize_legacy_plain_string():
-    assert wd._normalize_date_mention("Aug 11 - tentative") == {"text": "Aug 11 - tentative", "kind": None}
+    assert wd._normalize_date_mention("Aug 11 - tentative") == \
+        {"text": "Aug 11 - tentative", "kind": None, "raw_item_id": None}
 
 
 def test_normalize_new_shape_hard():
     assert wd._normalize_date_mention({"text": "must sign by Aug 11", "kind": "hard"}) == \
-        {"text": "must sign by Aug 11", "kind": "hard"}
+        {"text": "must sign by Aug 11", "kind": "hard", "raw_item_id": None}
 
 
 def test_normalize_new_shape_soft():
     assert wd._normalize_date_mention({"text": "shooting for next week", "kind": "soft"}) == \
-        {"text": "shooting for next week", "kind": "soft"}
+        {"text": "shooting for next week", "kind": "soft", "raw_item_id": None}
 
 
 def test_normalize_malformed_kind_becomes_none():
-    assert wd._normalize_date_mention({"text": "x", "kind": "urgent"}) == {"text": "x", "kind": None}
+    assert wd._normalize_date_mention({"text": "x", "kind": "urgent"}) == \
+        {"text": "x", "kind": None, "raw_item_id": None}
+
+
+def test_normalize_carries_raw_item_id_when_given():
+    """Enhancement idea panel #5: the enclosing extraction's own
+    raw_item_id, passed through untouched - a real deep-link target,
+    never guessed."""
+    assert wd._normalize_date_mention("Aug 11", raw_item_id=42) == \
+        {"text": "Aug 11", "kind": None, "raw_item_id": 42}
 
 
 def test_normalize_blank_string_is_none():
@@ -181,12 +191,15 @@ def test_due_date_takes_priority_over_calendar_evidence(ws_db):
 def test_hard_mention_sets_has_hard_deadline(ws_db):
     now = time.time()
     iid = _issue(ws_db)
-    _extraction_with_dates(ws_db, iid, [{"text": "must sign by Aug 11", "kind": "hard"}], "m1")
+    rid = _extraction_with_dates(ws_db, iid, [{"text": "must sign by Aug 11", "kind": "hard"}], "m1")
     issues = [ws_db.get_issue(iid)]
 
     wd.attach_deadline_info(issues, now=now)
 
-    assert issues[0]["deadline_mentions"] == [{"text": "must sign by Aug 11", "kind": "hard"}]
+    mention = issues[0]["deadline_mentions"][0]
+    assert mention["text"] == "must sign by Aug 11" and mention["kind"] == "hard"
+    # Enhancement idea panel #5: a real deep-link target, not guessed.
+    assert mention["raw_item_id"] == rid
     assert issues[0]["has_hard_deadline"] is True
 
 
@@ -198,7 +211,8 @@ def test_soft_mention_alone_is_not_hard(ws_db):
 
     wd.attach_deadline_info(issues, now=now)
 
-    assert issues[0]["deadline_mentions"] == [{"text": "shooting for next week", "kind": "soft"}]
+    mention = issues[0]["deadline_mentions"][0]
+    assert mention["text"] == "shooting for next week" and mention["kind"] == "soft"
     assert issues[0]["has_hard_deadline"] is False
 
 
@@ -210,8 +224,30 @@ def test_legacy_unclassified_mention_is_not_hard(ws_db):
 
     wd.attach_deadline_info(issues, now=now)
 
-    assert issues[0]["deadline_mentions"] == [{"text": "Aug 11 - tentative press release", "kind": None}]
+    mention = issues[0]["deadline_mentions"][0]
+    assert mention["text"] == "Aug 11 - tentative press release" and mention["kind"] is None
     assert issues[0]["has_hard_deadline"] is False
+
+
+def test_deadline_mention_carries_deep_links_key(ws_db):
+    """Enhancement idea panel #5: reuses deep_links.attach_deep_links
+    verbatim - an outlook_mail raw_item's mention gets real action links,
+    the same ones its own evidence row would get."""
+    now = time.time()
+    iid = _issue(ws_db)
+    rid = _extraction_with_dates(ws_db, iid, [{"text": "must sign by Aug 11", "kind": "hard"}], "m1x")
+    conn = ws_db._connect()
+    conn.execute("UPDATE raw_items SET entry_id = ? WHERE id = ?", ("entry-abc", rid))
+    conn.commit()
+    conn.close()
+    issues = [ws_db.get_issue(iid)]
+
+    wd.attach_deadline_info(issues, now=now)
+
+    mention = issues[0]["deadline_mentions"][0]
+    assert "deep_links" in mention
+    assert isinstance(mention["deep_links"], list)
+    assert len(mention["deep_links"]) > 0  # outlook_mail with a real entry_id gets real actions
 
 
 def test_mixed_hard_and_soft_mentions_both_kept(ws_db):

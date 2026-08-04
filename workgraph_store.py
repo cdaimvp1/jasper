@@ -2659,6 +2659,32 @@ def get_raw_items_for_issue(issue_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def compute_reply_latency_for_issue(issue_id: str) -> dict:
+    """Enhancement idea panel #1: a real back-and-forth activity signal
+    from raw_items.direction/occurred_ts - both already captured at
+    ingest, never read back out for this until now. ping_pong_count is
+    how many times direction actually alternated (inbound->outbound or
+    outbound->inbound) across the thread; avg_reply_latency_seconds is the
+    mean gap between each such alternation (None if there were none - a
+    one-sided thread, or too few directional items to alternate at all).
+    'internal'/'unknown' direction values are excluded before looking for
+    alternations - neither is a real side of a back-and-forth, and
+    leaving them in would either falsely break a real streak or falsely
+    count a same-side repeat as an alternation."""
+    items = get_raw_items_for_issue(issue_id)
+    directional = [i for i in items if i.get("direction") in ("inbound", "outbound")]
+    ping_pong_count = 0
+    latencies = []
+    for prev, cur in zip(directional, directional[1:]):
+        if prev["direction"] != cur["direction"]:
+            ping_pong_count += 1
+            latencies.append(cur["occurred_ts"] - prev["occurred_ts"])
+    return {
+        "ping_pong_count": ping_pong_count,
+        "avg_reply_latency_seconds": (sum(latencies) / len(latencies)) if latencies else None,
+    }
+
+
 def list_raw_items_by_thread_key(source: str, thread_key: str) -> list[dict]:
     """All raw_items sharing this (source, thread_key), oldest first,
     REGARDLESS of which issue each one currently belongs to (unlike get_
@@ -5038,6 +5064,22 @@ def list_signal_treatments() -> list[dict]:
         finally:
             conn.close()
     return [dict(r) for r in rows]
+
+
+def find_active_signal_overrides_for_issue(issue_id: str) -> list[dict]:
+    """Enhancement idea panel #4: show when this issue's classification
+    reflects Marc's own override (signal_treatment_overrides), not the
+    code default - real transparency into a correction that already
+    existed but was previously only visible in Settings' own audit view
+    (list_signal_treatments), never on the issue it actually affected.
+    Empty list when none of this issue's raw_items matched a known
+    signal_type, or none of those types has a live override."""
+    items = get_raw_items_for_issue(issue_id)
+    signal_types = {i["signal_type"] for i in items if i.get("signal_type")}
+    if not signal_types:
+        return []
+    overrides = {o["signal_type"]: o for o in list_signal_treatments()}
+    return [overrides[st] for st in signal_types if st in overrides]
 
 
 # --- ownership_rules --------------------------------------------------------

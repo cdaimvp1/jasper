@@ -113,6 +113,38 @@ def reference_base_ids_for_issue(issue_id: str) -> set:
     }
 
 
+def find_reference_id_collisions_for_issue(issue_id: str, issue: Optional[dict] = None) -> list[dict]:
+    """Enhancement idea panel #2: real visibility into a same-PR/PO-number
+    pair that is NOT already in the same project - either a merge that
+    hasn't caught up yet, or one deliberately blocked by a v2.4 cannot_
+    merge/cannot_link constraint (both worth Marc seeing, for different
+    reasons). Reads definitive_ids off the cached signature (Section 12.7)
+    rather than re-deriving reference_base_ids_for_issue per candidate -
+    same real perf win backtest_scored_model/scored_grouping_decision
+    already get from that cache."""
+    if issue is None:
+        issue = ws.get_issue(issue_id)
+    my_sig = get_or_compute_work_object_signature(issue_id, issue)
+    my_refs = set(my_sig["definitive_ids"])
+    if not my_refs:
+        return []
+    my_project_id = issue.get("project_id")
+    collisions = []
+    for other in ws.list_issues(states=None, limit=10000):
+        if other["id"] == issue_id:
+            continue
+        if my_project_id and my_project_id == other.get("project_id"):
+            continue  # already grouped together - not a collision worth flagging
+        other_sig = get_or_compute_work_object_signature(other["id"], other)
+        shared = my_refs & set(other_sig["definitive_ids"])
+        if shared:
+            collisions.append({
+                "issue_id": other["id"], "title": other.get("title"),
+                "shared_reference_ids": sorted(shared),
+            })
+    return collisions
+
+
 def _vetoed_by_reference_mismatch(issue_id: str, sibling_id: str) -> bool:
     """True when BOTH issues have at least one identified PR/PO reference
     BASE and the sets are disjoint - a real, structured signal that

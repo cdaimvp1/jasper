@@ -354,6 +354,50 @@ def test_attach_supplier_precedent_other_gated_count_zero_when_no_company(ws_db)
     assert issue["supplier_other_gated_count"] == 0
 
 
+def test_attach_supplier_precedent_includes_portfolio_value(ws_db):
+    """Enhancement idea panel #3: real dollar context for this supplier's
+    OTHER open issues, on the issue panel itself - previously only
+    visible via the Supplier Dashboard drill-down."""
+    _party(ws_db, "p1", "Acme")
+    other_open = ws_db.create_issue_with_new_id(title="Big deal", state="active", category="other")
+    ws_db.link_party_to_issue(other_open, "p1")
+    ra = ws_db.insert_raw_item(source="outlook_mail", stable_key="pv1", thread_key="pv1", dedupe_key="pv1",
+                                occurred_ts=100.0, subject="Worth $2.5 million", from_actor="a@example.com",
+                                participants_json="[]")
+    ws_db.link_raw_item_to_issue(ra, other_open)
+
+    viewed_id = ws_db.create_issue_with_new_id(title="Viewing this one", state="active", category="other")
+    ws_db.link_party_to_issue(viewed_id, "p1")
+    issue = ws_db.get_issue(viewed_id)
+
+    wsup.attach_supplier_precedent(issue)
+
+    assert issue["supplier_portfolio"] == {"other_open_issue_count": 1, "other_open_value_total": 2_500_000.0}
+
+
+def test_attach_supplier_precedent_portfolio_excludes_self_and_closed(ws_db):
+    _party(ws_db, "p1", "Acme")
+    closed = ws_db.create_issue_with_new_id(title="Done deal", state="done", category="other")
+    ws_db.link_party_to_issue(closed, "p1")
+
+    viewed_id = ws_db.create_issue_with_new_id(title="Viewing this one", state="active", category="other")
+    ws_db.link_party_to_issue(viewed_id, "p1")
+    issue = ws_db.get_issue(viewed_id)
+
+    wsup.attach_supplier_precedent(issue)
+
+    assert issue["supplier_portfolio"] == {"other_open_issue_count": 0, "other_open_value_total": 0.0}
+
+
+def test_attach_supplier_precedent_portfolio_zero_when_no_company(ws_db):
+    iid = ws_db.create_issue_with_new_id(title="No supplier", state="active", category="other")
+    issue = ws_db.get_issue(iid)
+
+    wsup.attach_supplier_precedent(issue)
+
+    assert issue["supplier_portfolio"] == {"other_open_issue_count": 0, "other_open_value_total": 0.0}
+
+
 def test_list_suppliers_does_not_call_get_issue_per_issue(ws_db, monkeypatch):
     """Hardening pass #3 (HIGH): list_suppliers() used to call ws.get_issue()
     once per issue across every company - measured live at 375 individual

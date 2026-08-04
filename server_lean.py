@@ -58,6 +58,7 @@ from bus import init_bus, emit_event, query_events, latest_id, event_count
 from watchers import start_watchers, stop_watchers
 
 import workgraph_claims
+import workgraph_reconcile
 import workgraph_deepdive
 import workgraph_store as wg
 import workgraph_classify
@@ -2026,6 +2027,44 @@ async def api_project_suggestion_resolve(suggestion_id: int, body: ProjectSugges
     return JSONResponse({"ok": True, "result": result})
 
 
+@app.get("/api/workgraph/issues/{issue_id}/claim-suggestions")
+async def api_claim_suggestions_list(issue_id: str):
+    """Task #155: pending claim-resolution suggestions (both evidence
+    types - 'resolve' and 'contradiction') for one issue's checklist
+    view - a human confirms/rejects each explicitly, same review-then-
+    confirm shape as project suggestions above."""
+    if wg.get_issue(issue_id) is None:
+        raise HTTPException(404, f"no such issue: {issue_id}")
+    suggestions = workgraph_reconcile.list_pending_claim_suggestions_for_issue(issue_id)
+    return JSONResponse({"suggestions": sanitize_surrogates(suggestions)})
+
+
+class ClaimSuggestionResolveBody(BaseModel):
+    status: str  # confirmed | rejected
+    actor: str = "marc"
+
+
+@app.post("/api/workgraph/claim-suggestions/{suggestion_id}/resolve")
+async def api_claim_suggestion_resolve(suggestion_id: int, body: ClaimSuggestionResolveBody):
+    """Confirming a 'resolve' suggestion marks the named claim done;
+    confirming a 'contradiction' suggestion only acknowledges the
+    mismatch and never touches the claim (see workgraph_reconcile's
+    module docstring - an issue closing is not evidence a claim was
+    fulfilled). Either way, nothing here ever auto-closes anything
+    without this explicit human call."""
+    if body.status not in ("confirmed", "rejected"):
+        raise HTTPException(400, "status must be 'confirmed' or 'rejected'")
+    if wg.get_claim_suggestion(suggestion_id) is None:
+        raise HTTPException(404, f"no such suggestion: {suggestion_id}")
+    if body.status == "confirmed":
+        ok = workgraph_reconcile.confirm_claim_suggestion(suggestion_id, actor=body.actor)
+    else:
+        ok = workgraph_reconcile.reject_claim_suggestion(suggestion_id, actor=body.actor)
+    if not ok:
+        raise HTTPException(409, "suggestion already resolved")
+    return JSONResponse({"ok": True})
+
+
 @app.get("/api/workgraph/parties")
 async def api_parties_list(affiliation: Optional[str] = None):
     return JSONResponse({"parties": sanitize_surrogates(wg.list_parties(affiliation=affiliation))})
@@ -2254,6 +2293,11 @@ async def api_raw_item_extraction_write(raw_item_id: int, body: ExtractionBody):
     # index evidence_fts (Section 9.6) here, same reasoning: this is the one
     # place a raw_item's real text+extraction are both freshly available.
     workgraph_claims.materialize_claims_for_raw_item(raw_item_id)
+    # Task #155: resolution_signals (this extraction's curator-judged
+    # completion evidence, if any) become suggest-only claim-resolution
+    # suggestions the moment they're written - same live-wiring reasoning
+    # as materialize_claims_for_raw_item above, never an auto-close.
+    workgraph_reconcile.generate_resolution_signal_suggestions(raw_item_id)
     body_text = text_extract.resolve_item_text(item)
     if body_text and body_text.strip():
         wg.index_evidence_fts(raw_item_id, item.get("issue_id"), body_text)

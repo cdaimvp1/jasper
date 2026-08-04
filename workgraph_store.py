@@ -1103,6 +1103,36 @@ def init_workgraph() -> None:
             except sqlite3.OperationalError:
                 pass
 
+            # pending_claim_suggestions (2026-08-04, architecture-review
+            # follow-up P1, task #155): same review-then-confirm shape as
+            # pending_project_suggestions - claims materialize and dedupe
+            # correctly now, but nothing ever suggests a claim IS resolved.
+            # suggestion_kind='resolve' (a specific raw_item's content
+            # directly says an open claim was fulfilled) is a proposal to
+            # mark the claim done; 'contradiction' (an issue closed while a
+            # claim under it is still open) has no single obvious
+            # resolution and is suggest-only in a different sense - it
+            # surfaces a mismatch, it never implies the claim should
+            # auto-close. evidence_type is a small, closed enum - no
+            # fuzzy/heuristic "probably done" scoring, see
+            # workgraph_reconcile.py's own module docstring for why.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS pending_claim_suggestions (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    claim_id        INTEGER NOT NULL REFERENCES claims(id),
+                    suggestion_kind TEXT NOT NULL CHECK (suggestion_kind IN ('resolve','contradiction')),
+                    evidence_type   TEXT NOT NULL CHECK (evidence_type IN
+                                       ('explicit_resolution_signal','issue_closed_with_open_claims')),
+                    evidence_note   TEXT,
+                    raw_item_id     INTEGER REFERENCES raw_items(id),
+                    status          TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','confirmed','rejected','expired')),
+                    created_ts      REAL NOT NULL,
+                    resolved_ts     REAL
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_claim_suggestions_status ON pending_claim_suggestions(status)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_claim_suggestions_claim ON pending_claim_suggestions(claim_id, evidence_type)")
+
             # identity_constraints (design doc Section 12.6): extends
             # pending_project_suggestions' pairwise dedupe - today PENDING-only,
             # forgotten the moment a suggestion is rejected/expires - into a
@@ -6322,6 +6352,105 @@ def list_open_claims_for_issues(issue_ids: list[str], claim_type: Optional[str] 
     for r in rows:
         out.setdefault(r["issue_id"], []).append(dict(r))
     return out
+
+
+def list_issue_ids_by_state(states: list[str]) -> list[str]:
+    """Lightweight id-only counterpart to list_issues (which joins
+    synthesis/parties for display and defaults to limit=200) - for a
+    batched sweep like workgraph_reconcile.detect_issue_closed_with_open_
+    claims_contradictions that needs every matching issue id, not a
+    display page of the first 200."""
+    if not states:
+        return []
+    with _lock:
+        conn = _connect()
+        try:
+            placeholders = ",".join("?" * len(states))
+            rows = conn.execute(
+                f"SELECT id FROM issues WHERE state IN ({placeholders})", states,
+            ).fetchall()
+        finally:
+            conn.close()
+    return [r["id"] for r in rows]
+
+
+# --- pending_claim_suggestions (2026-08-04, task #155) ----------------------
+
+def create_claim_suggestion(*, claim_id: int, suggestion_kind: str, evidence_type: str,
+                             evidence_note: Optional[str] = None, raw_item_id: Optional[int] = None) -> int:
+    """Dedupe-then-insert, same shape as create_project_suggestion: a
+    PENDING suggestion already on record for this exact (claim_id,
+    evidence_type) pair is reused (its id returned) rather than
+    duplicated - re-running a sweep (the daily backfill, or reprocessing
+    a raw_item) never grows a second pending row asking the same
+    question twice. Unlike create_project_suggestion there is no veto
+    concept here (no identity_constraints equivalent for claims yet), so
+    this never returns None."""
+    now = time.time()
+    with _lock:
+        conn = _connect()
+        try:
+            existing = conn.execute(
+                """SELECT id FROM pending_claim_suggestions
+                   WHERE status = 'pending' AND claim_id = ? AND evidence_type = ?""",
+                (claim_id, evidence_type),
+            ).fetchone()
+            if existing:
+                return existing["id"]
+            cur = conn.execute(
+                """INSERT INTO pending_claim_suggestions
+                   (claim_id, suggestion_kind, evidence_type, evidence_note, raw_item_id, created_ts)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (claim_id, suggestion_kind, evidence_type, evidence_note, raw_item_id, now),
+            )
+            return cur.lastrowid
+        finally:
+            conn.close()
+
+
+def get_claim_suggestion(suggestion_id: int) -> Optional[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM pending_claim_suggestions WHERE id = ?", (suggestion_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+    return dict(row) if row else None
+
+
+def list_pending_claim_suggestions(issue_id: Optional[str] = None) -> list[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            if issue_id is not None:
+                rows = conn.execute(
+                    """SELECT s.* FROM pending_claim_suggestions s
+                       JOIN claims c ON c.id = s.claim_id
+                       WHERE s.status = 'pending' AND c.issue_id = ?
+                       ORDER BY s.created_ts ASC""",
+                    (issue_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM pending_claim_suggestions WHERE status = 'pending' ORDER BY created_ts ASC",
+                ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def resolve_claim_suggestion(suggestion_id: int, status: str) -> None:
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                "UPDATE pending_claim_suggestions SET status = ?, resolved_ts = ? WHERE id = ?",
+                (status, time.time(), suggestion_id),
+            )
+        finally:
+            conn.close()
 
 
 def index_evidence_fts(raw_item_id: int, issue_id: Optional[str], body: str) -> None:

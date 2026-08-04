@@ -38,6 +38,19 @@ for Phase 3 (design doc Section 9):
                               Must run BEFORE relying on materialize_
                               claims_for_raw_item's reconciliation path on
                               a pre-existing DB.
+  backfill_resolution_signal_suggestions() — sweep (task #155, wired into
+                              run_backfill_daily_if_due, unlike the two
+                              backfills above) that turns any extraction's
+                              resolution_signals into suggest-only claim-
+                              resolution suggestions via workgraph_
+                              reconcile.generate_resolution_signal_
+                              suggestions - catches any raw_item whose
+                              extraction (or correction) landed outside the
+                              server_lean.py live-wiring point. Also see
+                              workgraph_reconcile.detect_issue_closed_
+                              with_open_claims_contradictions, the second
+                              (issue-state-side) half of task #155, run in
+                              the same daily sweep below.
 
 Same "one-time backfill, then a daily-if-due sweep for anything that landed
 since" shape as workgraph_identity.backfill_identity_anchors /
@@ -52,6 +65,7 @@ import time
 
 import text_extract
 import workgraph_claims
+import workgraph_reconcile
 import workgraph_store as ws
 
 
@@ -203,6 +217,22 @@ def backfill_canonical_keys_and_merge_duplicates() -> dict:
     }
 
 
+def backfill_resolution_signal_suggestions(*, limit: int | None = None) -> dict:
+    """One-time-then-daily sweep (task #155) for raw_items whose extraction
+    already carries resolution_signals but were extracted (or re-extracted
+    via a correction) before the live-wiring point in server_lean.py ran
+    for them - same shape as backfill_claims. Idempotent: create_claim_
+    suggestion's own (claim_id, evidence_type) dedupe means re-running
+    this never grows duplicate pending suggestions."""
+    raw_item_ids = ws.list_raw_item_ids_with_extractions()
+    if limit is not None:
+        raw_item_ids = raw_item_ids[:limit]
+    matched = 0
+    for rid in raw_item_ids:
+        matched += workgraph_reconcile.generate_resolution_signal_suggestions(rid)
+    return {"raw_items_scanned": len(raw_item_ids), "signals_matched": matched}
+
+
 def backfill_evidence_fts(*, limit: int | None = None) -> dict:
     raw_item_ids = ws.list_all_raw_item_ids()
     if limit is not None:
@@ -238,6 +268,8 @@ def run_backfill_daily_if_due(now: float | None = None) -> dict | None:
     return {
         "claims": backfill_claims(),
         "evidence_fts": backfill_evidence_fts(),
+        "resolution_signal_suggestions": backfill_resolution_signal_suggestions(),
+        "issue_closed_contradictions": workgraph_reconcile.detect_issue_closed_with_open_claims_contradictions(),
     }
 
 

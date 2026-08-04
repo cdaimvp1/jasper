@@ -69,7 +69,9 @@ different jobs.
                         "repeat_signals": [{"ask_text": "...", "days_since_first_ask": 6,
                                              "escalated": true,
                                              "escalation_note": "2nd follow-up, now from the
-                                             requester's manager rather than the requester"}, ...]}}
+                                             requester's manager rather than the requester"}, ...],
+                        "resolution_signals": [{"claim_type": "ask"|"decision"|"commitment",
+                                             "claim_text": "...", "resolution_note": "..."}, ...]}}
    ```
    Computed ONCE per raw_item, permanently — never re-extract an item that already has a row here
    (check first; the routes list above tell you which raw_items already have one). Writing this
@@ -100,6 +102,27 @@ different jobs.
      the time, same as `estimated_completion` being genuinely absent in step 5 below. This field
      exists to capture a real, judged repeat — never to flag every ask/commitment/decision as
      "maybe related."
+
+   **`resolution_signals` (added 2026-08-04, task #155, claim-resolution suggestions) — only
+   populate this when THIS raw_item's own content directly and unambiguously states that a
+   SPECIFIC earlier open ask/decision/commitment on the SAME issue was fulfilled, never a guess —
+   same discipline as `repeat_signals`, one level further (a completion, not just a repeat):**
+   - Same prerequisite as `repeat_signals`: read this issue's prior `asks`/`decisions`/
+     `commitments` first (`GET /api/workgraph/issues/{issue_id}`) before judging whether anything
+     in THIS raw_item resolves one of them.
+   - Add one entry only when the match is explicit and specific — "the signed SOW you asked for
+     is attached," a direct "Approved." reply naming what was approved, a clear "done, sent
+     Friday" tied to one named ask. `claim_type` and `claim_text` must reproduce that EARLIER
+     claim's own text verbatim (not this raw_item's restatement of it — this is the mirror image
+     of `repeat_signals`, which records the NEW text; this records which OLD claim just got
+     closed), so the suggestion this becomes points at the exact open claim it's resolving.
+     `resolution_note` is a short, specific reason (what/where the confirmation is), not a
+     restatement of the claim text.
+   - This only ever CREATES A SUGGESTION for a human to confirm (workgraph_reconcile.py) — it
+     never closes anything itself. If you're not confident a specific earlier claim was actually
+     fulfilled by THIS raw_item, omit the entry entirely; a missed resolution just means one more
+     item stays open a little longer, which costs nothing — a wrongly-suggested one costs Marc's
+     trust in the queue.
 
    **`dates_mentioned` entries need real judgment on `kind` and `whose` (added 2026-07-30 for
    `kind`, Marc's direct request; `whose` added 2026-08-03, task #57/design doc Section 9.7) — this

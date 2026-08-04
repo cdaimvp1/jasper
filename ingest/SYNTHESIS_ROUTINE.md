@@ -182,6 +182,27 @@ different jobs.
    tasks with a one-line rationale each (never a bare label with no "why" — Marc's explicit
    "in-depth, not oversimplified" requirement).
 
+   **`derived_title` (added 2026-08-04, task #52) — ALWAYS include one, every synthesis write, no
+   exceptions.** The list/inbox views already prefer this over the issue's own mechanical `title`
+   (which is just the raw email subject line, verbatim) everywhere they render a row - this field
+   has been fully wired into the UI the whole time; it was simply never asked for here, which is
+   the entire reason roughly half of all real open issues still show a raw subject line like
+   `"***Please Read: Action Required**** FW:Lilly Cyber SAE-17010 Review Outcome"` or `"Action
+   required: Approve the Requisition that JESSICA GOLINO submitted - PR815290-V2..."` instead of
+   what the issue is actually about.
+   - A short (aim for 5-10 words), real, specific title naming what this issue actually IS - the
+     deal, the ask, the decision, the document - never a restatement of the raw subject line's own
+     boilerplate ("Action required," "FW:," "***Please Read***," a system's own notification
+     framing). Good: `"UneeQ pricing negotiation"`, `"PR815290-V2 approval - Data Spine Phase 2"`,
+     `"Veeva Link SOW - extra T&Cs flagged"`. Bad: reusing the subject line, or anything that needs
+     the raw subject to make sense.
+   - Update it every time you write a new synthesis if what the issue is about has genuinely
+     changed (a decision landed, the ask shifted) - don't just carry the old one forward reflexively
+     - but don't rewrite it cosmetically on every pass either if the real subject-matter hasn't moved.
+   - This is real judgment, same as the summary itself - never a mechanical truncation of the
+     subject line or the summary's own first sentence (that would just relocate the same noise
+     problem, not solve it).
+
    **`label` is rendered verbatim as a button's visible text in the real UI — keep it a short,
    imperative call-to-action (2-5 words: "Go to Ariba", "Confirm with Legal", "Approve the SOW"),
    never a full descriptive sentence.** Put the specific, "in-depth" detail (which PR/PO number,
@@ -196,6 +217,7 @@ different jobs.
    ```
    POST /api/workgraph/{entity_type}/{entity_id}/synthesis
    {"summary": "...",
+    "derived_title": "...",
     "next_steps": [{"step": "...", "current": true,
                      "estimate_days_low": 3, "estimate_days_high": 5,
                      "estimate_confidence": "documented", "estimate_note": "per the SOW review SLA"}, ...],

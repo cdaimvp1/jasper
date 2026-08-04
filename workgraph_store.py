@@ -2570,6 +2570,26 @@ def list_issue_ids() -> list[str]:
     return [r["id"] for r in rows]
 
 
+def list_issue_ids_missing_derived_title() -> list[str]:
+    """Task #52 (2026-08-04): every issue with no real derived_title yet -
+    either no synthesis row at all, or one whose derived_title is NULL/
+    empty. Batched, one query - the real scope workgraph_classify.
+    backfill_derived_titles needs to stay cheap enough to run every
+    scheduled_refresh cycle (not just as a one-time manual pass) without
+    redoing work for every already-titled issue every time."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute("""
+                SELECT i.id FROM issues i
+                LEFT JOIN synthesis s ON s.entity_type = 'issue' AND s.entity_id = i.id
+                WHERE s.entity_id IS NULL OR s.derived_title IS NULL OR s.derived_title = ''
+            """).fetchall()
+        finally:
+            conn.close()
+    return [r["id"] for r in rows]
+
+
 def get_last_refresh_ts() -> Optional[float]:
     """Best-effort 'how fresh is what's on screen' - the most recent
     issues.updated_at across the whole graph. Simpler and more reliably

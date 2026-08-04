@@ -1026,3 +1026,131 @@ def test_cluster_and_link_jasper_ref_takes_priority_over_reference_match(ws_db, 
     assert result["attached_via_jasper_ref"] == 1
     assert result["attached_via_reference"] == 0
     assert ws_db.get_raw_item(second_rid)["issue_id"] == jasper_target
+
+
+# --- backfill_derived_titles (task #52, 2026-08-04) -------------------------
+# Found dead: compute_deterministic_title/backfill_derived_titles existed,
+# worked, and had zero callers anywhere but a one-time manual pass - never
+# wired into the live pipeline, so every issue created since has had no
+# chance at a real title beyond the raw mechanical subject line.
+
+def _issue_with_parties(ws_db, title, *, internal_name=None, external_company=None):
+    iid = ws_db.create_issue_with_new_id(title=title, state="active", category="other")
+    if internal_name:
+        pid = f"int-{iid}"
+        ws_db.upsert_party(id=pid, primary_email=f"{pid}@lilly.com", display_name=internal_name,
+                            affiliation="internal", affiliation_confidence="H",
+                            affiliation_source="domain_heuristic", company=None)
+        ws_db.link_party_to_issue(iid, pid)
+    if external_company:
+        pid = f"ext-{iid}"
+        ws_db.upsert_party(id=pid, primary_email=f"{pid}@supplier.com", display_name="Rep",
+                            affiliation="external", affiliation_confidence="H",
+                            affiliation_source="domain_heuristic", company=external_company)
+        ws_db.link_party_to_issue(iid, pid)
+    return iid
+
+
+def test_missing_derived_title_finds_issue_with_no_synthesis_row(ws_db):
+    iid = ws_db.create_issue_with_new_id(title="Issue", state="active", category="other")
+    assert iid in ws_db.list_issue_ids_missing_derived_title()
+
+
+def test_missing_derived_title_finds_issue_with_empty_title(ws_db):
+    iid = ws_db.create_issue_with_new_id(title="Issue", state="active", category="other")
+    ws_db.upsert_synthesis(entity_type="issue", entity_id=iid, summary="a real summary",
+                            next_steps_json="[]", suggested_actions_json="[]",
+                            synthesized_from_marker="rev:1")
+    assert iid in ws_db.list_issue_ids_missing_derived_title()
+
+
+def test_missing_derived_title_excludes_issue_with_a_real_title(ws_db):
+    iid = ws_db.create_issue_with_new_id(title="Issue", state="active", category="other")
+    ws_db.set_derived_title("issue", iid, "Real Title")
+    assert iid not in ws_db.list_issue_ids_missing_derived_title()
+
+
+def test_backfill_sets_title_from_requestor_and_supplier(ws_db):
+    iid = _issue_with_parties(ws_db, "RE: pricing", internal_name="Jane Doe", external_company="UneeQ")
+    result = wc.backfill_derived_titles()
+    assert result["updated"] == 1
+    synth = ws_db.get_synthesis("issue", iid)
+    assert synth["derived_title"] == "Jane Doe - UneeQ - pricing"
+
+
+def test_backfill_skips_issue_with_insufficient_party_data(ws_db):
+    """compute_deterministic_title requires 2 of 3 real parts - a lone
+    topic (no real requestor or supplier) isn't worth overriding the raw
+    title with something no better."""
+    iid = ws_db.create_issue_with_new_id(title="Random subject", state="active", category="other")
+    result = wc.backfill_derived_titles()
+    assert result["updated"] == 0
+    assert ws_db.get_synthesis("issue", iid) is None  # never touched - nothing to set
+
+
+def test_backfill_never_overwrites_an_existing_title(ws_db):
+    iid = _issue_with_parties(ws_db, "RE: pricing", internal_name="Jane Doe", external_company="UneeQ")
+    ws_db.set_derived_title("issue", iid, "Curator's own real title")
+
+    result = wc.backfill_derived_titles()
+
+    assert result["checked"] == 0  # already titled - excluded from the scan entirely
+    assert ws_db.get_synthesis("issue", iid)["derived_title"] == "Curator's own real title"
+
+
+def test_backfill_only_scans_issues_missing_a_title(ws_db):
+    titled = _issue_with_parties(ws_db, "RE: a", internal_name="Jane Doe", external_company="Acme")
+    ws_db.set_derived_title("issue", titled, "Already titled")
+    untitled = _issue_with_parties(ws_db, "RE: b", internal_name="John Roe", external_company="Beta")
+
+    result = wc.backfill_derived_titles()
+
+    assert result["checked"] == 1
+    assert result["updated"] == 1
+    assert ws_db.get_synthesis("issue", untitled)["derived_title"] == "John Roe - Beta - b"
+
+
+def test_backfill_strips_ariba_requisition_boilerplate_from_topic(ws_db):
+    """Real live-data bug (task #52, 2026-08-04): every Ariba PR-approval
+    notification carries this exact fixed wrapper text, which was passing
+    straight through into the 'improved' title untouched - defeating the
+    whole point of the rewrite for one of the most common real subjects."""
+    iid = _issue_with_parties(
+        ws_db,
+        "Action required: Approve the Requisition that CORRINA MCCORKLE submitted  - "
+        "PR815290-V2 - Lilly One Data Spine Phase 2 Support ($464,000.00 USD)",
+        internal_name="Cori McCorkle", external_company="Ariba",
+    )
+    result = wc.backfill_derived_titles()
+    assert result["updated"] == 1
+    title = ws_db.get_synthesis("issue", iid)["derived_title"]
+    assert "Action required" not in title
+    assert "submitted" not in title
+    assert "PR815290-V2" in title
+
+
+def test_backfill_omits_requestor_when_name_already_in_topic(ws_db):
+    """Real live-data bug (task #52, 2026-08-04): prepending the requestor's
+    own name produced a literal duplicate when the raw subject already
+    contained it verbatim (e.g. 'Alex Sohn - Alex Sohn Finance Intern
+    Presentation')."""
+    iid = _issue_with_parties(
+        ws_db, "Alex Sohn Finance Intern Presentation",
+        internal_name="Alex Sohn", external_company="Acme",
+    )
+    result = wc.backfill_derived_titles()
+    assert result["updated"] == 1
+    title = ws_db.get_synthesis("issue", iid)["derived_title"]
+    assert title == "Acme - Alex Sohn Finance Intern Presentation"
+
+
+def test_backfill_declines_when_only_part_is_redundant_with_topic(ws_db):
+    """If the requestor's name is the ONLY real part on hand and it's
+    already redundant with the topic, there's nothing left to add - decline
+    rather than emit a title identical to the raw one."""
+    iid = _issue_with_parties(
+        ws_db, "Alex Sohn Finance Intern Presentation", internal_name="Alex Sohn",
+    )
+    result = wc.backfill_derived_titles()
+    assert result["updated"] == 0
+    assert ws_db.get_synthesis("issue", iid) is None

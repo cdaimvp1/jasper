@@ -168,6 +168,18 @@ _AUTO_REPLY_PREFIX = re.compile(r"^\s*automatic reply:\s*", re.I)
 # the wrapper rather than trying to strip the wrapper as another prefix,
 # since it's not a prefix - the real subject is INSIDE quotes, not after them.
 _MEETING_STARTING_SOON = re.compile(r'^\s*(?:\[external\]\s*)?your meeting\s+"(.+?)"\s+is starting soon', re.I)
+# Task #52 (2026-08-04): Ariba's own requisition-approval notification wraps
+# the actual descriptive content (PR number, project name, dollar figure -
+# the genuinely useful part) inside a fixed boilerplate carrier. Confirmed
+# against 15+ real distinct subjects live: the wrapper text and the double
+# space before " - " are both exactly consistent, never varying - a safe,
+# purely mechanical strip (removing a known fixed wrapper), not a judgment
+# call about what the email means, so it doesn't cross the "curator's job,
+# not a keyword guess" line this codebase holds elsewhere (Ariba expiration
+# dates, deadline_type/resolved_date).
+_ARIBA_REQUISITION_BOILERPLATE_RE = re.compile(
+    r"^\s*action required:\s*approve the requisition that\s+.+?\s+submitted\s*[-–—]?\s*", re.I,
+)
 
 
 def strip_subject_prefix(subject: str) -> str:
@@ -423,9 +435,25 @@ def run_classification(limit: int = 500) -> dict:
 def compute_deterministic_title(issue_id: str) -> Optional[str]:
     """'Requestor - Supplier - short topic', built entirely from data already
     on hand (no LLM call) - a real name/company beats a raw email subject
-    line for telling two threads apart at a glance, per Marc's ask. Requires
-    at least 2 of the 3 parts to be real (not just a lone topic) - a title
-    that's no better than the raw one isn't worth overriding it."""
+    line for telling two threads apart at a glance, per Marc's ask. Returns
+    None (never fake-improves the raw title) when neither a real requestor
+    nor a real supplier is on hand.
+
+    Two real quality bugs found and fixed (task #52, 2026-08-04) via a live
+    backfill run against production, both confirmed against real subjects
+    before fixing:
+    - the Ariba requisition-approval notification's fixed boilerplate
+      wrapper ("Action required: Approve the Requisition that NAME
+      submitted - ...") was passing straight through into `topic`
+      untouched, so the "improved" title still carried the exact same
+      noise task #52 exists to remove - stripped via a narrow, exact-
+      wrapper regex (a mechanical strip of known fixed text, not a
+      judgment call about what the email means).
+    - prepending `requestor` when their own name already appears verbatim
+      in the topic (e.g. "Alex Sohn Finance Intern Presentation") produced
+      a literal duplicate ("Alex Sohn - Alex Sohn Finance Intern
+      Presentation") - now skipped when redundant, same treatment for
+      `supplier`."""
     issue = ws.get_issue(issue_id)
     if not issue:
         return None
@@ -439,20 +467,37 @@ def compute_deterministic_title(issue_id: str) -> Optional[str]:
     supplier = None
     if external:
         supplier = external[0].get("company") or external[0].get("display_name")
+
     topic = strip_subject_prefix(issue.get("title") or "")
+    topic = _ARIBA_REQUISITION_BOILERPLATE_RE.sub("", topic).strip(" -–—")
     if len(topic) > 60:
         topic = topic[:57].rstrip() + "..."
+
+    if requestor and requestor.lower() in topic.lower():
+        requestor = None
+    if supplier and supplier.lower() in topic.lower():
+        supplier = None
+
+    if not requestor and not supplier:
+        return None  # no real, non-redundant name/company on hand - the raw title is all there is, don't fake improve it
     parts = [p for p in (requestor, supplier, topic) if p]
-    if len([p for p in (requestor, supplier) if p]) == 0:
-        return None  # no real name/company on hand - the raw title is all there is, don't fake improve it
     return " - ".join(parts)
 
 
 def backfill_derived_titles() -> dict:
-    """One-time (or on-demand) repair pass: compute a derived_title for every
-    existing issue that doesn't have one yet - fixes the 74 real issues
-    curator already synthesized before this generator existed."""
-    issue_ids = ws.list_issue_ids()
+    """Scoped to issues currently MISSING a derived_title only (task #52,
+    2026-08-04) - originally iterated every issue every call, redoing the
+    same computation for already-titled issues and never getting wired
+    into the live pipeline at all (found dead: no caller anywhere but this
+    module's own definition). Now cheap enough to run every scheduled_
+    refresh cycle (see run_derived_title_backfill below) rather than only
+    as a one-time manual pass - real party data (a new external contact,
+    a newly-resolved internal name) can arrive well after an issue's
+    first classification, so an issue compute_deterministic_title
+    couldn't title on cycle 1 may become titleable on a later cycle.
+    Never overwrites an existing title (curator's own, or a prior
+    deterministic one) - only fills a genuine gap."""
+    issue_ids = ws.list_issue_ids_missing_derived_title()
     updated = 0
     for issue_id in issue_ids:
         title = compute_deterministic_title(issue_id)

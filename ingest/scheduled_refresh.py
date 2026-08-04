@@ -395,6 +395,20 @@ def run() -> dict:
     #    synthesis groups issues by their final, settled project boundaries).
     grouping_result = run_project_grouping_oneshot()
 
+    # 5.5. Deterministic derived-title backfill (task #52, 2026-08-04) -
+    # cheap, zero-LLM, no-op on an issue that already has one (curator's
+    # own or a prior deterministic pass). Runs after grouping/parties are
+    # settled for this cycle, before synthesis - so if curator's own
+    # synthesis pass below has nothing better to say about the title,
+    # upsert_synthesis's own COALESCE preserves this one rather than
+    # leaving the raw mechanical subject line as the only title an issue
+    # ever gets. Found dead before this: the function existed, worked,
+    # and was never called from anywhere but a one-time manual pass.
+    try:
+        derived_title_result = workgraph_classify.backfill_derived_titles()
+    except Exception as e:
+        derived_title_result = {"error": str(e)}
+
     # 6. Synthesis, once per refresh cycle (not duplicated per classify pass
     #    like step 2/4 above - comparatively expensive, and doesn't need to
     #    run twice in one cycle the way classify does).
@@ -489,6 +503,7 @@ def run() -> dict:
         "nba_final": nba_result_2,
         "alerts_final": alerts_result_2,
         "project_grouping": grouping_result,
+        "derived_title_backfill": derived_title_result,
         "synthesis": synthesis_result,
         "deep_dive": deepdive_result,
         "retention": retention_result,

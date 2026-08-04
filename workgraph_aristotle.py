@@ -206,13 +206,25 @@ def detect_and_log_candidates_daily_if_due(now: Optional[float] = None) -> Optio
     return {"candidates_found": len(candidates), "logged": logged}
 
 
-def check_prerequisites(issue_id: str, raw_items: list[dict]) -> Optional[dict]:
-    """Checks every distinct signal_type present in `raw_items` against
-    active rules. Returns the FIRST unsatisfied rule's warning (as
-    {"warning","rule_id"}), or None if nothing triggers or every triggered
-    rule is already satisfied. `raw_items` is the caller's already-fetched
-    list (workgraph_nba.py already fetches this for value extraction) so
-    this never issues its own duplicate raw_items query."""
+def check_prerequisites_all(issue_id: str, raw_items: list[dict]) -> list[dict]:
+    """Like check_prerequisites below, but returns EVERY unsatisfied
+    (raw_item, rule) match across all of `raw_items`, not just the first -
+    each result tagged with the raw_item_id that carried the triggering
+    signal (task #49, per docs/design/ARISTOTLE_PER_ROW_GATING.md).
+
+    The raw_item_id attached is the item that RAISED the gate (e.g. a
+    signature request), never a stand-in for the still-missing approval -
+    there is no raw_item to point to for an absence; that's the whole
+    nature of this check (see _prerequisite_satisfied's own "no
+    confirmation seen yet, never a claim it didn't happen" framing). A
+    consumer must not render this as if some other row is "the missing
+    one" - the badge belongs on the row whose evidence raised the gate.
+
+    Only meant for a single issue-detail view (Marc actually opening one
+    issue) - callers that scan many issues (score_issue's bulk pass,
+    gate_board's portfolio scan) should keep calling the thin
+    check_prerequisites() wrapper below, which needs only the first match."""
+    results = []
     checked_signal_types: set[str] = set()
     for item in raw_items:
         signal_type = item.get("signal_type")
@@ -222,8 +234,26 @@ def check_prerequisites(issue_id: str, raw_items: list[dict]) -> Optional[dict]:
         rules = ws.get_active_prerequisite_rules_for_trigger(signal_type)
         for rule in rules:
             if not _prerequisite_satisfied(issue_id, rule):
-                return {"warning": _build_warning(rule), "rule_id": rule["id"]}
-    return None
+                results.append({"warning": _build_warning(rule), "rule_id": rule["id"],
+                                 "raw_item_id": item.get("id")})
+    return results
+
+
+def check_prerequisites(issue_id: str, raw_items: list[dict]) -> Optional[dict]:
+    """Checks every distinct signal_type present in `raw_items` against
+    active rules. Returns the FIRST unsatisfied rule's warning (as
+    {"warning","rule_id"}), or None if nothing triggers or every triggered
+    rule is already satisfied. `raw_items` is the caller's already-fetched
+    list (workgraph_nba.py already fetches this for value extraction) so
+    this never issues its own duplicate raw_items query.
+
+    A thin wrapper over check_prerequisites_all (task #49) so the two can
+    never drift out of sync - same first-match value as before this
+    change, since "collect everything then take index 0" and the original
+    loop-with-early-return produce an identical first result for the same
+    input order."""
+    all_checks = check_prerequisites_all(issue_id, raw_items)
+    return all_checks[0] if all_checks else None
 
 
 def gate_board() -> dict:

@@ -218,3 +218,50 @@ def test_draft_forward_timeout_raises_runtime_error_not_timeout_expired(monkeypa
     monkeypatch.setattr(subprocess, "run", fake_run)
     with pytest.raises(RuntimeError, match="timed out"):
         oa.draft_forward("some-entry-id")
+
+
+# --- compose_new (task #35, 2026-08-04) -------------------------------------
+# Replaces the interim client-only mailto: link the cockpit UI used for the
+# stakeholder multi-select + compose action. Unlike draft_reply/draft_forward,
+# there's no EntryID here (a fresh thread, not a reply to an existing item) -
+# the recipient list is the only real required input.
+
+def test_compose_new_requires_to_emails():
+    with pytest.raises(ValueError):
+        oa.compose_new([], "subject")
+    with pytest.raises(ValueError):
+        oa.compose_new(None, "subject")
+
+
+def test_compose_new_joins_recipients_with_semicolons(monkeypatch):
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        return _FakeCompletedProcess(returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = oa.compose_new(["a@x.com", "b@y.com"], "Re: pricing - Ref: JW-marc-004")
+
+    assert result == {"ok": True}
+    assert "a@x.com;b@y.com" in captured["args"]
+    assert "Re: pricing - Ref: JW-marc-004" in captured["args"]
+    assert str(oa._DRAFT_COMPOSE_SCRIPT) in captured["args"]
+
+
+def test_compose_new_raises_runtime_error_on_failure(monkeypatch):
+    def fake_run(args, **kwargs):
+        return _FakeCompletedProcess(returncode=1, stderr="Outlook is not running")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match="Outlook is not running"):
+        oa.compose_new(["a@x.com"], "subject")
+
+
+def test_compose_new_timeout_raises_runtime_error_not_timeout_expired(monkeypatch):
+    def fake_run(args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=args, timeout=kwargs.get("timeout", 20))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match="timed out"):
+        oa.compose_new(["a@x.com"], "subject")

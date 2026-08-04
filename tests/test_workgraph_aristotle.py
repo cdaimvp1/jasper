@@ -296,6 +296,122 @@ def test_check_prerequisites_falls_back_to_generic_wording_without_reason(ws_db)
     assert "ariba_pr_fully_approved" in result["warning"]
 
 
+# --- check_prerequisites_all (task #49, 2026-08-04) ----------------------
+# check_prerequisites() itself is now a thin wrapper over this - every test
+# above already covers the "first match" behavior stays unchanged; these
+# cover the actual new capability, per docs/design/ARISTOTLE_PER_ROW_GATING.md.
+
+def test_check_prerequisites_all_empty_when_nothing_triggers(ws_db):
+    issue_id = _issue(ws_db)
+    assert ar.check_prerequisites_all(issue_id, []) == []
+
+
+def test_check_prerequisites_all_tags_result_with_raw_item_id(ws_db):
+    issue_id = _issue(ws_db)
+    row_id = _raw_item(ws_db, issue_id, "signature_requested_docusign", "k1")
+    ws_db.create_prerequisite_rule(
+        trigger_signal_type="signature_requested_docusign",
+        requires_signal_type="ariba_pr_fully_approved",
+        match_on="project", reason="an approved Ariba PO", created_by="marc",
+    )
+    raw_items = ws_db.get_raw_items_for_issue(issue_id)
+
+    results = ar.check_prerequisites_all(issue_id, raw_items)
+
+    assert len(results) == 1
+    assert results[0]["raw_item_id"] == row_id
+    assert "an approved Ariba PO" in results[0]["warning"]
+
+
+def test_check_prerequisites_all_collects_every_unsatisfied_match_not_just_first(ws_db):
+    """The real gap check_prerequisites_all exists to close: two DIFFERENT
+    triggering signal_types on one issue, each gated by its own unsatisfied
+    rule - the old first-match-wins check_prerequisites would only ever
+    report one of these."""
+    issue_id = _issue(ws_db)
+    row_a = _raw_item(ws_db, issue_id, "signature_requested_docusign", "k1")
+    row_b = _raw_item(ws_db, issue_id, "invoice_dispute_raised", "k2")
+    ws_db.create_prerequisite_rule(
+        trigger_signal_type="signature_requested_docusign",
+        requires_signal_type="ariba_pr_fully_approved",
+        match_on="project", reason="an approved Ariba PO", created_by="marc",
+    )
+    ws_db.create_prerequisite_rule(
+        trigger_signal_type="invoice_dispute_raised",
+        requires_signal_type="invoice_reconciled",
+        match_on="project", reason="a reconciled invoice", created_by="marc",
+    )
+    raw_items = ws_db.get_raw_items_for_issue(issue_id)
+
+    results = ar.check_prerequisites_all(issue_id, raw_items)
+
+    assert len(results) == 2
+    by_raw_item = {r["raw_item_id"]: r for r in results}
+    assert "an approved Ariba PO" in by_raw_item[row_a]["warning"]
+    assert "a reconciled invoice" in by_raw_item[row_b]["warning"]
+
+
+def test_check_prerequisites_all_two_raw_items_same_rule_both_reported(ws_db):
+    """Two separate DocuSign requests on one issue, same unsatisfied rule -
+    each gets its own entry, never deduped away (design doc's own edge
+    case: this is correct, not something to collapse to one)."""
+    issue_id = _issue(ws_db)
+    row_a = _raw_item(ws_db, issue_id, "signature_requested_docusign", "k1")
+    row_b = _raw_item(ws_db, issue_id, "signature_requested_docusign", "k2")
+    ws_db.create_prerequisite_rule(
+        trigger_signal_type="signature_requested_docusign",
+        requires_signal_type="ariba_pr_fully_approved",
+        match_on="project", reason="an approved Ariba PO", created_by="marc",
+    )
+    raw_items = ws_db.get_raw_items_for_issue(issue_id)
+
+    results = ar.check_prerequisites_all(issue_id, raw_items)
+
+    # Only the FIRST raw_item of a given signal_type is ever checked - see
+    # checked_signal_types in the implementation, unchanged from the
+    # original check_prerequisites. Confirming this stays true here too
+    # (not a task #49 regression) rather than asserting len == 2, which
+    # this specific case never produces.
+    assert len(results) == 1
+    assert results[0]["raw_item_id"] == row_a
+
+
+def test_check_prerequisites_all_omits_satisfied_rules(ws_db):
+    issue_id = _issue(ws_db)
+    _raw_item(ws_db, issue_id, "signature_requested_docusign", "k1")
+    ws_db.create_prerequisite_rule(
+        trigger_signal_type="signature_requested_docusign",
+        requires_signal_type="ariba_pr_fully_approved",
+        match_on="project", reason="an approved Ariba PO", created_by="marc",
+    )
+    _raw_item(ws_db, issue_id, "ariba_pr_fully_approved", "k2")
+    raw_items = ws_db.get_raw_items_for_issue(issue_id)
+
+    assert ar.check_prerequisites_all(issue_id, raw_items) == []
+
+
+def test_check_prerequisites_still_returns_first_match_from_all(ws_db):
+    issue_id = _issue(ws_db)
+    row_a = _raw_item(ws_db, issue_id, "signature_requested_docusign", "k1")
+    _raw_item(ws_db, issue_id, "invoice_dispute_raised", "k2")
+    ws_db.create_prerequisite_rule(
+        trigger_signal_type="signature_requested_docusign",
+        requires_signal_type="ariba_pr_fully_approved",
+        match_on="project", reason="an approved Ariba PO", created_by="marc",
+    )
+    ws_db.create_prerequisite_rule(
+        trigger_signal_type="invoice_dispute_raised",
+        requires_signal_type="invoice_reconciled",
+        match_on="project", reason="a reconciled invoice", created_by="marc",
+    )
+    raw_items = ws_db.get_raw_items_for_issue(issue_id)
+
+    result = ar.check_prerequisites(issue_id, raw_items)
+
+    assert result["raw_item_id"] == row_a
+    assert "an approved Ariba PO" in result["warning"]
+
+
 # --- task #67: gate_board -----------------------------------------------
 
 def test_gate_board_empty_when_nothing_exists(ws_db):

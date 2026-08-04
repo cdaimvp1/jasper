@@ -6140,13 +6140,15 @@ html[data-theme="dark"]{
   // Sidebar Dismiss (issue-level) is now real - task #44 - wired the same
   // way Mark done/Snooze already were, via data-act="dismiss" + the
   // delegated [data-act] listener calling pccRunDeterministic (see below).
-  // Stakeholder multi-select + interim mailto: compose (piece #6, port
-  // #47). Real Outlook-COM compose-to-recipients action is task #35, not
-  // built yet - this is a plain client-only mailto: link, same as the
-  // mockup. The "Ref: JW-<id>" subject tag applies task #36's own design
-  // (a quiet, mail-security-safe text token) inline to this one interim
-  // action; task #36 itself is the separate, generic build (checking
-  // inbound mail for the pattern as a fallback linking signal).
+  // Stakeholder multi-select + real Outlook-COM compose (piece #6, port
+  // #47; task #35). Was a plain client-only mailto: link (same as the
+  // mockup) while the real action wasn't built - now dispatches to
+  // POST /api/action/compose-new (outlook_actions.compose_new:
+  // CreateItem(0) + Display(), never Send()), same pattern as the
+  // existing draft-reply/draft-forward buttons. The server resolves the
+  // subject (issue's own display_title + the task #36 "Ref: JW-<id>" tag)
+  // from the real issue record rather than trusting anything from the
+  // client, so the button no longer needs to pass the title through.
   function pccStakeToggle(row) {
     row.classList.toggle("selected");
     const panel = row.closest(".pcc-side-block");
@@ -6154,13 +6156,21 @@ html[data-theme="dark"]{
     const btn = panel.querySelector("#pccEnvBtn");
     if (btn) { btn.disabled = !any; btn.classList.toggle("active", any); }
   }
-  function pccComposeSelected(issueId, issueTitle) {
+  async function pccComposeSelected(issueId) {
     const rows = document.querySelectorAll(".pcc-stake-row.selected");
     if (!rows.length) return;
     const emails = Array.from(rows).map(r => r.getAttribute("data-email")).filter(Boolean);
     if (!emails.length) return;
-    const subject = encodeURIComponent(`${issueTitle} - Ref: JW-${issueId}`);
-    window.location.href = "mailto:" + emails.join(",") + "?subject=" + subject;
+    try {
+      const r = await fetch("/api/action/compose-new", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ issue_id: issueId, to_emails: emails }),
+      });
+      if (!r.ok) throw new Error(`compose-new failed: ${r.status}`);
+    } catch (e) {
+      console.error("pccComposeSelected failed:", e);
+      alert("Couldn't open a new Outlook draft - see console for details.");
+    }
   }
   function pccFmtAge(ts) {
     if (!ts) return "";
@@ -7165,6 +7175,12 @@ html[data-theme="dark"]{
     const commitments = d.commitments || [];
     const repeatSignals = d.repeat_signals || [];
     const relatedByReference = d.related_by_reference || [];
+    // Task #49: per-checklist-item Aristotle gating - keyed by raw_item_id
+    // (JSON object keys are always strings, so lookups below coerce
+    // rawItemId the same way). issue.has_unmet_prerequisite (unchanged)
+    // stays the aggregate "is anything gated" signal; this is the added
+    // per-row "which thing" signal - see docs/design/ARISTOTLE_PER_ROW_GATING.md.
+    const gatedRawItems = d.gated_raw_items || {};
     // 2026-08-02 port: "Next actions" as its own zone is gone, along with
     // the separate dynamic primary-action button that used to appear in
     // BOTH the header AND the sidebar simultaneously (a real, live
@@ -7305,7 +7321,7 @@ html[data-theme="dark"]{
     // "Next actions" AND again inline on that same evidence's Progress
     // timeline row (pccTlRowHtml, now stripped of action rendering below -
     // Progress is history-only).
-    checklistItems.forEach(it => { it.actions = []; });
+    checklistItems.forEach(it => { it.actions = []; it.gated = it.rawItemId != null ? gatedRawItems[it.rawItemId] : null; });
     const checklistByRawItem = new Map();
     checklistItems.forEach(it => {
       if (it.rawItemId == null) return;
@@ -7383,6 +7399,7 @@ html[data-theme="dark"]{
         <div class="pcc-xrow-left" onclick="pccXTog(this,'${rowId}')">
           <span class="pcc-check-dot" onclick="pccDotToggle(event,this)"></span>
           <span class="pcc-deadline-badge" style="background:${badge.bg};color:${badge.fg}">${badge.label}</span>
+          ${it.gated ? '<span class="pcc-deadline-badge" style="background:var(--pink-t);color:var(--red-d)" title="' + pccEsc(it.gated.warning) + '">Gated</span>' : ""}
           <span class="pcc-xrow-text">${pccEsc(it.text)}</span>
           <svg class="chev" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
         </div>
@@ -7395,6 +7412,7 @@ html[data-theme="dark"]{
           ${actionsHtml}
         </div>
         <div class="pcc-xrow-body" id="${rowId}">
+          ${it.gated ? `<div class="pcc-xact-why"><b>Gated:</b> ${pccEsc(it.gated.warning)}</div>` : ""}
           ${rationaleHtml}
           ${attachHtml}
           ${linkHtml ? `<div class="pcc-check-link">${linkHtml}</div>` : '<div class="pcc-nolink">no deep link yet</div>'}
@@ -7595,7 +7613,7 @@ html[data-theme="dark"]{
     };
     const sideStakeholdersHtml = parties.length ? `
       <div class="pcc-side-block">
-        <div class="pcc-side-hd">Stakeholders<button type="button" class="pcc-envelope-btn" id="pccEnvBtn" disabled onclick="pccComposeSelected(${issue.id},'${pccEsc(issue.title || "")}')" title="Email selected stakeholders">&#9993;</button></div>
+        <div class="pcc-side-hd">Stakeholders<button type="button" class="pcc-envelope-btn" id="pccEnvBtn" disabled onclick="pccComposeSelected(${issue.id})" title="Email selected stakeholders">&#9993;</button></div>
         ${Array.from(sideExternalByCompany.entries()).map(([company, ps]) => `
           <div class="pcc-side-sub">${pccEsc(company)} (External)</div>
           <div class="pcc-stake-list">${ps.map(pccStakeRowHtml).join("")}</div>`).join("")}

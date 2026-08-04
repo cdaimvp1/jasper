@@ -18,6 +18,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent / "ingest"
 _OPEN_ITEM_SCRIPT = _SCRIPT_DIR / "outlook_open_item.ps1"
 _DRAFT_REPLY_SCRIPT = _SCRIPT_DIR / "outlook_draft_reply.ps1"
 _DRAFT_FORWARD_SCRIPT = _SCRIPT_DIR / "outlook_draft_forward.ps1"
+_DRAFT_COMPOSE_SCRIPT = _SCRIPT_DIR / "outlook_draft_compose.ps1"
 _TIMEOUT_SECONDS = 20
 
 
@@ -86,4 +87,21 @@ def draft_forward(entry_id: str, ref_tag: str | None = None) -> dict:
     args = ["powershell", "-NoProfile", "-File", str(_DRAFT_FORWARD_SCRIPT), "-EntryID", entry_id]
     if ref_tag:
         args.extend(["-RefTag", ref_tag])
+    return _run_powershell(args)
+
+
+def compose_new(to_emails: list[str], subject: str) -> dict:
+    """Creates a REAL Outlook draft new-mail item addressed to `to_emails`
+    via COM's own CreateItem(0)/Display() - task #35, replaces the interim
+    client-only mailto: link the cockpit UI used while this wasn't built
+    yet. Unlike draft_reply/draft_forward, there's no existing item to
+    reply to (this is Marc selecting stakeholders and starting a fresh
+    thread), so it's the one Outlook action here with no EntryID - the
+    recipients themselves are the only real input. Never calls Send(): this
+    only ever puts a draft on screen, the same as a person clicking New
+    Email themselves. Raises RuntimeError (with a real reason) on failure."""
+    if not to_emails:
+        raise ValueError("to_emails is required")
+    to_field = ";".join(to_emails)
+    args = ["powershell", "-NoProfile", "-File", str(_DRAFT_COMPOSE_SCRIPT), "-To", to_field, "-Subject", subject or ""]
     return _run_powershell(args)

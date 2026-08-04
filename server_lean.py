@@ -1339,7 +1339,21 @@ async def api_workgraph_issue_detail(issue_id: str, log_choice: bool = False):
     deep_links.attach_deep_links(checklist_decisions)
     deep_links.attach_deep_links(checklist_commitments)
     deep_links.attach_deep_links(checklist_repeat_signals)
+    # Task #49 (per-checklist-item Aristotle gating, docs/design/
+    # ARISTOTLE_PER_ROW_GATING.md): every unsatisfied prerequisite for this
+    # issue, keyed by the raw_item_id that raised it - a map instead of a
+    # field on each of the four checklist dicts above, so this needed one
+    # extra lookup here rather than touching four separate fetch call sites.
+    # issue["has_unmet_prerequisite"] (set by recompute_all, unchanged)
+    # stays the aggregate "is anything gated" signal; this is the added
+    # per-row "which thing" signal - one doesn't replace the other.
+    gated_raw_items = {
+        g["raw_item_id"]: g for g in workgraph_aristotle.check_prerequisites_all(
+            issue_id, wg.get_raw_items_for_issue(issue_id))
+        if g.get("raw_item_id") is not None
+    }
     return JSONResponse({"issue": sanitize_surrogates(issue), "evidence": sanitize_surrogates(evidence),
+                        "gated_raw_items": sanitize_surrogates(gated_raw_items),
                         "pending_actions": sanitize_surrogates(pending), "tasks": sanitize_surrogates(tasks),
                         "state_history": sanitize_surrogates(state_history),
                         "parties": sanitize_surrogates(parties), "project": sanitize_surrogates(project),
@@ -1440,6 +1454,41 @@ async def api_action_draft_forward(body: DraftForwardBody):
     ref_tag = f"JW-{raw_item['issue_id']}" if raw_item.get("issue_id") else None  # task #36, see draft-reply above
     try:
         result = await asyncio.to_thread(outlook_actions.draft_forward, entry_id, ref_tag)
+    except RuntimeError as e:
+        raise HTTPException(500, str(e))
+    return JSONResponse(result)
+
+
+class ComposeNewBody(BaseModel):
+    issue_id: str
+    to_emails: list[str]
+
+
+@app.post("/api/action/compose-new")
+async def api_action_compose_new(body: ComposeNewBody):
+    """Task #35 - creates a REAL Outlook draft new-mail item addressed to
+    the selected stakeholders (outlook_actions.compose_new: CreateItem(0) +
+    Display(), never Send()) - replaces the interim client-only mailto:
+    link the cockpit UI used while this wasn't built yet. Same
+    asyncio.to_thread guard as the other Outlook actions above, same
+    reason - this blocks for a full COM round-trip on a single-worker
+    server."""
+    issue = wg.get_issue(body.issue_id)
+    if issue is None:
+        raise HTTPException(404, f"no such issue: {body.issue_id}")
+    if not body.to_emails:
+        raise HTTPException(400, "to_emails is required")
+    # Same "JW-<issue-id>" tag format draft-reply/draft-forward already use
+    # (task #36) - display_title (task #52's derived_title, when curator or
+    # the deterministic backfill has set one) preferred over the raw
+    # subject line, same precedence the rest of the UI already applies
+    # everywhere (wg.get_issue() alone only returns the issues table row,
+    # not the synthesis-joined display_title - fetched separately here).
+    synthesis = wg.get_synthesis("issue", body.issue_id)
+    display_title = (synthesis or {}).get("derived_title") or issue.get("title") or ""
+    subject = f"{display_title} - Ref: JW-{body.issue_id}"
+    try:
+        result = await asyncio.to_thread(outlook_actions.compose_new, body.to_emails, subject)
     except RuntimeError as e:
         raise HTTPException(500, str(e))
     return JSONResponse(result)

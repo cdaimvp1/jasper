@@ -75,6 +75,7 @@ import workgraph_projects
 import workgraph_lessons
 import workgraph_socrates
 import workgraph_deadlines
+import workgraph_redline
 import workgraph_signal_trends
 import workgraph_aristotle
 import workgraph_export
@@ -2121,6 +2122,20 @@ async def api_renewal_outreach_draft(issue_id: str):
     if draft is None:
         raise HTTPException(404, f"no renewal outreach candidate for issue: {issue_id}")
     return JSONResponse(sanitize_surrogates(draft))
+
+
+@app.get("/api/workgraph/attachments/{attachment_id_a}/compare/{attachment_id_b}")
+async def api_attachment_compare(attachment_id_a: int, attachment_id_b: int):
+    """Enhancement idea panel #19: a deterministic, zero-LLM paragraph-
+    level text diff between two attachments the caller has explicitly
+    named (no relationship-discovery guess about which two are
+    'versions' of each other - see workgraph_redline.py's own module
+    docstring for why)."""
+    try:
+        result = workgraph_redline.compare_attachments(attachment_id_a, attachment_id_b)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    return JSONResponse(sanitize_surrogates(result))
 
 
 class PartyCorrectionBody(BaseModel):

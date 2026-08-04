@@ -4,8 +4,8 @@
   "description": "Jasper — mail triage and workgraph assistant",
   "start_url": "/cockpit",
   "display": "standalone",
-  "theme_color": "#EEDCC0",
-  "background_color": "#EEDCC0",
+  "theme_color": "#FAF9F7",
+  "background_color": "#FAF9F7",
   "icons": [
     { "src": "/static/jasper-dog-white-192x192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
     { "src": "/static/jasper-dog-white-256x256.png", "sizes": "256x256", "type": "image/png", "purpose": "any" },

@@ -27,7 +27,7 @@
      same <head>, see "theo-theme") runs; that script immediately overwrites this
      content= to match whichever theme (explicit choice or OS default) is active,
      keeping the installed Edge PWA's title bar in sync with the in-app theme. -->
-<meta name="theme-color" id="theo-meta-theme-color" content="#EEDCC0">
+<meta name="theme-color" id="theo-meta-theme-color" content="#FAF9F7">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Libre+Franklin:wght@300;400;500;600;700;800&family=Roboto+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
@@ -108,7 +108,7 @@
 .mqm365 .mqchat{color:var(--red,#E1251B);opacity:.82}
 .mqm365 .mqchat:hover{color:var(--red,#E1251B);background:var(--pink-t,#FBE7E3);border-color:var(--pink-2,#F3C6BD);opacity:1}
 .mqb{font-family:var(--sans);font-weight:700;font-size:12.5px;border-radius:0;padding:7px 13px;cursor:pointer;border:1px solid transparent;white-space:nowrap}
-.mqb.primary{background:var(--red);color:#fff}.mqb.primary:hover{background:var(--red-d)}
+.mqb.primary{background:var(--red-fill);color:#fff}.mqb.primary:hover{background:var(--red-fill);filter:brightness(.88)}
 .mqb.ghost{background:var(--surface);border-color:var(--line2);color:var(--ink)}.mqb.ghost:hover{background:var(--bg)}
 .mqover{position:relative}
 .mqkebab{width:30px;height:30px;border-radius:8px;border:1px solid transparent;background:transparent;color:var(--mut2);cursor:pointer;font-size:17px;line-height:1;opacity:.55;transition:opacity .12s,background .12s,border-color .12s,color .12s}
@@ -2087,16 +2087,29 @@
 
 </script>
 <style>
-:root{--surface:#FBF2E1;--red:#CC5A22;--red-d:#A8471A;--ink:#22160A;--mut:#87643A;--mut2:#87643A;--line:#E0C48D;--line2:#CBA85E;--bg:#EEDCC0;--pink-t:#F1D2C4;--teal-t:#C9E6E0;--teal-d:#146B62;--amber-t:#F1DFA4;--amber-d:#B4841B;--blue-t:#C9E6E0;--blue-d:#146B62;--cci-green:#5C7A2E;--cci-yellow:#B4841B;--cci-orange:#CC5A22;--cci-red:#8B2013;--ai:#5C7A2E;--ai-t:#DCE7BD;--bblue:#146B62;--blue-mut:#87643A;--shadow:0 1px 4px rgba(70,40,8,.08);--shadow-lg:0 12px 34px rgba(70,40,8,.12);--glow:0 8px 24px rgba(204,90,34,.28);--sans:'Libre Franklin',system-ui,Arial,sans-serif;--mono:'Roboto Mono',ui-monospace,monospace;--fz-h:30px;--fz-title:16px;--fz-body:14px;--fz-sm:13px;--fz-meta:11.5px;--fz-mono:10.5px;
+:root{--surface:#FFFFFF;--red:#3B6FE0;--red-fill:#3B6FE0;--red-d:#C0392B;--ink:#1B1917;--mut:#6B6660;--mut2:#6B6660;--line:#E7E4DE;--line2:#D8D4CC;--bg:#FAF9F7;--pink-t:#EAF0FC;--teal-t:#EAF0FC;--teal-d:#3B6FE0;--amber-t:#F1DFA4;--amber-d:#B4841B;--blue-t:#EAF0FC;--blue-d:#3B6FE0;--cci-green:#5C7A2E;--cci-yellow:#B4841B;--cci-orange:#B5540D;--cci-red:#C0392B;--ai:#5C7A2E;--ai-t:#DCE7BD;--bblue:#3B6FE0;--blue-mut:#6B6660;--shadow:0 1px 4px rgba(20,20,20,.06);--shadow-lg:0 12px 34px rgba(20,20,20,.10);--glow:0 8px 24px rgba(59,111,224,.28);--sans:'Libre Franklin',system-ui,Arial,sans-serif;--mono:'Roboto Mono',ui-monospace,monospace;--fz-h:30px;--fz-title:16px;--fz-body:14px;--fz-sm:13px;--fz-meta:11.5px;--fz-mono:10.5px;
 /* Settings view (grafted from the former standalone settings.html) authored against
    --muted/--border/--accent token names that don't exist on this page - alias them
    onto the real tokens rather than rewriting ~330 lines of inline styles. */
 --muted:var(--mut);--border:var(--line);--accent:var(--bblue);}
-/* dark theme, additive token override. Sunset Harvest (light, above) / Walnut Night
-   (dark, below) - Marc's pick from the 2026-08-02 color-scheme mockup round, replacing
-   the prior neutral olive/beige dark palette. Buttons/icons recolor with the theme now
-   (--red/--bblue are the theme's primary/secondary accents, not a fixed brand pair). */
-html[data-theme="dark"]{--header:#231A12;--tint-8fb3f0:#19253a;--tint-9fb4d2:#172232;--tint-d7e2ef:#162434;--tint-f6d79a:#1E302D;--tint-ff8e85:#3e1d1b;--surface:#2E2119;color-scheme:dark;--red:#F0916A;--red-d:#D97A50;--ink:#F3E7D4;--mut:#B29A78;--mut2:#B29A78;--line:#4A3626;--line2:#5C4630;--bg:#231A12;--pink-t:#5A2A22;--teal-t:#1E4A42;--teal-d:#6FD6C4;--amber-t:#4F3A14;--amber-d:#F2C368;--blue-t:#1E4A42;--blue-d:#6FD6C4;--ai:#B7CE7C;--ai-t:#3B4420;--bblue:#F2C368;--shadow:0 1px 2px rgba(0,0,0,.5),0 1px 3px rgba(0,0,0,.4);--muted:var(--mut);--border:var(--line);--accent:var(--bblue);}
+/* "Material Elevation" dark theme (task #158, 2026-08-04) - this is a SECOND,
+   OLDER token namespace (found live while applying the picked palette; the
+   --lk-* system task #58/#63/#158 already covers is a separate, newer set used
+   only by the ported Detail Panel) that a much larger share of the actual PCC
+   board/notifications/grafted-Settings CSS still reads from. Real findings while
+   mapping it: --red-d is NOT "a darker shade of primary" despite the name - live
+   usage (Gated/Hard-deadline/Escalated badges, bulk-at-risk counts, the stale-
+   liveness dot) shows it's the real danger/urgent semantic color, matching
+   --lk-danger's role exactly - mapped there, not to a shade of the new blue.
+   --red-fill (new) is the solid-fill-with-hardcoded-white-text role (topbar,
+   status-active badges, list-header badges) - same fill/text split reasoning as
+   --lk-pri-fill above; --red itself stays the lighter text/border-role value.
+   --cci-*/--ai* are real semantic status colors (confidence tiers, an AI-source
+   indicator), deliberately left in their own hue families, not converted to blue -
+   only --cci-orange (which was piggybacking on the old primary's exact hex) got a
+   real independent orange so it no longer silently tracks whatever the primary
+   accent happens to be. */
+html[data-theme="dark"]{--header:#121212;--tint-8fb3f0:#19253a;--tint-9fb4d2:#172232;--tint-d7e2ef:#162434;--tint-f6d79a:#1E302D;--tint-ff8e85:#3e1d1b;--surface:#1E1E1E;color-scheme:dark;--red:#82AAFF;--red-fill:#2F5FD1;--red-d:#D33C3C;--ink:#E9E9E9;--mut:#9E9E9E;--mut2:#9E9E9E;--line:#333333;--line2:#404040;--bg:#121212;--pink-t:#1F2B42;--teal-t:#1F2B42;--teal-d:#82AAFF;--amber-t:#4F3A14;--amber-d:#F2C368;--blue-t:#1F2B42;--blue-d:#82AAFF;--ai:#B7CE7C;--ai-t:#3B4420;--bblue:#82AAFF;--shadow:0 1px 2px rgba(0,0,0,.5),0 1px 3px rgba(0,0,0,.4);--muted:var(--mut);--border:var(--line);--accent:var(--bblue);}
 
 /* ════════════════════════════════════════════════════════════════════════
    PCC ADD — page-level view toggle + Personal Command Center board.
@@ -2198,7 +2211,7 @@ html[data-theme="dark"]{--header:#231A12;--tint-8fb3f0:#19253a;--tint-9fb4d2:#17
 .cp-chat-send-icon{position:absolute;right:5px;bottom:5px;width:28px;height:28px;display:flex;align-items:center;justify-content:center;
   background:var(--ink);color:#fff;border:none;border-radius:0;cursor:pointer}
 .cp-chat-send-icon svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2}
-.cp-chat-send-icon:hover{background:var(--red)}
+.cp-chat-send-icon:hover{background:var(--red-fill)}
 .cp-chat-attach{position:absolute;left:5px;bottom:5px;width:28px;height:28px;display:flex;align-items:center;justify-content:center;
   background:transparent;color:var(--mut);border:none;cursor:pointer}
 .cp-chat-attach svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:2}
@@ -2238,7 +2251,7 @@ html[data-theme="dark"]{--header:#231A12;--tint-8fb3f0:#19253a;--tint-9fb4d2:#17
 /* Solid status badge (the ONE colored element in the header) + a single
    plain-text meta line - replaces the old row of competing chips. */
 .pcc-status-badge{font-family:var(--sans);font-weight:800;font-size:11px;text-transform:uppercase;letter-spacing:.03em;padding:4px 11px;color:#fff;flex:none}
-.pcc-status-badge.status-active{background:var(--red)}
+.pcc-status-badge.status-active{background:var(--red-fill)}
 .pcc-status-badge.status-waiting,.pcc-status-badge.status-blocked{background:var(--amber-d)}
 .pcc-status-badge.status-done{background:var(--blue-d)}
 .pcc-status-badge.status-noise-archived{background:var(--mut2)}
@@ -2404,7 +2417,7 @@ table.pcc-table .row-desc{font-size:11.5px;color:var(--mut);margin-top:2px}
 ::-webkit-scrollbar-track{background:transparent}
 ::-webkit-scrollbar-corner{background:transparent}
 html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:var(--fz-body);line-height:1.5;-webkit-font-smoothing:antialiased}
-.topbar{background:var(--header,var(--red));color:#fff;padding:0 20px;height:56px;display:flex;align-items:center;justify-content:space-between;gap:16px;position:sticky;top:0;z-index:20}
+.topbar{background:var(--header,var(--red-fill));color:#fff;padding:0 20px;height:56px;display:flex;align-items:center;justify-content:space-between;gap:16px;position:sticky;top:0;z-index:20}
 .brand img{height:23px;display:block}
 .role{display:flex;align-items:center;gap:11px}.who{display:flex;align-items:center;gap:9px}.who .av{width:31px;height:31px;border-radius:50%;background:rgba(255,255,255,.2);display:flex;align-items:center;justify-content:center;font-size:var(--fz-meta);font-weight:700}.who .nm{font-size:var(--fz-sm);font-weight:600;line-height:1.15}.who .ti{font-size:var(--fz-meta);opacity:.85;line-height:1.2}
 .switch{background:transparent;border:1.5px solid rgba(255,255,255,.5);color:#fff;border-radius:30px;padding:6px 13px;font-family:var(--sans);font-weight:600;font-size:var(--fz-meta);cursor:pointer}.switch:hover{background:rgba(255,255,255,.14)}
@@ -2486,7 +2499,7 @@ window.theoReflectTheme=window.theoReflectTheme||function(){window._theoThemeRef
    favicon pattern with JS instead of a CSS media query. */
 window.theoRegisterThemeReflector(function(){
   var m=document.getElementById('theo-meta-theme-color');
-  if(m)m.setAttribute('content',(window.theoTheme&&window.theoTheme())==='dark'?'#231A12':'#EEDCC0');
+  if(m)m.setAttribute('content',(window.theoTheme&&window.theoTheme())==='dark'?'#121212':'#FAF9F7');
 });</script>
 <style>
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -2532,34 +2545,48 @@ window.theoRegisterThemeReflector(function(){
    now - see the Settings toggle added the same round.
    ═════════════════════════════════════════════════════════════════════════ */
 :root{
-  --lk-canvas:#EEDCC0; --lk-surface:#FBF2E1; --lk-panel:#F5E7CB;
-  --lk-nested:#EEDAAE; --lk-line:#E0C48D; --lk-line2:#CBA85E;
-  --lk-ink:#22160A; --lk-ink2:#48331B; --lk-mut:#87643A; --lk-mut2:#87643A;
-  --lk-pri:#CC5A22; --lk-pri-t:#F7D8BC;
-  --lk-emph:#155E82;
-  --lk-flag:#48331B; --lk-danger:#8B2013;
-  --lk-bubble-me:#3D2A16; --lk-bubble-me-fg:#F8F1DC;
+  /* Task #158 (2026-08-04): replaced Sunset Harvest with "Warm Paper" -
+     Marc's pick from a live 4-light x 4-dark comparison after asking for
+     "more normal." Real research behind the values, not eyeballed: WCAG
+     2.1 (4.5:1 text / 3:1 large-text+UI-components), the 60/30/10 neutral/
+     secondary/accent distribution, and a real bug this replaces - the old
+     palette's --lk-mut on canvas measured 3.99:1, below the 4.5:1 floor.
+     --lk-pri-fill (new, task #158) is a SEPARATE variable from --lk-pri
+     rather than reusing it: --lk-pri is used as TEXT/border in 21 places
+     (badges, borders) and as a solid BUTTON FILL (paired with hardcoded
+     white text) in 8 places - one hex value can't serve both roles well
+     in dark mode (confirmed live: the OLD dark --lk-pri+white was only
+     2.34:1, an existing, unnoticed contrast bug this fixes). In light
+     mode the same value still works for both roles fine, so pri-fill just
+     mirrors pri here - no visual change, only dark mode's value differs. */
+  --lk-canvas:#FAF9F7; --lk-surface:#FFFFFF; --lk-panel:#F2F0EC;
+  --lk-nested:#ECE8E1; --lk-line:#E7E4DE; --lk-line2:#D8D4CC;
+  --lk-ink:#1B1917; --lk-ink2:#3D3A35; --lk-mut:#6B6660; --lk-mut2:#6B6660;
+  --lk-pri:#3B6FE0; --lk-pri-fill:#3B6FE0; --lk-pri-t:#EAF0FC;
+  --lk-emph:#3B6FE0;
+  --lk-flag:#3D3A35; --lk-danger:#C0392B;
+  --lk-bubble-me:#3D3A35; --lk-bubble-me-fg:#FAF9F7;
   --lk-r-s:8px; --lk-r-c:4px; --lk-r-x:12px;
-  --lk-elev:0 1px 2px rgba(70,40,8,.08),0 2px 6px rgba(70,40,8,.10);
+  --lk-elev:0 1px 2px rgba(20,20,20,.06),0 2px 6px rgba(20,20,20,.08);
 }
-/* Walnut Night - the dark pair of the Sunset Harvest palette above.
-   Task #63 (2026-08-04), Marc's ask: "add more blue" - --lk-emph (the
-   group-badge/flag/estimate-accent color, not the primary button) was a
-   green-leaning teal in light mode and an unrelated warm gold in dark
-   mode, so the palette read as entirely warm (orange/tan/gold) with no
-   cool color anywhere in Walnut Night. Shifted both to an actual
-   blue-leaning teal, kept dark enough (light) / muted enough (dark) to
-   still sit in the same earthy family rather than reading as a jarring
-   bright-blue accent - a first pass on a subjective call, easy to retune
-   further if this isn't the right amount/shade. */
+/* "Material Elevation" dark theme (task #158, 2026-08-04) - replaces
+   Walnut Night, Marc's pick from the same live comparison as the light
+   theme above. Literal Material Design dark-theme spec: #121212 base,
+   each elevated surface a step lighter (surface/panel/nested), never
+   pure black (causes halation). --lk-pri-fill genuinely differs from
+   --lk-pri here (see the light theme's own comment above for why) -
+   #2F5FD1 gives 5.71:1 with the hardcoded white button text every fill
+   site already uses, vs. the old palette's unnoticed 2.34:1. --lk-danger
+   also moved from #F0483A (2.96:1 with white - failed even the 3:1 UI-
+   component floor) to #D33C3C (4.69:1). */
 html[data-theme="dark"]{
-  --lk-canvas:#231A12; --lk-surface:#2E2119; --lk-panel:#2A1F17;
-  --lk-nested:#36271C; --lk-line:#4A3626; --lk-line2:#5C4630;
-  --lk-ink:#F3E7D4; --lk-ink2:#D9C7AA; --lk-mut:#B29A78; --lk-mut2:#B29A78;
-  --lk-pri:#F0916A; --lk-pri-t:#5A2C18;
-  --lk-emph:#5FA8D6;
-  --lk-flag:#D9C7AA; --lk-danger:#F0483A;
-  --lk-bubble-me:#F0916A; --lk-bubble-me-fg:#241207;
+  --lk-canvas:#121212; --lk-surface:#1E1E1E; --lk-panel:#262626;
+  --lk-nested:#2C2C2C; --lk-line:#333333; --lk-line2:#404040;
+  --lk-ink:#E9E9E9; --lk-ink2:#C4C4C4; --lk-mut:#9E9E9E; --lk-mut2:#9E9E9E;
+  --lk-pri:#82AAFF; --lk-pri-fill:#2F5FD1; --lk-pri-t:#1F2B42;
+  --lk-emph:#82AAFF;
+  --lk-flag:#C4C4C4; --lk-danger:#D33C3C;
+  --lk-bubble-me:#82AAFF; --lk-bubble-me-fg:#121212;
   --lk-elev:0 1px 3px rgba(0,0,0,.5),0 2px 8px rgba(0,0,0,.45);
 }
 
@@ -2754,7 +2781,7 @@ html[data-theme="dark"]{
 /* right padding widened 40->72px (task #37, same reason as the base rule
    above): room for the mic button too, not just Send. */
 #cpChatInput{font-size:13.5px;line-height:1.5;padding:9px 72px 9px 36px;max-height:132px;overflow-y:auto;background:none}
-.cp-chat-send-icon{background:var(--lk-pri);border-radius:var(--lk-r-s);width:30px;height:30px}
+.cp-chat-send-icon{background:var(--lk-pri-fill);border-radius:var(--lk-r-s);width:30px;height:30px}
 .cp-chat-attach{color:var(--lk-mut2);border-radius:var(--lk-r-c)}
 .cp-chat-attach:hover{background:var(--lk-nested);color:var(--lk-ink)}
 .cp-chat-mic{color:var(--lk-mut2);border-radius:var(--lk-r-c);right:40px}
@@ -2769,7 +2796,7 @@ html[data-theme="dark"]{
   grid-template-columns:28px minmax(0,1fr) auto}
 .mqwrow:hover{background:var(--lk-panel)}
 .mqwrow.is-active{background:var(--lk-nested)}
-.mqwrow.is-active::before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--lk-pri)}
+.mqwrow.is-active::before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--lk-pri-fill)}
 .mqwt{font-size:13px;font-weight:600;line-height:1.35;color:var(--lk-ink)}
 .mqwdesc{font-size:12px;color:var(--lk-mut2);line-height:1.45;margin-top:3px;
   display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
@@ -2879,7 +2906,7 @@ html[data-theme="dark"]{
 .pcc-micro-btn.mdone:hover{background:var(--blue-t);color:var(--bblue);border-color:var(--bblue)}
 .pcc-micro-btn.msnooze:hover{background:var(--amber-t);color:var(--amber-d);border-color:var(--amber-d)}
 .pcc-micro-btn.mclose:hover{background:var(--lk-pri-t);color:var(--lk-danger);border-color:var(--lk-danger)}
-.pcc-xact-btn{flex:none;border:none;background:var(--lk-pri);color:#fff;font:700 11.5px var(--sans);
+.pcc-xact-btn{flex:none;border:none;background:var(--lk-pri-fill);color:#fff;font:700 11.5px var(--sans);
   padding:8px 13px;border-radius:var(--lk-r-c);cursor:pointer;white-space:normal;text-align:center;
   width:100%;box-sizing:border-box}
 .pcc-xact-btn.ghost{background:none;border:1.5px solid var(--lk-line2);color:var(--lk-ink)}
@@ -2904,7 +2931,7 @@ html[data-theme="dark"]{
 .pcc-step-row{display:flex;gap:9px;align-items:baseline;margin:0 12px;padding:8px 11px;
   font-size:13px;color:var(--lk-mut);border-radius:var(--lk-r-c)}
 .pcc-step-current{background:var(--lk-panel);color:var(--lk-ink);font-weight:600}
-.pcc-step-now{font-size:10.5px;font-weight:700;background:var(--lk-pri);color:#fff;padding:2px 8px;border-radius:999px}
+.pcc-step-now{font-size:10.5px;font-weight:700;background:var(--lk-pri-fill);color:#fff;padding:2px 8px;border-radius:999px}
 /* attention with no fill: transparent ground + the one emphasis rule */
 .pcc-est-completion{display:flex;gap:9px;align-items:baseline;margin:12px 18px 14px;
   font-size:12px;color:var(--lk-ink2);border-left:3px solid var(--lk-emph);padding:3px 0 3px 11px;background:none}
@@ -3053,7 +3080,7 @@ html[data-theme="dark"]{
    backend compose-to-recipients action is task #35, not built yet. */
 .pcc-envelope-btn{border:1px solid var(--lk-line2);background:var(--lk-surface);color:var(--lk-mut2);border-radius:var(--lk-r-c);
   padding:3px 7px;font-size:13px;cursor:pointer;line-height:1}
-.pcc-envelope-btn.active{background:var(--lk-pri);color:#fff;border-color:var(--lk-pri)}
+.pcc-envelope-btn.active{background:var(--lk-pri-fill);color:#fff;border-color:var(--lk-pri)}
 .pcc-envelope-btn:disabled{opacity:.4;cursor:default}
 .pcc-stake-list{display:flex;flex-direction:column}
 .pcc-stake-row{display:flex;align-items:center;gap:9px;padding:7px 2px;border-bottom:1px solid var(--lk-line);cursor:pointer;
@@ -3061,7 +3088,7 @@ html[data-theme="dark"]{
 .pcc-stake-row:last-child{border-bottom:none}
 .pcc-stake-row:hover{background:var(--lk-nested)}
 .pcc-stake-dot{width:15px;height:15px;border-radius:50%;border:1.5px solid var(--lk-line2);flex:none;position:relative;background:var(--lk-surface)}
-.pcc-stake-row.selected .pcc-stake-dot{background:var(--lk-pri);border-color:var(--lk-pri)}
+.pcc-stake-row.selected .pcc-stake-dot{background:var(--lk-pri-fill);border-color:var(--lk-pri)}
 .pcc-stake-row.selected .pcc-stake-dot::after{content:"";position:absolute;left:4px;top:1px;width:4px;height:8px;
   border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg)}
 .pcc-stake-name{font-size:12.5px;font-weight:600;color:var(--lk-ink)}
@@ -3141,7 +3168,7 @@ html[data-theme="dark"]{
    touch more visual weight - solid border in the accent color instead of the
    quiet --lk-line outline the per-worker buttons use. */
 .cp-wake-all-btn{border-color:var(--lk-pri);color:var(--lk-pri);font-weight:800;margin-right:6px}
-.cp-wake-all-btn:hover{background:var(--lk-pri);color:#fff}
+.cp-wake-all-btn:hover{background:var(--lk-pri-fill);color:#fff}
 
 /* Task #57 (2026-08-02): "Your next move" strip - deliberately plain. The
    removed rollup cards (0ffeecc) tried to look important with dollar
@@ -3203,7 +3230,7 @@ html[data-theme="dark"]{
 .pcc-tele-bar-track{background:var(--lk-line);border-radius:4px;height:9px;overflow:hidden}
 .pcc-tele-bar-fill{height:100%;border-radius:4px}
 .pcc-tele-bar-fill.pos{background:var(--bblue)}
-.pcc-tele-bar-fill.accent{background:var(--lk-pri)}
+.pcc-tele-bar-fill.accent{background:var(--lk-pri-fill)}
 .pcc-tele-bar-fill.mut{background:var(--lk-line2)}
 .pcc-tele-bar-val{text-align:right;font-family:var(--mono);color:var(--lk-ink2);font-weight:700;font-variant-numeric:tabular-nums}
 .pcc-tele-accept-card{background:var(--lk-surface);border:1px solid var(--lk-line2);border-radius:var(--lk-r-x);padding:18px 20px;
@@ -5782,8 +5809,8 @@ html[data-theme="dark"]{
       var s = document.createElement('style');
       s.id = 'theo-brand-css';
       s.textContent =
-        ':root{--header:#EEDCC0;--topbar-fg:#22160A;--topbar-fg-mut:#87643A;--topbar-line:#CBA85E;--topbar-divider:rgba(34,22,10,.20);--topbar-ctrl-bd:rgba(34,22,10,.43);--topbar-ctrl-hover:rgba(34,22,10,.08);--topbar-av-bg:#22160A;--topbar-av-fg:#FBF2E1;--topbar-shadow:0 1px 0 var(--topbar-line),0 3px 6px -2px rgba(34,22,10,.12);--brand-logo-filter:brightness(0);--dino-filter:brightness(0)}' +
-        'html[data-theme="dark"]{--header:#231A12;--topbar-fg:#F3E7D4;--topbar-fg-mut:#B29A78;--topbar-line:#5C4630;--topbar-divider:rgba(255,255,255,.30);--topbar-ctrl-bd:rgba(255,255,255,.5);--topbar-ctrl-hover:rgba(255,255,255,.12);--topbar-av-bg:#F3E7D4;--topbar-av-fg:#231A12;--topbar-shadow:0 2px 6px rgba(0,0,0,.5);--brand-logo-filter:none;--dino-filter:brightness(0) invert(.92)}' +
+        ':root{--header:#FAF9F7;--topbar-fg:#1B1917;--topbar-fg-mut:#6B6660;--topbar-line:#D8D4CC;--topbar-divider:rgba(27,25,23,.20);--topbar-ctrl-bd:rgba(27,25,23,.43);--topbar-ctrl-hover:rgba(27,25,23,.08);--topbar-av-bg:#1B1917;--topbar-av-fg:#FAF9F7;--topbar-shadow:0 1px 0 var(--topbar-line),0 3px 6px -2px rgba(27,25,23,.12);--brand-logo-filter:brightness(0);--dino-filter:brightness(0)}' +
+        'html[data-theme="dark"]{--header:#121212;--topbar-fg:#E9E9E9;--topbar-fg-mut:#9E9E9E;--topbar-line:#404040;--topbar-divider:rgba(255,255,255,.30);--topbar-ctrl-bd:rgba(255,255,255,.5);--topbar-ctrl-hover:rgba(255,255,255,.12);--topbar-av-bg:#E9E9E9;--topbar-av-fg:#121212;--topbar-shadow:0 2px 6px rgba(0,0,0,.5);--brand-logo-filter:none;--dino-filter:brightness(0) invert(.92)}' +
         '.topbar{color:var(--topbar-fg)!important;box-shadow:var(--topbar-shadow)}' +
         '.topbar .brand img{filter:var(--brand-logo-filter)}' +
         '.topbar .switch{color:var(--topbar-fg)!important;border-color:var(--topbar-ctrl-bd)!important}' +

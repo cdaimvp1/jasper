@@ -377,10 +377,35 @@ def _apply_snooze_avoidance_boost(score: float, snooze_count: int) -> float:
     return min(1.0, score + boost)
 
 
+# Enhancement idea panel #12: ask density - how many distinct open asks are
+# CURRENTLY stacked on this one issue, not whether any single one is stale/
+# escalated (E8/#10 already cover those). Three simultaneously-open asks on
+# one thread is a real, different signal from one - resolving it clears more
+# at once, and a pile of unanswered asks accumulating on the same issue is
+# itself worth surfacing. Same bounded-additive shape as the snooze boost
+# just above; +0.04 per ask beyond the first, capped at 5 asks (+0.16 max).
+_ASK_DENSITY_BOOST_PER_ASK = 0.04
+_ASK_DENSITY_BOOST_MAX_ASKS = 5
+
+
+def ask_density_for_issue(open_claims: list[dict]) -> int:
+    """Count of currently-open ask-type claims - open_claims is whatever the
+    caller already fetched (list_open_claims_for_issue(s), optionally
+    pre-filtered to claim_type='ask'), no new query needed here."""
+    return sum(1 for c in open_claims if c.get("claim_type") == "ask")
+
+
+def _apply_ask_density_boost(score: float, ask_count: int) -> float:
+    extra_asks = max(0, ask_count - 1)
+    boost = _ASK_DENSITY_BOOST_PER_ASK * min(extra_asks, _ASK_DENSITY_BOOST_MAX_ASKS)
+    return min(1.0, score + boost)
+
+
 def score_issue(issue: dict, now: float, weights: dict = DEFAULT_WEIGHTS,
                  identity_anchors: Optional[list] = None,
                  category_staleness_baselines: Optional[dict] = None,
-                 state_history: Optional[list] = None) -> tuple[float, str, Optional[int]]:
+                 state_history: Optional[list] = None,
+                 open_claims: Optional[list] = None) -> tuple[float, str, Optional[int]]:
     """Pure-ISH: the only non-arithmetic steps are reading this issue's own
     raw_items for the value regex, and looking up a matching Total Recall
     lesson (both just DB reads, still zero LLM calls).
@@ -464,6 +489,9 @@ def score_issue(issue: dict, now: float, weights: dict = DEFAULT_WEIGHTS,
     snoozes = snooze_history_from_state_history(state_history) if state_history else []
     score = _apply_snooze_avoidance_boost(score, len(snoozes))
 
+    ask_count = ask_density_for_issue(open_claims) if open_claims else 0
+    score = _apply_ask_density_boost(score, ask_count)
+
     days_quiet = int(max(0.0, (now - issue["updated_at"]) / DAY))
 
     # Aristotle (task #51) - a taught prerequisite check. Prepended, not
@@ -503,6 +531,8 @@ def score_issue(issue: dict, now: float, weights: dict = DEFAULT_WEIGHTS,
     if len(snoozes) >= 2:
         last_snoozed_days = int(max(0.0, (now - snoozes[-1]["changed_ts"]) / DAY))
         reasons.append(f"snoozed {len(snoozes)}x, last {last_snoozed_days}d ago")
+    if ask_count >= 3:
+        reasons.append(f"{ask_count} open asks")
     if not reasons:
         reasons.append("waiting on someone else")
 
@@ -549,12 +579,18 @@ def recompute_all(now: float | None = None) -> dict:
     # shape as anchors_by_issue above - list_issue_state_history_for_issues
     # already exists (built for workgraph_alerts, same batching discipline).
     state_history_by_issue = ws.list_issue_state_history_for_issues([i["id"] for i in issues])
+    # Enhancement idea panel #12: one batched open-asks query, same shape as
+    # the others above - list_open_claims_for_issues already existed (built
+    # for rank_actions), just filtered to claim_type='ask' here since that's
+    # the only type ask_density_for_issue cares about.
+    open_asks_by_issue = ws.list_open_claims_for_issues([i["id"] for i in issues], claim_type="ask")
     updated = 0
     for issue in issues:
         score, reason, lesson_id = score_issue(
             issue, now, identity_anchors=anchors_by_issue.get(issue["id"]),
             category_staleness_baselines=category_staleness_baselines,
             state_history=state_history_by_issue.get(issue["id"]),
+            open_claims=open_asks_by_issue.get(issue["id"]),
         )
         action_kind = "review" if issue["state"] == "active" else "wait"
         # task #55: reason's prefix is a fixed, owned string (workgraph_

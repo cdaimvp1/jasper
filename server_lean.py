@@ -1224,6 +1224,12 @@ async def api_workgraph_issue_detail(issue_id: str, log_choice: bool = False):
     # classifier set with no actor - list_issue_state_history is already a
     # single-issue, cheap query (not a DB-wide scan like #9's), safe here.
     issue["snooze_history"] = workgraph_nba.snooze_history_from_state_history(wg.list_issue_state_history(issue_id))
+    # Enhancement idea panel #12: how many distinct open asks are currently
+    # stacked on this one issue - list_open_claims_for_issue is a cheap
+    # single-issue query, same as #10's above.
+    issue["ask_density"] = workgraph_nba.ask_density_for_issue(
+        wg.list_open_claims_for_issue(issue_id, claim_type="ask")
+    )
     # Part E1 (2026-07-30): unified ranked candidate actions - read-time
     # only, see workgraph_nba.candidate_actions' own docstring. Falls back
     # to project_synthesis's suggested_actions when this issue's own

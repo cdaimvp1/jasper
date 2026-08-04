@@ -628,6 +628,96 @@ def test_gated_issue_downweight_constant_is_a_real_reduction():
     assert 0.0 < nba._GATED_ISSUE_DOWNWEIGHT < 1.0
 
 
+# --- enhancement idea panel #12: ask density --------------------------------
+
+def _open_ask_claim(ws_db, issue_id, raw_item_id, text="please send the SOW"):
+    return ws_db.insert_claim(
+        issue_id=issue_id, raw_item_id=raw_item_id, claim_type="ask", text=text,
+        author="counterparty", author_basis="direction",
+    )
+
+
+def _issue_with_raw_item(ws_db, title, key):
+    issue_id = ws_db.create_issue_with_new_id(title=title, state="active", category="other")
+    row_id = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key=key, thread_key=key, dedupe_key=key,
+        occurred_ts=time.time(), subject="s", from_actor="a@example.com",
+        participants_json="[]", body_preview="",
+    )
+    ws_db.link_raw_item_to_issue(row_id, issue_id)
+    return issue_id, row_id
+
+
+def test_ask_density_for_issue_counts_only_ask_type_claims():
+    open_claims = [
+        {"claim_type": "ask"}, {"claim_type": "ask"},
+        {"claim_type": "decision"}, {"claim_type": "commitment"},
+    ]
+    assert nba.ask_density_for_issue(open_claims) == 2
+
+
+def test_ask_density_for_issue_zero_for_no_claims():
+    assert nba.ask_density_for_issue([]) == 0
+
+
+def test_apply_ask_density_boost_scales_with_count_and_caps():
+    base = 0.5
+    one_ask = nba._apply_ask_density_boost(base, 1)
+    three_asks = nba._apply_ask_density_boost(base, 3)
+    many_asks = nba._apply_ask_density_boost(base, 50)
+
+    assert one_ask == base  # a single open ask is the normal case, no boost
+    assert three_asks > one_ask
+    # capped at _ASK_DENSITY_BOOST_MAX_ASKS extra asks beyond the first
+    expected_cap = base + nba._ASK_DENSITY_BOOST_PER_ASK * nba._ASK_DENSITY_BOOST_MAX_ASKS
+    assert many_asks == pytest.approx(expected_cap)
+    assert many_asks <= 1.0
+
+
+def test_score_issue_multi_ask_issue_scores_higher_than_single_ask_twin(ws_db):
+    now = time.time()
+    busy_id, busy_rid = _issue_with_raw_item(ws_db, "Busy", "ask-busy")
+    quiet_id, quiet_rid = _issue_with_raw_item(ws_db, "Quiet", "ask-quiet")
+    busy_claims = [
+        _open_ask_claim(ws_db, busy_id, busy_rid, text=f"ask {i}") for i in range(4)
+    ]
+    quiet_claims = [_open_ask_claim(ws_db, quiet_id, quiet_rid)]
+
+    busy_open = ws_db.list_open_claims_for_issue(busy_id, claim_type="ask")
+    quiet_open = ws_db.list_open_claims_for_issue(quiet_id, claim_type="ask")
+
+    busy_score, busy_reason, _ = nba.score_issue(
+        ws_db.get_issue(busy_id), now, open_claims=busy_open)
+    quiet_score, quiet_reason, _ = nba.score_issue(
+        ws_db.get_issue(quiet_id), now, open_claims=quiet_open)
+
+    assert busy_score > quiet_score
+    assert "4 open asks" in busy_reason
+    assert "open asks" not in quiet_reason
+
+
+def test_score_issue_ask_reason_omitted_below_threshold(ws_db):
+    now = time.time()
+    issue_id, rid = _issue_with_raw_item(ws_db, "TwoAsks", "ask-two")
+    _open_ask_claim(ws_db, issue_id, rid, text="ask 1")
+    _open_ask_claim(ws_db, issue_id, rid, text="ask 2")
+    open_claims = ws_db.list_open_claims_for_issue(issue_id, claim_type="ask")
+
+    _score, reason, _ = nba.score_issue(ws_db.get_issue(issue_id), now, open_claims=open_claims)
+
+    assert "open asks" not in reason  # 2 asks is below the >= 3 reason threshold
+
+
+def test_score_issue_handles_missing_open_claims_gracefully(ws_db):
+    now = time.time()
+    issue_id, _rid = _issue_with_raw_item(ws_db, "NoClaimsArg", "ask-none")
+
+    score, reason, _ = nba.score_issue(ws_db.get_issue(issue_id), now)
+
+    assert score >= 0.0
+    assert "open asks" not in reason
+
+
 # --- task #65: value_at_risk_rollup ------------------------------------------
 
 def _open_issue_with_value(ws_db, title, amount_text, key):

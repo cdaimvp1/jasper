@@ -599,3 +599,99 @@ def test_list_open_claims_for_issues_batched(ws_db):
 
 def test_list_open_claims_for_issues_empty_list(ws_db):
     assert wc.list_open_claims_for_issues([]) == {}
+
+
+# --- find_duplicate_or_conflicting_asks_across_project (task #140, E17) ----
+
+def _issue_in_project(ws_db, pid, title):
+    iid = _issue(ws_db, title)
+    ws_db.assign_issue_to_project(iid, pid)
+    return iid
+
+
+def test_conflicting_ask_across_project_is_flagged(ws_db):
+    pid = ws_db.create_project_with_new_id(name="P", category="other")
+    a = _issue_in_project(ws_db, pid, "A")
+    b = _issue_in_project(ws_db, pid, "B")
+    rid_a = _raw_item(ws_db, a, "ca1", {"asks": ["Approve requisition PR854779-V4 for $3,876,200.00"]},
+                       direction="inbound")
+    conn = ws_db._connect()
+    conn.execute("UPDATE raw_items SET pr_number_base = 'PR854779' WHERE id = ?", (rid_a,))
+    conn.close()
+    wc.materialize_claims_for_raw_item(rid_a)
+    rid_b = _raw_item(ws_db, b, "ca2", {"asks": ["Approve requisition PR854779-V4 for $1,938,100.00"]},
+                       direction="inbound")
+    conn = ws_db._connect()
+    conn.execute("UPDATE raw_items SET pr_number_base = 'PR854779' WHERE id = ?", (rid_b,))
+    conn.close()
+    wc.materialize_claims_for_raw_item(rid_b)
+
+    groups = wc.find_duplicate_or_conflicting_asks_across_project()
+
+    assert len(groups) == 1
+    group = groups[0]
+    assert group["project_id"] == pid
+    assert group["verdict"] == "conflicting"
+    assert {c["issue_id"] for c in group["claims"]} == {a, b}
+
+
+def test_duplicate_ask_across_project_is_flagged(ws_db):
+    pid = ws_db.create_project_with_new_id(name="P", category="other")
+    a = _issue_in_project(ws_db, pid, "A")
+    b = _issue_in_project(ws_db, pid, "B")
+    for iid, key in ((a, "da1"), (b, "da2")):
+        rid = _raw_item(ws_db, iid, key, {"asks": ["Approve requisition PR1112223"]}, direction="inbound")
+        conn = ws_db._connect()
+        conn.execute("UPDATE raw_items SET pr_number_base = 'PR1112223' WHERE id = ?", (rid,))
+        conn.close()
+        wc.materialize_claims_for_raw_item(rid)
+
+    groups = wc.find_duplicate_or_conflicting_asks_across_project()
+
+    assert len(groups) == 1
+    assert groups[0]["verdict"] == "duplicate"
+
+
+def test_same_canonical_key_on_unrelated_issues_not_flagged(ws_db):
+    """No shared project - two separate, ungrouped matters that happen to
+    reference the same PR is not this feature's job (it's a project-
+    grouping question, not a claim-dedup one)."""
+    a = _issue(ws_db, "A")
+    b = _issue(ws_db, "B")
+    for iid, key in ((a, "un1"), (b, "un2")):
+        rid = _raw_item(ws_db, iid, key, {"asks": ["Approve requisition PR3334445"]}, direction="inbound")
+        conn = ws_db._connect()
+        conn.execute("UPDATE raw_items SET pr_number_base = 'PR3334445' WHERE id = ?", (rid,))
+        conn.close()
+        wc.materialize_claims_for_raw_item(rid)
+
+    assert wc.find_duplicate_or_conflicting_asks_across_project() == []
+
+
+def test_closed_issue_excluded_from_duplicate_ask_sweep(ws_db):
+    pid = ws_db.create_project_with_new_id(name="P", category="other")
+    a = _issue_in_project(ws_db, pid, "A")
+    b = _issue_in_project(ws_db, pid, "B")
+    for iid, key in ((a, "cl1"), (b, "cl2")):
+        rid = _raw_item(ws_db, iid, key, {"asks": ["Approve requisition PR5556667"]}, direction="inbound")
+        conn = ws_db._connect()
+        conn.execute("UPDATE raw_items SET pr_number_base = 'PR5556667' WHERE id = ?", (rid,))
+        conn.close()
+        wc.materialize_claims_for_raw_item(rid)
+    conn = ws_db._connect()
+    conn.execute("UPDATE issues SET state = 'done' WHERE id = ?", (b,))
+    conn.close()
+
+    assert wc.find_duplicate_or_conflicting_asks_across_project() == []
+
+
+def test_single_issue_with_only_one_open_claim_not_flagged(ws_db):
+    pid = ws_db.create_project_with_new_id(name="P", category="other")
+    a = _issue_in_project(ws_db, pid, "A")
+    rid = _raw_item(ws_db, a, "so1", {"asks": ["Approve requisition PR7778889"]}, direction="inbound")
+    conn = ws_db._connect()
+    conn.execute("UPDATE raw_items SET pr_number_base = 'PR7778889' WHERE id = ?", (rid,))
+    conn.close()
+    wc.materialize_claims_for_raw_item(rid)
+
+    assert wc.find_duplicate_or_conflicting_asks_across_project() == []

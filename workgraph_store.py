@@ -619,6 +619,47 @@ def init_workgraph() -> None:
                         conn.execute("ROLLBACK")
                     except sqlite3.OperationalError:
                         pass  # no transaction was actually open (e.g. BEGIN itself failed) - nothing to roll back
+            # Same rebuild-and-copy pattern again, for enhancement idea panel
+            # #17's new 'duplicate_ask_across_project' kind - the same
+            # canonical_key open on 2+ DIFFERENT issues that are members of
+            # the SAME project (canonical-key dedup at materialize time is
+            # deliberately issue-scoped, so this is the only place that
+            # catches the same ask/commitment/decision tracked twice, or
+            # with conflicting details, once two issues that both carry it
+            # have been grouped into one project).
+            existing_sql = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='alerts'"
+            ).fetchone()
+            if existing_sql and "duplicate_ask_across_project" not in (existing_sql["sql"] or ""):
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    conn.execute("ALTER TABLE alerts RENAME TO alerts_pre_e17")
+                    conn.execute("""
+                        CREATE TABLE alerts (
+                            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                            issue_id     TEXT,
+                            kind         TEXT NOT NULL CHECK (kind IN ('stale','high_priority_ask','anomaly','stuck_action','unmet_prerequisite','reference_id_collision','conflicting_value_figures','duplicate_ask_across_project')),
+                            severity     TEXT NOT NULL CHECK (severity IN ('info','warn','critical')),
+                            summary      TEXT NOT NULL,
+                            source_ref   TEXT,
+                            created_ts   REAL NOT NULL,
+                            dismissed    INTEGER NOT NULL DEFAULT 0,
+                            dismissed_ts REAL
+                        )
+                    """)
+                    conn.execute("""
+                        INSERT INTO alerts (id, issue_id, kind, severity, summary, source_ref,
+                                             created_ts, dismissed, dismissed_ts)
+                        SELECT id, issue_id, kind, severity, summary, source_ref,
+                               created_ts, dismissed, dismissed_ts FROM alerts_pre_e17
+                    """)
+                    conn.execute("DROP TABLE alerts_pre_e17")
+                    conn.execute("COMMIT")
+                except sqlite3.OperationalError:
+                    try:
+                        conn.execute("ROLLBACK")
+                    except sqlite3.OperationalError:
+                        pass  # no transaction was actually open (e.g. BEGIN itself failed) - nothing to roll back
             conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_dismissed ON alerts(dismissed, created_ts DESC)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_issue_kind ON alerts(issue_id, kind)")
 
@@ -6372,6 +6413,38 @@ def list_issue_ids_by_state(states: list[str]) -> list[str]:
         finally:
             conn.close()
     return [r["id"] for r in rows]
+
+
+def list_open_claims_with_canonical_key_and_project() -> list[dict]:
+    """Enhancement idea panel #17 (Duplicate/conflicting-ask detector
+    across project, worker capability): every open claim that HAS a
+    canonical_key, joined to its issue's project_id and state, in one
+    query - the DB-wide batched read workgraph_claims.find_duplicate_or_
+    conflicting_asks_across_project needs to group by (project_id,
+    claim_type, canonical_key) without an N+1 per-issue lookup. Claims on
+    issues with no project (project_id IS NULL) are excluded at the SQL
+    level - a canonical_key can only collide ACROSS issues once those
+    issues are members of the same project; this is the direct
+    complement of list_all_reference_base_id_pairs' own same-project
+    EXCLUSION for panel #14 (there, same-project is not a collision
+    worth flagging; here, same-project is the ONLY case worth flagging -
+    a real ask/commitment/decision tracked once per issue by design, so
+    two issues sharing one carries real signal only once they're grouped
+    into the same underlying piece of work)."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute("""
+                SELECT c.id, c.issue_id, c.claim_type, c.canonical_key, c.text,
+                       i.project_id, i.state
+                FROM claims c
+                JOIN issues i ON i.id = c.issue_id
+                WHERE c.status = 'open' AND c.canonical_key IS NOT NULL
+                      AND i.project_id IS NOT NULL
+            """).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
 
 
 # --- pending_claim_suggestions (2026-08-04, task #155) ----------------------

@@ -26,6 +26,16 @@ Seven concrete kinds, each with its own pure `_evaluate_*` helper:
                                tier dollar figures - workgraph_nba._extract_value_
                                amount silently picks the max and moves on; this
                                surfaces the disagreement itself.
+  duplicate_ask_across_project — enhancement idea panel #17: the same canonical-
+                               key ask/commitment/decision open on 2+ DIFFERENT
+                               issues that are members of the SAME project -
+                               canonical-key dedup at materialization time is
+                               deliberately issue-scoped, so this is the only
+                               place that catches it once two issues carrying
+                               the same thing get grouped together. 'conflicting'
+                               (different details, e.g. two dollar figures for
+                               the same PR) is a warn; 'duplicate' (identical
+                               text) is info.
 
 Idempotent by construction: every alert kind is deduped against the set of
 currently-undismissed alerts before `run()` creates anything, keyed by
@@ -47,6 +57,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import workgraph_store as ws
 import workgraph_projects
 import workgraph_nba
+import workgraph_claims
 
 DAY = 86400.0
 
@@ -125,6 +136,18 @@ def _evaluate_conflicting_value_figures(issue: dict, figures: list[dict]):
     return "warn", summary
 
 
+def _evaluate_duplicate_ask_across_project(group: dict):
+    """Pure. Always fires (caller already filtered to 2+ distinct issues).
+    'conflicting' is a warn (a real discrepancy, not just redundant
+    tracking) - 'duplicate' is info (nothing to reconcile, just two
+    issues tracking the same thing)."""
+    issue_ids = ", ".join(sorted({c["issue_id"] for c in group["claims"]}))
+    if group["verdict"] == "conflicting":
+        texts = " / ".join(sorted({c["text"] for c in group["claims"]}))
+        return "warn", f"Conflicting details for the same {group['claim_type']} across {issue_ids}: {texts}"
+    return "info", f"Same {group['claim_type']} tracked on both {issue_ids} in this project"
+
+
 def run(now: float | None = None, thresholds: dict = DEFAULT_THRESHOLDS) -> dict:
     """Scan all 4 conditions and create any new, non-duplicate alerts. Called
     right after workgraph_nba.recompute_all() everywhere that's called, so
@@ -138,7 +161,8 @@ def run(now: float | None = None, thresholds: dict = DEFAULT_THRESHOLDS) -> dict
     existing_source_ref = {(a["kind"], a["source_ref"]) for a in existing if a["source_ref"]}
 
     by_kind = {"stale": 0, "high_priority_ask": 0, "anomaly": 0, "stuck_action": 0,
-               "unmet_prerequisite": 0, "reference_id_collision": 0, "conflicting_value_figures": 0}
+               "unmet_prerequisite": 0, "reference_id_collision": 0, "conflicting_value_figures": 0,
+               "duplicate_ask_across_project": 0}
 
     # 1. Stale waiting/blocked issues. Evidence + state history fetched ONCE for
     # the whole batch (fixed 2026-07-29: this used to be 2 queries per issue
@@ -250,6 +274,23 @@ def run(now: float | None = None, thresholds: dict = DEFAULT_THRESHOLDS) -> dict
         ws.create_alert(issue_id=issue["id"], kind="conflicting_value_figures", severity=severity, summary=summary)
         existing_issue_kind.add((issue["id"], "conflicting_value_figures"))
         by_kind["conflicting_value_figures"] += 1
+
+    # 8. Duplicate/conflicting ask across project (enhancement idea panel
+    #    #17) - the same canonical-key ask/commitment/decision tracked
+    #    open on 2+ DIFFERENT issues that are members of the SAME project.
+    #    Dedup keys off the full group identity (project+claim_type+
+    #    canonical_key), not a single issue_id - the same group could in
+    #    principle involve more than 2 issues over time.
+    for group in workgraph_claims.find_duplicate_or_conflicting_asks_across_project():
+        source_ref = f"{group['project_id']}:{group['claim_type']}:{group['canonical_key']}"
+        if ("duplicate_ask_across_project", source_ref) in existing_source_ref:
+            continue
+        severity, summary = _evaluate_duplicate_ask_across_project(group)
+        first_issue_id = sorted({c["issue_id"] for c in group["claims"]})[0]
+        ws.create_alert(issue_id=first_issue_id, kind="duplicate_ask_across_project", severity=severity,
+                         summary=summary, source_ref=source_ref)
+        existing_source_ref.add(("duplicate_ask_across_project", source_ref))
+        by_kind["duplicate_ask_across_project"] += 1
 
     return {"created": sum(by_kind.values()), "by_kind": by_kind}
 

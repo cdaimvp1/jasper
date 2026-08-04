@@ -187,3 +187,56 @@ def test_conflicting_value_figures_alert_not_generated_for_single_figure(ws_db, 
     result = wa.run(now=time.time())
 
     assert result["by_kind"]["conflicting_value_figures"] == 0
+
+
+# --- enhancement idea panel #17: duplicate/conflicting ask across project --
+
+def _conflicting_ask_across_project(ws_db):
+    import json
+    pid = ws_db.create_project_with_new_id(name="P", category="other")
+    a = ws_db.create_issue_with_new_id(title="Issue A", state="active", category="other")
+    ws_db.assign_issue_to_project(a, pid)
+    b = ws_db.create_issue_with_new_id(title="Issue B", state="active", category="other")
+    ws_db.assign_issue_to_project(b, pid)
+
+    import workgraph_claims as wc
+    for iid, key, amount in ((a, "dup-alert-a", "$3,876,200.00"), (b, "dup-alert-b", "$1,938,100.00")):
+        rid = ws_db.insert_raw_item(
+            source="outlook_mail", stable_key=key, thread_key=key, dedupe_key=key,
+            occurred_ts=time.time(), subject="s", from_actor="a@example.com", participants_json="[]",
+        )
+        ws_db.link_raw_item_to_issue(rid, iid)
+        ws_db.create_extraction(rid, json.dumps({"asks": [f"Approve requisition PR9990001 for {amount}"]}))
+        conn = ws_db._connect()
+        conn.execute("UPDATE raw_items SET direction = 'inbound', pr_number_base = 'PR9990001' WHERE id = ?", (rid,))
+        conn.close()
+        wc.materialize_claims_for_raw_item(rid)
+    return a, b
+
+
+def test_duplicate_ask_across_project_alert_generated_end_to_end(ws_db, bus_db):
+    a, b = _conflicting_ask_across_project(ws_db)
+
+    result = wa.run(now=time.time())
+
+    assert result["by_kind"]["duplicate_ask_across_project"] == 1
+    alerts = ws_db.list_alerts(dismissed=False)
+    match = next(al for al in alerts if al["kind"] == "duplicate_ask_across_project")
+    assert match["severity"] == "warn"  # conflicting, not identical text
+    assert match["issue_id"] in (a, b)
+
+
+def test_duplicate_ask_across_project_alert_deduped_across_runs(ws_db, bus_db):
+    _conflicting_ask_across_project(ws_db)
+
+    first = wa.run(now=time.time())
+    second = wa.run(now=time.time())
+
+    assert first["by_kind"]["duplicate_ask_across_project"] == 1
+    assert second["by_kind"]["duplicate_ask_across_project"] == 0
+
+
+def test_duplicate_ask_across_project_alert_not_generated_without_a_group(ws_db, bus_db):
+    ws_db.create_issue_with_new_id(title="Fine", state="active", category="other")
+    result = wa.run(now=time.time())
+    assert result["by_kind"]["duplicate_ask_across_project"] == 0

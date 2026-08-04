@@ -467,3 +467,58 @@ def list_open_claims_for_issue(issue_id: str, claim_type: Optional[str] = None) 
 
 def list_open_claims_for_issues(issue_ids: list[str], claim_type: Optional[str] = None) -> dict[str, list[dict]]:
     return ws.list_open_claims_for_issues(issue_ids, claim_type=claim_type)
+
+
+_CLOSED_ISSUE_STATES = ("done", "dismissed", "noise-archived")
+
+
+def find_duplicate_or_conflicting_asks_across_project() -> list[dict]:
+    """Enhancement idea panel #17 (Duplicate/conflicting-ask detector
+    across project, worker capability): canonical-key dedup at
+    materialization time is deliberately issue-scoped (see canonical_
+    key_for_claim's own docstring - "the same PR, supplier, or action
+    language can appear in separate cases... should not silently
+    collapse claims across work objects"), which is correct for two
+    issues that AREN'T related. But once two issues that both carry the
+    same canonical_key get grouped into the same project, that's no
+    longer two unrelated matters - it's the same ask/commitment/decision
+    tracked twice, or (the more valuable catch) tracked twice with
+    DIFFERENT details, e.g. two different dollar figures for the same PR
+    approval on two issues under one project (the exact live PR854779-V4
+    shape found while building this).
+
+    Batched: one query across every open claim with a canonical_key
+    (list_open_claims_with_canonical_key_and_project), grouped in Python
+    by (project_id, claim_type, canonical_key) - never a per-project or
+    per-issue query. Closed issues (done/dismissed/noise-archived) are
+    excluded - same reasoning as find_all_reference_id_collisions: an
+    unprompted alert about a matter Marc already closed isn't actionable
+    right now.
+
+    Returns one entry per (project_id, claim_type, canonical_key) group
+    that spans 2+ DISTINCT issues: {project_id, claim_type, canonical_key,
+    verdict, claims: [{claim_id, issue_id, text}, ...]}. verdict is
+    'conflicting' when the claims disagree on text (a real discrepancy
+    worth surfacing), 'duplicate' when every claim's text is byte-
+    identical (the same thing tracked twice, nothing new to reconcile)."""
+    rows = ws.list_open_claims_with_canonical_key_and_project()
+    groups: dict[tuple, list[dict]] = {}
+    for row in rows:
+        if row["state"] in _CLOSED_ISSUE_STATES:
+            continue
+        key = (row["project_id"], row["claim_type"], row["canonical_key"])
+        groups.setdefault(key, []).append(row)
+
+    results = []
+    for (project_id, claim_type, canonical_key), members in groups.items():
+        issue_ids = {m["issue_id"] for m in members}
+        if len(issue_ids) < 2:
+            continue
+        texts = {m["text"] for m in members}
+        verdict = "duplicate" if len(texts) == 1 else "conflicting"
+        results.append({
+            "project_id": project_id, "claim_type": claim_type, "canonical_key": canonical_key,
+            "verdict": verdict,
+            "claims": [{"claim_id": m["id"], "issue_id": m["issue_id"], "text": m["text"]} for m in members],
+        })
+    return results

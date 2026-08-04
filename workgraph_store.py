@@ -987,6 +987,33 @@ def init_workgraph() -> None:
             except sqlite3.OperationalError:
                 pass
 
+            try:
+                # Canonical claim deduplication (2026-08-04, architecture-
+                # review follow-up P1): repeat_signals-driven dedup (Section
+                # 9.3, find_open_claim_by_text) requires a byte-EXACT text
+                # match, which real production data confirmed misses real
+                # duplicates - the same Ariba PR reminder re-sent with
+                # slightly different wording around an identical reference
+                # ID (PR1161567/PR1170816/PR1169904/PR854779-V4 all real live
+                # cases). canonical_key is a SEPARATE, additive fallback
+                # dedup key (see workgraph_claims.canonical_key_for_claim) -
+                # deliberately NOT a UNIQUE constraint: the live backfill
+                # (workgraph_claims.backfill_canonical_keys_and_merge_
+                # duplicates) must run and merge existing duplicate groups
+                # BEFORE any uniqueness could be enforced without breaking
+                # on pre-existing data, and application-level check-then-
+                # insert-or-touch (same pattern find_open_claim_by_text
+                # already uses) is sufficient - no DB-level constraint
+                # needed for a single-writer-at-a-time store. NULL is a
+                # legitimate value (no definitive reference AND normalized
+                # text below the trust bar), never backfilled to a guess.
+                conn.execute("ALTER TABLE claims ADD COLUMN canonical_key TEXT")
+            except sqlite3.OperationalError:
+                pass
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_claims_canonical ON claims(issue_id, claim_type, canonical_key)"
+            )
+
             # claim_edges (design doc Section 12.3 / 8.2): the edge types
             # Section 8.2 named back when Phase 3 was built, now real. Only
             # `supersedes` has an actual writer in this pass (touch_claim's
@@ -1037,6 +1064,20 @@ def init_workgraph() -> None:
                 )
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_claim_events_claim ON claim_events(claim_id, ts)")
+
+            try:
+                # Provenance fix (2026-08-04, architecture-review follow-up
+                # P1): claims.raw_item_id is fixed at creation time and
+                # never updated - a claim touched 5 times by 5 different
+                # repeat messages had no record of which raw_item caused
+                # each individual touch, only the FIRST one. A nullable
+                # raw_item_id on claim_events closes this without a new
+                # table - every log_claim_event call site (create AND the
+                # repeat/dedup touch paths) now passes the raw_item that
+                # triggered it.
+                conn.execute("ALTER TABLE claim_events ADD COLUMN raw_item_id INTEGER REFERENCES raw_items(id)")
+            except sqlite3.OperationalError:
+                pass
 
             # identity_constraints (design doc Section 12.6): extends
             # pending_project_suggestions' pairwise dedupe - today PENDING-only,
@@ -5505,6 +5546,22 @@ def list_extractions_for_issues(issue_ids: list[str]) -> dict[str, list[dict]]:
     return out
 
 
+def list_all_open_claims() -> list[dict]:
+    """Every OPEN claim across the whole DB, oldest first - the backfill
+    driver for workgraph_claims_backfill.backfill_canonical_keys_and_merge_
+    duplicates (2026-08-04), not a hot-path query. Same "one-time backfill
+    scan, N+1-tolerant" shape as list_raw_item_ids_with_extractions below."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM claims WHERE status = 'open' ORDER BY first_seen_ts ASC"
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
 def list_raw_item_ids_with_extractions() -> list[int]:
     """Every raw_item that has a real extraction, oldest first - the backfill
     driver for workgraph_claims_backfill.backfill_claims (Section 9.9 step 3),
@@ -5574,10 +5631,48 @@ def find_open_claim_by_text(issue_id: str, claim_type: str, text: str) -> Option
     return dict(row) if row else None
 
 
+def find_open_claim_by_canonical_key(issue_id: str, claim_type: str, canonical_key: str) -> Optional[dict]:
+    """Fallback dedup for canonical claim deduplication (2026-08-04) - the
+    same "exact match among this issue's OPEN claims of the same type"
+    shape as find_open_claim_by_text above, just keyed on canonical_key
+    (structured-reference-preferred, conservative-normalization-fallback -
+    see workgraph_claims.canonical_key_for_claim) instead of raw text.
+    Called only when the byte-exact text match already failed - see
+    materialize_claims_for_raw_item's own docstring for why both checks
+    run, in that order."""
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                """SELECT * FROM claims WHERE issue_id = ? AND claim_type = ?
+                   AND status = 'open' AND canonical_key = ? ORDER BY id DESC LIMIT 1""",
+                (issue_id, claim_type, canonical_key),
+            ).fetchone()
+        finally:
+            conn.close()
+    return dict(row) if row else None
+
+
+def set_claim_canonical_key(claim_id: int, canonical_key: str) -> None:
+    """Backfill-only setter (2026-08-04) - insert_claim sets canonical_key
+    at creation time for every NEW claim; this updates an EXISTING row
+    for workgraph_claims_backfill.backfill_canonical_keys_and_merge_
+    duplicates, which computes canonical_key for claims that predate this
+    feature. Deliberately not a general-purpose claim editor - no other
+    caller should ever change a claim's canonical_key after the fact."""
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute("UPDATE claims SET canonical_key = ? WHERE id = ?", (canonical_key, claim_id))
+        finally:
+            conn.close()
+
+
 def insert_claim(
     *, issue_id: str, raw_item_id: int, claim_type: str, text: str,
     author: str, author_basis: str, owner: Optional[str] = None,
     date_kind: Optional[str] = None, ts: Optional[float] = None,
+    canonical_key: Optional[str] = None,
 ) -> int:
     now = ts if ts is not None else time.time()
     with _lock:
@@ -5587,10 +5682,10 @@ def insert_claim(
             cur = conn.execute(
                 """INSERT INTO claims
                    (issue_id, raw_item_id, claim_type, text, author, author_basis,
-                    owner, date_kind, status, first_seen_ts, last_seen_ts)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)""",
+                    owner, date_kind, status, first_seen_ts, last_seen_ts, canonical_key)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)""",
                 (issue_id, raw_item_id, claim_type, text, author, author_basis,
-                 owner, date_kind, now, now),
+                 owner, date_kind, now, now, canonical_key),
             )
             claim_id = cur.lastrowid
             conn.execute(
@@ -5676,19 +5771,26 @@ def update_claim_status(claim_id: int, status: str, *, actor: str, superseded_by
 
 
 def log_claim_event(claim_id: int, event_type: str, *, actor: str, note: Optional[str] = None,
-                     ts: Optional[float] = None) -> int:
+                     ts: Optional[float] = None, raw_item_id: Optional[int] = None) -> int:
     """Design doc Section 12.3's right-sized event log - 5 real event types
     (create/escalate/acknowledge/complete/dismiss), each with a real,
     deterministic producer in workgraph_claims.py, not the Blueprint's full
     14-type taxonomy (no current producer for the other 9 - a named,
-    deliberate gap, not silently dropped)."""
+    deliberate gap, not silently dropped).
+
+    raw_item_id (2026-08-04, provenance fix): claims.raw_item_id is fixed
+    at creation and never updated, so a claim touched by several later
+    repeat messages had no record of which raw_item caused each individual
+    touch. Every real call site now passes the raw_item that triggered
+    this specific event - optional only for the handful of callers (tests,
+    mostly) with no real raw_item context."""
     now = ts if ts is not None else time.time()
     with _lock:
         conn = _connect()
         try:
             cur = conn.execute(
-                "INSERT INTO claim_events (claim_id, event_type, ts, actor, note) VALUES (?, ?, ?, ?, ?)",
-                (claim_id, event_type, now, actor, note),
+                "INSERT INTO claim_events (claim_id, event_type, ts, actor, note, raw_item_id) VALUES (?, ?, ?, ?, ?, ?)",
+                (claim_id, event_type, now, actor, note, raw_item_id),
             )
             return cur.lastrowid
         finally:

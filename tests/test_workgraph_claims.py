@@ -209,6 +209,143 @@ def test_ask_without_matching_repeat_signal_inserts_new_claim(ws_db):
     assert len(wc.list_open_claims_for_issue(iid, claim_type="ask")) == 2
 
 
+# --- canonical_key_for_claim (2026-08-04, canonical claim dedup) -----------
+
+def test_canonical_key_prefers_structured_reference():
+    key = wc.canonical_key_for_claim("ask", "Please approve PR1161567 by Friday", "counterparty", "PR1161567")
+    assert key == "ask|approve|PR1161567|counterparty"
+
+
+def test_canonical_key_falls_back_to_generic_action_family_when_no_keyword_matches():
+    key = wc.canonical_key_for_claim("ask", "Please look into this soon", "counterparty", "PR1161567")
+    assert key == "ask|generic|PR1161567|counterparty"
+
+
+def test_canonical_key_without_reference_uses_conservative_normalization():
+    key = wc.canonical_key_for_claim("ask", "Please send the signed SOW by Friday", None, None)
+    assert key is not None
+    assert key.startswith("ask|text:")
+    assert "send" in key and "signed" in key and "sow" in key and "friday" in key
+
+
+def test_canonical_key_strips_greeting_and_reminder_boilerplate_only():
+    with_boilerplate = wc.canonical_key_for_claim(
+        "ask", "Hi Marc, this is a friendly reminder: please send the signed SOW. Thanks!", None, None)
+    without_boilerplate = wc.canonical_key_for_claim("ask", "please send the signed SOW", None, None)
+    assert with_boilerplate == without_boilerplate
+
+
+def test_canonical_key_preserves_negation_numbers_and_amounts():
+    key = wc.canonical_key_for_claim("ask", "The $50,000 invoice was NOT approved on 2026-08-01", None, None)
+    assert "not" in key
+    assert "50" in key and "000" in key
+    assert "2026" in key
+
+
+def test_canonical_key_returns_none_for_too_short_normalized_text():
+    assert wc.canonical_key_for_claim("ask", "ok thanks", None, None) is None
+
+
+def test_canonical_key_different_reference_ids_never_collapse():
+    key_a = wc.canonical_key_for_claim("ask", "Please approve this PO", "counterparty", "PR1000001")
+    key_b = wc.canonical_key_for_claim("ask", "Please approve this PO", "counterparty", "PR2000002")
+    assert key_a != key_b
+
+
+# --- materialize_claims_for_raw_item: canonical_key dedup fallback --------
+
+def test_canonical_key_dedup_fires_when_repeat_signals_misses_reference_reminder(ws_db):
+    """Real production shape: the SAME Ariba PR reminder re-sent with
+    DIFFERENT wording (so byte-exact repeat_signals never matches), but
+    around the identical reference ID - must dedup via canonical_key, not
+    insert a second open claim."""
+    iid = _issue(ws_db)
+    rid1 = _raw_item(ws_db, iid, "cd1", {"asks": ["Please approve PR1161567 at your earliest convenience"]},
+                      direction="inbound")
+    conn = ws_db._connect()
+    conn.execute("UPDATE raw_items SET pr_number_base = 'PR1161567' WHERE id = ?", (rid1,))
+    conn.close()
+    wc.materialize_claims_for_raw_item(rid1)
+
+    rid2 = _raw_item(ws_db, iid, "cd2", {"asks": ["REMINDER: please approve PR1161567 - still pending"]},
+                      direction="inbound")
+    conn = ws_db._connect()
+    conn.execute("UPDATE raw_items SET pr_number_base = 'PR1161567' WHERE id = ?", (rid2,))
+    conn.close()
+    inserted = wc.materialize_claims_for_raw_item(rid2)
+
+    claims = wc.list_open_claims_for_issue(iid, claim_type="ask")
+    assert inserted == 0
+    assert len(claims) == 1
+
+
+def test_canonical_key_dedup_does_not_downgrade_existing_escalation(ws_db):
+    """A claim already escalated=1 via a real repeat_signals hit must NOT
+    be silently reset to escalated=0 just because a LATER repeat lands via
+    the canonical_key fallback instead (which carries no escalation info
+    of its own)."""
+    iid = _issue(ws_db)
+    rid1 = _raw_item(ws_db, iid, "esc1", {"asks": ["Please approve PR1161567"]}, direction="inbound")
+    conn = ws_db._connect()
+    conn.execute("UPDATE raw_items SET pr_number_base = 'PR1161567' WHERE id = ?", (rid1,))
+    conn.close()
+    wc.materialize_claims_for_raw_item(rid1)
+
+    rid2 = _raw_item(ws_db, iid, "esc2", {
+        "asks": ["Please approve PR1161567"],
+        "repeat_signals": [{"ask_text": "Please approve PR1161567", "days_since_first_ask": 3,
+                             "escalated": True, "escalation_note": "third time asking"}],
+    }, direction="inbound")
+    conn = ws_db._connect()
+    conn.execute("UPDATE raw_items SET pr_number_base = 'PR1161567' WHERE id = ?", (rid2,))
+    conn.close()
+    wc.materialize_claims_for_raw_item(rid2)
+
+    rid3 = _raw_item(ws_db, iid, "esc3", {"asks": ["REMINDER: PR1161567 still needs approval"]}, direction="inbound")
+    conn = ws_db._connect()
+    conn.execute("UPDATE raw_items SET pr_number_base = 'PR1161567' WHERE id = ?", (rid3,))
+    conn.close()
+    wc.materialize_claims_for_raw_item(rid3)
+
+    claims = wc.list_open_claims_for_issue(iid, claim_type="ask")
+    assert len(claims) == 1
+    assert claims[0]["escalated"] == 1
+    assert claims[0]["escalation_note"] == "third time asking"
+
+
+def test_new_claim_gets_a_canonical_key_set_on_insert(ws_db):
+    iid = _issue(ws_db)
+    rid = _raw_item(ws_db, iid, "ck1", {"asks": ["Please approve PR1161567"]}, direction="inbound")
+    conn = ws_db._connect()
+    conn.execute("UPDATE raw_items SET pr_number_base = 'PR1161567' WHERE id = ?", (rid,))
+    conn.close()
+    wc.materialize_claims_for_raw_item(rid)
+
+    claims = wc.list_open_claims_for_issue(iid, claim_type="ask")
+    assert claims[0]["canonical_key"] == "ask|approve|PR1161567|marc"
+
+
+def test_claim_events_record_raw_item_id_provenance_on_create_and_touch(ws_db):
+    iid = _issue(ws_db)
+    rid1 = _raw_item(ws_db, iid, "prov1", {"asks": ["Please approve PR1161567"]}, direction="inbound")
+    conn = ws_db._connect()
+    conn.execute("UPDATE raw_items SET pr_number_base = 'PR1161567' WHERE id = ?", (rid1,))
+    conn.close()
+    wc.materialize_claims_for_raw_item(rid1)
+    claim = wc.list_open_claims_for_issue(iid, claim_type="ask")[0]
+
+    rid2 = _raw_item(ws_db, iid, "prov2", {"asks": ["REMINDER: approve PR1161567"]}, direction="inbound")
+    conn = ws_db._connect()
+    conn.execute("UPDATE raw_items SET pr_number_base = 'PR1161567' WHERE id = ?", (rid2,))
+    conn.close()
+    wc.materialize_claims_for_raw_item(rid2)
+
+    events = ws_db.list_claim_events_for_claim(claim["id"])
+    raw_item_ids = [e["raw_item_id"] for e in events]
+    assert rid1 in raw_item_ids
+    assert rid2 in raw_item_ids
+
+
 # --- claims_revision (Section 9.5) --------------------------------------
 
 def test_claims_revision_bumps_on_insert(ws_db):

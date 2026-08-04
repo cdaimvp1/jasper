@@ -98,6 +98,113 @@ def test_backfill_evidence_fts_skips_items_with_no_text(ws_db):
     assert stats["indexed"] == 0
 
 
+# --- backfill_canonical_keys_and_merge_duplicates (2026-08-04) -----------
+#
+# These simulate LEGACY data that predates canonical_key (two separate
+# open claims, canonical_key=NULL on both) by inserting claims directly
+# via ws_db.insert_claim rather than through materialize_claims_for_raw_
+# item - which, after this same fix, now prevents this exact duplication
+# from ever happening to NEW data (see test_workgraph_claims.py's own
+# canonical-key-dedup-fallback tests for that live-path coverage). The
+# backfill's job is specifically to clean up what already existed before
+# the fix shipped.
+
+def _legacy_duplicate_claim(ws_db, issue_id, key, reference, text, direction="inbound"):
+    rid = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key=key, thread_key=key, dedupe_key=key,
+        occurred_ts=time.time(), subject="s", from_actor="a@example.com", participants_json="[]",
+    )
+    ws_db.link_raw_item_to_issue(rid, issue_id)
+    conn = ws_db._connect()
+    conn.execute("UPDATE raw_items SET pr_number_base = ?, direction = ? WHERE id = ?", (reference, direction, rid))
+    conn.commit()
+    conn.close()
+    author = "counterparty" if direction == "inbound" else "marc"
+    owner = "marc" if author == "counterparty" else "counterparty"
+    claim_id = ws_db.insert_claim(
+        issue_id=issue_id, raw_item_id=rid, claim_type="ask", text=text,
+        author=author, author_basis="direction", owner=owner,
+    )
+    return rid, claim_id
+
+
+def test_backfill_merges_pre_existing_duplicate_group_missed_by_repeat_signals(ws_db):
+    """Simulates a real pre-existing duplicate group (both claims already
+    materialized with NO canonical_key, matching data that predates this
+    feature) - the backfill must compute canonical_key for both and merge
+    them into one open claim."""
+    iid = _issue(ws_db, "Disputed PR")
+    _legacy_duplicate_claim(ws_db, iid, "dup1a", "PR1161567", "Please approve PR1161567 at your earliest convenience")
+    _legacy_duplicate_claim(ws_db, iid, "dup1b", "PR1161567", "REMINDER: please approve PR1161567 - still pending")
+    before = ws_db.list_open_claims_for_issue(iid, claim_type="ask")
+    assert len(before) == 2  # confirmed real gap: both inserted, no canonical_key yet
+
+    result = backfill.backfill_canonical_keys_and_merge_duplicates()
+
+    assert result["groups_merged"] == 1
+    assert result["claims_absorbed"] == 1
+    after = ws_db.list_open_claims_for_issue(iid, claim_type="ask")
+    assert len(after) == 1
+
+
+def test_backfill_keeps_the_earliest_claim_as_canonical(ws_db):
+    iid = _issue(ws_db, "Disputed PR 2")
+    _rid_a, claim_a = _legacy_duplicate_claim(ws_db, iid, "dup2a", "PR1170816", "Please approve PR1170816")
+    _rid_b, _claim_b = _legacy_duplicate_claim(ws_db, iid, "dup2b", "PR1170816", "REMINDER: approve PR1170816 please")
+
+    result = backfill.backfill_canonical_keys_and_merge_duplicates()
+
+    after = ws_db.list_open_claims_for_issue(iid, claim_type="ask")
+    assert len(after) == 1
+    assert after[0]["id"] == claim_a  # claim_a was inserted first, so it's the earliest by first_seen_ts
+    assert result["merges"][0]["canonical_claim_id"] == claim_a
+
+
+def test_backfill_is_idempotent_second_run_merges_nothing(ws_db):
+    iid = _issue(ws_db, "Disputed PR 3")
+    _legacy_duplicate_claim(ws_db, iid, "dup3a", "PR1169904", "Please approve PR1169904")
+    _legacy_duplicate_claim(ws_db, iid, "dup3b", "PR1169904", "REMINDER: PR1169904 needs approval")
+
+    first = backfill.backfill_canonical_keys_and_merge_duplicates()
+    second = backfill.backfill_canonical_keys_and_merge_duplicates()
+
+    assert first["groups_merged"] == 1
+    assert second["groups_merged"] == 0
+    assert second["claims_absorbed"] == 0
+
+
+def test_backfill_does_not_merge_claims_with_disjoint_references(ws_db):
+    iid = _issue(ws_db, "Two different POs")
+    _legacy_duplicate_claim(ws_db, iid, "dup4a", "PR854779-V4", "Please approve PR854779-V4")
+    _legacy_duplicate_claim(ws_db, iid, "dup4b", "PR854779-V4", "Please approve PR854779-V4 amendment")
+    _legacy_duplicate_claim(ws_db, iid, "dup4c", "PR999999999", "Please approve PR999999999 as well")
+
+    result = backfill.backfill_canonical_keys_and_merge_duplicates()
+
+    after = ws_db.list_open_claims_for_issue(iid, claim_type="ask")
+    assert len(after) == 2  # the PR854779-V4 pair merged; the disjoint PR999999999 claim stands alone
+    assert result["groups_merged"] == 1
+    assert result["claims_absorbed"] == 1
+
+
+def test_backfill_absorbed_claim_marked_superseded_with_audit_trail(ws_db):
+    iid = _issue(ws_db, "Audit trail")
+    _rid_a, claim_a = _legacy_duplicate_claim(ws_db, iid, "dup5a", "PR1161567", "Please approve PR1161567")
+    _rid_b, claim_b = _legacy_duplicate_claim(ws_db, iid, "dup5b", "PR1161567", "REMINDER: approve PR1161567")
+
+    result = backfill.backfill_canonical_keys_and_merge_duplicates()
+
+    canonical_id = result["merges"][0]["canonical_claim_id"]
+    absorbed_ids = result["merges"][0]["absorbed_claim_ids"]
+    assert canonical_id == claim_a
+    assert absorbed_ids == [claim_b]
+    events = ws_db.list_claim_events_for_claim(claim_b)
+    assert any(e["event_type"] == "acknowledge" and str(canonical_id) in (e["note"] or "") for e in events)
+    absorbed_claim = ws_db.get_claim(claim_b)
+    assert absorbed_claim["status"] == "superseded"
+    assert absorbed_claim["superseded_by"] == canonical_id
+
+
 def test_run_backfill_daily_if_due_returns_none_on_second_call_same_day(ws_db, monkeypatch):
     import workgraph_claims_backfill as b
     monkeypatch.setattr(b, "ws", ws_db)

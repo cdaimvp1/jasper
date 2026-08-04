@@ -32,14 +32,126 @@ asks-only, a real gap found while reading the current extraction contract) -
 any claim whose text repeat_signals names as a restatement of an existing
 OPEN claim of the same type updates that claim in place instead of
 inserting a second one.
+
+Canonical-key dedup (2026-08-04, architecture-review follow-up P1): a real
+fallback for when repeat_signals' byte-exact match fails, but the claim is
+still genuinely a restatement - confirmed live: the SAME Ariba PR reminder
+re-sent with slightly different wording around an identical reference ID
+(PR1161567/PR1170816/PR1169904/PR854779-V4 all real live duplicate groups).
+See canonical_key_for_claim's own docstring for the exact rule (structured
+reference preferred; conservative text normalization only as a fallback;
+deliberately no fuzzy/embedding similarity anywhere).
 """
 from __future__ import annotations
 
+import re
+import unicodedata
 from typing import Optional
 
 import workgraph_store as ws
 
 _OTHER_SIDE = {"marc": "counterparty", "counterparty": "marc", "unknown": "unknown"}
+
+# Finite action-family keyword table (2026-08-04) - deliberately small and
+# closed, not a learned/fuzzy classifier: these are the verbs that actually
+# recur across real procurement correspondence (approve/sign/pay a PO,
+# review/confirm/respond-to a document, send a deliverable). Word-stem
+# patterns, not bare substrings - "approval"/"approved"/"approving" must
+# all match the SAME "approve" family as "approve" itself, or two real
+# messages about the identical PR ("please approve PR1161567" vs "PR1161567
+# still needs approval") would get DIFFERENT canonical keys and silently
+# fail to dedup, defeating the whole point of preferring the structured-
+# reference tier. A claim whose text matches none of these still gets a
+# canonical_key (via the reference-only or conservative-normalization
+# paths below) - this only sharpens the structured-reference key when a
+# real action word is present.
+_ACTION_FAMILY_PATTERNS = (
+    ("approve", re.compile(r"\bapprov\w*\b")),
+    ("review", re.compile(r"\breview\w*\b")),
+    ("sign", re.compile(r"\bsign\w*\b")),
+    ("send", re.compile(r"\bsen[dt]\w*\b")),
+    ("pay", re.compile(r"\bpa(?:y|id|ying)\w*\b")),
+    ("respond", re.compile(r"\brespon[ds]\w*\b")),
+    ("confirm", re.compile(r"\bconfirm\w*\b")),
+)
+
+
+def _action_family_for_text(text: str) -> Optional[str]:
+    lowered = text.lower()
+    for family, pattern in _ACTION_FAMILY_PATTERNS:
+        if pattern.search(lowered):
+            return family
+    return None
+
+
+# Conservative boilerplate the normalization path strips - ONLY greeting/
+# sign-off/reminder-framing phrases, never a word that could carry real
+# content (negation, numbers, dates, amounts, supplier names, and the
+# actual ask/decision/commitment text all survive this untouched).
+_BOILERPLATE_RE = re.compile(
+    r"\b(please\s+(?:be\s+)?(?:advised|note|find)|kind(?:ly)?\s+(?:note|reminder)|"
+    r"this\s+is\s+a\s+(?:friendly\s+)?reminder|reminder\s*:?|"
+    r"dear\s+\w+|hi\s+\w+|hello\s+\w+|thanks?(?:\s+(?:you|so\s+much))?|"
+    r"regards|best\s+regards|sincerely)\b",
+    re.IGNORECASE,
+)
+# Keeps word characters, whitespace, and the handful of symbols that carry
+# real meaning in this domain - $/% for amounts, . and - for dates/decimals/
+# negative numbers. Every other punctuation mark collapses to a space.
+_NORMALIZE_STRIP_RE = re.compile(r"[^\w\s.$%-]")
+_WHITESPACE_RE = re.compile(r"\s+")
+# Below this length a normalized string is too generic to trust as a dedup
+# key on its own (e.g. "ok" or "yes") - same trust-floor discipline as
+# workgraph_projects.MIN_TOPIC_KEY_LEN for topic-key matching.
+_MIN_NORMALIZED_LEN = 8
+
+
+_SENTENCE_ENDING_PERIOD_RE = re.compile(r"\.(?=\s|$)")
+
+
+def _conservative_normalize(text: str) -> str:
+    """Unicode-normalize, lowercase, strip ONLY greeting/reminder
+    boilerplate phrases and punctuation - never a fuzzy similarity
+    transform. See this module's own docstring for why no embedding/
+    fuzzy-match step exists anywhere in this pass."""
+    normalized = unicodedata.normalize("NFKC", text).lower()
+    normalized = _BOILERPLATE_RE.sub(" ", normalized)
+    normalized = _NORMALIZE_STRIP_RE.sub(" ", normalized)
+    # A period ending a sentence/word ("SOW." / "Thanks!") carries no
+    # meaning worth preserving - unlike one BETWEEN digits (a decimal, e.g.
+    # "2.5"), which _NORMALIZE_STRIP_RE already left untouched above.
+    normalized = _SENTENCE_ENDING_PERIOD_RE.sub("", normalized)
+    return _WHITESPACE_RE.sub(" ", normalized).strip()
+
+
+def canonical_key_for_claim(claim_type: str, text: str, owner: Optional[str],
+                             reference_base: Optional[str]) -> Optional[str]:
+    """The fallback dedup key checked after repeat_signals' byte-exact
+    match fails (see materialize_claims_for_raw_item). Two tiers, most-
+    trusted first:
+
+    (1) A definitive reference (the producing raw_item's own real,
+    structured PR/PO base - see reference_base's caller) is materially
+    safer than any text comparison: "ask|approve|PR1161567|marc" ties the
+    claim to a real identifier, not wording. Combined with the finite
+    action-family keyword table above (falls back to "generic" if no
+    keyword matches) and owner, scoped to claim_type by the caller's own
+    (issue_id, claim_type) lookup.
+
+    (2) Without a definitive reference, ONLY a conservative normalization
+    of the claim text itself (Unicode-normalize/lowercase/strip boilerplate/
+    collapse punctuation) - deliberately no fuzzy similarity or embeddings
+    anywhere in this function, per this module's own docstring. Returns
+    None (no fallback key at all) when the normalized text falls below
+    _MIN_NORMALIZED_LEN - a key too generic to trust is worse than no key,
+    since a false merge silently loses a real, distinct claim."""
+    if reference_base:
+        action_family = _action_family_for_text(text) or "generic"
+        return f"{claim_type}|{action_family}|{reference_base}|{owner or 'unknown'}"
+    normalized = _conservative_normalize(text)
+    if len(normalized) < _MIN_NORMALIZED_LEN:
+        return None
+    return f"{claim_type}|text:{normalized}"
 
 
 def _resolve_author(raw_item: dict) -> tuple[str, str]:
@@ -95,6 +207,7 @@ def materialize_claims_for_raw_item(raw_item_id: int) -> int:
     ts = extraction.get("extracted_ts")
 
     author, author_basis = _resolve_author(raw_item)
+    reference_base = raw_item.get("pr_number_base")
     inserted = 0
 
     for field, claim_type in (("asks", "ask"), ("decisions", "decision"), ("commitments", "commitment")):
@@ -106,37 +219,55 @@ def materialize_claims_for_raw_item(raw_item_id: int) -> int:
                 continue
             text = text.strip()
             owner = _derive_owner(claim_type, author)
+            canonical_key = canonical_key_for_claim(claim_type, text, owner, reference_base)
 
             # Section 9.3's real gap fix: repeat_signals now covers
             # commitments/decisions too, not just asks - same dedup rule,
             # widened scope, not a second mechanism.
             repeat = _matching_repeat_signal(blob, text)
-            if repeat is not None:
-                existing = ws.find_open_claim_by_text(issue_id, claim_type, text)
-                if existing is not None:
-                    escalated = bool(repeat.get("escalated"))
-                    ws.touch_claim(
-                        existing["id"], ts=ts, escalated=escalated,
-                        escalation_note=repeat.get("escalation_note"),
-                    )
-                    # Section 12.3's right-sized event log: a repeat is real
-                    # signal either way - escalated means the same ask/
-                    # commitment/decision got worse (a new sender, more
-                    # senior), not-escalated means it's just still open and
-                    # someone said so again. Both are worth a real event,
-                    # not just the silent last_seen_ts bump touch_claim
-                    # already does.
-                    ws.log_claim_event(
-                        existing["id"], "escalate" if escalated else "acknowledge",
-                        actor="curator", note=repeat.get("escalation_note"), ts=ts,
-                    )
-                    continue
+            existing = ws.find_open_claim_by_text(issue_id, claim_type, text) if repeat is not None else None
+            # 2026-08-04 fallback: repeat_signals requires curator to have
+            # volunteered an exact-text match AND find_open_claim_by_text to
+            # confirm it byte-for-byte - real production duplicates (the
+            # same Ariba PR reminder re-sent with slightly different
+            # wording) pass through both checks untouched. canonical_key
+            # (structured-reference-preferred, conservative-normalization
+            # fallback - see canonical_key_for_claim's own docstring) is a
+            # second, independent dedup path, checked only when the first
+            # one didn't already find something.
+            if existing is None and canonical_key is not None:
+                existing = ws.find_open_claim_by_canonical_key(issue_id, claim_type, canonical_key)
+            if existing is not None:
+                # Only apply escalation state when repeat_signals actually
+                # said something about it - escalated=None on touch_claim
+                # means "just update last_seen_ts," never silently
+                # downgrading a claim's existing escalated=1 back to 0 just
+                # because THIS particular repeat came in via the
+                # canonical_key fallback instead of repeat_signals.
+                escalated = bool(repeat.get("escalated")) if repeat is not None else None
+                escalation_note = repeat.get("escalation_note") if repeat is not None else None
+                ws.touch_claim(existing["id"], ts=ts, escalated=escalated, escalation_note=escalation_note)
+                # Section 12.3's right-sized event log: a repeat is real
+                # signal either way - escalated means the same ask/
+                # commitment/decision got worse (a new sender, more
+                # senior), not-escalated means it's just still open and
+                # someone said so again. Both are worth a real event, not
+                # just the silent last_seen_ts bump touch_claim already
+                # does. raw_item_id (2026-08-04): the ONE record of which
+                # specific message caused THIS touch - claims.raw_item_id
+                # only ever remembers the first one.
+                ws.log_claim_event(
+                    existing["id"], "escalate" if escalated else "acknowledge",
+                    actor="curator", note=escalation_note, ts=ts, raw_item_id=raw_item_id,
+                )
+                continue
 
             claim_id = ws.insert_claim(
                 issue_id=issue_id, raw_item_id=raw_item_id, claim_type=claim_type,
                 text=text, author=author, author_basis=author_basis, owner=owner, ts=ts,
+                canonical_key=canonical_key,
             )
-            ws.log_claim_event(claim_id, "create", actor="curator", ts=ts)
+            ws.log_claim_event(claim_id, "create", actor="curator", ts=ts, raw_item_id=raw_item_id)
             inserted += 1
 
     dates_mentioned = blob.get("dates_mentioned")
@@ -148,12 +279,13 @@ def materialize_claims_for_raw_item(raw_item_id: int) -> int:
             continue
         date_kind = entry.get("kind") if entry.get("kind") in ("hard", "soft") else None
         owner = _derive_owner("date", author, whose=entry.get("whose"))
+        canonical_key = canonical_key_for_claim("date", text, owner, reference_base)
         claim_id = ws.insert_claim(
             issue_id=issue_id, raw_item_id=raw_item_id, claim_type="date",
             text=text, author=author, author_basis=author_basis, owner=owner,
-            date_kind=date_kind, ts=ts,
+            date_kind=date_kind, ts=ts, canonical_key=canonical_key,
         )
-        ws.log_claim_event(claim_id, "create", actor="curator", ts=ts)
+        ws.log_claim_event(claim_id, "create", actor="curator", ts=ts, raw_item_id=raw_item_id)
         inserted += 1
 
     # Fixed 2026-08-04 (architecture-review follow-up, P1): a key_fact is

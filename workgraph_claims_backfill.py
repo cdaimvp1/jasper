@@ -15,6 +15,17 @@ for Phase 3 (design doc Section 9):
                               historical corpus). Idempotent per raw_item
                               (workgraph_store.index_evidence_fts deletes
                               then re-inserts).
+  backfill_canonical_keys_and_merge_duplicates() — one-time cleanup
+                              (2026-08-04) for canonical claim dedup: backs
+                              every existing OPEN claim with a canonical_key
+                              and merges pre-existing duplicate groups the
+                              byte-exact repeat_signals dedup missed.
+                              Idempotent, but deliberately NOT wired into
+                              run_backfill_daily_if_due below - new
+                              duplicates are already prevented at write time
+                              by materialize_claims_for_raw_item's own
+                              canonical_key fallback, so there's nothing new
+                              for a daily re-run of this to find.
 
 Same "one-time backfill, then a daily-if-due sweep for anything that landed
 since" shape as workgraph_identity.backfill_identity_anchors /
@@ -58,6 +69,87 @@ def backfill_claims(*, limit: int | None = None) -> dict:
         "claims_inserted": inserted,
         "already_materialized": skipped_already_materialized,
         "skipped_no_issue_id": skipped_no_issue,
+    }
+
+
+def backfill_canonical_keys_and_merge_duplicates() -> dict:
+    """One-time (and safely re-runnable) backfill for canonical claim
+    deduplication (2026-08-04, architecture-review follow-up P1):
+
+    (1) computes canonical_key for every OPEN claim that doesn't have one
+    yet, via workgraph_claims.canonical_key_for_claim, using the claim's
+    own producing raw_item's real pr_number_base when one exists.
+
+    (2) groups OPEN claims by (issue_id, claim_type, canonical_key) and,
+    for every group with more than one member, keeps the EARLIEST
+    (first_seen_ts) as the real canonical claim and marks the rest
+    status='superseded' (superseded_by=<canonical id>) - never a delete,
+    same reversible-bookkeeping convention as every other resolution in
+    this codebase (expire_stale_project_suggestions, etc). Real known live
+    duplicate groups this closes: the same Ariba PR reminder re-sent with
+    different wording around PR1161567/PR1170816/PR1169904/PR854779-V4.
+
+    Deliberately idempotent: a claim that already has a canonical_key is
+    skipped in step 1 (not recomputed), and an already-'superseded' claim
+    is excluded from list_all_open_claims entirely - re-running this after
+    a first clean pass finds nothing left to merge. Per the design's own
+    sequencing requirement, this must run and be verified clean BEFORE any
+    uniqueness could ever be considered on (issue_id, claim_type,
+    canonical_key) - see workgraph_store's own schema comment for why no
+    such constraint exists yet."""
+    claims = ws.list_all_open_claims()
+    computed = 0
+    for claim in claims:
+        if claim.get("canonical_key"):
+            continue
+        raw_item = ws.get_raw_item(claim["raw_item_id"])
+        reference_base = (raw_item or {}).get("pr_number_base")
+        canonical_key = workgraph_claims.canonical_key_for_claim(
+            claim["claim_type"], claim["text"], claim.get("owner"), reference_base,
+        )
+        if canonical_key is None:
+            continue
+        ws.set_claim_canonical_key(claim["id"], canonical_key)
+        claim["canonical_key"] = canonical_key
+        computed += 1
+
+    groups: dict = {}
+    for claim in claims:
+        key = claim.get("canonical_key")
+        if not key:
+            continue
+        groups.setdefault((claim["issue_id"], claim["claim_type"], key), []).append(claim)
+
+    groups_merged = 0
+    claims_absorbed = 0
+    merges = []
+    for (issue_id, _claim_type, _key), members in groups.items():
+        if len(members) < 2:
+            continue
+        members.sort(key=lambda c: c["first_seen_ts"])
+        canonical = members[0]
+        duplicates = members[1:]
+        groups_merged += 1
+        for dup in duplicates:
+            ws.update_claim_status(dup["id"], "superseded", actor="system", superseded_by=canonical["id"])
+            ws.log_claim_event(
+                dup["id"], "acknowledge", actor="system",
+                note=f"merged into canonical claim #{canonical['id']} (canonical_key backfill)",
+                raw_item_id=dup["raw_item_id"],
+            )
+            claims_absorbed += 1
+        ws.touch_claim(canonical["id"], ts=max(c["last_seen_ts"] for c in members))
+        merges.append({
+            "issue_id": issue_id, "canonical_claim_id": canonical["id"],
+            "absorbed_claim_ids": [c["id"] for c in duplicates],
+        })
+
+    return {
+        "open_claims_scanned": len(claims),
+        "canonical_keys_computed": computed,
+        "groups_merged": groups_merged,
+        "claims_absorbed": claims_absorbed,
+        "merges": merges,
     }
 
 

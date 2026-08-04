@@ -2043,6 +2043,24 @@ async def api_issue_assign_project(issue_id: str, body: IssueProjectBody):
     return JSONResponse({"ok": True, "issue": sanitize_surrogates(wg.get_issue(issue_id))})
 
 
+class IssueSplitBody(BaseModel):
+    reason: Optional[str] = None
+
+
+@app.post("/api/workgraph/issues/{issue_id}/split")
+async def api_issue_split_from_project(issue_id: str, body: IssueSplitBody):
+    """Task #178 - the safety-valve counterpart to the more aggressive
+    matching model this grouping-v3 phase builds. Unlike the bare /project
+    route above (which the auto-grouper itself also calls), this is the
+    Marc-facing 'this grouping was wrong, undo it' action: detaches the
+    issue AND durably vetoes it from auto-re-merging with the same project's
+    current members (workgraph_projects.split_issue_from_project)."""
+    if wg.get_issue(issue_id) is None:
+        raise HTTPException(404, f"no such issue: {issue_id}")
+    result = workgraph_projects.split_issue_from_project(issue_id, actor="marc", reason=body.reason)
+    return JSONResponse({"ok": True, "result": result})
+
+
 MAX_GROUPING_SUGGESTIONS_PER_WAKE = 12
 
 

@@ -2400,6 +2400,8 @@ table.pcc-table .row-desc{font-size:11.5px;color:var(--mut);margin-top:2px}
 .conf-pill.low{background:var(--pink-t);color:var(--red)}
 .nba-why{display:flex;flex-wrap:wrap;gap:5px}
 .why-chip{font-family:var(--mono);font-size:9.5px;font-weight:600;padding:2px 8px;border-radius:20px;background:var(--bg);border:1px solid var(--line);color:var(--mut2)}
+.pcc-linkbtn{font-family:var(--sans);font-size:11px;font-weight:600;color:var(--mut2);background:none;border:none;padding:0;cursor:pointer;text-decoration:underline;text-decoration-color:var(--line2)}
+.pcc-linkbtn:hover{color:var(--ink)}
 .abstain{display:flex;align-items:flex-start;gap:9px;background:var(--ai-t);border:1px solid var(--line2);border-radius:12px;padding:13px 15px;margin-bottom:14px}
 .abstain .sp{color:var(--ai);font-weight:800;flex:none;font-size:14px;line-height:1.3}
 .abstain-head{margin:0 0 7px;font-weight:800;color:var(--ink);font-size:13px}
@@ -7760,6 +7762,7 @@ html[data-theme="dark"]{
           <div class="pcc-meta-line">
             ${(issue.reference_ids || []).map(r => `<span class="pcc-deadline-badge" style="background:var(--bg);color:var(--mut2)">${pccEsc(r)}</span>`).join("")}
             ${metaLine}
+            ${project ? `<button type="button" class="pcc-linkbtn" style="margin-left:8px" onclick="pccSplitIssueFromProject('${pccEsc(issue.id)}', '${pccEsc(project.name)}')">Split off from project</button>` : ""}
           </div>
           ${learnedHtml}
           ${precedentHtml}
@@ -8045,6 +8048,22 @@ html[data-theme="dark"]{
       pccSelectIssue(issueId);
     }
   }
+  // Task #178: the safety-valve counterpart to grouping v3's more
+  // aggressive matching model - Marc's own "yes you'd need to be able to
+  // split them out again/reverse it if it is wrong... but still". Unlike
+  // pccRunDeterministic (issue STATE), this changes issue MEMBERSHIP - a
+  // distinct action, so it gets its own dispatcher rather than overloading
+  // that one's act switch.
+  window.pccSplitIssueFromProject = async function (issueId, projectName) {
+    if (!confirm(`Split this issue back out of "${projectName}"? It becomes standalone again, and won't auto-merge back into that project's current issues.`)) return;
+    await fetch(`/api/workgraph/issues/${encodeURIComponent(issueId)}/split`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}),
+    });
+    delete pccDetailCache[issueId];
+    await pccLoadIssues();
+    pccSelectIssue(issueId);
+  };
+
   async function pccRunGenerative(issueId, actionKind, instructions) {
     // Part E2 (2026-07-30): instructions is optional (undefined/null for
     // every pre-existing caller, unchanged behavior) - used by the new

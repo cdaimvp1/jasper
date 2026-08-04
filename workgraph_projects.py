@@ -1270,6 +1270,65 @@ def backfill_identity_constraints_from_historical_rejections(*, apply: bool = Fa
     }
 
 
+def split_issue_from_project(issue_id: str, *, actor: str = "marc", reason: Optional[str] = None) -> dict:
+    """Task #178 - the safety valve Marc asked for alongside the more
+    aggressive matching model this whole grouping-v3 phase builds ("yes
+    you'd need to be able to split them out again/reverse it if it is
+    wrong... but still"). Detaches ONE issue from its current project and
+    durably vetoes it from drifting straight back in.
+
+    Two things happen, both necessary:
+    1. assign_issue_to_project(issue_id, None) - the issue goes back to
+       being a standalone issue, exactly like one that never matched
+       anything (list_standalone_issue_ids/workgraph_synthesis already
+       treats this as a normal, first-class state).
+    2. A cannot_merge identity_constraint against EVERY other current
+       member of the project being left - not just whichever single
+       sibling originally triggered the grouping. Without this, the very
+       next classify/grouping cycle would just re-score this issue against
+       those same members and merge it right back in, since nothing about
+       the underlying signature changed - only Marc's judgment that the
+       grouping was wrong did. Scoped to the CURRENT members only (not the
+       whole project's future), same reasoning as reject_suggestion's own
+       durable-veto: a wrongly-blocked pair costs nothing (it just can't
+       auto-merge again, still visible as a suggestion a human could
+       force), but a wrongly-allowed one is the exact fragmentation/false-
+       merge problem this phase exists to fix.
+
+    membership_state resets to 'provisional' (reset_work_object_membership_
+    to_provisional) - if this issue lands somewhere else later, that's a
+    NEW grouping nobody has reviewed yet, regardless of whether the OLD one
+    (now reversed) had been confirmed."""
+    issue = ws.get_issue(issue_id)
+    if issue is None:
+        return {"action": "not_found"}
+    old_project_id = issue.get("project_id")
+    if not old_project_id:
+        return {"action": "not_grouped"}
+
+    siblings = [i for i in ws.list_issues_for_project(old_project_id) if i["id"] != issue_id]
+    reason = reason or f"split off from {old_project_id} (Marc reversed an incorrect grouping)"
+    ws.assign_issue_to_project(issue_id, None, reason=reason)
+    ws.reset_work_object_membership_to_provisional(issue_id)
+
+    constraints_created = []
+    for sibling in siblings:
+        if ws.find_identity_constraint("cannot_merge", issue_id, sibling["id"]) is not None:
+            continue
+        ws.create_identity_constraint(
+            "cannot_merge", issue_id, sibling["id"], reason=reason, actor=actor,
+        )
+        constraints_created.append(sibling["id"])
+    ws.invalidate_work_object_signature(issue_id)
+    for sibling in siblings:
+        ws.invalidate_work_object_signature(sibling["id"])
+
+    return {
+        "action": "split", "issue_id": issue_id, "old_project_id": old_project_id,
+        "constraints_created": constraints_created,
+    }
+
+
 def _suggestion_kind_for_scored_signals(matched_signals: list) -> Optional[str]:
     """Regression fix (2026-08-04): maps scored_grouping_decision's
     matched_signals to the same merge-vs-link verdict _strong_signal_match

@@ -2504,6 +2504,26 @@ def confirm_work_object_membership(work_object_id: str) -> None:
             conn.close()
 
 
+def reset_work_object_membership_to_provisional(work_object_id: str) -> None:
+    """Task #178's real producer for the reverse transition confirm_work_
+    object_membership's own docstring said didn't exist yet: workgraph_
+    projects.split_issue_from_project calls this on the issue being split
+    off. Needed because membership_state is a column on the work_object's
+    OWN row, not reset by assign_issue_to_project alone - without this, an
+    issue split out of a wrongly-confirmed project and later auto-grouped
+    into some OTHER, genuinely-unrelated project would keep showing
+    'confirmed' from the OLD grouping, even though nobody has looked at
+    the new one."""
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                "UPDATE work_objects SET membership_state = 'provisional' WHERE id = ?", (work_object_id,)
+            )
+        finally:
+            conn.close()
+
+
 def advance_work_object_exposure_state(work_object_id: str, new_state: str) -> None:
     """Forward-only (design doc Section 12.8's own rule: 'once exposed,
     never silently moved again') - ranked not_exposed < shown_in_project <

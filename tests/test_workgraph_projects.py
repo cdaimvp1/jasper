@@ -2179,3 +2179,71 @@ def test_group_issue_bridge_creates_a_suggestion_per_bridged_project(ws_db, monk
     assert bridged_project_ids == {p1, p2}
     pending = ws_db.list_project_suggestions(status="pending")
     assert len(pending) == 2
+
+
+def test_split_issue_from_project_detaches_and_resets_membership(ws_db):
+    """Task #178: the safety valve Marc asked for alongside the more
+    aggressive matching model. Splitting an issue back out of a project
+    it's confirmed-merged into should leave it standalone again, exactly
+    like an issue that never matched anything."""
+    p1 = ws_db.create_project_with_new_id(name="Project one", category="other")
+    a = _issue(ws_db, "A")
+    b = _issue(ws_db, "B")
+    ws_db.assign_issue_to_project(a, p1)
+    ws_db.assign_issue_to_project(b, p1)
+    ws_db.confirm_work_object_membership(a)
+    ws_db.confirm_work_object_membership(b)
+
+    result = wp.split_issue_from_project(a, reason="wrong merge, different suppliers")
+
+    assert result["action"] == "split"
+    assert result["old_project_id"] == p1
+    assert ws_db.get_issue(a)["project_id"] is None
+    assert ws_db.get_work_object_membership_exposure(a)["membership_state"] == "provisional"
+    # b, left behind, keeps its own confirmed state and project untouched.
+    assert ws_db.get_issue(b)["project_id"] == p1
+    assert ws_db.get_work_object_membership_exposure(b)["membership_state"] == "confirmed"
+
+
+def test_split_issue_from_project_vetoes_re_merge_with_former_members(ws_db):
+    """The detach alone isn't the safety valve - without a durable veto, the
+    very next classify/grouping cycle would just re-score the same
+    signature and merge it right back in. This checks the REAL consumer
+    (compute_work_object_signature's cannot_link_ids, same field
+    _pairwise_score_from_signature's veto reads) not just that a row got
+    written."""
+    p1 = ws_db.create_project_with_new_id(name="Project one", category="other")
+    a = _issue(ws_db, "A")
+    b = _issue(ws_db, "B")
+    ws_db.assign_issue_to_project(a, p1)
+    ws_db.assign_issue_to_project(b, p1)
+
+    result = wp.split_issue_from_project(a)
+
+    assert result["constraints_created"] == [b]
+    assert ws_db.find_identity_constraint("cannot_merge", a, b) is not None
+    sig = wp.compute_work_object_signature(a)
+    assert b in sig["cannot_link_ids"]
+
+
+def test_split_issue_from_project_is_a_noop_on_an_ungrouped_issue(ws_db):
+    a = _issue(ws_db, "A")
+    result = wp.split_issue_from_project(a)
+    assert result["action"] == "not_grouped"
+
+
+def test_split_issue_from_project_skips_existing_constraints(ws_db):
+    """Re-splitting (or splitting after a prior manual constraint already
+    exists between this pair) shouldn't duplicate the identity_constraints
+    row - find_identity_constraint is checked before create, same pattern
+    reject_suggestion already uses."""
+    p1 = ws_db.create_project_with_new_id(name="Project one", category="other")
+    a = _issue(ws_db, "A")
+    b = _issue(ws_db, "B")
+    ws_db.assign_issue_to_project(a, p1)
+    ws_db.assign_issue_to_project(b, p1)
+    ws_db.create_identity_constraint("cannot_merge", a, b, reason="pre-existing", actor="marc")
+
+    result = wp.split_issue_from_project(a)
+
+    assert result["constraints_created"] == []

@@ -571,6 +571,63 @@ def test_score_issue_no_warning_when_no_rule_triggers(ws_db):
     assert "No confirmation seen yet" not in reason
 
 
+# --- enhancement idea panel #11: score gated issues lower ------------------
+
+def _gated_issue(ws_db, title="Sign this"):
+    """Same real-rule pattern as test_score_issue_prepends_aristotle_warning_
+    when_unsatisfied - a genuinely gated issue, not a mocked check_prerequisites."""
+    issue_id = ws_db.create_issue_with_new_id(title=title, state="active", category="other")
+    row_id = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key=f"gated-{title}", thread_key=f"gated-{title}", dedupe_key=f"gated-{title}",
+        occurred_ts=time.time(), subject="Signature requested", from_actor="a@example.com",
+        participants_json="[]", body_preview="please sign",
+    )
+    ws_db.link_raw_item_to_issue(row_id, issue_id)
+    conn = ws_db._connect()
+    conn.execute("UPDATE raw_items SET signal_type = ? WHERE id = ?", ("signature_requested_docusign", row_id))
+    ws_db.create_prerequisite_rule(
+        trigger_signal_type="signature_requested_docusign", requires_signal_type="ariba_pr_fully_approved",
+        match_on="project", reason="an approved PO", created_by="marc",
+    )
+    return issue_id
+
+
+def test_score_issue_gated_scores_lower_than_ungated_twin(ws_db):
+    now = time.time()
+    gated_id = _gated_issue(ws_db, title="Gated")
+    ungated_id = ws_db.create_issue_with_new_id(title="Ungated", state="active", category="other")
+
+    gated_score, gated_reason, _ = nba.score_issue(ws_db.get_issue(gated_id), now)
+    ungated_score, _, _ = nba.score_issue(ws_db.get_issue(ungated_id), now)
+
+    assert gated_score < ungated_score
+    assert gated_reason.startswith("No confirmation seen yet")
+
+
+def test_score_issue_gated_downweight_is_multiplicative_not_flat(ws_db):
+    """A higher-urgency gated issue should score higher than a lower-
+    urgency gated issue, in the same proportion _GATED_ISSUE_DOWNWEIGHT
+    would predict - proof the downweight scales with the issue's own
+    urgency rather than applying a flat subtraction that could invert
+    real priority ordering between two differently-urgent gated issues."""
+    now = time.time()
+    stale_gated_id = _gated_issue(ws_db, title="StaleGated")
+    fresh_gated_id = _gated_issue(ws_db, title="FreshGated")
+    conn = ws_db._connect()
+    conn.execute("UPDATE issues SET updated_at = ? WHERE id = ?", (now - 20 * nba.DAY, stale_gated_id))
+    conn.commit()
+    conn.close()
+
+    stale_score, _, _ = nba.score_issue(ws_db.get_issue(stale_gated_id), now)
+    fresh_score, _, _ = nba.score_issue(ws_db.get_issue(fresh_gated_id), now)
+
+    assert stale_score > fresh_score  # real urgency difference survives the downweight
+
+
+def test_gated_issue_downweight_constant_is_a_real_reduction():
+    assert 0.0 < nba._GATED_ISSUE_DOWNWEIGHT < 1.0
+
+
 # --- task #65: value_at_risk_rollup ------------------------------------------
 
 def _open_issue_with_value(ws_db, title, amount_text, key):

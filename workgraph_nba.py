@@ -364,6 +364,13 @@ def snooze_history_from_state_history(state_history: list[dict]) -> list[dict]:
 _SNOOZE_BOOST_PER_COUNT = 0.05
 _SNOOZE_BOOST_MAX_COUNT = 5
 
+# Enhancement idea panel #11: an unmet Aristotle prerequisite means acting on
+# this issue is exactly the "verify before proceeding" case the check exists
+# to catch - it should score lower, not the same as a confirmed-safe issue of
+# equal urgency. Multiplicative, applied where prereq is actually checked in
+# score_issue (see the comment there for why 0.6 and why multiplicative).
+_GATED_ISSUE_DOWNWEIGHT = 0.6
+
 
 def _apply_snooze_avoidance_boost(score: float, snooze_count: int) -> float:
     boost = _SNOOZE_BOOST_PER_COUNT * min(snooze_count, _SNOOZE_BOOST_MAX_COUNT)
@@ -464,6 +471,18 @@ def score_issue(issue: dict, now: float, weights: dict = DEFAULT_WEIGHTS,
     # staleness/value reasons. Only ever "no confirmation seen yet", never
     # "this hasn't happened" - see workgraph_aristotle.py's own docstring.
     prereq = workgraph_aristotle.check_prerequisites(issue["id"], raw_items)
+    if prereq:
+        # Enhancement idea panel #11: has_unmet_prerequisite was persisted
+        # (issues.has_unmet_prerequisite, set a few lines below in
+        # recompute_all) and shown as a warning, but never actually
+        # affected priority_score - a gated issue ranked identically to a
+        # confirmed-safe one of the same urgency, even though acting on it
+        # without the missing confirmation is exactly what Aristotle exists
+        # to prevent. Multiplicative, not subtractive, so it scales with
+        # whatever the issue's real urgency already is rather than a flat
+        # penalty that could push a already-low-urgency issue negative.
+        # 0.6 (40% reduction) is a judgment call, not a measured requirement.
+        score *= _GATED_ISSUE_DOWNWEIGHT
     reasons = [prereq["warning"]] if prereq else []
     if issue["state"] == "active":
         reasons.append("your move")

@@ -2042,6 +2042,17 @@ async def api_supplier_detail(company: str):
     return JSONResponse(sanitize_surrogates(detail))
 
 
+@app.get("/api/workgraph/suppliers/{company}/weekly_scorecard")
+async def api_supplier_weekly_scorecard(company: str):
+    """Enhancement idea panel #15: a real, on-demand draft - generated
+    fresh on every call (cheap, same batched queries supplier_detail
+    already uses), never auto-sent anywhere."""
+    draft = workgraph_suppliers.weekly_scorecard_draft(company, time.time())
+    if draft is None:
+        raise HTTPException(404, f"no such supplier: {company}")
+    return JSONResponse(sanitize_surrogates(draft))
+
+
 class PartyCorrectionBody(BaseModel):
     affiliation: str  # internal | external
     company: Optional[str] = None

@@ -4237,8 +4237,16 @@ html[data-theme="dark"]{
         // not re-derived here.
         if (s.gated_open_issue_count) bits.push('<span style="color:#B45309;font-weight:700">' + s.gated_open_issue_count + ' gated</span>');
         var precedentLine = s.precedent ? '<br><span style="color:var(--mut,#888);font-size:12px">Precedent (' + esc(s.precedent.confidence) + '): ' + esc(s.precedent.statement) + '</span>' : '';
-        return '<li><b>' + esc(s.company) + '</b> — ' + contacts +
-          '<br><span style="color:var(--mut,#888);font-size:12px">' + bits.join(' · ') + '</span>' + precedentLine + '</li>';
+        // enhancement idea panel #15: on-demand weekly scorecard DRAFT - a real,
+        // deterministic narrative fetched fresh from workgraph_suppliers.
+        // weekly_scorecard_draft, never auto-sent. Toggled inline so Marc can
+        // read/copy it without leaving this list.
+        var scorecardBtn = '<button type="button" class="ho-scorecard-btn" data-company="' + esc(s.company) +
+          '" style="margin-left:6px;font-size:11px;padding:1px 6px;cursor:pointer">Weekly scorecard</button>';
+        var scorecardBox = '<pre class="ho-scorecard-text" data-company="' + esc(s.company) +
+          '" style="display:none;white-space:pre-wrap;font:12px/1.4 inherit;margin:6px 0 0;padding:8px;border-radius:4px;background:var(--panel-2,#f4f4f4)"></pre>';
+        return '<li><b>' + esc(s.company) + '</b> — ' + contacts + scorecardBtn +
+          '<br><span style="color:var(--mut,#888);font-size:12px">' + bits.join(' · ') + '</span>' + precedentLine + scorecardBox + '</li>';
       }).join('') : Object.keys(byCompany).sort().map(function (k) {
         return '<li><b>' + esc(k) + '</b> — ' + byCompany[k].map(function (p) { return esc(p.display_name || p.primary_email); }).join(', ') + '</li>';
       }).join('');
@@ -4280,6 +4288,24 @@ html[data-theme="dark"]{
     } catch (e) { /* leave whatever loaded so far on screen */ }
     hoRender();
   }
+
+  // enhancement idea panel #15: click-to-fetch weekly scorecard draft, toggled
+  // inline per company. Delegated (brief.innerHTML is rebuilt on every
+  // hoRender), so a fresh call still binds correctly after reload.
+  document.addEventListener('click', function (e) {
+    var btn = e.target.closest && e.target.closest('.ho-scorecard-btn');
+    if (!btn) return;
+    var company = btn.getAttribute('data-company');
+    var box = btn.parentElement.querySelector('.ho-scorecard-text[data-company="' + company.replace(/"/g, '\\"') + '"]');
+    if (!box) return;
+    if (box.style.display !== 'none') { box.style.display = 'none'; return; }
+    box.style.display = 'block';
+    box.textContent = 'Loading…';
+    fetch('/api/workgraph/suppliers/' + encodeURIComponent(company) + '/weekly_scorecard', { cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.json() : Promise.reject(); })
+      .then(function (d) { box.textContent = d.narrative || 'No scorecard available.'; })
+      .catch(function () { box.textContent = 'Could not load the weekly scorecard right now.'; });
+  });
 
   function boot() { hoLoad(); }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);

@@ -455,3 +455,137 @@ def test_supplier_detail_includes_gated_count_and_precedent(ws_db):
 
     assert detail["gated_open_issue_count"] == 1
     assert detail["precedent"]["statement"] == "Acme contracts close fast"
+
+
+# --- enhancement idea panel #15: weekly supplier scorecard draft -----------
+
+def test_weekly_scorecard_draft_none_for_unknown_company(ws_db):
+    assert wsup.weekly_scorecard_draft("Nobody Inc", time.time()) is None
+
+
+def test_weekly_scorecard_draft_includes_open_count_and_value(ws_db):
+    now = time.time()
+    _party(ws_db, "p1", "Acme")
+    iid = ws_db.create_issue_with_new_id(title="Deal", state="active", category="other")
+    ws_db.link_party_to_issue(iid, "p1")
+    rid = ws_db.insert_raw_item(source="outlook_mail", stable_key="wk1", thread_key="wk1", dedupe_key="wk1",
+                                 occurred_ts=now, subject="Worth $3 million", from_actor="a@example.com",
+                                 participants_json="[]")
+    ws_db.link_raw_item_to_issue(rid, iid)
+
+    draft = wsup.weekly_scorecard_draft("Acme", now)
+
+    assert draft["company"] == "Acme"
+    assert draft["open_issue_count"] == 1
+    assert draft["value_found"] == 3_000_000.0
+    assert "1 open" in draft["narrative"] or "Acme" in draft["narrative"]
+    assert "$3,000,000" in draft["narrative"]
+
+
+def test_weekly_scorecard_draft_counts_issue_opened_this_week(ws_db):
+    now = time.time()
+    _party(ws_db, "p1", "Acme")
+    iid = ws_db.create_issue_with_new_id(title="Fresh deal", state="active", category="other")
+    ws_db.link_party_to_issue(iid, "p1")
+    conn = ws_db._connect()
+    conn.execute("UPDATE issues SET opened_at = ? WHERE id = ?", (now - 2 * 86400, iid))
+    conn.close()
+
+    draft = wsup.weekly_scorecard_draft("Acme", now)
+
+    assert draft["opened_this_week"] == 1
+    assert "1 new issue" in draft["narrative"]
+
+
+def test_weekly_scorecard_draft_ignores_issue_opened_before_this_week(ws_db):
+    now = time.time()
+    _party(ws_db, "p1", "Acme")
+    iid = ws_db.create_issue_with_new_id(title="Old deal", state="active", category="other")
+    ws_db.link_party_to_issue(iid, "p1")
+    conn = ws_db._connect()
+    conn.execute("UPDATE issues SET opened_at = ? WHERE id = ?", (now - 30 * 86400, iid))
+    conn.close()
+
+    draft = wsup.weekly_scorecard_draft("Acme", now)
+
+    assert draft["opened_this_week"] == 0
+    assert "no new activity this week" in draft["narrative"]
+
+
+def test_weekly_scorecard_draft_counts_issue_closed_this_week(ws_db):
+    now = time.time()
+    _party(ws_db, "p1", "Acme")
+    iid = ws_db.create_issue_with_new_id(title="Closing this week", state="active", category="other")
+    ws_db.link_party_to_issue(iid, "p1")
+    conn = ws_db._connect()
+    conn.execute("UPDATE issues SET opened_at = ? WHERE id = ?", (now - 20 * 86400, iid))
+    conn.close()
+    ws_db.update_issue(iid, state="done")
+
+    draft = wsup.weekly_scorecard_draft("Acme", now)
+
+    assert draft["closed_this_week"] == 1
+    assert "1 issue(s) closed this week" in draft["narrative"]
+
+
+def test_weekly_scorecard_draft_ignores_issue_closed_before_this_week(ws_db):
+    now = time.time()
+    _party(ws_db, "p1", "Acme")
+    iid = ws_db.create_issue_with_new_id(title="Old close", state="active", category="other")
+    ws_db.link_party_to_issue(iid, "p1")
+    ws_db.update_issue(iid, state="done")
+    conn = ws_db._connect()
+    conn.execute("UPDATE issue_state_history SET changed_ts = ? WHERE issue_id = ? AND to_state = 'done'",
+                 (now - 20 * 86400, iid))
+    conn.close()
+
+    draft = wsup.weekly_scorecard_draft("Acme", now)
+
+    assert draft["closed_this_week"] == 0
+
+
+def test_weekly_scorecard_draft_includes_gated_count(ws_db):
+    now = time.time()
+    _party(ws_db, "p1", "Acme")
+    gated = ws_db.create_issue_with_new_id(title="Sign this", state="active", category="other")
+    ws_db.link_party_to_issue(gated, "p1")
+    ws_db.update_issue(gated, has_unmet_prerequisite=1)
+
+    draft = wsup.weekly_scorecard_draft("Acme", now)
+
+    assert draft["gated_open_issue_count"] == 1
+    assert "gated on an unmet prerequisite" in draft["narrative"]
+
+
+def test_weekly_scorecard_draft_includes_escalated_count(ws_db):
+    now = time.time()
+    _party(ws_db, "p1", "Acme")
+    iid = ws_db.create_issue_with_new_id(title="Chased hard", state="active", category="other")
+    ws_db.link_party_to_issue(iid, "p1")
+    for i in range(2):
+        rid = ws_db.insert_raw_item(
+            source="outlook_mail", stable_key=f"esc{i}", thread_key=f"esc{i}", dedupe_key=f"esc{i}",
+            occurred_ts=now, subject="Please respond", from_actor=f"asker{i}@example.com",
+            participants_json="[]",
+        )
+        conn = ws_db._connect()
+        conn.execute("UPDATE raw_items SET direction = 'inbound', item_class = 'ACTIONABLE-ASK' WHERE id = ?", (rid,))
+        conn.close()
+        ws_db.link_raw_item_to_issue(rid, iid)
+
+    draft = wsup.weekly_scorecard_draft("Acme", now)
+
+    assert draft["escalated_open_issue_count"] == 1
+    assert "escalated by multiple people" in draft["narrative"]
+
+
+def test_weekly_scorecard_draft_no_hard_deadline_line_when_none(ws_db):
+    now = time.time()
+    _party(ws_db, "p1", "Acme")
+    iid = ws_db.create_issue_with_new_id(title="Deal", state="active", category="other")
+    ws_db.link_party_to_issue(iid, "p1")
+
+    draft = wsup.weekly_scorecard_draft("Acme", now)
+
+    assert draft["has_hard_deadline"] is False
+    assert "hard deadline" not in draft["narrative"]

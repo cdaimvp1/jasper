@@ -230,3 +230,72 @@ def supplier_detail(company: str) -> Optional[dict]:
         "gated_open_issue_count": _gated_open_issue_count(open_issues),
         "precedent": _total_recall_precedent_for_company(company, categories),
     }
+
+
+_WEEK = 7 * 86400.0
+
+
+def weekly_scorecard_draft(company: str, now: float) -> Optional[dict]:
+    """Enhancement idea panel #15 (Weekly supplier scorecard draft, worker
+    capability): a deterministic, zero-LLM narrative built from real
+    numbers - list_suppliers()'s own per-company snapshot, plus a real
+    week-over-week delta (opened/closed/escalated in the last 7 days) that
+    a static snapshot alone can't show. A genuine DRAFT: Marc reviews and
+    edits before it goes anywhere, same posture as draft_reply/draft_
+    forward - this never sends anything on its own. None if the company
+    has no real issues at all (nothing to draft).
+
+    Escalation count reuses E8's distinct_escalation_sender_count per open
+    issue (>=2 distinct askers = a real escalation, matching that
+    function's own >=2 threshold), not a fresh definition of 'escalated'."""
+    issues = _issue_dicts_for_company(company)
+    if not issues:
+        return None
+    open_issues = [i for i in issues if i["state"] in _OPEN_STATES]
+    open_issue_ids = [i["id"] for i in open_issues]
+    value_found = sum(workgraph_nba.value_amounts_for_issues(open_issue_ids).values())
+    workgraph_deadlines.attach_deadline_info(open_issues)
+    has_hard_deadline = any(i.get("has_hard_deadline") for i in open_issues)
+    gated_count = _gated_open_issue_count(open_issues)
+
+    week_ago = now - _WEEK
+    history_by_issue = ws.list_issue_state_history_for_issues([i["id"] for i in issues])
+    closed_this_week = [
+        i for i in issues if i["state"] == "done" and any(
+            h["to_state"] == "done" and h["changed_ts"] >= week_ago
+            for h in history_by_issue.get(i["id"], [])
+        )
+    ]
+    opened_this_week = [i for i in issues if i["opened_at"] >= week_ago]
+    raw_items_by_issue = ws.get_raw_items_for_issues(open_issue_ids)
+    escalated_open_issues = [
+        i for i in open_issues
+        if workgraph_nba.distinct_escalation_sender_count(raw_items_by_issue.get(i["id"], [])) >= 2
+    ]
+
+    lines = [f"{company} — weekly scorecard: {len(open_issues)} open, ${value_found:,.0f} in play"]
+    if opened_this_week:
+        lines.append(f"- {len(opened_this_week)} new issue(s) opened this week")
+    if closed_this_week:
+        lines.append(f"- {len(closed_this_week)} issue(s) closed this week")
+    if not opened_this_week and not closed_this_week:
+        lines.append("- no new activity this week")
+    if gated_count:
+        lines.append(f"- {gated_count} open issue(s) currently gated on an unmet prerequisite")
+    if escalated_open_issues:
+        lines.append(f"- {len(escalated_open_issues)} open issue(s) escalated by multiple people")
+    if has_hard_deadline:
+        lines.append("- at least one open issue carries a hard deadline")
+
+    return {
+        "company": company,
+        "generated_ts": now,
+        "narrative": "\n".join(lines),
+        "open_issue_count": len(open_issues),
+        "value_found": value_found,
+        "opened_this_week": len(opened_this_week),
+        "closed_this_week": len(closed_this_week),
+        "gated_open_issue_count": gated_count,
+        "escalated_open_issue_count": len(escalated_open_issues),
+        "has_hard_deadline": has_hard_deadline,
+    }

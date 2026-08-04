@@ -67,6 +67,28 @@ def test_get_project_claims_fingerprint_changes_when_a_member_gets_a_claim(ws_db
     assert ws_db.get_claims_revision(iid2) == 0
 
 
+def test_get_project_claims_fingerprint_changes_when_membership_changes_alone(ws_db):
+    """Task #175: the post-assignment synthesis-refresh Marc asked for ("once
+    a new item is assigned to a project, the llm does a quick pass ... to
+    synthesize it into the project's canon") needs no new code - it's this
+    fingerprint plus scheduled_refresh's existing grouping-before-synthesis
+    ordering. Locks in the half of get_project_claims_fingerprint's docstring
+    the sibling test above doesn't cover: a brand-new member joining with
+    ZERO claims of its own (the common bridge/merge shape - a new issue is
+    assigned a project_id before anything about it has been re-extracted)
+    still flips the fingerprint, purely from the membership SET changing."""
+    pid = ws_db.create_project_with_new_id(name="P", category="other")
+    iid1 = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    ws_db.assign_issue_to_project(iid1, pid)
+    before = ws_db.get_project_claims_fingerprint(pid)
+
+    iid2 = ws_db.create_issue_with_new_id(title="B (bridged in)", state="active", category="other")
+    ws_db.assign_issue_to_project(iid2, pid)
+
+    after = ws_db.get_project_claims_fingerprint(pid)
+    assert before != after
+
+
 def test_get_project_claims_fingerprint_stable_for_unchanged_members(ws_db):
     pid = ws_db.create_project_with_new_id(name="P", category="other")
     iid1 = ws_db.create_issue_with_new_id(title="A", state="active", category="other")

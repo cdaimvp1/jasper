@@ -61,20 +61,6 @@ def _link_party(ws_db, issue_id, party_id, email, affiliation="external", compan
     ws_db.link_party_to_issue(issue_id, party_id)
 
 
-def _give_real_context(ws_db, issue_id, category="rfp-sourcing"):
-    """Confidence spine v1 (2026-08-03): scored_grouping_decision's verdict
-    is now damped by real context_accuracy, not just the raw pairwise
-    score - a 2-signal match with NO category, NO evidence, and NO
-    reference (the bare _issue() default) genuinely deserves a lower
-    effective score than the same match backed by real context. Tests
-    whose actual point is "does a 2-signal combination auto-merge" need
-    that real context to isolate what they're testing, same as production
-    issues (which have a real category and real evidence) almost always
-    do - a bare-fixture issue is the unrealistic case, not the norm."""
-    ws_db.update_issue(issue_id, category=category)
-    ws_db.add_evidence(issue_id=issue_id, type="email", summary="real evidence for this issue")
-
-
 # --- reference_ids_for_issue --------------------------------------------
 
 def test_reference_ids_extracts_pr_number(ws_db):
@@ -1078,61 +1064,67 @@ def _isolate_config(monkeypatch, tmp_path):
     return config
 
 
-def _score_pair(a, b):
-    """Section 12.7 helper: builds both sides' cached signatures + topic
-    keys and scores them, the same sequence scored_grouping_decision/
-    backtest_scored_model now use - retired _pairwise_score/
-    _issue_signal_snapshot (Section 9's flat model) called for this
-    directly; keeping ONE real scoring path is the whole point of the
-    signature model (see compute_work_object_signature's docstring)."""
+def _matched_points_pair(a, b):
+    """Task #184 (2026-08-04) helper: builds both sides' cached signatures +
+    topic keys and runs them through _matched_data_points, the same
+    sequence scored_grouping_decision/backtest_scored_model now use -
+    retired _score_pair/_pairwise_score_from_signature (the weighted-score
+    model this replaces) called for this directly; keeping ONE real
+    matching path is the whole point of the signature model (see
+    compute_work_object_signature's docstring)."""
     issue_a, issue_b = wp.ws.get_issue(a), wp.ws.get_issue(b)
     sig_a = wp.get_or_compute_work_object_signature(a, issue_a)
     sig_b = wp.get_or_compute_work_object_signature(b, issue_b)
     topic_a = wp._topic_key_for_signature(issue_a, sig_a)
     topic_b = wp._topic_key_for_signature(issue_b, sig_b)
-    return wp._pairwise_score_from_signature(
-        a, sig_a, topic_a, issue_a.get("category"), b, sig_b, topic_b, issue_b.get("category"),
-    )
+    return wp._matched_data_points(a, sig_a, topic_a, b, sig_b, topic_b)
 
 
-def test_pairwise_score_single_signal_never_reaches_threshold(ws_db):
+def test_matched_data_points_single_point_is_not_enough(ws_db):
+    """Marc's count-based rule (task #184): one matched data point (a
+    shared supplier alone here) is real evidence of SOMETHING, but never
+    enough on its own - the 2-or-more floor lives in the caller
+    (scored_grouping_decision), this function just reports what matched."""
     a = _issue(ws_db, "A")
     _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
     b = _issue(ws_db, "B, unrelated subject entirely")
     _link_party(ws_db, b, "p2", "other@acme.com", company="Acme")
 
-    score, signals = _score_pair(a, b)
+    points = _matched_points_pair(a, b)
 
-    assert signals == ["company"]
-    assert score == wp.SCORE_WEIGHTS["company"]
-    assert score < wp.AUTO_MERGE_THRESHOLD
+    assert points == ["supplier"]
+    assert len(points) < 2
 
 
-def test_pairwise_score_company_and_topic_combine_above_threshold(ws_db):
+def test_matched_data_points_supplier_and_subject_entity_combine_to_two_points(ws_db):
     a = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted")
     _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
     b = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted again")
     _link_party(ws_db, b, "p2", "other@acme.com", company="Acme")
 
-    score, signals = _score_pair(a, b)
+    points = _matched_points_pair(a, b)
 
-    assert set(signals) == {"company", "topic"}
-    assert score == wp.SCORE_WEIGHTS["company"] + wp.SCORE_WEIGHTS["topic"]
-    assert score >= wp.AUTO_MERGE_THRESHOLD
+    assert set(points) == {"supplier", "subject_entity"}
+    assert len(points) >= 2
 
 
-def test_pairwise_score_category_other_never_contributes(ws_db):
+def test_matched_data_points_category_is_never_a_point_type(ws_db):
+    """Category is dropped entirely as a point type (per _matched_data_
+    points' own docstring) - an internal taxonomy tag, not extracted
+    evidence, per Marc's own list of real data points. Two issues sharing
+    nothing but the same category value must match on nothing at all."""
     a = _issue(ws_db, "A")
+    ws_db.update_issue(a, category="other")
     b = _issue(ws_db, "B")
-    score, signals = _score_pair(a, b)
-    assert "category" not in signals
-    assert score == 0.0
+    ws_db.update_issue(b, category="other")
+
+    assert _matched_points_pair(a, b) == []
 
 
-def test_pairwise_score_disjoint_reference_vetoes_everything(ws_db):
-    """Even a strong combined score must be zeroed by a disjoint reference
-    ID - the absolute override carries over unchanged from the ordered
-    model."""
+def test_matched_data_points_disjoint_reference_vetoes_everything(ws_db):
+    """Even two otherwise-matching data points must be vetoed by a
+    disjoint reference ID - the absolute override carries over unchanged
+    from the model this replaces."""
     a = _issue(ws_db, "Action required: Approve the Requisition that X submitted")
     _raw_item(ws_db, a, "PR111111", "pa1")
     _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
@@ -1140,15 +1132,12 @@ def test_pairwise_score_disjoint_reference_vetoes_everything(ws_db):
     _raw_item(ws_db, b, "PR222222", "pa2")
     _link_party(ws_db, b, "p2", "rep2@acme.com", company="Acme")
 
-    score, signals = _score_pair(a, b)
-
-    assert score == 0.0
-    assert signals == []
+    assert _matched_points_pair(a, b) == []
 
 
-def test_pairwise_score_cannot_merge_constraint_vetoes_everything(ws_db):
-    """Section 12.7's real new veto: a durable cannot_merge (v2.4) must
-    zero the score outright, same absolute-override treatment as a
+def test_matched_data_points_cannot_merge_constraint_vetoes_everything(ws_db):
+    """Section 12.7's real veto: a durable cannot_merge (v2.4) must return
+    an empty match list outright, same absolute-override treatment as a
     disjoint reference ID - closing the real gap where scored_grouping_
     decision's auto_merge path bypassed create_project_suggestion (and
     therefore v2.4's own check) by calling merge_issues_txn directly."""
@@ -1158,10 +1147,7 @@ def test_pairwise_score_cannot_merge_constraint_vetoes_everything(ws_db):
     _link_party(ws_db, b, "p2", "other@acme.com", company="Acme")
     ws_db.create_identity_constraint("cannot_merge", a, b, "confirmed separate", actor="marc")
 
-    score, signals = _score_pair(a, b)
-
-    assert score == 0.0
-    assert signals == []
+    assert _matched_points_pair(a, b) == []
 
 
 # --- work_object_signatures caching (Section 12.7) ------------------------
@@ -1243,21 +1229,24 @@ def test_scored_grouping_decision_reference_match_is_auto_merge(ws_db):
     decision = wp.scored_grouping_decision(a, ws_db.get_issue(a))
 
     assert decision["verdict"] == "auto_merge"
-    assert decision["score"] == 1.0
+    assert decision["match_count"] == 1
     assert decision["sibling_id"] == b
     assert decision["matched_signals"] == ["reference"]
 
 
-def test_scored_grouping_decision_shared_party_alone_is_suggest_not_auto_merge(ws_db):
-    """Phase 0 fix (D4): a standalone _shared_external_party -> auto_merge(1.0)
-    branch used to live in scored_grouping_decision - the exact hazard the
-    live grouping path (_strong_signal_match) was already narrowed off of on
-    2026-07-31 (see this module's docstring). A shared party alone must now
-    only ever SUGGEST, never auto-merge, on otherwise unrelated topics."""
-    # company left unset on both sides so ONLY the party signal fires -
+def test_scored_grouping_decision_shared_stakeholder_alone_is_no_match(ws_db):
+    """Marc's count-based redesign (task #184): a standalone shared party
+    (one matched data point - "stakeholder") is never enough on its own,
+    full stop - it doesn't even clear the floor to become a "candidate",
+    let alone auto_merge. This is the same real hazard a standalone
+    _shared_external_party -> auto_merge(1.0) branch used to create
+    (Phase 0 fix D4) and the live grouping path (_strong_signal_match) was
+    already narrowed off of on 2026-07-31 - the count model closes it more
+    simply: fewer than 2 matched data points is never a real candidate."""
+    # company left unset on both sides so ONLY the stakeholder point fires -
     # otherwise a shared party who also shares a company would double up
-    # both signals and auto-merge for a different reason than this test
-    # means to isolate.
+    # both points and clear the 2-point floor for a different reason than
+    # this test means to isolate.
     a = _issue(ws_db, "Renewal negotiation")
     _link_party(ws_db, a, "p_shared", "rep@acme.com")
     b = _issue(ws_db, "Completely unrelated support escalation")
@@ -1265,31 +1254,19 @@ def test_scored_grouping_decision_shared_party_alone_is_suggest_not_auto_merge(w
 
     decision = wp.scored_grouping_decision(a, ws_db.get_issue(a))
 
-    assert decision["verdict"] == "suggest"
-    assert decision["sibling_id"] == b
-    assert decision["matched_signals"] == ["party"]
+    assert decision["verdict"] == "no_match"
+    assert decision["sibling_id"] is None
+    assert decision["matched_signals"] == []
 
 
-def test_scored_grouping_decision_party_plus_topic_raw_score_composition_merge(ws_db):
-    """Marc's detailed correction (2026-08-04) to the plain count-based rule
-    this replaces: signals are weighted strong/medium/weak, not counted
-    flatly - party+topic is 2 MEDIUM anchors ("named counterparty" +
-    "specific product/service" in his own framing), which clears his
-    stated bar ("2 medium anchors") - so the composition classification is
-    "merge". party+SENDER (a medium + a weak anchor) does NOT clear it on
-    its own - see test_suggestion_kind_for_scored_signals_weak_anchors_
-    need_two below.
-
-    The verdict itself still comes back "suggest" here, NOT "auto_merge" -
-    a SEPARATE, still-open issue found while fixing this: effective_score
-    = raw_score * context_accuracy (workgraph_confidence.py), and
-    context_accuracy's referential_resolution component is 0.0 whenever
-    this issue has no captured PR/PO reference of its own (unrelated to
-    whether party+topic actually match), which single-handedly caps
-    effective_score below 0.65 for almost any non-reference-based match,
-    composition notwithstanding. That's flagged back to Marc as its own
-    question, not silently patched here - this test only locks in the
-    composition half of the fix, which is settled."""
+def test_scored_grouping_decision_stakeholder_plus_subject_entity_is_candidate(ws_db):
+    """Marc's final, direct correction (task #184, 2026-08-04) superseding
+    the tiered strong/medium/weak anchor model this replaces: it's based on
+    matching COUNT, not signal weight - "there is a huge difference between
+    matching on 1 data point and matching on 2 or more." stakeholder
+    (shared named party) + subject_entity (matching subject core) is 2
+    matched data points, which is ALWAYS a candidate now, full stop - no
+    secondary numeric/weighting gate decides otherwise."""
     a = _issue(ws_db, "Workday HCM SaaS renewal negotiation")
     _link_party(ws_db, a, "p_shared", "rep@acme.com")
 
@@ -1298,64 +1275,16 @@ def test_scored_grouping_decision_party_plus_topic_raw_score_composition_merge(w
 
     decision = wp.scored_grouping_decision(a, ws_db.get_issue(a))
 
-    assert decision["score"] == 0.9
-    assert set(decision["matched_signals"]) == {"party", "topic"}
-    assert wp._suggestion_kind_for_scored_signals(decision["matched_signals"]) == "merge"
-    assert decision["verdict"] == "suggest"
+    assert decision["match_count"] == 2
+    assert set(decision["matched_signals"]) == {"stakeholder", "subject_entity"}
+    assert decision["verdict"] == "candidate"
 
 
-def test_scored_grouping_decision_two_signals_without_a_real_anchor_only_suggests(ws_db):
-    """Confidence spine v1 (2026-08-03): a 2-signal heuristic match
-    (party+topic, raw 0.90 - bumped from 0.80 task #169/#170, 2026-08-04,
-    party/topic weights 0.40->0.45 - isolated from company by leaving it
-    unset on both sides) now correctly stays at "suggest," never
-    "auto_merge" -
-    without ANY real structural anchor (a reference), referential_
-    resolution is 0 on this pair regardless of how rich the surrounding
-    context is, capping effective_score below AUTO_MERGE_THRESHOLD. This
-    is the intended, more conservative behavior: docs/design/CONFIDENCE_
-    AND_IDENTITY_REDESIGN.md Section 3.3's own bucket rules reserve
-    Automatic for real anchors - two heuristic signals alone were never
-    supposed to be enough, the original scored model just hadn't been
-    checked against that rule until this backtest did."""
-    a = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted")
-    _link_party(ws_db, a, "p_shared2", "rep@acme.com")
-    b = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted again")
-    _link_party(ws_db, b, "p_shared2", "rep@acme.com")
-
-    decision = wp.scored_grouping_decision(a, ws_db.get_issue(a))
-
-    assert decision["verdict"] == "suggest"
-    assert decision["score"] == 0.9  # the raw score is still high...
-    assert decision["effective_score"] < wp.AUTO_MERGE_THRESHOLD  # ...but the damped one decides
-    assert "party" in decision["matched_signals"]
-
-
-def test_scored_grouping_decision_real_context_raises_effective_score_even_when_it_cant_cross_alone(ws_db):
-    """_give_real_context (category + evidence) measurably raises
-    effective_score over the identical thin-context match - real context
-    is worth something, it just isn't a substitute for a real anchor when
-    deciding Automatic vs One-touch."""
-    a = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted")
-    _link_party(ws_db, a, "p1", "rep@acme.com")
-    _give_real_context(ws_db, a)
-    b = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted again")
-    _link_party(ws_db, b, "p2", "other@acme.com")
-    thin = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted")
-    _link_party(ws_db, thin, "p3", "third@acme.com")
-    thin_b = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted again")
-    _link_party(ws_db, thin_b, "p4", "fourth@acme.com")
-
-    rich_decision = wp.scored_grouping_decision(a, ws_db.get_issue(a))
-    thin_decision = wp.scored_grouping_decision(thin, ws_db.get_issue(thin))
-
-    assert rich_decision["verdict"] == thin_decision["verdict"] == "suggest"
-    assert rich_decision["effective_score"] > thin_decision["effective_score"]
-
-
-def test_scored_grouping_decision_combined_weak_signals_still_only_suggests_without_anchor(ws_db):
-    """company+topic (raw 0.80, no party/reference at all) - same shape,
-    same reasoning as the party+topic test above."""
+def test_scored_grouping_decision_supplier_and_subject_entity_is_candidate(ws_db):
+    """supplier+subject_entity (no shared party/reference at all) - same
+    shape, same count-based reasoning as the stakeholder+subject_entity
+    test above, with a different pair of matched point types. Two matched
+    data points is always a candidate now, regardless of which two."""
     a = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted")
     _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
     b = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted again")
@@ -1363,12 +1292,15 @@ def test_scored_grouping_decision_combined_weak_signals_still_only_suggests_with
 
     decision = wp.scored_grouping_decision(a, ws_db.get_issue(a))
 
-    assert decision["verdict"] == "suggest"
+    assert decision["verdict"] == "candidate"
     assert decision["sibling_id"] == b
-    assert set(decision["matched_signals"]) == {"company", "topic"}
+    assert set(decision["matched_signals"]) == {"supplier", "subject_entity"}
 
 
-def test_scored_grouping_decision_single_weak_signal_is_suggest_not_merge(ws_db):
+def test_scored_grouping_decision_single_supplier_point_is_no_match(ws_db):
+    """The task #81 lesson under the new count-based rule: a single matched
+    data point (supplier alone here, unrelated subjects) never clears the
+    2-point floor - no candidate, no suggestion, nothing."""
     a = _issue(ws_db, "A")
     _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
     b = _issue(ws_db, "B, unrelated subject entirely")
@@ -1376,47 +1308,8 @@ def test_scored_grouping_decision_single_weak_signal_is_suggest_not_merge(ws_db)
 
     decision = wp.scored_grouping_decision(a, ws_db.get_issue(a))
 
-    assert decision["verdict"] == "suggest"
-    assert decision["sibling_id"] == b
-
-
-def test_scored_grouping_decision_attaches_confidence_spine_fields(ws_db):
-    """Confidence spine v1 (2026-08-03): context_accuracy/effective_score
-    are real now (they decide the verdict, not just observational fields -
-    see the "still only suggests without anchor" tests above for a case
-    where damping actually changes the bucket). A single weak signal
-    (party alone, raw 0.40) stays "suggest" here regardless - it was
-    already below AUTO_MERGE_THRESHOLD undamped, so this case doesn't by
-    itself prove damping is active; it just confirms the fields are
-    computed and internally consistent."""
-    a = _issue(ws_db, "A")
-    _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
-    b = _issue(ws_db, "B, unrelated subject entirely")
-    _link_party(ws_db, b, "p2", "other@acme.com", company="Acme")
-
-    decision = wp.scored_grouping_decision(a, ws_db.get_issue(a))
-
-    assert 0.0 <= decision["context_accuracy"] <= 1.0
-    assert decision["effective_score"] == round(decision["score"] * decision["context_accuracy"], 6)
-    assert decision["verdict"] == "suggest"
-
-
-def test_scored_grouping_decision_uses_real_anchors_when_backfilled(ws_db):
-    """Confidence spine v1: once identity_anchors exist for the issue,
-    context_accuracy is computed from them, not the match_kind shim."""
-    a = _issue(ws_db, "A")
-    _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
-    b = _issue(ws_db, "B, unrelated subject entirely")
-    _link_party(ws_db, b, "p2", "other@acme.com", company="Acme")
-
-    without_anchors = wp.scored_grouping_decision(a, ws_db.get_issue(a))
-
-    ws_db.create_identity_anchor(anchor_type="party", normalized_value="p1", anchor_strength="exact",
-                                  exclusive=False, issue_id=a)
-    with_anchors = wp.scored_grouping_decision(a, ws_db.get_issue(a))
-
-    assert with_anchors["context_accuracy"] > without_anchors["context_accuracy"]
-    assert with_anchors["verdict"] == without_anchors["verdict"] == "suggest"
+    assert decision["verdict"] == "no_match"
+    assert decision["sibling_id"] is None
 
 
 def test_scored_grouping_decision_nothing_shared_is_no_match(ws_db):
@@ -1444,13 +1337,13 @@ def test_group_issue_flag_off_uses_ordered_model_not_scored_model(ws_db, monkeyp
     model (_strong_signal_match) resolves this shared-company pair on its
     own terms ("company", a link suggestion) - never touching the scored
     model's verdict, even though shadow_scored is still computed and
-    logged for comparison. Confidence spine v1 note: post-damping, the
-    scored model's OWN verdict for this same pair is also "suggest" now
-    (no real anchor - see test_scored_grouping_decision_combined_weak_
-    signals_still_only_suggests_without_anchor), so the two models agree
-    on the outcome here; what this test actually confirms is that the flag
-    gates which model's REASONING drove it - "company" (ordered), not
-    "scored" - not a wider outcome gap that no longer exists post-damping."""
+    logged for comparison. Under the count-based redesign (task #184), the
+    scored model's OWN verdict for this same pair is also "candidate" now
+    (supplier+subject_entity is 2 matched data points - see test_scored_
+    grouping_decision_supplier_and_subject_entity_is_candidate), so the two
+    models agree on the outcome here; what this test actually confirms is
+    that the flag gates which model's REASONING drove it - "company"
+    (ordered), not "scored" - not a wider outcome gap."""
     config = _isolate_config(monkeypatch, tmp_path)
     assert config.get("grouping", "scored_model_enabled") in (None, False)
 
@@ -1463,14 +1356,14 @@ def test_group_issue_flag_off_uses_ordered_model_not_scored_model(ws_db, monkeyp
 
     assert result["action"] == "suggested"
     assert result["signal"] == "company"
-    assert result["shadow_scored"]["verdict"] == "suggest"  # still computed/logged either way
+    assert result["shadow_scored"]["verdict"] == "candidate"  # still computed/logged either way
 
 
 def test_group_issue_flag_on_uses_scored_model(ws_db, monkeypatch, tmp_path):
     """Same pair as above, flag ON: the SCORED model's own path handles
     it (signal="scored") instead of the ordered model's "company" - the
-    real thing the flag gates. Post-damping, both land on "suggested" for
-    this no-anchor pair (see the module-level note above)."""
+    real thing the flag gates. Both land on "suggested" for this pair
+    either way (see the module-level note above)."""
     config = _isolate_config(monkeypatch, tmp_path)
     config.set_value(True, "grouping", "scored_model_enabled")
 
@@ -1485,7 +1378,12 @@ def test_group_issue_flag_on_uses_scored_model(ws_db, monkeypatch, tmp_path):
     assert result["signal"] == "scored"
 
 
-def test_group_issue_flag_on_single_weak_signal_creates_suggestion_not_merge(ws_db, monkeypatch, tmp_path):
+def test_group_issue_flag_on_single_matched_point_creates_no_suggestion(ws_db, monkeypatch, tmp_path):
+    """Marc's count-based floor applied end-to-end: a single matched data
+    point (supplier alone, unrelated subjects) never clears the 2-point
+    bar, so group_issue's scored path must not create ANY suggestion for
+    it - not even a 'link' the way a single weak signal used to under the
+    tiered-anchor model this replaces."""
     config = _isolate_config(monkeypatch, tmp_path)
     config.set_value(True, "grouping", "scored_model_enabled")
 
@@ -1496,81 +1394,25 @@ def test_group_issue_flag_on_single_weak_signal_creates_suggestion_not_merge(ws_
 
     result = wp.group_issue(a)
 
-    assert result["action"] == "suggested"
+    assert result["action"] == "no_match"
     assert ws_db.get_issue(a)["project_id"] is None
-
-
-# --- 2026-08-04 (Marc's second, more detailed correction, superseding the ---
-# --- plain count-based rule this replaces): "every signal should not count --
-# --- equally... one extremely strong identifier may be enough... two weak --
-# --- matches... should not generate a serious candidate." Tiered anchors: --
-# --- strong (any 1 alone), medium (need 2, or 1 + 2 weak), weak (support ---
-# --- only, never alone or in pairs of just weak). ---------------------
-
-def test_suggestion_kind_for_scored_signals_one_strong_anchor_is_enough():
-    assert wp._suggestion_kind_for_scored_signals(["attachment"]) == "merge"
-
-
-def test_suggestion_kind_for_scored_signals_two_medium_anchors_merge():
-    """His own examples of medium anchors: supplier (company), named
-    counterparty (party), specific product/service (ariba_descriptor),
-    specific dollar amount (amount)."""
-    assert wp._suggestion_kind_for_scored_signals(["party", "topic"]) == "merge"
-    assert wp._suggestion_kind_for_scored_signals(["company", "amount"]) == "merge"
-    assert wp._suggestion_kind_for_scored_signals(["ariba_descriptor", "ariba_requester"]) == "merge"
-
-
-def test_suggestion_kind_for_scored_signals_medium_plus_two_weak_merges():
-    assert wp._suggestion_kind_for_scored_signals(["party", "sender", "category"]) == "merge"
-
-
-def test_suggestion_kind_for_scored_signals_medium_plus_one_weak_is_link():
-    """A medium anchor with only ONE weak signal alongside it (not two)
-    doesn't clear his stated bar - his own example shape (sender alone
-    paired with just one company/party match) stays a link, the exact
-    task #81 lesson (party+sender was the original real bug's shape)."""
-    assert wp._suggestion_kind_for_scored_signals(["party", "sender"]) == "link"
-    assert wp._suggestion_kind_for_scored_signals(["company", "sender"]) == "link"
-
-
-def test_suggestion_kind_for_scored_signals_two_weak_anchors_alone_is_link():
-    """Weak anchors are 'useful only as supporting evidence' - his own
-    words - never sufficient by themselves, even two of them with no
-    medium/strong backing at all."""
-    assert wp._suggestion_kind_for_scored_signals(["sender", "category"]) == "link"
-
-
-def test_suggestion_kind_for_scored_signals_exactly_one_signal_is_link():
-    """Exactly one data point is never enough to merge on its own - the
-    task #81 lesson (a single shared party/company/topic proves a
-    relationship, not the same transaction) - still surfaced as a link for
-    a human to judge, never silently dropped."""
-    assert wp._suggestion_kind_for_scored_signals(["party"]) == "link"
-    assert wp._suggestion_kind_for_scored_signals(["company"]) == "link"
-    assert wp._suggestion_kind_for_scored_signals(["topic"]) == "link"
-    assert wp._suggestion_kind_for_scored_signals(["sender"]) == "link"
-
-
-def test_suggestion_kind_for_scored_signals_no_signals_is_none():
-    assert wp._suggestion_kind_for_scored_signals([]) is None
+    assert ws_db.list_project_suggestions(status="pending") == []
 
 
 def test_group_issue_flag_on_same_supplier_and_topic_now_suggests_merge_kind(ws_db, monkeypatch, tmp_path):
-    """Marc's corrected rule applied end-to-end: company + topic is 2
-    MEDIUM anchors (his own framing: "supplier" + "specific product/
-    service"), and the suggestion it produces is now correctly kind=
-    'merge' (confirming it actually merges the two issues) rather than
-    the old hierarchy's blanket 'link' for anything paired with company
-    that wasn't one of four hand-picked "precise" signals.
+    """Marc's count-based rule applied end-to-end: supplier + subject_entity
+    is 2 matched data points, and every candidate suggestion this creates
+    now always uses kind='merge' (confirming it actually merges the two
+    issues, if confirmed) - never 'link' - regardless of which two point
+    types matched. This replaces the old hierarchy's tiered anchor
+    classification (which decided merge vs. link per signal combination)
+    entirely: under the new rule there's no separate 'link' outcome for a
+    scored candidate at all.
 
-    Doesn't reach action='auto_merged' here - a separate, still-open issue
-    (see test_scored_grouping_decision_party_plus_topic_raw_score_
-    composition_merge's docstring): confidence damping via
-    referential_resolution caps effective_score below AUTO_MERGE_THRESHOLD
-    for any pair with no captured reference ID, composition aside. What
-    Marc's fix DOES change today: the suggestion Marc/curator actually
-    sees is now correctly labeled 'merge', not 'link' - confirming it will
-    really merge the two issues, not just record a relationship."""
+    Doesn't reach action='auto_merged' here - only a shared reference ID
+    auto-merges now (see _shared_reference_id); every other 2+-point
+    candidate always surfaces as a suggestion for a human/curator to
+    confirm, never merges silently."""
     config = _isolate_config(monkeypatch, tmp_path)
     config.set_value(True, "grouping", "scored_model_enabled")
 
@@ -1607,8 +1449,8 @@ def test_group_issue_flag_on_shared_definitive_reference_still_auto_merges(ws_db
 def test_group_issue_flag_on_disjoint_definitive_references_vetoes_match(ws_db, monkeypatch, tmp_path):
     """Two issues at the same company but with DIFFERENT, disjoint PR
     numbers must not merge OR link - a_ids/b_ids both non-empty and
-    disjoint zeroes the score outright inside _pairwise_score_from_
-    signature, unchanged by this fix."""
+    disjoint vetoes the match outright inside _matched_data_points,
+    unchanged by this fix."""
     config = _isolate_config(monkeypatch, tmp_path)
     config.set_value(True, "grouping", "scored_model_enabled")
 
@@ -1627,11 +1469,10 @@ def test_group_issue_flag_on_disjoint_definitive_references_vetoes_match(ws_db, 
 
 def test_group_issue_flag_on_cannot_link_constraint_blocks_suggestion(ws_db, monkeypatch, tmp_path):
     """A durable cannot_link constraint (v2.4) is caught even earlier than
-    create_project_suggestion's own veto check: _pairwise_score_from_
-    signature zeroes this pair's score to 0.0 outright (compute_work_
-    object_signature's cannot_link_ids), so it never even becomes the
-    scored model's best_sibling candidate - confirmed via no_match, not a
-    create-then-drop."""
+    create_project_suggestion's own veto check: _matched_data_points
+    returns [] for this pair outright (compute_work_object_signature's
+    cannot_link_ids), so it never even becomes the scored model's
+    best_sibling candidate - confirmed via no_match, not a create-then-drop."""
     config = _isolate_config(monkeypatch, tmp_path)
     config.set_value(True, "grouping", "scored_model_enabled")
 
@@ -1661,86 +1502,6 @@ def test_group_issue_flag_on_no_duplicate_suggestion_on_replay(ws_db, monkeypatc
     wp.group_issue(a)
     wp.group_issue(a)
 
-    assert len(ws_db.list_project_suggestions(status="pending")) == 1
-
-
-# --- replay_scored_merge_link_regression -----------------------------------
-
-def test_replay_repairs_a_wrongly_classified_merge_suggestion_into_link(ws_db):
-    """Simulates the actual pre-fix bug: a pending 'merge' suggestion
-    exists (as create_project_suggestion's old no-suggestion_kind call
-    would have created it) for a pair whose live signals are really
-    company-alone - the replay must expire the wrong row and create the
-    correct 'link' suggestion in its place. Subjects deliberately don't
-    share a topic-key match (unlike the sibling tests below) so the ONLY
-    live signal is company - under Marc's 2026-08-04 count-based rule,
-    exactly one matching data point is still never enough to merge on its
-    own, the one case this replay still needs to catch."""
-    a = _issue(ws_db, "Quarterly business review notes")
-    _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
-    b = _issue(ws_db, "Invoice discrepancy follow-up")
-    _link_party(ws_db, b, "p2", "other@acme.com", company="Acme")
-    bad_sid = ws_db.create_project_suggestion(
-        issue_id_a=a, issue_id_b=b,
-        reason="scored signal (company, score=0.45)", suggestion_kind="merge",
-    )
-
-    result = wp.replay_scored_merge_link_regression(since_ts=0.0)
-
-    assert result["repaired"] == 1
-    assert ws_db.get_project_suggestion(bad_sid)["status"] == "expired"
-    pending = ws_db.list_project_suggestions(status="pending")
-    assert len(pending) == 1
-    assert pending[0]["suggestion_kind"] == "link"
-
-
-def test_replay_leaves_correctly_classified_merge_suggestions_alone(ws_db):
-    a = _issue(ws_db, "First notice")
-    _raw_item(ws_db, a, "PR7223344 approval needed", "regr-replay-ref-a")
-    b = _issue(ws_db, "REMINDER PR7223344")
-    _raw_item(ws_db, b, "REMINDER PR7223344", "regr-replay-ref-b")
-    good_sid = ws_db.create_project_suggestion(
-        issue_id_a=a, issue_id_b=b,
-        reason="scored signal (topic, score=0.4)", suggestion_kind="merge",
-    )
-
-    result = wp.replay_scored_merge_link_regression(since_ts=0.0)
-
-    assert result["repaired"] == 0
-    assert ws_db.get_project_suggestion(good_sid)["status"] == "pending"
-
-
-def test_replay_ignores_suggestions_before_since_ts(ws_db):
-    a = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted")
-    _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
-    b = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted again")
-    _link_party(ws_db, b, "p2", "other@acme.com", company="Acme")
-    old_sid = ws_db.create_project_suggestion(
-        issue_id_a=a, issue_id_b=b,
-        reason="scored signal (company,topic, score=0.8)", suggestion_kind="merge",
-    )
-
-    result = wp.replay_scored_merge_link_regression(since_ts=time.time() + 1000)
-
-    assert result["repaired"] == 0
-    assert ws_db.get_project_suggestion(old_sid)["status"] == "pending"
-
-
-def test_replay_is_idempotent(ws_db):
-    a = _issue(ws_db, "Quarterly business review notes")
-    _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
-    b = _issue(ws_db, "Invoice discrepancy follow-up")
-    _link_party(ws_db, b, "p2", "other@acme.com", company="Acme")
-    ws_db.create_project_suggestion(
-        issue_id_a=a, issue_id_b=b,
-        reason="scored signal (company, score=0.45)", suggestion_kind="merge",
-    )
-
-    first = wp.replay_scored_merge_link_regression(since_ts=0.0)
-    second = wp.replay_scored_merge_link_regression(since_ts=0.0)
-
-    assert first["repaired"] == 1
-    assert second["repaired"] == 0  # already-repaired pair has no pending 'merge' row left to touch
     assert len(ws_db.list_project_suggestions(status="pending")) == 1
 
 
@@ -1847,15 +1608,20 @@ def test_backtest_scored_model_flags_different_project_pair_scoring_above_thresh
     assert any({h["a"], h["b"]} == {a, b} for h in hits)
 
 
-def test_backtest_scored_model_actual_verdict_reflects_tiered_anchor_rule(ws_db):
-    """actual_verdict, restored (2026-08-04) after briefly looking redundant
-    under the short-lived plain count-based rule: Marc's tiered-anchor
-    correction means raw score crossing AUTO_MERGE_THRESHOLD does NOT
-    always imply a real merge candidate again - party+sender reaches 0.65
-    (0.45+0.20) but is medium+weak, one weak signal short of his stated
-    bar, so actual_verdict must say "suggest" even though it's in the
-    at-or-above-threshold list. party+topic (medium+medium, 0.90) is a
-    genuine merge candidate for comparison."""
+def test_backtest_scored_model_reports_match_count_not_a_tiered_verdict(ws_db):
+    """Task #184 (2026-08-04): the tiered strong/medium/weak anchor
+    classification (and its "actual_verdict" field, distinguishing a raw
+    score crossing AUTO_MERGE_THRESHOLD from a real merge candidate) is
+    gone entirely - there's no score left to diverge from the composition.
+    a/b share only ONE real matched point (a shared external party -
+    "int-shared" is INTERNAL and never counted, per _matched_data_points'
+    own rule, and the two subjects don't share a topic core), so the pair
+    never even clears the 2-point bar and must be ABSENT from the
+    above-threshold list at all - not present-but-downgraded the way a
+    tiered "suggest" verdict used to represent it. c/d share a real
+    external party AND a matching topic core (2 points), so that pair DOES
+    appear, reporting match_count/matched_signals directly with no
+    verdict field of any kind."""
     a = _issue(ws_db, "Renewal negotiation")
     _link_party(ws_db, a, "p_shared", "rep@acme.com")
     ws_db.upsert_party(id="int-shared", primary_email="me@lilly.com", display_name="Me",
@@ -1873,8 +1639,12 @@ def test_backtest_scored_model_actual_verdict_reflects_tiered_anchor_rule(ws_db)
     result = wp.backtest_scored_model()
     hits = {frozenset({h["a"], h["b"]}): h for h in result["different_project_pairs_at_or_above_threshold"]}
 
-    assert hits[frozenset({a, b})]["actual_verdict"] == "suggest"
-    assert hits[frozenset({c, d})]["actual_verdict"] == "merge"
+    assert frozenset({a, b}) not in hits  # single matched point - never clears the bar
+    cd_hit = hits[frozenset({c, d})]
+    assert cd_hit["match_count"] == 2
+    assert set(cd_hit["matched_signals"]) == {"stakeholder", "subject_entity"}
+    assert "actual_verdict" not in cd_hit
+    assert "score" not in cd_hit
 
 
 def test_backtest_scored_model_task81_boilerplate_case_stays_a_veto(ws_db):
@@ -2162,14 +1932,15 @@ def test_backfill_apply_twice_is_idempotent(ws_db):
     assert second["already_constrained"] == 1
 
 
-# --- new content-extracted pairwise signals (task #169/#170, 2026-08-04) ----
-# ariba_descriptor/ariba_requester/amount/attachment, added to _pairwise_
-# score_from_signature so "supplier + one other real data point" (Marc's
-# stated rule) actually has enough combinable signals to clear
-# AUTO_MERGE_THRESHOLD for Ariba's automated notifications specifically -
-# is_automated_sender already excludes the notification address itself from
-# party/company matching, so without these, two different Ariba requisitions
-# (or two versions of the same one) looked identical to the signature.
+# --- content-extracted matched data points (task #169/#170, then #184, ----
+# 2026-08-04) - ariba_descriptor -> "product_service", ariba_requester ->
+# folded into "stakeholder", value_amount -> "amount", accepted_lineages ->
+# "document". Added to _matched_data_points so "supplier + one other real
+# data point" (Marc's stated rule) actually has enough combinable points for
+# Ariba's automated notifications specifically - is_automated_sender already
+# excludes the notification address itself from party/company matching, so
+# without these, two different Ariba requisitions (or two versions of the
+# same one) looked identical to the signature.
 
 def _sig(**overrides):
     base = {
@@ -2182,100 +1953,55 @@ def _sig(**overrides):
     return base
 
 
-def test_pairwise_score_ariba_descriptor_and_requester_together_merges():
+def test_matched_data_points_ariba_descriptor_and_requester_together_is_two_points():
     a = _sig(positive_vocabulary={"ariba_requester": "Thomas Turner", "ariba_descriptor": "Workday HCM SaaS", "value_amount": None})
     b = _sig(positive_vocabulary={"ariba_requester": "Thomas Turner", "ariba_descriptor": "Workday HCM SaaS", "value_amount": None})
-    score, signals = wp._pairwise_score_from_signature("a", a, "", None, "b", b, "", None)
-    assert "ariba_descriptor" in signals
-    assert "ariba_requester" in signals
-    assert score >= wp.AUTO_MERGE_THRESHOLD
+    points = wp._matched_data_points("a", a, "", "b", b, "")
+    assert "product_service" in points
+    assert "stakeholder" in points
+    assert len(points) >= 2
 
 
-def test_pairwise_score_ariba_descriptor_alone_does_not_reach_threshold():
+def test_matched_data_points_product_service_alone_is_one_point():
     a = _sig(positive_vocabulary={"ariba_requester": None, "ariba_descriptor": "Workday HCM SaaS", "value_amount": None})
     b = _sig(positive_vocabulary={"ariba_requester": None, "ariba_descriptor": "Workday HCM SaaS", "value_amount": None})
-    score, signals = wp._pairwise_score_from_signature("a", a, "", None, "b", b, "", None)
-    assert signals == ["ariba_descriptor"]
-    assert score < wp.AUTO_MERGE_THRESHOLD
+    points = wp._matched_data_points("a", a, "", "b", b, "")
+    assert points == ["product_service"]
 
 
-def test_pairwise_score_descriptor_plus_amount_merges():
+def test_matched_data_points_product_service_plus_amount_is_two_points():
     a = _sig(positive_vocabulary={"ariba_requester": None, "ariba_descriptor": "Workday HCM SaaS", "value_amount": 53702143.0})
     b = _sig(positive_vocabulary={"ariba_requester": None, "ariba_descriptor": "Workday HCM SaaS", "value_amount": 53702143.0})
-    score, signals = wp._pairwise_score_from_signature("a", a, "", None, "b", b, "", None)
-    assert "amount" in signals
-    assert score >= wp.AUTO_MERGE_THRESHOLD
+    points = wp._matched_data_points("a", a, "", "b", b, "")
+    assert "amount" in points
+    assert "product_service" in points
+    assert len(points) >= 2
 
 
-def test_pairwise_score_amount_requires_close_match_not_exact():
+def test_matched_data_points_amount_requires_close_match_not_exact():
     """A 1% tolerance is real-world tolerant (rounding, currency
     conversion noise) without being so loose two unrelated deals coincide."""
     a = _sig(positive_vocabulary={"ariba_requester": None, "ariba_descriptor": None, "value_amount": 100000.0})
     b = _sig(positive_vocabulary={"ariba_requester": None, "ariba_descriptor": None, "value_amount": 100500.0})
-    score, signals = wp._pairwise_score_from_signature("a", a, "", None, "b", b, "", None)
-    assert "amount" in signals
+    points = wp._matched_data_points("a", a, "", "b", b, "")
+    assert "amount" in points
 
     c = _sig(positive_vocabulary={"ariba_requester": None, "ariba_descriptor": None, "value_amount": 150000.0})
-    score2, signals2 = wp._pairwise_score_from_signature("a", a, "", None, "c", c, "", None)
-    assert "amount" not in signals2
+    points2 = wp._matched_data_points("a", a, "", "c", c, "")
+    assert "amount" not in points2
 
 
-def test_pairwise_score_attachment_lineage_overlap_matches():
+def test_matched_data_points_document_lineage_overlap_matches():
     a = _sig(accepted_lineages=["lineage-abc123"])
     b = _sig(accepted_lineages=["lineage-abc123", "lineage-def456"])
-    score, signals = wp._pairwise_score_from_signature("a", a, "", None, "b", b, "", None)
-    assert "attachment" in signals
+    points = wp._matched_data_points("a", a, "", "b", b, "")
+    assert "document" in points
 
 
-def test_pairwise_score_no_new_signals_when_vocab_empty():
+def test_matched_data_points_no_points_when_vocab_empty():
     a = _sig()
     b = _sig()
-    score, signals = wp._pairwise_score_from_signature("a", a, "", None, "b", b, "", None)
-    assert score == 0.0
-    assert signals == []
-
-
-def test_suggestion_kind_company_alone_stays_link():
-    assert wp._suggestion_kind_for_scored_signals(["company"]) == "link"
-
-
-def test_suggestion_kind_company_plus_medium_anchor_merges():
-    """Marc's tiered-anchor correction (2026-08-04, superseding the
-    plain-count rule this replaces same day): company is a MEDIUM anchor,
-    so it merges when paired with another MEDIUM anchor (2 medium anchors
-    clears his stated bar) - but NOT when paired with only a WEAK one
-    (sender), which needs a second weak signal alongside it instead.
-
-    company+topic specifically is flagged, not silently assumed settled:
-    it's the exact shape of the real task #81 incident (two DIFFERENT
-    Ariba reps' DIFFERENT requisitions at the same company, sharing only
-    boilerplate phrasing, no reference number captured on either side to
-    trigger the disjoint-reference veto) - 71 issues wrongly merged into
-    one project. Whether that specific combination should still be an
-    exception to the general rule is an open question raised back to
-    Marc, not decided here - this test locks in the code's CURRENT
-    behavior (merge, since topic is medium-tier) so a future change shows
-    up as a deliberate diff."""
-    assert wp._suggestion_kind_for_scored_signals(["company", "amount"]) == "merge"
-    assert wp._suggestion_kind_for_scored_signals(["company", "ariba_descriptor"]) == "merge"
-    assert wp._suggestion_kind_for_scored_signals(["company", "topic"]) == "merge"
-    assert wp._suggestion_kind_for_scored_signals(["company", "sender"]) == "link"
-
-
-def test_suggestion_kind_combined_new_signals_merge():
-    """This function is a pure signal-name-set -> kind mapping - it doesn't
-    itself know whether the underlying score crossed AUTO_MERGE_THRESHOLD
-    (that's SCORE_WEIGHTS' job; amount=0.25 alone never reaches 0.65, so
-    scored_grouping_decision never calls this with signals=['amount']
-    alone in practice)."""
-    assert wp._suggestion_kind_for_scored_signals(["ariba_descriptor", "ariba_requester"]) == "merge"
-    assert wp._suggestion_kind_for_scored_signals([]) is None
-
-
-def test_suggestion_kind_party_and_topic_semantics_unchanged():
-    assert wp._suggestion_kind_for_scored_signals(["party"]) == "link"
-    assert wp._suggestion_kind_for_scored_signals(["party", "topic"]) == "merge"
-    assert wp._suggestion_kind_for_scored_signals(["topic"]) == "link"
+    assert wp._matched_data_points("a", a, "", "b", b, "") == []
 
 
 # --- connected-components candidate search + bridge detection --------------
@@ -2400,11 +2126,10 @@ def test_split_issue_from_project_detaches_and_resets_membership(ws_db):
 
 def test_split_issue_from_project_vetoes_re_merge_with_former_members(ws_db):
     """The detach alone isn't the safety valve - without a durable veto, the
-    very next classify/grouping cycle would just re-score the same
+    very next classify/grouping cycle would just re-match the same
     signature and merge it right back in. This checks the REAL consumer
     (compute_work_object_signature's cannot_link_ids, same field
-    _pairwise_score_from_signature's veto reads) not just that a row got
-    written."""
+    _matched_data_points' veto reads) not just that a row got written."""
     p1 = ws_db.create_project_with_new_id(name="Project one", category="other")
     a = _issue(ws_db, "A")
     b = _issue(ws_db, "B")

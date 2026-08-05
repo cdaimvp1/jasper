@@ -71,10 +71,12 @@ judgment, not re-confirm the same pair repeatedly.
 
 ## Bridge candidates (task #169/#170/#174, 2026-08-04, Marc's direct design ask)
 
-A `reason` starting with `"bridge candidate - connects to project ..."` means the deterministic
-scorer (`workgraph_projects.scored_grouping_decision`) found this issue (`issue_id_a`) scoring at
-or above the auto-merge threshold against a member of an EXISTING, already-established project —
-and it found this for TWO OR MORE distinct projects at once, not just one. That's a real, common
+A `reason` starting with `"bridge candidate - connects to project {pid} via N matching data points
+(...)"` means the deterministic matcher (`workgraph_projects.scored_grouping_decision`) found this
+issue (`issue_id_a`) sharing 2 or more matched real data points (a shared supplier, a named
+stakeholder, a matching subject entity, a product/service, a dollar amount, or document lineage —
+never just a raw signal count) against a member of an EXISTING, already-established project — and
+it found this for TWO OR MORE distinct projects at once, not just one. That's a real, common
 shape: one email/PR/notification can genuinely bridge two things that were previously tracked as
 separate — the exact case Marc described (a PR + a contract + other correspondence with the same
 supplier, filed as separate requisitions, that should live under one project). Each bridged project
@@ -108,8 +110,8 @@ a bridge without having looked at the other.
 - **Genuinely unsure** → same as any other suggestion: leave it pending rather than forcing a call.
 
 Never confirm a bridge suggestion on the strength of its `reason` string alone — the deterministic
-score got it into your queue, but whether it's actually the same real-world relationship is exactly
-the judgment this routine exists for.
+matched-data-point count got it into your queue, but whether it's actually the same real-world
+relationship is exactly the judgment this routine exists for.
 
 ## Looking back further (task #177, 2026-08-04, Marc's direct design ask)
 

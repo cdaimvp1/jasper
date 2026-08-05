@@ -1226,7 +1226,7 @@ def init_workgraph() -> None:
             # edges' contradicts/supports and identity_constraints' 8 unused
             # types are named rather than silently dropped - topic matching
             # stays the existing direct SequenceMatcher comparison
-            # (workgraph_projects._pairwise_score_from_signature), not
+            # (workgraph_projects._matched_data_points), not
             # folded into a vocabulary field nothing extracts yet.
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS work_object_signatures (

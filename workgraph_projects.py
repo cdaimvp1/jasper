@@ -43,7 +43,6 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
 import workgraph_store as ws
-import workgraph_confidence as confidence
 import workgraph_lessons
 import workgraph_signals
 import workgraph_nba
@@ -544,57 +543,53 @@ def _weak_signal_candidates(issue: dict) -> list:
     return out
 
 
-# --- Part A2 of the grouping/NBA redesign (2026-07-30): weighted multi- ---
-# --- signal confidence model, computed alongside the ordered model above --
+# --- Task #184 (2026-08-04, Marc's direct redesign, replacing the entire ---
+# --- weighted-score system this section used to hold): one deterministic --
+# --- candidate pipeline, no weights, no numeric threshold. -----------------
 #
-# Real production evidence this session: the ordered model above trusts
-# ANY ONE of shared-company/matching-topic alone to auto-merge - the same
-# shape that already caused a real bug (task #81: 71 issues wrongly merged
-# because a subject-topic match alone fired). Marc's own instinct, checked
-# against the real pipeline: a shared internal sender or a bare category
-# match are each real but individually weak signals that should COMBINE
-# for confidence rather than trust any one alone. Reference-ID match and
-# shared-external-party stay standalone-sufficient (real, structurally
-# unambiguous signals, unlike the other three which are all heuristics).
+# Marc's own words, verbatim, after watching the weighted version in
+# practice: "I'm concerned about what these 69 link and 16 bridge groups
+# are... if you take only the logic I just gave you... it should be
+# significantly accurate... but now there are a bunch of competing systems
+# in here that are blocking one another." His replacement design (also
+# verbatim, across several messages the same day): normalize every email/
+# Teams message down to a fixed vocabulary of real data points (supplier,
+# a PR/PO number, a dollar amount, a contract identifier, a product/
+# service, a business unit, a named stakeholder, an attachment/document, a
+# date/deadline, a meaningful subject/content entity - sender/participant
+# and the Outlook thread id are ALWAYS extracted too, but "never used as
+# the primary matching data points"). Two issues are a CANDIDATE - worth a
+# real LLM/human look at the actual content - when 2 or more of those
+# points match, regardless of which two. More matches means a higher-
+# ranked candidate, but the gate itself is a plain count, never a weighted
+# score: "the whole weighting and scoring is getting in the way."
 #
-# No single one of the 4 combinable signals reaches AUTO_MERGE_THRESHOLD
-# alone (max weight 0.40) - this directly closes the task #81 shape.
-# Ships shadow-logged only (config('grouping','scored_model_enabled')
-# defaults off) - group_issue() always computes this for comparison, but
-# only ACTS on it once the flag is on, and the flag should only be
-# switched on after backtest_scored_model()'s output has been reviewed
-# (see that function's own docstring) - a hard gate, not a formality.
+# What this replaces: SCORE_WEIGHTS (per-signal decimal weights),
+# AUTO_MERGE_THRESHOLD/WEAK_SUGGESTION_FLOOR (a tunable numeric cutoff),
+# the strong/medium/weak anchor tiers _suggestion_kind_for_scored_signals
+# used for barely half a day, and confidence-spine damping
+# (context_accuracy/effective_score) being part of this decision at all -
+# four separate, independently-evolved mechanisms that had accumulated
+# into exactly the "competing systems blocking one another" Marc is
+# calling out. None of the underlying content-extraction work from earlier
+# today (Ariba descriptor/requester/amount, attachment lineage, company/
+# party/topic matching) goes away - it's the SAME extracted facts, just
+# counted instead of weighted and summed.
 #
-# sender demoted 0.30 -> 0.20 (2026-08-03, Marc's direct call): the live
-# backtest against the real corpus surfaced a real false-positive shape
-# beyond D4's party-alone fix - a shared INTERNAL contact (sender) still
-# combined with just ONE other weak signal (party or company, 0.40) to
-# cross AUTO_MERGE_THRESHOLD with zero structural anchor. Confirmed real:
-# marc-360 (a single calendar event) matched several genuinely unrelated
-# deals purely because a common internal attendee - a manager/legal/
-# coordinator-shaped contact invited everywhere - was on all of them.
-# At 0.20, sender can no longer cross threshold paired with just one
-# 0.40-weight signal (0.40+0.20=0.60 < 0.65) - it still corroborates a
-# real 3-signal alignment (party+company+sender=1.0), just never enough
-# alone with a single weak partner, the same discipline D4 already
-# applied to party.
-SCORE_WEIGHTS = {
-    "company": 0.45, "topic": 0.45, "sender": 0.20, "category": 0.15, "party": 0.45,
-    # Added task #169/#170 (2026-08-04, Marc's direct design ask): company/
-    # party/topic bumped 0.40->0.45 so "supplier + one other real signal"
-    # (e.g. company+sender=0.65) actually clears AUTO_MERGE_THRESHOLD -
-    # confirmed live that it didn't before (0.40+0.20=0.60), directly
-    # contradicting the stated rule. ariba_descriptor plays the same
-    # supplier-anchor role as company/party for Ariba's automated
-    # notifications specifically (is_automated_sender excludes the sender
-    # address itself from company/party matching entirely, so those two
-    # signals structurally can't fire for two different Ariba requisitions -
-    # this fills that gap). None of amount/attachment/ariba_requester reach
-    # 0.65 alone - by design, each needs a real second signal alongside it.
-    "ariba_descriptor": 0.45, "ariba_requester": 0.30, "amount": 0.25, "attachment": 0.35,
-}
-AUTO_MERGE_THRESHOLD = 0.65
-WEAK_SUGGESTION_FLOOR = 0.15  # preserves today's "one weak signal -> suggestion" behavior
+# One deliberate, flagged exception to "always 2+": an exact shared
+# reference ID (PR/PO - see _shared_reference_id) stays sufficient ALONE,
+# same as it's always been in this module, unchanged by this redesign.
+# That's a real shared transaction key Jasper already tracks with high
+# confidence, not an inferred signal like the others in Marc's list - if
+# he wants that folded into the same "always 2+" rule too, that's a real,
+# separate correction to flag, not an assumption to make silently here.
+#
+# Also honest about what's NOT built: three of Marc's listed data points
+# (a distinct contract identifier separate from PR/PO, business unit, and
+# date/deadline as a MATCHING point rather than just an NBA signal) have no
+# extractor yet. They're real gaps, not silently pretended-covered - see
+# _matched_data_points' own docstring for the exact point-type list this
+# actually checks today.
 
 # Task #177 (2026-08-04, Marc's direct design ask): the scored model's own
 # candidate search used to scan EVERY issue ever created, forever, with no
@@ -789,96 +784,131 @@ def _topic_key_for_signature(issue: dict, sig: dict) -> str:
     return key if len(key) >= MIN_TOPIC_KEY_LEN else ""
 
 
-def _pairwise_score_from_signature(a_id: str, a_sig: dict, a_topic_key: str, a_category: Optional[str],
-                                    b_id: str, b_sig: dict, b_topic_key: str, b_category: Optional[str]):
-    """Replaces _pairwise_score (retired) - same weights/thresholds, scored
-    against each side's cached WHOLE signature rather than a snapshot
-    recomputed from scratch per call. Two real behavior changes from the
-    model it replaces: (1) a cannot_merge/cannot_link identity_constraint
-    (v2.4) now vetoes to 0 outright, the same absolute-override treatment
-    a disjoint reference-ID pair already got - this closes a real gap
-    where scored_grouping_decision's auto_merge path called merge_issues_
-    txn directly, bypassing create_project_suggestion (and therefore v2.4's
-    own veto check) entirely; a rejected pair could previously still get
-    auto-merged by the scored model even after a human explicitly rejected
-    merging it. (2) topic/category stay direct comparisons, not signature
-    fields - see compute_work_object_signature's docstring. Returns (score,
-    matched_signal_names)."""
+def _matched_data_points(a_id: str, a_sig: dict, a_topic_key: str,
+                          b_id: str, b_sig: dict, b_topic_key: str) -> list:
+    """Task #184 (2026-08-04, Marc's direct redesign) - replaces
+    _pairwise_score_from_signature (retired same day, along with the
+    weighted-score model it belonged to). Returns the plain list of
+    matched NORMALIZED DATA POINTS between two issues - no weights, no
+    score. A real candidate is 2 or more of these; that gate lives in the
+    caller (scored_grouping_decision), not here - this function only
+    reports what actually matched.
+
+    The point-type vocabulary, mapped from Marc's own list onto what
+    Jasper's extraction actually produces today:
+      - "reference": a shared real PR/PO number (definitive_ids overlap).
+        Also its own separate, standalone-sufficient early return in
+        scored_grouping_decision (_shared_reference_id) - included here
+        too so it participates honestly in the count for any candidate
+        that reaches this far without having triggered that early return.
+      - "supplier": shared external company/org.
+      - "stakeholder": a shared NAMED person - either a tracked external
+        party in common, or a matching Ariba-extracted requester name.
+        Deliberately one point type, not two, even when both fire - they
+        answer the same question ("is there a shared named person"), and
+        Marc's own list treats "named stakeholder" as one data point.
+      - "product_service": a shared Ariba-extracted product/service
+        description.
+      - "amount": a shared dollar value (within 1%).
+      - "document": shared attachment/document lineage.
+      - "subject_entity": a shared, specific normalized subject/topic core.
+
+    Deliberately NOT a point type here, per Marc's own explicit rule
+    ("never used as the primary matching data points"): sender/participant
+    overlap (a shared INTERNAL contact) - always extracted and available
+    to whoever reviews a candidate's real content, but never counted
+    toward the 2+-point gate itself, on purpose. Category is dropped
+    entirely (not one of his listed data point types - an internal
+    taxonomy tag, not extracted evidence).
+
+    Honest gap, not silently pretended-covered: three of his listed types
+    have no extractor yet - a contract identifier distinct from a PR/PO
+    number, a business unit, and a date/deadline used as a MATCHING point
+    (deadlines already exist elsewhere in Jasper, just not wired in here).
+
+    Two absolute vetoes, checked first, unchanged from the model this
+    replaces: a disjoint real reference (both sides have a captured PR/PO
+    and they don't overlap) is positive evidence of two different real
+    transactions, not just an absent match; a cannot_merge/cannot_link
+    identity_constraint is a real human override. Either returns []
+    outright, regardless of anything else that would otherwise match."""
     a_ids, b_ids = set(a_sig["definitive_ids"]), set(b_sig["definitive_ids"])
     if a_ids and b_ids and a_ids.isdisjoint(b_ids):
-        return 0.0, []
+        return []
     if b_id in a_sig["cannot_link_ids"] or a_id in b_sig["cannot_link_ids"]:
-        return 0.0, []
+        return []
     # NOTE (2026-08-04): Marc's broader "hard contradiction" concept (a
     # different PO/legal-entity/requester should "materially reduce
     # confidence or trigger an LLM review boundary," his own words - not
     # necessarily an absolute veto the way a disjoint reference ID is) is
     # deliberately NOT implemented as a new hard veto here yet. A first
-    # attempt (zeroing the score outright on any ariba_requester mismatch)
+    # attempt (treating an ariba_requester mismatch as an absolute veto)
     # broke a legitimate bridge scenario in testing - a real bridging item
-    # sharing descriptor+amount with a DIFFERENT named requester is exactly
-    # the kind of case that should reach curator's LLM review, not get
-    # silently vetoed before ever being seen. Left as an open question back
-    # to Marc rather than guessed at further under time pressure.
+    # sharing product_service+amount with a DIFFERENT named requester is
+    # exactly the kind of case that should reach curator's LLM review, not
+    # get silently vetoed before anyone looks at it. Left as an open
+    # question back to Marc rather than guessed at further.
+
+    points = []
+    if a_ids and b_ids and not a_ids.isdisjoint(b_ids):
+        points.append("reference")
+    if a_sig["external_orgs"] and b_sig["external_orgs"] and not set(a_sig["external_orgs"]).isdisjoint(b_sig["external_orgs"]):
+        points.append("supplier")
 
     a_external = {p["party_id"] for p in a_sig["participant_roles"] if p.get("affiliation") == "external"}
     b_external = {p["party_id"] for p in b_sig["participant_roles"] if p.get("affiliation") == "external"}
-    a_internal = {p["party_id"] for p in a_sig["participant_roles"] if p.get("affiliation") == "internal"}
-    b_internal = {p["party_id"] for p in b_sig["participant_roles"] if p.get("affiliation") == "internal"}
+    a_vocab, b_vocab = a_sig.get("positive_vocabulary") or {}, b_sig.get("positive_vocabulary") or {}
+    a_req, b_req = a_vocab.get("ariba_requester"), b_vocab.get("ariba_requester")
+    shared_named_person = (a_external and b_external and not a_external.isdisjoint(b_external)) or (
+        a_req and b_req and a_req.lower().strip() == b_req.lower().strip())
+    if shared_named_person:
+        points.append("stakeholder")
 
-    signals = []
-    score = 0.0
-    if a_external and b_external and not a_external.isdisjoint(b_external):
-        score += SCORE_WEIGHTS["party"]
-        signals.append("party")
-    if a_sig["external_orgs"] and b_sig["external_orgs"] and not set(a_sig["external_orgs"]).isdisjoint(b_sig["external_orgs"]):
-        score += SCORE_WEIGHTS["company"]
-        signals.append("company")
     if a_topic_key and b_topic_key:
         m = SequenceMatcher(None, a_topic_key, b_topic_key).find_longest_match(
             0, len(a_topic_key), 0, len(b_topic_key))
         if m.size >= MIN_TOPIC_KEY_LEN:
-            score += SCORE_WEIGHTS["topic"]
-            signals.append("topic")
-    if a_internal and b_internal and not a_internal.isdisjoint(b_internal):
-        score += SCORE_WEIGHTS["sender"]
-        signals.append("sender")
-    if a_category and a_category != "other" and a_category == b_category:
-        score += SCORE_WEIGHTS["category"]
-        signals.append("category")
+            points.append("subject_entity")
 
-    # Added task #169/#170 (2026-08-04): real content-extracted signals,
-    # stored in positive_vocabulary (see compute_work_object_signature).
-    a_vocab, b_vocab = a_sig.get("positive_vocabulary") or {}, b_sig.get("positive_vocabulary") or {}
     a_desc, b_desc = a_vocab.get("ariba_descriptor"), b_vocab.get("ariba_descriptor")
     if a_desc and b_desc:
         norm_a, norm_b = a_desc.lower().strip(), b_desc.lower().strip()
         m = SequenceMatcher(None, norm_a, norm_b).find_longest_match(0, len(norm_a), 0, len(norm_b))
         if m.size >= MIN_TOPIC_KEY_LEN:
-            score += SCORE_WEIGHTS["ariba_descriptor"]
-            signals.append("ariba_descriptor")
-    a_req, b_req = a_vocab.get("ariba_requester"), b_vocab.get("ariba_requester")
-    if a_req and b_req and a_req.lower().strip() == b_req.lower().strip():
-        score += SCORE_WEIGHTS["ariba_requester"]
-        signals.append("ariba_requester")
+            points.append("product_service")
+
     a_amt, b_amt = a_vocab.get("value_amount"), b_vocab.get("value_amount")
     if a_amt and b_amt and abs(a_amt - b_amt) <= max(a_amt, b_amt) * 0.01:
-        score += SCORE_WEIGHTS["amount"]
-        signals.append("amount")
+        points.append("amount")
+
     if (a_sig["accepted_lineages"] and b_sig["accepted_lineages"]
             and not set(a_sig["accepted_lineages"]).isdisjoint(b_sig["accepted_lineages"])):
-        score += SCORE_WEIGHTS["attachment"]
-        signals.append("attachment")
-    return score, signals
+        points.append("document")
+
+    return points
 
 
 def scored_grouping_decision(issue_id: str, issue: dict, *, lookback_days: Optional[int] = None) -> dict:
-    """The scored model's verdict for ONE issue - always computed by
-    group_issue() regardless of whether config('grouping',
+    """The deterministic candidate-detection verdict for ONE issue - always
+    computed by group_issue() regardless of whether config('grouping',
     'scored_model_enabled') is on, so it can be shadow-logged for
-    comparison against the real (ordered-model) decision before ever
-    being trusted to act. Returns {verdict: auto_merge|suggest|no_match,
-    score, sibling_id, matched_signals}.
+    comparison against the real (ordered-model) decision before ever being
+    trusted to act. Returns {verdict: auto_merge|candidate|bridge|no_match,
+    match_count, sibling_id, matched_signals, bridged_projects}.
+
+    Task #184 (2026-08-04, Marc's direct redesign): no more weighted score,
+    no more AUTO_MERGE_THRESHOLD/WEAK_SUGGESTION_FLOOR, no more confidence-
+    spine damping in this decision at all - see _matched_data_points' own
+    docstring and this module's top-of-file comment for the full "why".
+    "candidate" (2+ matched data points against ANY issue - a fresh
+    ungrouped one, or a member of an existing project) replaces the old
+    auto_merge/suggest split entirely: every candidate is real judgment
+    territory now, not something the deterministic layer half-decides via
+    a numeric cutoff. Only an exact shared reference ID (PR/PO) stays
+    standalone-sufficient for an immediate auto_merge - a real shared
+    transaction key, not an inferred signal like the rest of Marc's list -
+    flagged in this module's own top comment as a deliberate, open-to-
+    correction exception to "always 2+".
 
     lookback_days (task #177): the candidate search below defaults to
     _candidate_pool's own scope (open issues, plus closed ones within
@@ -889,38 +919,20 @@ def scored_grouping_decision(issue_id: str, issue: dict, *, lookback_days: Optio
     m = _shared_reference_id(issue_id)
     if m:
         ref, sibling_id = m
-        return {"verdict": "auto_merge", "score": 1.0, "sibling_id": sibling_id, "matched_signals": ["reference"]}
-    # Phase 0 fix (2026-08-03, D4): a standalone _shared_external_party ->
-    # auto_merge(1.0) branch used to live here - the exact hazard the module
-    # docstring's 2026-07-31 narrowing already removed from the LIVE grouping
-    # path (_strong_signal_match), but this shadow-only scored model still
-    # carried it verbatim. A shared party now flows into the signature
-    # model's "party" signal below instead, where it contributes but can't
-    # alone cross AUTO_MERGE_THRESHOLD - same treatment as company/topic/
-    # sender.
+        return {"verdict": "auto_merge", "match_count": 1, "sibling_id": sibling_id,
+                "matched_signals": ["reference"], "bridged_projects": {}}
 
     my_project_id = issue.get("project_id")
     my_sig = get_or_compute_work_object_signature(issue_id, issue)
     my_topic_key = _topic_key_for_signature(issue, my_sig)
-    best_score, best_sibling, best_signals = 0.0, None, []
+    best_points, best_sibling = [], None
     # best-per-project (task #169/#170, 2026-08-04, Marc's direct design ask):
-    # the OLD version below excluded any candidate already in a DIFFERENT
-    # project than mine outright - meaning an ungrouped item could never
-    # join an existing, already-established project via this path at all,
-    # and a chain like A-B-C (A and B share 2 points, B and C share 2
-    # DIFFERENT points, A and C alone might share only 0-1) could never be
-    # discovered, since B's own project would just get skipped as a
-    # candidate source once it existed. Now tracks the best-scoring match
-    # PER DISTINCT existing project (keyed by that project's id, or the
-    # sibling's own id when it's ungrouped) so group_issue() below can tell
-    # a clean single-project match from a genuine bridge between two
-    # already-established projects.
-    # project_id -> (score, sibling_id, matched_signals) for the best-scoring
-    # member of that REAL, already-established project. Ungrouped siblings
-    # are tracked separately (best_score/best_sibling/best_signals above,
-    # already the pre-existing single-best-match behavior) since an
-    # ungrouped-to-ungrouped match forms a brand NEW project, not a bridge.
-    project_best: dict[str, tuple[float, str, list]] = {}
+    # tracks the best (most data points matched) candidate PER DISTINCT
+    # existing project so group_issue() below can tell a clean single-
+    # project match from a genuine bridge between two already-established
+    # projects - unchanged by task #184's count-based rewrite, just now
+    # keyed by point-count instead of score.
+    project_best: dict[str, tuple[list, str]] = {}
     # Task #177: scoped to _candidate_pool's open-plus-grace-period window
     # by default (was every issue ever created, no time bound at all).
     for other in _candidate_pool(lookback_days=lookback_days):
@@ -930,151 +942,95 @@ def scored_grouping_decision(issue_id: str, issue: dict, *, lookback_days: Optio
             continue  # already the same project - nothing to decide
         other_sig = get_or_compute_work_object_signature(other["id"], other)
         other_topic_key = _topic_key_for_signature(other, other_sig)
-        score, signals = _pairwise_score_from_signature(
-            issue_id, my_sig, my_topic_key, issue.get("category"),
-            other["id"], other_sig, other_topic_key, other.get("category"),
+        points = _matched_data_points(
+            issue_id, my_sig, my_topic_key,
+            other["id"], other_sig, other_topic_key,
         )
-        if score <= 0:
-            continue
+        if len(points) < 2:
+            continue  # Marc's floor: fewer than 2 real data points is never a candidate, period
         other_project_id = other.get("project_id")
         if other_project_id:
             current = project_best.get(other_project_id)
-            if current is None or score > current[0]:
-                project_best[other_project_id] = (score, other["id"], signals)
-        if score > best_score:
-            best_score, best_sibling, best_signals = score, other["id"], signals
+            if current is None or len(points) > len(current[0]):
+                project_best[other_project_id] = (points, other["id"])
+        if len(points) > len(best_points):
+            best_points, best_sibling = points, other["id"]
 
     # Bridge detection: 2+ DISTINCT already-established projects each with
-    # their own qualifying member at/above AUTO_MERGE_THRESHOLD means this
-    # item connects two real, separate groups - exactly the case that needs
-    # a real judgment call (which one, both, or neither), not a blind pick
-    # of whichever scored highest.
-    bridged_projects = {
-        pid: (score, sibling_id, signals)
-        for pid, (score, sibling_id, signals) in project_best.items()
-        if score >= AUTO_MERGE_THRESHOLD
-    }
+    # their own qualifying (2+-point) member means this item connects two
+    # real, separate groups - exactly the case that needs a real judgment
+    # call (which one, both, or neither), not a blind pick of whichever
+    # matched the most points.
+    bridged_projects = {pid: (pts, sib) for pid, (pts, sib) in project_best.items()}
 
-    # Confidence spine v1 (2026-08-03) - the verdict below now decides on
-    # the DAMPED score, not the raw ordered one. Deferred from v0/v1's own
-    # commits until this exact backtest-and-review happened (see git log)
-    # - not wired in unreviewed. Real anchors (once the backfill has
-    # covered this issue) take priority over the match_kind shim, via
-    # context_accuracy's own None check.
-    present = set()
-    if issue.get("category") and issue["category"] != "other":
-        present.add("category")
-    if my_sig["definitive_ids"] or my_sig["participant_roles"] or my_sig["external_orgs"] or my_topic_key:
-        present.add("anchor_or_relationship")
-    evidence_ts = [e["ts"] for e in ws.list_evidence(issue_id) if e.get("ts")]
-    real_anchors = ws.list_identity_anchors(issue_id=issue_id)
-    ctx = confidence.context_accuracy(
-        present_fields=present, required_fields={"category", "anchor_or_relationship"},
-        evidence_ts=evidence_ts, now=time.time(), match_kinds=best_signals,
-        total_refs=1, unresolved_refs=0 if my_sig["definitive_ids"] else 1,
-        anchor_strengths=([a["anchor_strength"] for a in real_anchors] if real_anchors else None),
-    )
-    effective_score = confidence.effective_score(best_score, ctx["context_accuracy"])
-
-    if effective_score >= AUTO_MERGE_THRESHOLD:
-        verdict = "auto_merge"
-        # Real bug found by backtest_scored_model()'s own mandatory review
-        # (task #180 prep, 2026-08-04): party(0.45)+sender(0.20) sums to
-        # EXACTLY AUTO_MERGE_THRESHOLD, so this branch used to auto_merge
-        # on that combination alone with no regard for what those signals
-        # actually mean - even though _suggestion_kind_for_scored_signals
-        # correctly classifies a bare party+sender match (no topic overlap)
-        # as "link", not "merge" - the exact task #81 false-positive shape
-        # (a busy contact who's the shared party on many genuinely
-        # different real deals). 71 real different-project pairs in the
-        # live corpus hit exactly this contradiction. The raw score alone
-        # is never enough to auto-merge if the signal COMPOSITION only
-        # supports a relationship, not a same-transaction claim - demote to
-        # suggest instead, same bar _strong_signal_match's own "merge" vs
-        # "link" verdict already applies for the ordered model.
-        if best_signals and _suggestion_kind_for_scored_signals(best_signals) != "merge":
-            verdict = "suggest"
-    elif effective_score >= WEAK_SUGGESTION_FLOOR:
-        verdict = "suggest"
+    if len(bridged_projects) >= 2:
+        verdict = "bridge"
+    elif best_sibling:
+        verdict = "candidate"
     else:
         verdict = "no_match"
-    if len(bridged_projects) >= 2:
-        # Overrides whatever the single-best-match verdict above would have
-        # been - this is a structural fact (the item connects two already-
-        # separate, already-established projects), not a confidence
-        # question, and group_issue() needs to route it to real judgment
-        # rather than silently picking whichever one scored highest.
-        verdict = "bridge"
 
-    return {"verdict": verdict, "score": round(best_score, 2),
-            "bridged_projects": {pid: {"score": round(s, 2), "sibling_id": sib, "matched_signals": sig}
-                                  for pid, (s, sib, sig) in bridged_projects.items()},
-            "sibling_id": best_sibling if verdict != "no_match" else None, "matched_signals": best_signals,
-            "context_accuracy": ctx["context_accuracy"], "effective_score": effective_score}
+    return {"verdict": verdict, "match_count": len(best_points),
+            "bridged_projects": {pid: {"match_count": len(pts), "sibling_id": sib, "matched_signals": pts}
+                                  for pid, (pts, sib) in bridged_projects.items()},
+            "sibling_id": best_sibling if verdict != "no_match" else None, "matched_signals": best_points}
 
 
 def backtest_scored_model() -> dict:
     """The required gate before config('grouping','scored_model_enabled')
-    is ever set to true - READ-ONLY, changes nothing. Runs the scored
-    model against every real pair in the current corpus and reports the
-    two things that matter:
-    (a) same-project pairs the new model would now score BELOW threshold
-        - informational (a real merge the new model wouldn't make on its
-        own; not necessarily wrong, just worth knowing).
-    (b) different-project (or one/both ungrouped) pairs the new model
-        would now score AT/OR-ABOVE threshold - the actual false-positive
-        class that matters (the exact task #81 shape) and needs human
-        review before the flag is ever enabled. Each entry's actual_verdict
-        ("merge" or "suggest") is what genuinely happens: Marc's tiered
-        anchor rule (2026-08-04 - see _suggestion_kind_for_scored_signals)
-        means crossing the raw score threshold does NOT always imply a
-        real merge candidate (party+sender alone reaches 0.65 but is
-        medium+weak, not 2+ medium anchors) - re-added after briefly being
-        removed the same day under an earlier, simpler count-based rule
-        where it happened to always be "merge" and looked redundant.
+    is ever set to true - READ-ONLY, changes nothing. Runs the deterministic
+    candidate-detection model (task #184, 2026-08-04) against every real
+    pair in the current corpus and reports the two things that matter:
+    (a) same-project pairs that DON'T clear the 2+-data-point candidate bar
+        - informational (a real merge the new model wouldn't have found on
+        its own; not necessarily wrong, just worth knowing).
+    (b) different-project (or one/both ungrouped) pairs that DO clear it -
+        the actual false-positive-risk class that matters (the exact task
+        #81 shape) and needs human review before the flag is ever enabled.
+    No more "actual_verdict" distinction between raw-score and real
+    composition - there's no score left to diverge from the composition;
+    clearing the bar (2+ matched data points) and being a real candidate
+    are now the same fact, not two things that could disagree.
+
     Every issue's signature is computed ONCE up front (real queries, O(n)),
     then compared pairwise purely in memory (O(n^2) cheap set ops) - fast
     even at real corpus scale. Section 12.7: reads/writes the same cached
     work_object_signatures table the live path does (a full backtest run
     is itself a real, honest way to warm the cache for every issue in the
-    corpus), scored via _pairwise_score_from_signature - including its
-    cannot_merge/cannot_link veto, so a backtest run now also reports
-    whether that veto changes any real pair's verdict."""
+    corpus), scored via _matched_data_points - including its cannot_merge/
+    cannot_link veto, so a backtest run now also reports whether that veto
+    changes any real pair's verdict."""
     issues = ws.list_issues(states=None, limit=10000)
     sigs = {}
     topic_keys = {}
     projects = {}
-    categories = {}
     for i in issues:
         sigs[i["id"]] = get_or_compute_work_object_signature(i["id"], i)
         topic_keys[i["id"]] = _topic_key_for_signature(i, sigs[i["id"]])
         projects[i["id"]] = i.get("project_id")
-        categories[i["id"]] = i.get("category")
     ids = list(sigs.keys())
 
-    same_project_below_threshold = []
-    different_project_at_or_above = []
+    same_project_below_bar = []
+    different_project_candidates = []
     for idx, a_id in enumerate(ids):
         for b_id in ids[idx + 1:]:
-            score, signals = _pairwise_score_from_signature(
-                a_id, sigs[a_id], topic_keys[a_id], categories[a_id],
-                b_id, sigs[b_id], topic_keys[b_id], categories[b_id],
+            points = _matched_data_points(
+                a_id, sigs[a_id], topic_keys[a_id],
+                b_id, sigs[b_id], topic_keys[b_id],
             )
             same_project = bool(projects[a_id] and projects[a_id] == projects[b_id])
-            if same_project and score < AUTO_MERGE_THRESHOLD:
-                same_project_below_threshold.append(
-                    {"a": a_id, "b": b_id, "score": round(score, 2), "project_id": projects[a_id]})
-            elif not same_project and score >= AUTO_MERGE_THRESHOLD:
-                actual_verdict = _suggestion_kind_for_scored_signals(signals) or "suggest"
-                different_project_at_or_above.append({
-                    "a": a_id, "b": b_id, "score": round(score, 2), "signals": signals,
+            if same_project and len(points) < 2:
+                same_project_below_bar.append(
+                    {"a": a_id, "b": b_id, "matched_signals": points, "project_id": projects[a_id]})
+            elif not same_project and len(points) >= 2:
+                different_project_candidates.append({
+                    "a": a_id, "b": b_id, "match_count": len(points), "matched_signals": points,
                     "a_project": projects[a_id], "b_project": projects[b_id],
-                    "actual_verdict": "merge" if actual_verdict == "merge" else "suggest",
                 })
     return {
         "issues_checked": len(ids),
-        "same_project_pairs_below_threshold": same_project_below_threshold,
-        "different_project_pairs_at_or_above_threshold": different_project_at_or_above,
+        "same_project_pairs_below_threshold": same_project_below_bar,
+        "different_project_pairs_at_or_above_threshold": different_project_candidates,
     }
 
 
@@ -1143,23 +1099,21 @@ def run_retroactive_scored_reprocess(*, apply: bool = False, lookback_days: int 
         if decision["verdict"] == "bridge":
             entry = {"issue_id": issue_id, "bridges": []}
             for pid, info in decision["bridged_projects"].items():
-                kind = _suggestion_kind_for_scored_signals(info["matched_signals"]) or "link"
                 reason = (f"retroactive reprocess: bridge candidate - connects to project {pid} via "
-                          f"scored signal ({','.join(info['matched_signals'])}, score={info['score']})")
+                          f"{info['match_count']} matching data points ({','.join(info['matched_signals'])})")
                 if apply:
                     ws.create_project_suggestion(
-                        issue_id_a=issue_id, issue_id_b=info["sibling_id"], reason=reason, suggestion_kind=kind,
+                        issue_id_a=issue_id, issue_id_b=info["sibling_id"], reason=reason, suggestion_kind="merge",
                     )
-                entry["bridges"].append({"project_id": pid, "sibling_id": info["sibling_id"], "kind": kind})
+                entry["bridges"].append({"project_id": pid, "sibling_id": info["sibling_id"]})
             bridged.append(entry)
         elif decision["verdict"] == "auto_merge":
             sibling_id = decision["sibling_id"]
             sibling = ws.get_issue(sibling_id)
             if issue.get("project_id") and sibling and issue["project_id"] == sibling.get("project_id"):
                 continue  # already the same project - nothing to do, don't count as a change
-            reason_label = f"retroactive reprocess: scored signal ({','.join(decision['matched_signals'])}, score={decision['score']})"
-            record = {"issue_id": issue_id, "sibling_id": sibling_id,
-                      "signals": decision["matched_signals"], "score": decision["score"]}
+            reason_label = "retroactive reprocess: shared reference ID"
+            record = {"issue_id": issue_id, "sibling_id": sibling_id, "signals": decision["matched_signals"]}
             if apply:
                 result = merge_issues(issue_id, sibling_id, reason_label=reason_label)
                 if result["status"] == "deferred":
@@ -1168,19 +1122,14 @@ def run_retroactive_scored_reprocess(*, apply: bool = False, lookback_days: int 
                     auto_merged.append({**record, "project_id": result["project_id"]})
             else:
                 auto_merged.append(record)
-        elif decision["verdict"] == "suggest":
+        elif decision["verdict"] == "candidate":
             sibling_id = decision["sibling_id"]
-            kind = _suggestion_kind_for_scored_signals(decision["matched_signals"])
-            if kind is None:
-                no_match_count += 1
-                continue
-            reason = f"retroactive reprocess: scored signal ({','.join(decision['matched_signals'])}, score={decision['score']})"
-            if kind == "link":
-                reason = f"possibly related (not necessarily same project) - {reason}"
+            reason = (f"retroactive reprocess: {decision['match_count']} matching data points "
+                      f"({','.join(decision['matched_signals'])})")
             if apply:
-                ws.create_project_suggestion(issue_id_a=issue_id, issue_id_b=sibling_id, reason=reason, suggestion_kind=kind)
-            suggested.append({"issue_id": issue_id, "sibling_id": sibling_id, "kind": kind,
-                               "signals": decision["matched_signals"], "score": decision["score"]})
+                ws.create_project_suggestion(issue_id_a=issue_id, issue_id_b=sibling_id, reason=reason, suggestion_kind="merge")
+            suggested.append({"issue_id": issue_id, "sibling_id": sibling_id,
+                               "signals": decision["matched_signals"], "match_count": decision["match_count"]})
         else:
             no_match_count += 1
 
@@ -1527,49 +1476,6 @@ def split_issue_from_project(issue_id: str, *, actor: str = "marc", reason: Opti
     }
 
 
-_STRONG_ANCHOR_SIGNALS = {"attachment"}  # reference (PR/PO) is its own earlier early-return, not routed through here
-_MEDIUM_ANCHOR_SIGNALS = {"party", "company", "topic", "ariba_descriptor", "ariba_requester", "amount"}
-_WEAK_ANCHOR_SIGNALS = {"sender", "category"}
-
-
-def _suggestion_kind_for_scored_signals(matched_signals: list) -> Optional[str]:
-    """Marc's direct, detailed correction (2026-08-04) to the plain
-    count-based rule this replaces same day: "every signal should not
-    count equally... two weak matches such as sender+year should not
-    generate a serious candidate... one extremely strong identifier may be
-    enough." His stated threshold, applied directly:
-
-        candidate (merge) if: 1 strong anchor
-                           OR 2+ medium anchors
-                           OR 1 medium anchor + 2+ weak anchors
-
-    Strong: a shared attachment/document lineage (his own example - "a
-    shared document ID" is listed as a strong anchor) - reference ID
-    (PR/PO) is stronger still, but that's scored_grouping_decision's own
-    earlier _shared_reference_id early-return, never reaching this
-    function at all. Medium: party, company, topic, and the Ariba
-    content fields (descriptor/requester/amount) - each specific enough
-    on its own to mean something, per his examples ("supplier", "specific
-    dollar amount", "specific product/service"). Weak: sender, category -
-    his own examples ("sender", "department") - real corroboration, never
-    sufficient alone OR paired with just one other weak signal.
-
-    Exactly one medium anchor and nothing else (or any number of weak
-    anchors with no medium/strong backing) still surfaces as a link for a
-    human to judge - the task #81 lesson (a single shared identity proves
-    a relationship, not the same transaction) - never silently dropped.
-    Zero signals is no_match."""
-    signals = set(matched_signals)
-    if not signals:
-        return None
-    strong = signals & _STRONG_ANCHOR_SIGNALS
-    medium = signals & _MEDIUM_ANCHOR_SIGNALS
-    weak = signals & _WEAK_ANCHOR_SIGNALS
-    if strong or len(medium) >= 2 or (len(medium) >= 1 and len(weak) >= 2):
-        return "merge"
-    return "link"
-
-
 def group_issue(issue_id: str, *, lookback_days: Optional[int] = None) -> dict:
     """Runs the grouping logic for ONE issue. Safe to re-run -
     assign_issue_to_project and create_project_suggestion are both
@@ -1611,7 +1517,12 @@ def group_issue(issue_id: str, *, lookback_days: Optional[int] = None) -> dict:
     def _finish(action: str, *, signal: Optional[str] = None, sibling_id: Optional[str] = None, **extra) -> dict:
         ws.log_shadow_grouping_decision(
             issue_id=issue_id, live_action=action, live_signal=signal, live_sibling_id=sibling_id,
-            scored_verdict=shadow_scored["verdict"], scored_score=shadow_scored["score"],
+            scored_verdict=shadow_scored["verdict"],
+            # Task #184 (2026-08-04): no more numeric score to log - the
+            # scored_score column now just holds the plain matched-data-
+            # point count, so shadow-log comparisons still have SOME
+            # numeric ranking signal to sort/filter on.
+            scored_score=float(shadow_scored.get("match_count") or 0),
             scored_sibling_id=shadow_scored.get("sibling_id"),
             scored_signals_json=json.dumps(shadow_scored.get("matched_signals") or []),
         )
@@ -1641,8 +1552,8 @@ def group_issue(issue_id: str, *, lookback_days: Optional[int] = None) -> dict:
             # this item connects 2+ already-established, previously-
             # separate projects - real judgment territory (which one, both
             # meaning they should merge, or neither), not safe to auto-pick
-            # whichever scored highest. The real LLM judgment call this
-            # deserves isn't built yet (tracked separately) - in the
+            # whichever matched the most points. The real LLM judgment call
+            # this deserves isn't built yet (tracked separately) - in the
             # meantime, surface a suggestion against EVERY bridged
             # project's best-matching member so a human reviewing the
             # existing suggestion queue sees the real ambiguity, rather
@@ -1650,36 +1561,30 @@ def group_issue(issue_id: str, *, lookback_days: Optional[int] = None) -> dict:
             # no_match.
             created = []
             for pid, info in shadow_scored["bridged_projects"].items():
-                kind = _suggestion_kind_for_scored_signals(info["matched_signals"]) or "link"
-                reason = (f"bridge candidate - connects to project {pid} via scored signal "
-                          f"({','.join(info['matched_signals'])}, score={info['score']})")
+                reason = (f"bridge candidate - connects to project {pid} via "
+                          f"{info['match_count']} matching data points ({','.join(info['matched_signals'])})")
                 ws.create_project_suggestion(
-                    issue_id_a=issue_id, issue_id_b=info["sibling_id"], reason=reason, suggestion_kind=kind,
+                    issue_id_a=issue_id, issue_id_b=info["sibling_id"], reason=reason, suggestion_kind="merge",
                 )
                 created.append({"project_id": pid, "sibling_id": info["sibling_id"]})
             return _finish("bridge_suggested", signal="scored", count=len(created), bridges=created)
         if shadow_scored["verdict"] == "auto_merge":
-            reason_label = f"scored signal ({','.join(shadow_scored['matched_signals'])}, score={shadow_scored['score']})"
+            reason_label = f"shared reference ID ({','.join(shadow_scored['matched_signals'])})"
             return _merge_or_defer(shadow_scored["sibling_id"], reason_label, "scored")
-        if shadow_scored["verdict"] == "suggest":
+        if shadow_scored["verdict"] == "candidate":
             precedent = workgraph_lessons.precedent_prefilter(issue)
             if precedent == "confirmed":
                 return _merge_or_defer(shadow_scored["sibling_id"],
                                         "auto-resolved by precedent (repeated confirmed pattern)", "precedent")
             if precedent != "rejected":
                 matched_signals = shadow_scored["matched_signals"]
-                suggestion_kind = _suggestion_kind_for_scored_signals(matched_signals)
-                if suggestion_kind is None:
-                    return _finish("no_match")
-                reason = f"scored signal ({','.join(matched_signals)}, score={shadow_scored['score']})"
-                if suggestion_kind == "link":
-                    reason = f"possibly related (not necessarily same project) - {reason}"
+                reason = f"{shadow_scored['match_count']} matching data points ({','.join(matched_signals)})"
                 ws.create_project_suggestion(
                     issue_id_a=issue_id, issue_id_b=shadow_scored["sibling_id"],
-                    reason=reason, suggestion_kind=suggestion_kind,
+                    reason=reason, suggestion_kind="merge",
                 )
                 return _finish("suggested", signal="scored", sibling_id=shadow_scored["sibling_id"],
-                                count=1, suggestion_kind=suggestion_kind)
+                                count=1, suggestion_kind="merge")
         return _finish("no_match")
 
     match = _strong_signal_match(issue_id, issue)
@@ -1741,26 +1646,25 @@ def group_issue(issue_id: str, *, lookback_days: Optional[int] = None) -> dict:
     # this flag IS turned on: _strong_signal_match already searched
     # exhaustively across every other issue for shared party/company/topic
     # and found none, or this issue wouldn't have reached here - so the
-    # only _pairwise_score signal left that can genuinely corroborate a bare
-    # category match is a shared INTERNAL sender ("sender", which
-    # _strong_signal_match never checks). A category match with no such
-    # corroboration is dropped rather than suggested.
+    # only thing left that can genuinely corroborate a bare category match
+    # is a shared INTERNAL sender. Deliberately NOT routed through
+    # _matched_data_points (task #184) - Marc's redesign explicitly
+    # excludes sender/participant from ever being a primary matching data
+    # point, and this check is sender-only by construction (that's the
+    # entire point of it - category alone isn't one of his data points
+    # either). A category match with no such corroboration is dropped
+    # rather than suggested.
     my_sig = get_or_compute_work_object_signature(issue_id, issue)
-    my_topic_key = _topic_key_for_signature(issue, my_sig)
+    my_internal = {p["party_id"] for p in my_sig["participant_roles"] if p.get("affiliation") == "internal"}
     corroborated = []
     for other in candidates:
         other_sig = get_or_compute_work_object_signature(other["id"], other)
-        other_topic_key = _topic_key_for_signature(other, other_sig)
-        score, signals = _pairwise_score_from_signature(
-            issue_id, my_sig, my_topic_key, issue.get("category"),
-            other["id"], other_sig, other_topic_key, other.get("category"),
-        )
-        if any(s != "category" for s in signals):
-            corroborated.append((score, other))
+        other_internal = {p["party_id"] for p in other_sig["participant_roles"] if p.get("affiliation") == "internal"}
+        if my_internal and other_internal and not my_internal.isdisjoint(other_internal):
+            corroborated.append(other)
     if not corroborated:
         return _finish("no_match")
-    corroborated.sort(key=lambda pair: pair[0], reverse=True)
-    _, best = corroborated[0]
+    best = corroborated[0]
 
     # Total Recall precedent check, before asking curator (or Marc) at all -
     # see workgraph_lessons.precedent_prefilter. A 'confirmed' verdict merges
@@ -1826,74 +1730,6 @@ def backfill_regroup_by_reference() -> dict:
         action = group_issue(issue["id"])["action"]
         results[action] = results.get(action, 0) + 1
     return results
-
-
-def replay_scored_merge_link_regression(since_ts: float) -> dict:
-    """One-time repair pass for the 2026-08-04 merge/link regression fix
-    (see _suggestion_kind_for_scored_signals): while scored_model_enabled
-    was on (2026-08-03 onward, until this fix), EVERY scored "suggest"
-    verdict created a suggestion_kind='merge' row regardless of its real
-    signals - a company/party-alone pair that should have been "link"
-    instead sat as a pending merge suggestion. Idempotent - safe to
-    re-run: finds still-PENDING 'merge' suggestions created since
-    `since_ts` whose reason marks them as scored-model-originated
-    ("scored signal"), re-derives the correct kind for THIS EXACT stored
-    pair against its CURRENT live signatures, and for every one that
-    should have been 'link': expires the wrong pending 'merge' row
-    (status='expired' - reversible bookkeeping, never a delete, same
-    convention as expire_stale_project_suggestions) and creates the
-    correct 'link' suggestion via create_project_suggestion (itself
-    idempotent - reuses an existing pending 'link' row for this exact
-    pair if one is already there, so a second run of this function is a
-    no-op). Rows this fix would already have classified 'merge' are left
-    untouched.
-
-    Deliberately re-scores the STORED pair directly via _pairwise_score_
-    from_signature rather than calling scored_grouping_decision(issue_a_
-    id, ...) again - that function only returns issue_a's single best-
-    scoring candidate across the WHOLE corpus today, which on a live,
-    still-growing corpus is very often a DIFFERENT issue than the one
-    originally suggested (confirmed live: of 69 real pending scored-merge
-    suggestions since 2026-08-03, scored_grouping_decision's 'still-best-
-    match' framing skipped 61 of them as 'moved on', even though most of
-    those specific PAIRS were themselves still a real company/party-alone
-    match worth repairing). This function answers "was THIS suggested
-    pair itself wrongly classified," not "is this pair still issue_a's
-    single best match today" - the two are different questions, and only
-    the first is what this repair is actually for. Any cannot_merge/
-    cannot_link veto is still respected automatically (create_project_
-    suggestion's own check), same as the live path."""
-    candidates = [
-        s for s in ws.list_project_suggestions(status="pending")
-        if s["suggestion_kind"] == "merge" and s["created_ts"] >= since_ts
-        and "scored signal" in (s.get("reason") or "")
-    ]
-    repaired = 0
-    for sugg in candidates:
-        issue_a_id, issue_b_id = sugg["issue_id_a"], sugg["issue_id_b"]
-        issue_a, issue_b = ws.get_issue(issue_a_id), ws.get_issue(issue_b_id)
-        if issue_a is None or issue_b is None:
-            continue
-        if issue_a.get("project_id") or issue_b.get("project_id"):
-            continue  # already resolved one way or another since - not this fix's job to re-litigate
-        sig_a = get_or_compute_work_object_signature(issue_a_id, issue_a)
-        sig_b = get_or_compute_work_object_signature(issue_b_id, issue_b)
-        topic_a = _topic_key_for_signature(issue_a, sig_a)
-        topic_b = _topic_key_for_signature(issue_b, sig_b)
-        score, matched_signals = _pairwise_score_from_signature(
-            issue_a_id, sig_a, topic_a, issue_a.get("category"),
-            issue_b_id, sig_b, topic_b, issue_b.get("category"),
-        )
-        correct_kind = _suggestion_kind_for_scored_signals(matched_signals)
-        if correct_kind != "link":
-            continue  # already correctly 'merge', vetoed to 0, or no longer resolves to any suggestion
-        ws.resolve_project_suggestion(sugg["id"], "expired")
-        reason = (f"possibly related (not necessarily same project) - "
-                  f"scored signal ({','.join(matched_signals)}, score={score})")
-        ws.create_project_suggestion(issue_id_a=issue_a_id, issue_id_b=issue_b_id,
-                                      reason=reason, suggestion_kind="link")
-        repaired += 1
-    return {"checked": len(candidates), "repaired": repaired}
 
 
 def find_relationship_links_for_grouped_issues() -> dict:

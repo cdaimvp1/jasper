@@ -1189,10 +1189,13 @@ def test_matched_data_points_category_is_never_a_point_type(ws_db):
     assert _matched_points_pair(a, b) == []
 
 
-def test_matched_data_points_disjoint_reference_vetoes_everything(ws_db):
-    """Even two otherwise-matching data points must be vetoed by a
-    disjoint reference ID - the absolute override carries over unchanged
-    from the model this replaces."""
+def test_matched_data_points_disjoint_reference_no_longer_vetoes_other_points(ws_db):
+    """Retracted 2026-08-05 (Marc's direct correction, live on the
+    Authenticx case): a disjoint reference used to veto EVERYTHING - now
+    it just means "reference" itself isn't one of the counted points;
+    other real matched points (here: supplier + subject_entity) still
+    count normally, surfacing this pair as a real candidate for curator/
+    human review rather than blocking it outright."""
     a = _issue(ws_db, "Action required: Approve the Requisition that X submitted")
     _raw_item(ws_db, a, "PR111111", "pa1")
     _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
@@ -1200,7 +1203,11 @@ def test_matched_data_points_disjoint_reference_vetoes_everything(ws_db):
     _raw_item(ws_db, b, "PR222222", "pa2")
     _link_party(ws_db, b, "p2", "rep2@acme.com", company="Acme")
 
-    assert _matched_points_pair(a, b) == []
+    points = _matched_points_pair(a, b)
+
+    assert "reference" not in points
+    assert "supplier" in points
+    assert "subject_entity" in points
 
 
 def test_matched_data_points_cannot_merge_constraint_vetoes_everything(ws_db):
@@ -1533,11 +1540,13 @@ def test_group_issue_flag_on_shared_definitive_reference_still_auto_merges(ws_db
     assert ws_db.get_issue(a)["project_id"] == ws_db.get_issue(b)["project_id"]
 
 
-def test_group_issue_flag_on_disjoint_definitive_references_vetoes_match(ws_db, monkeypatch, tmp_path):
-    """Two issues at the same company but with DIFFERENT, disjoint PR
-    numbers must not merge OR link - a_ids/b_ids both non-empty and
-    disjoint vetoes the match outright inside _matched_data_points,
-    unchanged by this fix."""
+def test_group_issue_flag_on_disjoint_definitive_references_still_no_match_alone(ws_db, monkeypatch, tmp_path):
+    """Retracted 2026-08-05: a disjoint reference no longer vetoes a pair
+    outright, but that's not the same as it being enough to match ON ITS
+    OWN - this pair shares only "supplier" (same company, different
+    people) with nothing else (different PR-embedded subjects, no shared
+    party) - one point is still below the 2+-point floor regardless of
+    reference status, so this stays no_match for an unrelated reason now."""
     config = _isolate_config(monkeypatch, tmp_path)
     config.set_value(True, "grouping", "scored_model_enabled")
 
@@ -1552,6 +1561,41 @@ def test_group_issue_flag_on_disjoint_definitive_references_vetoes_match(ws_db, 
 
     assert result["action"] == "no_match"
     assert ws_db.list_project_suggestions(status="pending") == []
+
+
+def test_group_issue_authenticx_shape_disjoint_reference_with_real_supplier_match_suggests(ws_db, monkeypatch, tmp_path):
+    """The actual real-world case that drove the 2026-08-05 retraction:
+    two real Ariba requisitions for the SAME supplier (Authenticx), with
+    DIFFERENT PR numbers (two distinct real purchase transactions) but
+    matching Ariba descriptors long enough to clear subject_entity's own
+    bar too - supplier + subject_entity is 2 real points, so this must now
+    surface as a real 'candidate' suggestion for curator/human review,
+    never auto-merged (only a SHARED reference auto-merges) and never
+    silently dropped the way the old absolute disjoint-reference veto used
+    to force it to be."""
+    config = _isolate_config(monkeypatch, tmp_path)
+    config.set_value(True, "grouping", "scored_model_enabled")
+
+    a = _issue(ws_db, "Action required: Approve the Requisition that ALICIA MORRIS submitted "
+                       "- PR960120-V4 - Authenticx Conversational Intelligence for CMH Chatbots ($455,592.00 USD)")
+    _raw_item(ws_db, a, "PR960120-V4 approval needed", "auth-a")
+    _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
+    b = _issue(ws_db, "Action required: Approve the Requisition that CLAUDIA HERNANDEZ submitted "
+                       "- PR1175200 - Authenticx Conversational Intelligence for Omvoh,Olumiant & Ebglyss ($183,020.68 USD)")
+    _raw_item(ws_db, b, "PR1175200 approval needed", "auth-b")
+    _link_party(ws_db, b, "p2", "other@acme.com", company="Acme")
+
+    decision = wp.scored_grouping_decision(a, ws_db.get_issue(a))
+    assert decision["verdict"] == "candidate"
+    assert "reference" not in decision["matched_signals"]
+
+    result = wp.group_issue(a)
+
+    assert result["action"] == "suggested"
+    pending = ws_db.list_project_suggestions(status="pending")
+    assert len(pending) == 1
+    assert pending[0]["suggestion_kind"] == "merge"
+    assert ws_db.get_issue(a)["project_id"] is None  # a suggestion, not a silent merge
 
 
 def test_group_issue_flag_on_cannot_link_constraint_blocks_suggestion(ws_db, monkeypatch, tmp_path):

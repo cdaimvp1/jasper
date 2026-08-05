@@ -1643,15 +1643,29 @@ def init_workgraph() -> None:
             # still lands with is_raw_cluster at its column default (0) -
             # only the separate, direct-to-work_objects cluster-creation
             # path (workgraph_store.create_cluster) ever sets it to 1.
-            conn.execute("DROP VIEW IF EXISTS issues")
-            conn.execute("""
-                CREATE VIEW issues AS
-                SELECT id, title, category, status AS state, priority, priority_score,
-                       nba_action_kind, nba_reason, owner, due, opened_at, updated_at,
-                       confidence_tier, parent_id AS project_id, lesson_id_cited,
-                       has_unmet_prerequisite, claims_revision
-                FROM work_objects WHERE object_type = 'request' AND is_raw_cluster = 0
-            """)
+            # Fixed 2026-08-05, real race caught by test_multiprocess_
+            # concurrency.py's own stress test: DROP+CREATE isn't atomic
+            # across separate connections/processes (each init_workgraph()
+            # call opens its own autocommit connection - a view carries no
+            # data, so there's no transaction wrapping the two statements
+            # together) - two processes waking at once could both pass the
+            # DROP (a no-op once the view is already gone) and then race on
+            # the bare CREATE VIEW, the second one raising "view issues
+            # already exists". The desired end state (a correctly-defined
+            # `issues` view) is reached either way - whichever process's
+            # CREATE actually won already put the SAME definition in place.
+            try:
+                conn.execute("DROP VIEW IF EXISTS issues")
+                conn.execute("""
+                    CREATE VIEW issues AS
+                    SELECT id, title, category, status AS state, priority, priority_score,
+                           nba_action_kind, nba_reason, owner, due, opened_at, updated_at,
+                           confidence_tier, parent_id AS project_id, lesson_id_cited,
+                           has_unmet_prerequisite, claims_revision
+                    FROM work_objects WHERE object_type = 'request' AND is_raw_cluster = 0
+                """)
+            except sqlite3.OperationalError:
+                pass
             conn.execute("""
                 CREATE TRIGGER IF NOT EXISTS trg_issues_insert INSTEAD OF INSERT ON issues
                 BEGIN

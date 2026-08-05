@@ -838,28 +838,49 @@ def _matched_data_points(a_id: str, a_sig: dict, a_topic_key: str,
     number, a business unit, and a date/deadline used as a MATCHING point
     (deadlines already exist elsewhere in Jasper, just not wired in here).
 
-    Two absolute vetoes, checked first, unchanged from the model this
-    replaces: a disjoint real reference (both sides have a captured PR/PO
-    and they don't overlap) is positive evidence of two different real
-    transactions, not just an absent match; a cannot_merge/cannot_link
-    identity_constraint is a real human override. Either returns []
-    outright, regardless of anything else that would otherwise match."""
+    Retracted 2026-08-05 (Marc's direct correction, live on the Authenticx
+    case): a disjoint real reference used to veto EVERYTHING outright - two
+    issues with different captured PR/PO numbers could never match on
+    anything else either, no matter how much other real signal they shared.
+    That's exactly what kept three genuinely-related Authenticx PRs (CMH
+    Chatbots, Lilly Direct, Omvoh/Olumiant/Ebglyss - the same overall vendor
+    relationship, three separate purchase transactions) from ever becoming
+    candidates for the same project. Marc's own call: a disjoint reference
+    is real evidence these are different TRANSACTIONS, not evidence they're
+    unrelated - so it no longer blocks the pair from matching on other real
+    points, it just means "reference" itself is never one of the counted
+    points for this pair (the block below already only counts "reference"
+    when the two id sets actually overlap - removing the veto didn't change
+    that half). A pair that clears 2+ points this way still only ever
+    reaches "candidate" (curator/human review), never "auto_merge" -
+    _shared_reference_id/scored_grouping_decision's own auto_merge path
+    only ever fires on a genuinely SHARED reference, never a disjoint one -
+    so this can't silently merge two different real transactions on its
+    own; it can only surface them together for a real judgment call. Per
+    Marc's own explicit follow-up, THAT judgment (confirmed correct on
+    Authenticx) is: group them into one project, then have curator extract
+    each real transaction back out as its own separate issue INSIDE that
+    project (see workgraph_projects.extract_issue_from_project, corrected
+    pipeline Phase D) - "split them up within the project," his words -
+    rather than ever collapsing them into one blob.
+
+    The remaining absolute veto, unchanged: a cannot_merge/cannot_link
+    identity_constraint is a real human override (an explicit past reject),
+    not an inference - still returns [] outright, regardless of anything
+    else that would otherwise match."""
     a_ids, b_ids = set(a_sig["definitive_ids"]), set(b_sig["definitive_ids"])
-    if a_ids and b_ids and a_ids.isdisjoint(b_ids):
-        return []
     if b_id in a_sig["cannot_link_ids"] or a_id in b_sig["cannot_link_ids"]:
         return []
     # NOTE (2026-08-04): Marc's broader "hard contradiction" concept (a
     # different PO/legal-entity/requester should "materially reduce
     # confidence or trigger an LLM review boundary," his own words - not
-    # necessarily an absolute veto the way a disjoint reference ID is) is
-    # deliberately NOT implemented as a new hard veto here yet. A first
-    # attempt (treating an ariba_requester mismatch as an absolute veto)
-    # broke a legitimate bridge scenario in testing - a real bridging item
-    # sharing product_service+amount with a DIFFERENT named requester is
-    # exactly the kind of case that should reach curator's LLM review, not
-    # get silently vetoed before anyone looks at it. Left as an open
-    # question back to Marc rather than guessed at further.
+    # necessarily an absolute veto the way a disjoint reference ID used to
+    # be) is deliberately NOT implemented as a new hard veto here either,
+    # same reasoning that already applied to ariba_requester mismatches
+    # below - a real bridging item sharing product_service+amount with a
+    # DIFFERENT named requester (or a different PR/PO) is exactly the kind
+    # of case that should reach curator's LLM review, not get silently
+    # vetoed before anyone looks at it.
 
     points = []
     if a_ids and b_ids and not a_ids.isdisjoint(b_ids):

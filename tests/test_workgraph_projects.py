@@ -1280,6 +1280,25 @@ def test_scored_grouping_decision_stakeholder_plus_subject_entity_is_candidate(w
     assert decision["verdict"] == "candidate"
 
 
+def test_scored_grouping_decision_persists_a_candidate_into_the_relationship_graph(ws_db):
+    """Task #184 Phase D (2026-08-05): every real candidate detected here
+    is also persisted into work_object_relationships as a byproduct - not
+    just returned to this one caller - so a future pass can check "have I
+    already decided this pair" instead of rescanning the whole backlog."""
+    a = _issue(ws_db, "Workday HCM SaaS renewal negotiation")
+    _link_party(ws_db, a, "p_shared", "rep@acme.com")
+    b = _issue(ws_db, "Workday HCM SaaS renewal negotiation follow-up")
+    _link_party(ws_db, b, "p_shared", "rep@acme.com")
+
+    wp.scored_grouping_decision(a, ws_db.get_issue(a))
+
+    row = ws_db.get_work_object_relationship(a, b)
+    assert row is not None
+    assert row["relationship_type"] == "candidate"
+    assert row["match_count"] == 2
+    assert set(json.loads(row["matched_signals_json"])) == {"stakeholder", "subject_entity"}
+
+
 def test_scored_grouping_decision_supplier_and_subject_entity_is_candidate(ws_db):
     """supplier+subject_entity (no shared party/reference at all) - same
     shape, same count-based reasoning as the stakeholder+subject_entity
@@ -2074,6 +2093,14 @@ def test_scored_grouping_decision_detects_a_real_bridge_between_two_projects(ws_
 
     assert decision["verdict"] == "bridge"
     assert set(decision["bridged_projects"].keys()) == {p1, p2}
+
+    # Task #184 Phase D: each bridged pair is persisted as 'bridge' (not
+    # left at the plain 'candidate' the first pass through the loop wrote)
+    # - curator's future review queue needs to see this shape distinctly.
+    row_a = ws_db.get_work_object_relationship(b, a)
+    row_c = ws_db.get_work_object_relationship(b, c)
+    assert row_a["relationship_type"] == "bridge"
+    assert row_c["relationship_type"] == "bridge"
 
 
 def test_group_issue_bridge_creates_a_suggestion_per_bridged_project(ws_db, monkeypatch, tmp_path):

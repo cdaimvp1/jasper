@@ -948,6 +948,20 @@ def scored_grouping_decision(issue_id: str, issue: dict, *, lookback_days: Optio
         )
         if len(points) < 2:
             continue  # Marc's floor: fewer than 2 real data points is never a candidate, period
+        # Task #184 Phase D (2026-08-05): every pair clearing the 2+-point
+        # bar gets persisted into the relationship graph as a byproduct of
+        # detection - not just returned to this call's one caller. This is
+        # what lets a FUTURE pass check "have I already decided this pair"
+        # (ws.get_work_object_relationship) instead of recomputing/re-
+        # suggesting against the whole corpus again - the "don't keep
+        # mapping the whole backlog over and over" requirement. Silently a
+        # no-op against an already-confirmed/rejected pair (upsert_work_
+        # object_relationship's own guarantee) - a fresh detection here
+        # never re-litigates a real prior judgment.
+        ws.upsert_work_object_relationship(
+            a_id=issue_id, b_id=other["id"], relationship_type="candidate",
+            match_count=len(points), matched_signals=points,
+        )
         other_project_id = other.get("project_id")
         if other_project_id:
             current = project_best.get(other_project_id)
@@ -965,6 +979,16 @@ def scored_grouping_decision(issue_id: str, issue: dict, *, lookback_days: Optio
 
     if len(bridged_projects) >= 2:
         verdict = "bridge"
+        # Re-tag each bridged pair's already-persisted 'candidate' row as
+        # 'bridge' - a real distinct shape curator's review queue needs to
+        # see (this issue connects 2+ established projects at once, not
+        # just one ambiguous pair), not something to reconstruct at read
+        # time from a flat candidate list.
+        for pts, sib in bridged_projects.values():
+            ws.upsert_work_object_relationship(
+                a_id=issue_id, b_id=sib, relationship_type="bridge",
+                match_count=len(pts), matched_signals=pts,
+            )
     elif best_sibling:
         verdict = "candidate"
     else:

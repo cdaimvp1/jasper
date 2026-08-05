@@ -1595,6 +1595,30 @@ def init_workgraph() -> None:
                 )
             except sqlite3.OperationalError:
                 pass
+
+            # Corrected-ordering redesign (2026-08-05, Marc's direct correction):
+            # a "cluster" is the raw pass-1/pass-2 matching unit - never a real,
+            # individually-tracked issue on its own. Deliberately NOT a new
+            # object_type value (that would require rebuilding the live
+            # work_objects table to change its existing object_type CHECK
+            # constraint - SQLite enforces whatever CHECK was stored at
+            # CREATE TABLE time, not whatever a later CREATE TABLE IF NOT
+            # EXISTS statement says, and this table is the busiest, most
+            # central one in the whole app with a live server currently
+            # running against it - real, avoidable risk for zero benefit
+            # over a plain boolean column, which needs only a safe ALTER
+            # TABLE ADD COLUMN). is_raw_cluster=1 rows are still real
+            # object_type='request' work_objects (same shape everything
+            # already expects), just excluded from the `issues` view below -
+            # invisible to the Inbox/NBA/checklist/evidence UI by
+            # construction, no filter for any downstream caller to
+            # remember, exactly the property the plan calls for.
+            try:
+                conn.execute(
+                    "ALTER TABLE work_objects ADD COLUMN is_raw_cluster INTEGER NOT NULL DEFAULT 0"
+                )
+            except sqlite3.OperationalError:
+                pass
             try:
                 conn.execute(
                     "ALTER TABLE work_objects ADD COLUMN exposure_state TEXT NOT NULL DEFAULT 'not_exposed' "
@@ -1609,13 +1633,24 @@ def init_workgraph() -> None:
             # matching create_issue()/update_issue()'s own exact patterns,
             # both behave identically to a real table). INSTEAD OF triggers
             # make them fully read/write, not just read-only projections.
+            # Corrected-ordering redesign (2026-08-05): the view itself must
+            # be dropped and recreated (not CREATE VIEW IF NOT EXISTS,
+            # which would silently skip re-applying the is_raw_cluster
+            # filter on an already-migrated live install) - views carry no
+            # data, so this is instant and safe, unlike a table rebuild.
+            # The INSTEAD OF triggers below are untouched: every row ever
+            # inserted THROUGH this view (i.e. every real create_issue call)
+            # still lands with is_raw_cluster at its column default (0) -
+            # only the separate, direct-to-work_objects cluster-creation
+            # path (workgraph_store.create_cluster) ever sets it to 1.
+            conn.execute("DROP VIEW IF EXISTS issues")
             conn.execute("""
-                CREATE VIEW IF NOT EXISTS issues AS
+                CREATE VIEW issues AS
                 SELECT id, title, category, status AS state, priority, priority_score,
                        nba_action_kind, nba_reason, owner, due, opened_at, updated_at,
                        confidence_tier, parent_id AS project_id, lesson_id_cited,
                        has_unmet_prerequisite, claims_revision
-                FROM work_objects WHERE object_type = 'request'
+                FROM work_objects WHERE object_type = 'request' AND is_raw_cluster = 0
             """)
             conn.execute("""
                 CREATE TRIGGER IF NOT EXISTS trg_issues_insert INSTEAD OF INSERT ON issues
@@ -2434,6 +2469,99 @@ def create_issue(
             conn.close()
 
 
+def create_cluster(*, id: str, title: str, category: Optional[str] = None) -> None:
+    """Corrected-ordering redesign (2026-08-05): a cluster is the raw pass-1/
+    pass-2 matching unit - the thing `workgraph_classify.cluster_and_link()`
+    creates for a fresh, unlinked communication BEFORE any real project/
+    issue judgment has happened. Writes directly to work_objects (bypassing
+    the `issues` view/its INSTEAD OF triggers entirely) with is_raw_cluster=1,
+    so it never appears through get_issue/list_issues/the Inbox/NBA/
+    checklist - see the `issues` view's own definition for why.
+
+    No issue_state_history row - that table tracks a real issue's tracked
+    lifecycle (active/waiting/done), which isn't a meaningful concept for a
+    raw cluster that hasn't been judged as anything yet. `state` still gets
+    a real value ('active') purely because work_objects.status is NOT NULL,
+    not because a cluster has a state lifecycle worth tracking."""
+    now = time.time()
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                """INSERT INTO work_objects
+                   (id, object_type, title, category, status, priority, owner,
+                    opened_at, updated_at, is_raw_cluster)
+                   VALUES (?, 'request', ?, ?, 'active', 'med', 'marc', ?, ?, 1)""",
+                (id, title, category, now, now),
+            )
+        finally:
+            conn.close()
+
+
+def create_cluster_with_new_id(**kwargs: Any) -> str:
+    """next_issue_id() + create_cluster(), safe against the same allocation
+    race create_issue_with_new_id already guards against - clusters share
+    the same id namespace as issues/projects (all work_objects), so the
+    same collision-retry discipline applies."""
+    for attempt in range(25):
+        cluster_id = next_issue_id()
+        try:
+            create_cluster(id=cluster_id, **kwargs)
+            return cluster_id
+        except sqlite3.IntegrityError:
+            time.sleep(random.uniform(0, 0.01) * (attempt + 1))
+            continue
+    raise RuntimeError("could not allocate a unique cluster id after 25 attempts")
+
+
+def get_cluster(id: str) -> Optional[dict]:
+    """Read counterpart to create_cluster - bypasses the `issues` view (which
+    now excludes is_raw_cluster=1 rows on purpose) and reads work_objects
+    directly, returning the SAME column shape the `issues` view exposes
+    (state/project_id aliases included) so this is a drop-in substitute for
+    get_issue anywhere pass-1/pass-2 matching needs to read a cluster - e.g.
+    _matched_data_points/scored_grouping_decision take a plain dict shaped
+    like an issue and don't care whether it came from the view or here."""
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                """SELECT id, title, category, status AS state, priority, priority_score,
+                          nba_action_kind, nba_reason, owner, due, opened_at, updated_at,
+                          confidence_tier, parent_id AS project_id, lesson_id_cited,
+                          has_unmet_prerequisite, claims_revision
+                   FROM work_objects WHERE id = ? AND is_raw_cluster = 1""",
+                (id,),
+            ).fetchone()
+        finally:
+            conn.close()
+    return dict(row) if row else None
+
+
+def list_clusters(limit: int = 10000) -> list[dict]:
+    """Cluster counterpart to list_issues - the candidate pool for pass-2
+    matching (`workgraph_projects._candidate_pool`). Deliberately no
+    `states` filter parameter the way list_issues has one - a cluster has
+    no meaningful open/closed lifecycle of its own (see create_cluster's
+    own docstring); every cluster not yet promoted into a project is
+    equally in scope for matching."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                """SELECT id, title, category, status AS state, priority, priority_score,
+                          nba_action_kind, nba_reason, owner, due, opened_at, updated_at,
+                          confidence_tier, parent_id AS project_id, lesson_id_cited,
+                          has_unmet_prerequisite, claims_revision
+                   FROM work_objects WHERE object_type = 'request' AND is_raw_cluster = 1
+                   LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
 def update_issue(id: str, *, touch_updated_at: bool = True, actor: Optional[str] = None, **fields: Any) -> None:
     """Generic field updater for issues (state, priority, nba_*, due, etc.).
     A state change is logged to issue_state_history in the same connection so
@@ -2964,11 +3092,21 @@ def next_issue_id() -> str:
     scheme collides the instant any issue is ever deleted (count drops, but
     the higher-numbered id already in use doesn't), which is exactly what
     happened during a real cleanup this session (IntegrityError on
-    'UNIQUE constraint failed: issues.id'). Max-based is stable under deletion."""
+    'UNIQUE constraint failed: issues.id'). Max-based is stable under deletion.
+
+    Queries work_objects directly, not the `issues` view - the real
+    uniqueness constraint is work_objects.id's PRIMARY KEY, which a cluster
+    (is_raw_cluster=1, invisible through the `issues` view on purpose)
+    still occupies. Scanning only the view would let this recompute the
+    SAME already-taken 'marc-NNN' id forever once a cluster holds the
+    current max - confirmed live (2026-08-05): create_issue_with_new_id
+    exhausted all 25 collision-retries this way the moment one cluster
+    existed, since every retry recomputed the identical, still-view-
+    invisible max."""
     with _lock:
         conn = _connect()
         try:
-            rows = conn.execute("SELECT id FROM issues WHERE id LIKE 'marc-%'").fetchall()
+            rows = conn.execute("SELECT id FROM work_objects WHERE id LIKE 'marc-%'").fetchall()
         finally:
             conn.close()
     max_n = 0

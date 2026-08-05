@@ -31,6 +31,52 @@ def test_create_issue_with_new_id_never_collides_id(ws_db):
     assert a != b
 
 
+def test_create_cluster_is_invisible_through_issues_view(ws_db):
+    """Corrected-ordering redesign (2026-08-05): a cluster is a real
+    work_objects row (object_type='request') but must never appear through
+    get_issue/list_issues - it's not a real, individually-tracked issue
+    until something promotes it. This is the whole point of is_raw_cluster."""
+    cid = ws_db.create_cluster_with_new_id(title="Authenticx Pricing Discussion", category="other")
+    assert ws_db.get_issue(cid) is None
+    assert cid not in [i["id"] for i in ws_db.list_issues(states=None, limit=1000)]
+
+
+def test_get_cluster_returns_issue_shaped_dict(ws_db):
+    """get_cluster must return the same column shape get_issue does (state/
+    project_id aliases included) so pass-1/pass-2 matching code can treat a
+    cluster and a real issue identically without a special case."""
+    cid = ws_db.create_cluster_with_new_id(title="Authenticx Pricing Discussion", category="other")
+    cluster = ws_db.get_cluster(cid)
+    assert cluster is not None
+    assert cluster["title"] == "Authenticx Pricing Discussion"
+    assert cluster["state"] == "active"
+    assert cluster["project_id"] is None
+
+
+def test_get_cluster_returns_none_for_a_real_issue(ws_db):
+    """The inverse guarantee - get_cluster must not accidentally surface a
+    real issue as if it were a cluster."""
+    iid = ws_db.create_issue_with_new_id(title="Real issue", state="active", category="other")
+    assert ws_db.get_cluster(iid) is None
+
+
+def test_list_clusters_only_returns_clusters(ws_db):
+    cid = ws_db.create_cluster_with_new_id(title="Cluster A", category="other")
+    iid = ws_db.create_issue_with_new_id(title="Real issue", state="active", category="other")
+    clusters = ws_db.list_clusters()
+    ids = [c["id"] for c in clusters]
+    assert cid in ids
+    assert iid not in ids
+
+
+def test_create_issue_with_new_id_never_collides_with_cluster_ids(ws_db):
+    """Clusters and issues share the same id namespace (all work_objects) -
+    the allocation race guard must hold across both creation paths."""
+    a = ws_db.create_cluster_with_new_id(title="A", category="other")
+    b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
+    assert a != b
+
+
 def test_get_raw_items_by_ids_batches_correctly(ws_db):
     """Task #44's deep_links.attach_deep_links relies on this being a single
     query for the whole evidence list, not one per row - same N+1 fix already

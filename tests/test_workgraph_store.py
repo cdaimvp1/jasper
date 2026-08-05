@@ -2343,6 +2343,63 @@ def test_list_source_containers_filters_by_issue(ws_db):
     assert [r["id"] for r in ws_db.list_source_containers(issue_id="marc-1")] == ["sc1"]
 
 
+def test_upsert_work_object_relationship_normalizes_pair_order(ws_db):
+    """Task #184 Phase D: the same real pair, detected from either
+    direction on two different passes, must land as ONE row - not two
+    duplicates depending on which side happened to be iterated first."""
+    ws_db.upsert_work_object_relationship(a_id="marc-b", b_id="marc-a", relationship_type="candidate",
+                                           match_count=2, matched_signals=["supplier", "stakeholder"])
+    ws_db.upsert_work_object_relationship(a_id="marc-a", b_id="marc-b", relationship_type="candidate",
+                                           match_count=3, matched_signals=["supplier", "stakeholder", "amount"])
+    row = ws_db.get_work_object_relationship("marc-a", "marc-b")
+    assert row is not None
+    assert row["from_id"] == "marc-a" and row["to_id"] == "marc-b"
+    assert row["match_count"] == 3  # the later, richer pass's count won - a real update, not a stale duplicate
+
+
+def test_upsert_work_object_relationship_never_overwrites_a_resolved_decision(ws_db):
+    """A curator/human judgment (confirmed or rejected) is permanent -
+    a later detection pass re-finding the same pair as a fresh candidate
+    must never silently re-litigate it."""
+    rid = ws_db.upsert_work_object_relationship(a_id="marc-a", b_id="marc-b", relationship_type="candidate",
+                                                  match_count=2, matched_signals=["supplier", "stakeholder"])
+    ws_db.resolve_work_object_relationship(rid, "rejected")
+    ws_db.upsert_work_object_relationship(a_id="marc-a", b_id="marc-b", relationship_type="candidate",
+                                           match_count=4, matched_signals=["supplier", "stakeholder", "amount", "document"])
+    row = ws_db.get_work_object_relationship("marc-a", "marc-b")
+    assert row["relationship_type"] == "rejected"
+    assert row["match_count"] == 2  # untouched - the rejection stands regardless of later match strength
+
+
+def test_list_pending_work_object_relationships_ranks_by_match_count_desc(ws_db):
+    ws_db.upsert_work_object_relationship(a_id="marc-a", b_id="marc-b", relationship_type="candidate",
+                                           match_count=2, matched_signals=["supplier", "stakeholder"])
+    ws_db.upsert_work_object_relationship(a_id="marc-c", b_id="marc-d", relationship_type="candidate",
+                                           match_count=4, matched_signals=["supplier", "stakeholder", "amount", "document"])
+    ws_db.upsert_work_object_relationship(a_id="marc-e", b_id="marc-f", relationship_type="bridge",
+                                           match_count=3, matched_signals=["supplier", "amount", "document"])
+    rows = ws_db.list_pending_work_object_relationships()
+    assert [r["match_count"] for r in rows] == [4, 3, 2]
+
+
+def test_list_pending_work_object_relationships_excludes_resolved(ws_db):
+    rid = ws_db.upsert_work_object_relationship(a_id="marc-a", b_id="marc-b", relationship_type="candidate",
+                                                   match_count=2, matched_signals=["supplier", "stakeholder"])
+    ws_db.resolve_work_object_relationship(rid, "confirmed")
+    assert ws_db.list_pending_work_object_relationships() == []
+
+
+def test_list_work_object_relationships_for_finds_either_direction(ws_db):
+    ws_db.upsert_work_object_relationship(a_id="marc-a", b_id="marc-b", relationship_type="candidate",
+                                           match_count=2, matched_signals=["supplier", "stakeholder"])
+    ws_db.upsert_work_object_relationship(a_id="marc-c", b_id="marc-a", relationship_type="candidate",
+                                           match_count=2, matched_signals=["amount", "document"])
+    rows = ws_db.list_work_object_relationships_for("marc-a")
+    assert len(rows) == 2
+    pairs = {(r["from_id"], r["to_id"]) for r in rows}
+    assert pairs == {("marc-a", "marc-b"), ("marc-a", "marc-c")}
+
+
 def test_upsert_source_session_is_idempotent_and_updates_end(ws_db):
     ws_db.upsert_source_container(id="sc1", source="teams_chat", container_type="teams_chat",
                                    exact_key="chat1", key_quality="exact", issue_id=None)

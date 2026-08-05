@@ -1207,6 +1207,50 @@ def init_workgraph() -> None:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_identity_constraints_a ON identity_constraints(constraint_type, subject_a)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_identity_constraints_b ON identity_constraints(constraint_type, subject_b)")
 
+            # work_object_relationships (task #184 Phase D, 2026-08-05, Marc's
+            # direct redesign): the persisted group-to-group relationship
+            # graph his design calls for ("we want to ensure we are capturing
+            # that somewhere so it can be referenced when the next email
+            # comes in - we don't want to have to keep mapping the whole
+            # backlog over and over again"). Generalizes pending_project_
+            # suggestions' shape (issue_id_a/issue_id_b/reason/status) to
+            # arbitrary work_object pairs at ANY grain (a fresh provisional
+            # group, an already-confirmed project, or a mix) - the thing
+            # that lets a new item's pass-2 match check ask "have I already
+            # decided this pair" instead of recomputing/re-suggesting
+            # against the whole corpus every wake.
+            #
+            # from_id/to_id are stored ORDER-NORMALIZED (from_id < to_id
+            # lexicographically, enforced by upsert_work_object_relationship
+            # - never by the caller) so the same real-world pair can never
+            # exist as two different rows depending on iteration order.
+            # relationship_type: 'candidate' (2+ matched data points, not
+            # yet reviewed), 'bridge' (a candidate that connects to 2+
+            # DISTINCT already-confirmed parent projects at once - stored
+            # explicitly per Marc's own stated shape, not derived at query
+            # time, so a reviewer's queue read never has to reconstruct it),
+            # 'confirmed'/'rejected' (curator's real judgment, Phase F).
+            # match_count/matched_signals_json are the same plain count +
+            # point-type list _matched_data_points already produces (task
+            # #184) - no weights here either.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS work_object_relationships (
+                    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                    from_id              TEXT NOT NULL REFERENCES work_objects(id),
+                    to_id                TEXT NOT NULL REFERENCES work_objects(id),
+                    relationship_type    TEXT NOT NULL CHECK (relationship_type IN
+                                             ('candidate','bridge','confirmed','rejected')),
+                    match_count          INTEGER NOT NULL,
+                    matched_signals_json TEXT NOT NULL,
+                    created_ts           REAL NOT NULL,
+                    resolved_ts          REAL,
+                    UNIQUE(from_id, to_id)
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_work_object_relationships_from ON work_object_relationships(from_id, relationship_type)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_work_object_relationships_to ON work_object_relationships(to_id, relationship_type)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_work_object_relationships_pending ON work_object_relationships(relationship_type, match_count DESC)")
+
             # work_object_signatures (design doc Section 12.7): a cached,
             # invalidate-on-write signature per work_object, read by
             # scored_grouping_decision/backtest_scored_model instead of
@@ -4994,6 +5038,29 @@ def upsert_source_container(*, id: str, source: str, container_type: str, exact_
             conn.close()
 
 
+def source_container_lookup(*, source: str, container_type: str, exact_key: str) -> Optional[dict]:
+    """Task #184 Phase B (2026-08-05): the read-by-identity counterpart
+    upsert_source_container's own UNIQUE(source, container_type, exact_key)
+    key was always meant to support - list_source_containers only ever
+    supported the reverse direction (by issue_id). This is what lets the
+    live clustering path check "does a container for this exact key
+    already exist" BEFORE an issue is created, the same way thread_map_
+    lookup already did for the older flat-string-key model this is
+    replacing. Returns the full row (including issue_id, possibly None if
+    a container was ever recorded with no issue attached yet) or None if
+    no such container exists at all."""
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM source_containers WHERE source = ? AND container_type = ? AND exact_key = ?",
+                (source, container_type, exact_key),
+            ).fetchone()
+        finally:
+            conn.close()
+    return dict(row) if row else None
+
+
 def list_source_containers(issue_id: Optional[str] = None) -> list[dict]:
     with _lock:
         conn = _connect()
@@ -5115,6 +5182,133 @@ def list_identity_anchors(issue_id: Optional[str] = None, status: str = "active"
                 ).fetchall()
             else:
                 rows = conn.execute("SELECT * FROM identity_anchors WHERE status = ?", (status,)).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def upsert_work_object_relationship(*, a_id: str, b_id: str, relationship_type: str,
+                                     match_count: int, matched_signals: list,
+                                     now: Optional[float] = None) -> int:
+    """Task #184 Phase D (2026-08-05). Order-normalizes (a_id, b_id) into
+    (from_id, to_id) with from_id < to_id lexicographically, so the SAME
+    real pair - detected from either direction, on any future pass - is
+    always the same row, never a duplicate depending on which side a
+    caller happened to iterate from first.
+
+    Never silently overwrites an already-resolved decision: if a row for
+    this exact pair already exists with relationship_type 'confirmed' or
+    'rejected', this is a no-op that returns the EXISTING row's id
+    unchanged - a fresh candidate/bridge detection on a later pass must
+    never re-litigate a real human/curator judgment already recorded
+    here. Otherwise upserts match_count/matched_signals_json/
+    relationship_type (a later pass can genuinely find MORE matched
+    points than an earlier one, as more content/extraction accumulates)."""
+    now = now if now is not None else time.time()
+    from_id, to_id = (a_id, b_id) if a_id < b_id else (b_id, a_id)
+    with _lock:
+        conn = _connect()
+        try:
+            existing = conn.execute(
+                "SELECT id, relationship_type FROM work_object_relationships WHERE from_id = ? AND to_id = ?",
+                (from_id, to_id),
+            ).fetchone()
+            if existing and existing["relationship_type"] in ("confirmed", "rejected"):
+                return existing["id"]
+            cur = conn.execute(
+                """INSERT INTO work_object_relationships
+                   (from_id, to_id, relationship_type, match_count, matched_signals_json, created_ts)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(from_id, to_id) DO UPDATE SET
+                       relationship_type = excluded.relationship_type,
+                       match_count = excluded.match_count,
+                       matched_signals_json = excluded.matched_signals_json""",
+                (from_id, to_id, relationship_type, match_count, json.dumps(matched_signals), now),
+            )
+            return cur.lastrowid if cur.lastrowid else existing["id"]
+        finally:
+            conn.close()
+
+
+def get_work_object_relationship(a_id: str, b_id: str) -> Optional[dict]:
+    """Order-normalized read counterpart to upsert_work_object_relationship -
+    the "have I already decided this pair" check Phase C/H need before
+    treating a pair as fresh."""
+    from_id, to_id = (a_id, b_id) if a_id < b_id else (b_id, a_id)
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM work_object_relationships WHERE from_id = ? AND to_id = ?",
+                (from_id, to_id),
+            ).fetchone()
+        finally:
+            conn.close()
+    return dict(row) if row else None
+
+
+def list_pending_work_object_relationships(limit: int = 1000) -> list[dict]:
+    """Curator's Phase F review queue - 'candidate'/'bridge' rows only,
+    ranked by match_count descending (the more matched data points, the
+    higher-priority the real content review) - the same "review the
+    highest-match_count candidates first" ordering Marc asked for."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                """SELECT * FROM work_object_relationships
+                   WHERE relationship_type IN ('candidate','bridge')
+                   ORDER BY match_count DESC, created_ts ASC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def resolve_work_object_relationship(relationship_id: int, status: str, *, now: Optional[float] = None) -> None:
+    """status must be 'confirmed' or 'rejected' - curator's real judgment
+    (Phase F), never a mechanical re-classification. A 'genuinely unsure'
+    verdict is NOT resolved here at all - the row is simply left as
+    'candidate'/'bridge' for curator's own next pass, per Marc's explicit
+    correction that grouping ambiguity is never surfaced as a decision
+    for him to make."""
+    if status not in ("confirmed", "rejected"):
+        raise ValueError(f"resolve_work_object_relationship: invalid status {status!r}")
+    now = now if now is not None else time.time()
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                "UPDATE work_object_relationships SET relationship_type = ?, resolved_ts = ? WHERE id = ?",
+                (status, now, relationship_id),
+            )
+        finally:
+            conn.close()
+
+
+def list_work_object_relationships_for(work_object_id: str, relationship_types: Optional[tuple] = None) -> list[dict]:
+    """Every relationship (either direction) touching one work_object -
+    Phase H's per-item incremental check ('what does this group already
+    relate to, before matching it against the whole corpus again') and
+    Phase F's bridge-sibling lookup (every other pending row sharing the
+    same from_id, so a bridge's several candidate rows are reviewed
+    together, never one at a time)."""
+    with _lock:
+        conn = _connect()
+        try:
+            if relationship_types:
+                placeholders = ",".join("?" for _ in relationship_types)
+                rows = conn.execute(
+                    f"""SELECT * FROM work_object_relationships
+                        WHERE (from_id = ? OR to_id = ?) AND relationship_type IN ({placeholders})""",
+                    (work_object_id, work_object_id, *relationship_types),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM work_object_relationships WHERE from_id = ? OR to_id = ?",
+                    (work_object_id, work_object_id),
+                ).fetchall()
         finally:
             conn.close()
     return [dict(r) for r in rows]

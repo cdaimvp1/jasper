@@ -867,7 +867,7 @@ def test_cluster_and_link_new_teams_session_does_not_silently_attach_to_old_sess
     r1 = _teams_item_in_shared_chat(ws_db, "multi3", "m1", "Approve PR900001", "PR900001", now)
     item1 = ws_db.get_raw_item(r1)
     existing_issue = ws_db.create_issue_with_new_id(title="Existing", state="active", category="other")
-    ws_db.thread_map_set(wc._effective_thread_key(item1), existing_issue)
+    wc._container_set_issue(item1, wc._effective_thread_key(item1), existing_issue)
     ws_db.link_raw_item_to_issue(r1, existing_issue)
 
     r2 = _teams_item_in_shared_chat(ws_db, "multi3", "m2", "Approve PR900002", "PR900002", now + 60)

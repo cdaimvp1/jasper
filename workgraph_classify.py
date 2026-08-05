@@ -31,6 +31,7 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
 import workgraph_store as ws
+import workgraph_identity
 import workgraph_parties
 import workgraph_projects
 import workgraph_signals
@@ -830,6 +831,71 @@ def _effective_thread_key(item: dict) -> str:
     return f"{thread_key}::s{session_seq}"
 
 
+def _container_identity(item: dict, exact_key: Optional[str]) -> Optional[tuple[str, str, str, str]]:
+    """Task #184 Phase B (2026-08-05, Marc's direct redesign): the real
+    pass-1 clustering key is now source_containers (task #75/#76's
+    identity-formalization layer), not the flat thread_map string key -
+    the same typed (source, container_type, exact_key, key_quality)
+    identity workgraph_identity.backfill_identity_anchors already computes
+    for existing issues after the fact. Reusing that module's own
+    _CONTAINER_TYPE_BY_SOURCE/_container_key_quality here (rather than a
+    second, inevitably-drifting copy) means the live path and the daily
+    backfill sweep can never disagree about what a container's identity
+    is.
+
+    exact_key is passed in (the caller's own _effective_thread_key(item)
+    result) rather than recomputed here - for a teams_chat item, that
+    call does a real DB read + sessionize pass, and cluster_and_link's
+    loop needs BOTH a lookup and, on a match, a set for the same item;
+    recomputing per call would double that read for no reason.
+
+    Returns (source, container_type, exact_key, key_quality), or None
+    when the item has no source/thread_key this layer recognizes (e.g. a
+    source type not in workgraph_identity's map, or a null thread_key) -
+    the caller falls through to the item's existing new-issue/hold-aside
+    logic exactly as it already does when thread_map had no match."""
+    source = item.get("source")
+    container_type = workgraph_identity._CONTAINER_TYPE_BY_SOURCE.get(source)
+    if not container_type or not exact_key:
+        return None
+    key_quality = workgraph_identity._container_key_quality(source, item.get("thread_key_source"))
+    return source, container_type, exact_key, key_quality
+
+
+def _container_lookup_issue(item: dict, exact_key: Optional[str]) -> Optional[str]:
+    """Read half of the source_containers-based clustering key - None if
+    this item has no recognized container identity, or a container exists
+    for this exact key but has no issue_id yet (a container can be
+    recorded with issue_id=None - upsert_source_container's own default -
+    though nothing on the live path does that today)."""
+    identity = _container_identity(item, exact_key)
+    if identity is None:
+        return None
+    source, container_type, key, _ = identity
+    row = ws.source_container_lookup(source=source, container_type=container_type, exact_key=key)
+    return row["issue_id"] if row else None
+
+
+def _container_set_issue(item: dict, exact_key: Optional[str], issue_id: str) -> None:
+    """Write half - upsert_source_container is keyed on (source,
+    container_type, exact_key) and idempotent (ON CONFLICT DO UPDATE
+    issue_id), so re-linking a later item on the same container is a safe
+    no-op/refresh, same discipline thread_map_set's INSERT OR REPLACE
+    always had. No-ops (does not raise) if this item has no recognized
+    container identity - callers only reach here after a successful
+    _container_identity resolution already gated the call, but staying
+    defensive here costs nothing and matches this module's existing
+    fail-open-to-None discipline elsewhere."""
+    identity = _container_identity(item, exact_key)
+    if identity is None:
+        return
+    source, container_type, key, key_quality = identity
+    ws.upsert_source_container(
+        id=f"sc-{source}-{key}", source=source, container_type=container_type,
+        exact_key=key, key_quality=key_quality, issue_id=issue_id,
+    )
+
+
 def cluster_and_link(limit: int = 500) -> dict:
     """For every classified-but-not-yet-linked item (issue_id IS NULL),
     resolve via thread_map (an existing Issue's thread_key) or create a new
@@ -928,7 +994,7 @@ def cluster_and_link(limit: int = 500) -> dict:
             continue
 
         thread_key = _effective_thread_key(item)
-        issue_id = ws.thread_map_lookup(thread_key)
+        issue_id = _container_lookup_issue(item, thread_key)
         is_new_issue = False
         reference_match = None
         jasper_ref_match = None
@@ -949,7 +1015,7 @@ def cluster_and_link(limit: int = 500) -> dict:
                     would_attach_via_jasper_ref += 1
             if jasper_ref_match and jasper_ref_auto_attach:
                 issue_id = jasper_ref_match
-                ws.thread_map_set(thread_key, issue_id)
+                _container_set_issue(item, thread_key, issue_id)
                 attached_via_jasper_ref += 1
         if issue_id is None:
             # 2026-07-31: match on pr_number_base (version-stripped), not
@@ -964,7 +1030,7 @@ def cluster_and_link(limit: int = 500) -> dict:
                     would_attach_via_reference += 1
             if reference_match and reference_auto_attach:
                 issue_id = reference_match
-                ws.thread_map_set(thread_key, issue_id)
+                _container_set_issue(item, thread_key, issue_id)
                 attached_via_reference += 1
             elif issue_id is None:
                 if item["item_class"] == "FYI-EVIDENCE":
@@ -998,7 +1064,7 @@ def cluster_and_link(limit: int = 500) -> dict:
                         would_attach_via_teams_sender_anchor += 1
                         if teams_sender_anchor_auto_attach:
                             issue_id = teams_sender_match
-                            ws.thread_map_set(thread_key, issue_id)
+                            _container_set_issue(item, thread_key, issue_id)
                             attached_via_teams_sender_anchor += 1
                 # Task #54/#55 (2026-08-02, Marc's direct report): "not every
                 # individual message... in Teams should go into the system" -
@@ -1027,7 +1093,7 @@ def cluster_and_link(limit: int = 500) -> dict:
                         title=title, category=item.get("topic"),
                         state=state, priority="med", confidence_tier=item.get("confidence") or "M",
                     )
-                    ws.thread_map_set(thread_key, issue_id)
+                    _container_set_issue(item, thread_key, issue_id)
                     created += 1
                     is_new_issue = True
 
@@ -1108,7 +1174,7 @@ def track_held_aside_item(raw_item_id: int) -> str:
     on one row from the held-aside queue (see list_held_aside_teams_items).
     Creates a real Issue for it - the exact same shape cluster_and_link's
     own new-issue fallback already builds (title/state/priority/
-    confidence_tier, thread_map_set, link_raw_item_to_issue, add_evidence,
+    confidence_tier, container-identity set, link_raw_item_to_issue, add_evidence,
     a starter task for a genuine ask, recompute_issue_state, then the same
     parties/projects resolution pass a normal auto-created issue gets) -
     this is a human overriding the hold-aside, not a second, different way
@@ -1129,7 +1195,7 @@ def track_held_aside_item(raw_item_id: int) -> str:
         title=title, category=item.get("topic"),
         state=state, priority="med", confidence_tier=item.get("confidence") or "M",
     )
-    ws.thread_map_set(_effective_thread_key(item), issue_id)
+    _container_set_issue(item, _effective_thread_key(item), issue_id)
     ws.link_raw_item_to_issue(raw_item_id, issue_id)
     ws.add_evidence(
         issue_id=issue_id, type=_evidence_type(item["source"]),

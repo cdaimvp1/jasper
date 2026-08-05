@@ -1236,13 +1236,14 @@ def run_retroactive_scored_reprocess(*, apply: bool = False, lookback_days: int 
         if decision["verdict"] == "bridge":
             entry = {"issue_id": issue_id, "bridges": []}
             for pid, info in decision["bridged_projects"].items():
+                kind = _suggestion_kind_for_matched_signals(info["matched_signals"])
                 reason = (f"retroactive reprocess: bridge candidate - connects to project {pid} via "
                           f"{info['match_count']} matching data points ({','.join(info['matched_signals'])})")
                 if apply:
                     ws.create_project_suggestion(
-                        issue_id_a=issue_id, issue_id_b=info["sibling_id"], reason=reason, suggestion_kind="merge",
+                        issue_id_a=issue_id, issue_id_b=info["sibling_id"], reason=reason, suggestion_kind=kind,
                     )
-                entry["bridges"].append({"project_id": pid, "sibling_id": info["sibling_id"]})
+                entry["bridges"].append({"project_id": pid, "sibling_id": info["sibling_id"], "suggestion_kind": kind})
             bridged.append(entry)
         elif decision["verdict"] == "auto_merge":
             sibling_id = decision["sibling_id"]
@@ -1261,11 +1262,12 @@ def run_retroactive_scored_reprocess(*, apply: bool = False, lookback_days: int 
                 auto_merged.append(record)
         elif decision["verdict"] == "candidate":
             sibling_id = decision["sibling_id"]
+            kind = _suggestion_kind_for_matched_signals(decision["matched_signals"])
             reason = (f"retroactive reprocess: {decision['match_count']} matching data points "
                       f"({','.join(decision['matched_signals'])})")
             if apply:
-                ws.create_project_suggestion(issue_id_a=issue_id, issue_id_b=sibling_id, reason=reason, suggestion_kind="merge")
-            suggested.append({"issue_id": issue_id, "sibling_id": sibling_id,
+                ws.create_project_suggestion(issue_id_a=issue_id, issue_id_b=sibling_id, reason=reason, suggestion_kind=kind)
+            suggested.append({"issue_id": issue_id, "sibling_id": sibling_id, "suggestion_kind": kind,
                                "signals": decision["matched_signals"], "match_count": decision["match_count"]})
         else:
             no_match_count += 1

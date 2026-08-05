@@ -969,6 +969,38 @@ def _matched_data_points(a_id: str, a_sig: dict, a_topic_key: str,
     return points
 
 
+# Fixed 2026-08-05 (real regression, found via the 4 tests that failed once
+# scored_model_enabled went live): the OLD ordered model (_strong_signal_
+# match, retired from group_issue's live path but still tested directly)
+# deliberately distinguished a "link" suggestion (party/company overlap
+# alone - proves a relationship, not the same transaction - e.g. the real
+# marc-166/marc-063 shape: same H1 contact, exiting one contract vs.
+# negotiating a different new one) from a "merge" suggestion (party overlap
+# PLUS real content overlap - same topic/product/amount/document - which
+# actually looks like the same transaction). group_issue's new count-based
+# "candidate" branch (task #184) never carried this distinction forward -
+# it hardcoded suggestion_kind="merge" for every candidate regardless of
+# which points matched, silently dropping a real, validated design
+# decision, not superseding it.
+#
+# "reference" is deliberately excluded from _CONTENT_OVERLAP_SIGNALS - a
+# genuinely shared reference ID never reaches a "candidate" verdict at all
+# (scored_grouping_decision's _shared_reference_id check turns it into an
+# immediate auto_merge before this ever runs), so it can't appear here.
+_CONTENT_OVERLAP_SIGNALS = {"subject_entity", "product_service", "amount", "document"}
+
+
+def _suggestion_kind_for_matched_signals(matched_signals: list) -> str:
+    """"merge" when real CONTENT overlaps (same topic/product/amount/
+    document - looks like the same transaction), "link" when only
+    party/company overlap ("supplier"/"stakeholder") matched - a real
+    relationship, not proof of the same transaction. Same semantics
+    _strong_signal_match's own party-with-topic-overlap-vs-without split
+    used, just re-derived from the count-based point vocabulary instead of
+    a bespoke check."""
+    return "merge" if any(s in _CONTENT_OVERLAP_SIGNALS for s in matched_signals) else "link"
+
+
 def scored_grouping_decision(issue_id: str, issue: dict, *, lookback_days: Optional[int] = None) -> dict:
     """The deterministic candidate-detection verdict for ONE issue - always
     computed by group_issue() regardless of whether config('grouping',
@@ -1750,16 +1782,21 @@ def group_issue(issue_id: str, *, lookback_days: Optional[int] = None) -> dict:
             # no_match.
             created = []
             for pid, info in shadow_scored["bridged_projects"].items():
+                kind = _suggestion_kind_for_matched_signals(info["matched_signals"])
                 reason = (f"bridge candidate - connects to project {pid} via "
                           f"{info['match_count']} matching data points ({','.join(info['matched_signals'])})")
                 ws.create_project_suggestion(
-                    issue_id_a=issue_id, issue_id_b=info["sibling_id"], reason=reason, suggestion_kind="merge",
+                    issue_id_a=issue_id, issue_id_b=info["sibling_id"], reason=reason, suggestion_kind=kind,
                 )
-                created.append({"project_id": pid, "sibling_id": info["sibling_id"]})
+                created.append({"project_id": pid, "sibling_id": info["sibling_id"], "suggestion_kind": kind})
             return _finish("bridge_suggested", signal="scored", count=len(created), bridges=created)
         if shadow_scored["verdict"] == "auto_merge":
+            # signal="reference", not the generic "scored" - the only path
+            # that ever produces "auto_merge" is a genuinely shared
+            # reference ID (_shared_reference_id), so this is always the
+            # real reason, not just "the scored model decided this."
             reason_label = f"shared reference ID ({','.join(shadow_scored['matched_signals'])})"
-            return _merge_or_defer(shadow_scored["sibling_id"], reason_label, "scored")
+            return _merge_or_defer(shadow_scored["sibling_id"], reason_label, "reference")
         if shadow_scored["verdict"] == "candidate":
             precedent = workgraph_lessons.precedent_prefilter(issue)
             if precedent == "confirmed":
@@ -1767,13 +1804,14 @@ def group_issue(issue_id: str, *, lookback_days: Optional[int] = None) -> dict:
                                         "auto-resolved by precedent (repeated confirmed pattern)", "precedent")
             if precedent != "rejected":
                 matched_signals = shadow_scored["matched_signals"]
+                kind = _suggestion_kind_for_matched_signals(matched_signals)
                 reason = f"{shadow_scored['match_count']} matching data points ({','.join(matched_signals)})"
                 ws.create_project_suggestion(
                     issue_id_a=issue_id, issue_id_b=shadow_scored["sibling_id"],
-                    reason=reason, suggestion_kind="merge",
+                    reason=reason, suggestion_kind=kind,
                 )
                 return _finish("suggested", signal="scored", sibling_id=shadow_scored["sibling_id"],
-                                count=1, suggestion_kind="merge")
+                                count=1, suggestion_kind=kind)
         return _finish("no_match")
 
     match = _strong_signal_match(issue_id, issue)

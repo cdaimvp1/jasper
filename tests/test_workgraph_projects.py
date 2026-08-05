@@ -453,11 +453,18 @@ def test_shared_real_company_with_different_pr_numbers_does_not_merge(ws_db):
     assert result["action"] == "no_match"
 
 
-def test_shared_real_company_without_reference_numbers_suggests_not_merges(ws_db):
-    """No PR/PO present on either side, so the reference veto never applies -
-    but shared company alone is narrowed (2026-07-31) to suggest-only, never
-    auto-merge on its own: an exact company match only proves the same
-    company is involved, not the same transaction."""
+def test_shared_real_company_alone_with_no_second_point_is_no_match(ws_db):
+    """Superseded 2026-08-04 (task #184, Marc's own explicit floor): this
+    used to assert "suggested" (a bare company match alone was suggest-
+    only, never auto-merge) under the OLD ordered model (_strong_signal_
+    match's "company" kind, always verdict "link"). That model is now
+    fully retired from group_issue's live path - the count-based model's
+    own rule is stricter and intentional, not a regression: "fewer than 2
+    real data points is never a candidate, period" (see this module's
+    top-of-file comment and _matched_data_points' own docstring). A bare
+    company match is exactly ONE point ("supplier") with nothing else -
+    no shared party, no topic/product/amount/document overlap - so it
+    correctly produces no_match now, not a weak suggestion."""
     a = _issue(ws_db, "Deal A")
     _raw_item(ws_db, a, "Let's discuss the renewal", "c3")
     _link_party(ws_db, a, "rep1", "rep1@acme.com", company="Acme")
@@ -468,8 +475,7 @@ def test_shared_real_company_without_reference_numbers_suggests_not_merges(ws_db
 
     result = wp.group_issue(a)
 
-    assert result["action"] == "suggested"
-    assert result["count"] == 1
+    assert result["action"] == "no_match"
 
 
 # --- related-vs-same-project verdict (2026-07-31) -------------------------
@@ -563,7 +569,7 @@ def test_group_issue_party_with_topic_overlap_creates_merge_suggestion(ws_db):
     result = wp.group_issue(a)
 
     assert result["action"] == "suggested"
-    assert "suggestion_kind" not in result  # unchanged default path, no explicit kind
+    assert result["suggestion_kind"] == "merge"
     suggestions = ws_db.list_project_suggestions(status="pending")
     assert suggestions[0]["suggestion_kind"] == "merge"
 
@@ -1592,13 +1598,18 @@ def test_group_issue_flag_on_single_matched_point_creates_no_suggestion(ws_db, m
 
 def test_group_issue_flag_on_same_supplier_and_topic_now_suggests_merge_kind(ws_db, monkeypatch, tmp_path):
     """Marc's count-based rule applied end-to-end: supplier + subject_entity
-    is 2 matched data points, and every candidate suggestion this creates
-    now always uses kind='merge' (confirming it actually merges the two
-    issues, if confirmed) - never 'link' - regardless of which two point
-    types matched. This replaces the old hierarchy's tiered anchor
-    classification (which decided merge vs. link per signal combination)
-    entirely: under the new rule there's no separate 'link' outcome for a
-    scored candidate at all.
+    is 2 matched data points, and this specific combination (real CONTENT
+    overlap, not just a shared party/company) suggests kind='merge' -
+    looks like the same transaction.
+
+    Corrected 2026-08-05 (real regression, not this test's original intent
+    reversed): this used to assert EVERY 2+-point candidate gets kind=
+    'merge' regardless of which points matched, dropping the merge-vs-link
+    distinction _strong_signal_match's own party-with-topic-overlap-vs-
+    without split had always made. That drop was a real bug, not an
+    intentional simplification - see _suggestion_kind_for_matched_signals'
+    own docstring. The distinction is restored; THIS specific case (real
+    content overlap present) still correctly lands on 'merge'.
 
     Doesn't reach action='auto_merged' here - only a shared reference ID
     auto-merges now (see _shared_reference_id); every other 2+-point

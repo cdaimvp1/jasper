@@ -236,6 +236,25 @@ def _pending_item(ws_db, thread_key, subject, pr_number=None, item_class="ACTION
     return rid
 
 
+def _seed_real_issue_with_thread(ws_db, thread_key, title, source="outlook_mail", state="active"):
+    """Corrected-ordering redesign (2026-08-05): cluster_and_link() no
+    longer creates a real issue for a fresh thread - a fresh unmatched
+    item becomes a cluster now (see task #184's Phase B). Several existing
+    tests need to exercise real-issue-specific behavior (state tracking,
+    NBA, etc.) that only applies once something is ALREADY a promoted
+    issue - Phase C (cluster group -> project -> curator-derived issue)
+    isn't built yet, so this helper stands in for "an issue that's already
+    been promoted:" a real issue, with its container mapping seeded
+    directly so a later matching raw_item on the SAME thread_key attaches
+    to it exactly the way cluster_and_link's own _container_lookup_issue
+    would resolve a real already-promoted issue. Returns the new issue id."""
+    iid = ws_db.create_issue_with_new_id(title=title, state=state, category="other")
+    container_type = "email_conversation" if source == "outlook_mail" else "teams_chat" if source == "teams_chat" else "calendar_series"
+    ws_db.upsert_source_container(id=f"sc-{source}-{thread_key}", source=source, container_type=container_type,
+                                   exact_key=thread_key, key_quality="exact", issue_id=iid)
+    return iid
+
+
 def _isolate_config(ws_db, monkeypatch, tmp_path):
     """Same isolation pattern as test_retention.py's retention_env fixture -
     config.SETTINGS_PATH is bound at import time, not per-test via
@@ -456,11 +475,7 @@ def test_cluster_and_link_new_fyi_reply_does_not_reopen_a_done_issue(ws_db):
     """End-to-end reproduction of the real bug: an issue with a resolved
     ask is manually marked done, then a brand-new, genuinely unrelated FYI
     reply lands on the SAME thread - must NOT silently reopen it."""
-    _pending_item(ws_db, "ck-reopen", "please approve the SOW", item_class="ACTIONABLE-ASK")
-    wc.cluster_and_link()
-    issues = ws_db.list_issues(states=None, limit=10)
-    iid = issues[0]["id"]
-    ws_db.update_issue(iid, state="done")
+    iid = _seed_real_issue_with_thread(ws_db, "ck-reopen", "please approve the SOW", state="done")
 
     rid = ws_db.insert_raw_item(source="outlook_mail", stable_key="ck-reopen", thread_key="ck-reopen", dedupe_key="ck-reopen-2",
                                  occurred_ts=time.time(), subject="FYI, fully approved and filed",
@@ -477,11 +492,7 @@ def test_cluster_and_link_new_fyi_reply_does_not_reopen_a_done_issue(ws_db):
 def test_cluster_and_link_new_actionable_reply_does_reopen_a_done_issue(ws_db):
     """The other half: a GENUINELY new ask on the same thread must still
     reopen the issue - this isn't a blanket freeze, only a targeted fix."""
-    _pending_item(ws_db, "ck-reopen2", "please approve the SOW", item_class="ACTIONABLE-ASK")
-    wc.cluster_and_link()
-    issues = ws_db.list_issues(states=None, limit=10)
-    iid = issues[0]["id"]
-    ws_db.update_issue(iid, state="done")
+    iid = _seed_real_issue_with_thread(ws_db, "ck-reopen2", "please approve the SOW", state="done")
 
     rid = ws_db.insert_raw_item(source="outlook_mail", stable_key="ck-reopen2", thread_key="ck-reopen2", dedupe_key="ck-reopen2-2",
                                  occurred_ts=time.time(), subject="Actually, one more approval needed on this",
@@ -1039,27 +1050,26 @@ def test_cluster_and_link_attaches_via_reference_when_flag_enabled(ws_db, monkey
     wc.cluster_and_link()
     first_issue_id = ws_db.get_raw_item(first_rid)["issue_id"]
 
-    _pending_item(ws_db, "ck5", "REMINDER: still needs approval", pr_number="PR666000", from_actor="bob@example.com")
+    second_rid = _pending_item(ws_db, "ck5", "REMINDER: still needs approval", pr_number="PR666000", from_actor="bob@example.com")
     result = wc.cluster_and_link()
 
     assert result["reference_auto_attach_enabled"] is True
     assert result["attached_via_reference"] == 1
-    assert result["issues_created"] == 0, "must attach to the existing issue, not create a second one"
-    issues = ws_db.list_issues(states=None, limit=10000)
-    assert len(issues) == 1
-    assert issues[0]["id"] == first_issue_id
+    assert result["issues_created"] == 0, "must attach to the existing cluster, not create a second one"
+    assert ws_db.get_cluster(first_issue_id) is not None, "the target is still a cluster, not yet promoted"
+    assert ws_db.get_raw_item(second_rid)["issue_id"] == first_issue_id
 
 
 def test_cluster_and_link_writes_breadcrumb_evidence_when_attached_via_reference(ws_db, monkeypatch, tmp_path):
     config = _isolate_config(ws_db, monkeypatch, tmp_path)
     config.set_value(True, "grouping", "reference_id_auto_attach_enabled")
 
-    _pending_item(ws_db, "ck6", "First notice", pr_number="PR777888", from_actor="alice@example.com")
+    first_rid = _pending_item(ws_db, "ck6", "First notice", pr_number="PR777888", from_actor="alice@example.com")
     wc.cluster_and_link()
     _pending_item(ws_db, "ck7", "REMINDER: still needs approval", pr_number="PR777888", from_actor="bob@example.com")
     wc.cluster_and_link()
 
-    issue_id = ws_db.list_issues(states=None, limit=10000)[0]["id"]
+    issue_id = ws_db.get_raw_item(first_rid)["issue_id"]
     evidence = ws_db.list_evidence(issue_id)
     breadcrumbed = [e for e in evidence if "auto-attached via shared reference" in (e.get("summary") or "")]
     assert len(breadcrumbed) == 1
@@ -1070,10 +1080,18 @@ def test_cluster_and_link_reference_match_ignores_closed_issues(ws_db, monkeypat
     config = _isolate_config(ws_db, monkeypatch, tmp_path)
     config.set_value(True, "grouping", "reference_id_auto_attach_enabled")
 
-    first_rid = _pending_item(ws_db, "ck8", "First notice", pr_number="PR112233", from_actor="alice@example.com")
-    wc.cluster_and_link()
-    first_issue_id = ws_db.get_raw_item(first_rid)["issue_id"]
-    ws_db.update_issue(first_issue_id, state="done")
+    # A real, already-promoted issue (Phase C isn't built yet - this stands
+    # in for "an issue that's already been promoted and closed"), with a
+    # matching reference already on it, then closed.
+    closed_issue_id = ws_db.create_issue_with_new_id(title="First notice", state="done", category="other")
+    old_rid = ws_db.insert_raw_item(source="outlook_mail", stable_key="ck8", thread_key="ck8", dedupe_key="ck8",
+                                     occurred_ts=time.time(), subject="First notice", from_actor="alice@example.com",
+                                     participants_json="[]")
+    conn = ws_db._connect()
+    conn.execute("UPDATE raw_items SET issue_id = ?, pr_number_base = 'PR112233' WHERE id = ?",
+                 (closed_issue_id, old_rid))
+    conn.commit()
+    conn.close()
 
     _pending_item(ws_db, "ck9", "REMINDER: still needs approval", pr_number="PR112233", from_actor="bob@example.com")
     result = wc.cluster_and_link()

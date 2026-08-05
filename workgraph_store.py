@@ -2514,6 +2514,31 @@ def create_cluster_with_new_id(**kwargs: Any) -> str:
     raise RuntimeError("could not allocate a unique cluster id after 25 attempts")
 
 
+def get_issue_or_cluster(id: str) -> Optional[dict]:
+    """Corrected-ordering redesign (2026-08-05): reads an object_type=
+    'request' work_object regardless of is_raw_cluster - for callers that
+    genuinely don't care which kind they got (e.g. `cluster_and_link()`'s
+    Jasper-ref-tag check: the tag names an exact id directly, and that id
+    is equally valid whether it turned out to already be promoted to a
+    real issue or is still an unpromoted cluster). Prefer get_issue/
+    get_cluster instead when a caller DOES care which kind it's reading -
+    this is deliberately the one place both are treated as interchangeable."""
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                """SELECT id, title, category, status AS state, priority, priority_score,
+                          nba_action_kind, nba_reason, owner, due, opened_at, updated_at,
+                          confidence_tier, parent_id AS project_id, lesson_id_cited,
+                          has_unmet_prerequisite, claims_revision
+                   FROM work_objects WHERE id = ? AND object_type = 'request'""",
+                (id,),
+            ).fetchone()
+        finally:
+            conn.close()
+    return dict(row) if row else None
+
+
 def get_cluster(id: str) -> Optional[dict]:
     """Read counterpart to create_cluster - bypasses the `issues` view (which
     now excludes is_raw_cluster=1 rows on purpose) and reads work_objects
@@ -3398,6 +3423,45 @@ def list_open_issue_ids_for_reference(pr_number_base: str) -> list[str]:
                    WHERE r.pr_number_base = ? AND i.state IN ('active','waiting','blocked')
                    GROUP BY i.id
                    ORDER BY i.updated_at DESC""",
+                (pr_number_base,),
+            ).fetchall()
+        finally:
+            conn.close()
+    return [r["id"] for r in rows]
+
+
+def list_open_work_objects_for_reference(pr_number_base: str) -> list[str]:
+    """Corrected-ordering redesign (2026-08-05): cluster-aware sibling of
+    list_open_issue_ids_for_reference, for workgraph_classify.cluster_and_
+    link()'s own exact-reference auto-attach - a fresh unlinked item
+    sharing a PR/PO with an EXISTING CLUSTER (not yet promoted to a real
+    issue) needs to find that cluster too, not just already-promoted
+    issues. Deliberately a SEPARATE function rather than making list_open_
+    issue_ids_for_reference itself cluster-aware - that function's other
+    two callers (workgraph_projects._shared_reference_id and its sibling)
+    are pass-2 matching helpers that today only ever run against real
+    issue ids (Phase C, promoting a cluster group into a project, isn't
+    built yet) - widening its scope now would be a real, untested behavior
+    change to code this redesign hasn't touched yet, for no benefit this
+    function doesn't already cover for cluster_and_link's actual need.
+
+    Queries work_objects directly (not the `issues` view) so it sees both
+    real issues (is_raw_cluster=0) and not-yet-promoted clusters
+    (is_raw_cluster=1) - status filter unchanged from the issue-only
+    version (only 'active'/'waiting'/'blocked' are in scope, same
+    'currently open' meaning for either kind of row)."""
+    if not pr_number_base:
+        return []
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                """SELECT w.id FROM work_objects w
+                   JOIN raw_items r ON r.issue_id = w.id
+                   WHERE r.pr_number_base = ? AND w.object_type = 'request'
+                         AND w.status IN ('active','waiting','blocked')
+                   GROUP BY w.id
+                   ORDER BY w.updated_at DESC""",
                 (pr_number_base,),
             ).fetchall()
         finally:

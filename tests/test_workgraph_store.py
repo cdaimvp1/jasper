@@ -77,6 +77,54 @@ def test_create_issue_with_new_id_never_collides_with_cluster_ids(ws_db):
     assert a != b
 
 
+def test_get_issue_or_cluster_reads_either_kind(ws_db):
+    iid = ws_db.create_issue_with_new_id(title="Real issue", state="active", category="other")
+    cid = ws_db.create_cluster_with_new_id(title="Cluster", category="other")
+    assert ws_db.get_issue_or_cluster(iid)["title"] == "Real issue"
+    assert ws_db.get_issue_or_cluster(cid)["title"] == "Cluster"
+
+
+def test_get_issue_or_cluster_none_for_a_project(ws_db):
+    """A project id is not object_type='request' at all - must not leak
+    through this reader, which is scoped to issue/cluster kinds only."""
+    pid = ws_db.create_project_with_new_id(name="A project", category="other")
+    assert ws_db.get_issue_or_cluster(pid) is None
+
+
+def test_list_open_work_objects_for_reference_finds_clusters_and_issues(ws_db):
+    """The whole point of this function - cluster_and_link's exact-
+    reference auto-attach needs to find a matching CLUSTER (not yet
+    promoted), not just an already-promoted issue."""
+    cid = ws_db.create_cluster_with_new_id(title="Cluster with a PR", category="other")
+    ws_db.insert_raw_item(source="outlook_mail", stable_key="k1", thread_key="k1", dedupe_key="dk1",
+                           occurred_ts=time.time(), subject="s", from_actor="a@example.com",
+                           participants_json="[]")
+    conn = ws_db._connect()
+    conn.execute("UPDATE raw_items SET issue_id = ?, pr_number_base = 'PR900001' WHERE stable_key = 'k1'", (cid,))
+    conn.commit()
+    conn.close()
+
+    matches = ws_db.list_open_work_objects_for_reference("PR900001")
+    assert cid in matches
+
+
+def test_list_open_work_objects_for_reference_excludes_closed(ws_db):
+    cid = ws_db.create_cluster_with_new_id(title="Closed cluster", category="other")
+    conn = ws_db._connect()
+    conn.execute("UPDATE work_objects SET status = 'done' WHERE id = ?", (cid,))
+    conn.commit()
+    conn.close()
+    ws_db.insert_raw_item(source="outlook_mail", stable_key="k2", thread_key="k2", dedupe_key="dk2",
+                           occurred_ts=time.time(), subject="s", from_actor="a@example.com",
+                           participants_json="[]")
+    conn = ws_db._connect()
+    conn.execute("UPDATE raw_items SET issue_id = ?, pr_number_base = 'PR900002' WHERE stable_key = 'k2'", (cid,))
+    conn.commit()
+    conn.close()
+
+    assert ws_db.list_open_work_objects_for_reference("PR900002") == []
+
+
 def test_get_raw_items_by_ids_batches_correctly(ws_db):
     """Task #44's deep_links.attach_deep_links relies on this being a single
     query for the whole evidence list, not one per row - same N+1 fix already

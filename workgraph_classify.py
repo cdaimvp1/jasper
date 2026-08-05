@@ -953,8 +953,14 @@ def cluster_and_link(limit: int = 500) -> dict:
     teams_sender_anchor_auto_attach = bool(config.get("grouping", "teams_sender_anchor_auto_attach_enabled"))
     now = time.time()
     with_pending = ws.get_items_pending_link(limit)
+    # Corrected-ordering redesign (2026-08-05): includes clusters, not just
+    # real issues - a fresh, unmatched item now becomes a cluster (Phase B),
+    # so the subject-match candidate pool must see clusters too, or the
+    # very first item on a recurring-subject thread would be permanently
+    # invisible to this fallback (the same reason the reference/jasper-ref
+    # attach paths above already became type-agnostic).
     open_issues_by_subject: dict[str, str] = {}
-    for iss in ws.list_issues(states=["active", "waiting", "blocked"], limit=5000):
+    for iss in ws.list_issues(states=["active", "waiting", "blocked"], limit=5000) + ws.list_clusters(limit=5000):
         key = normalize_subject_for_matching(iss.get("title") or "")
         if key:
             open_issues_by_subject.setdefault(key, iss["id"])
@@ -995,7 +1001,6 @@ def cluster_and_link(limit: int = 500) -> dict:
 
         thread_key = _effective_thread_key(item)
         issue_id = _container_lookup_issue(item, thread_key)
-        is_new_issue = False
         reference_match = None
         jasper_ref_match = None
         teams_sender_match = None
@@ -1009,7 +1014,11 @@ def cluster_and_link(limit: int = 500) -> dict:
             # the normal matching below, same as no tag at all.
             jasper_ref_candidate = item.get("jasper_ref_issue_id")
             if jasper_ref_candidate:
-                candidate_issue = ws.get_issue(jasper_ref_candidate)
+                # Corrected-ordering redesign (2026-08-05): get_issue_or_cluster,
+                # not get_issue - the tag names an exact id directly, and that
+                # id is equally valid whether it's already a real issue or
+                # still an unpromoted cluster.
+                candidate_issue = ws.get_issue_or_cluster(jasper_ref_candidate)
                 if candidate_issue and candidate_issue["state"] in ("active", "waiting", "blocked"):
                     jasper_ref_match = jasper_ref_candidate
                     would_attach_via_jasper_ref += 1
@@ -1024,7 +1033,12 @@ def cluster_and_link(limit: int = 500) -> dict:
             # requisition, not two unrelated strings).
             pr_number_base = item.get("pr_number_base")
             if pr_number_base:
-                candidates = ws.list_open_issue_ids_for_reference(pr_number_base)
+                # Corrected-ordering redesign (2026-08-05): list_open_work_
+                # objects_for_reference, not list_open_issue_ids_for_
+                # reference - a fresh item sharing this PR/PO with an
+                # existing CLUSTER (not yet promoted) needs to find it too,
+                # not just already-promoted issues.
+                candidates = ws.list_open_work_objects_for_reference(pr_number_base)
                 if candidates:
                     reference_match = candidates[0]
                     would_attach_via_reference += 1
@@ -1087,15 +1101,20 @@ def cluster_and_link(limit: int = 500) -> dict:
                     ws.mark_link_checked(item["id"], now)
                     continue
                 if issue_id is None:
+                    # Corrected-ordering redesign (2026-08-05, Marc's direct
+                    # correction): a fresh, unmatched communication becomes a
+                    # CLUSTER now, never a real issue directly. "Issue" is a
+                    # derived output of an already-confirmed project (Phase D,
+                    # curator's content-extraction step) - it is no longer
+                    # something created immediately at ingest time. Real
+                    # issue/checklist creation, NBA scoring, and state
+                    # tracking all wait for that later promotion; see the
+                    # touched_issues/touched_clusters split below for why the
+                    # post-processing at the end of this loop skips clusters.
                     title = strip_subject_prefix(item.get("subject") or "(no subject)")
-                    state = "active" if item["item_class"] == "ACTIONABLE-ASK" else "waiting"
-                    issue_id = ws.create_issue_with_new_id(
-                        title=title, category=item.get("topic"),
-                        state=state, priority="med", confidence_tier=item.get("confidence") or "M",
-                    )
+                    issue_id = ws.create_cluster_with_new_id(title=title, category=item.get("topic"))
                     _container_set_issue(item, thread_key, issue_id)
                     created += 1
-                    is_new_issue = True
 
         summary = item.get("subject") or item.get("body_preview") or "(no summary)"
         if issue_id == jasper_ref_match and jasper_ref_auto_attach:
@@ -1122,29 +1141,45 @@ def cluster_and_link(limit: int = 500) -> dict:
         if item["item_class"] == "ACTIONABLE-ASK":
             newly_actionable_issues.add(issue_id)
 
-        # A new issue opened by a genuine ask gets one starter task, with an
-        # owner resolved from any matching ownership_rules - left unknown
-        # (None) rather than defaulted to 'marc' when nothing matches, since
-        # guessing who owns something is exactly what Marc asked NOT to do.
-        if is_new_issue and item["item_class"] == "ACTIONABLE-ASK":
-            owner = ws.find_owner_for(category=item.get("topic"), topic=item.get("topic"))
-            ws.create_task(issue_id=issue_id, label=strip_subject_prefix(item.get("subject") or "(no subject)"), owner=owner)
+        # Starter-task creation is deliberately NOT done here anymore - a
+        # freshly-created work object from this path is always a cluster
+        # now (never a real issue directly), and a cluster has no checklist
+        # of its own to seed. Real task/checklist-item creation happens at
+        # Phase D (curator extracting issues from a confirmed project's
+        # content) - this is a genuine behavior change from before tonight,
+        # not an oversight.
 
-    for issue_id in touched_issues:
+    # Corrected-ordering redesign (2026-08-05): touched_issues can now hold
+    # a mix of real issue ids (attached via an existing container/reference/
+    # subject/Teams-sender match) and cluster ids (attached via the SAME
+    # paths, or freshly created above) - split them, since recompute_issue_
+    # state/parties/projects/title-generation are all real-issue concepts
+    # that don't apply to a cluster (no state machine, no NBA scoring, no
+    # project-grouping candidacy of its own yet - pass-2 matching over
+    # clusters is Phase C's job, not triggered inline here).
+    touched_real_issues = {i for i in touched_issues if ws.get_cluster(i) is None}
+    touched_clusters = touched_issues - touched_real_issues
+
+    for issue_id in touched_real_issues:
         recompute_issue_state(issue_id, new_item_is_actionable=issue_id in newly_actionable_issues)
 
-    party_result = workgraph_parties.run(list(touched_issues))
-    project_result = workgraph_projects.run(list(touched_issues))
+    party_result = workgraph_parties.run(list(touched_real_issues))
+    project_result = workgraph_projects.run(list(touched_real_issues))
 
     # Title generation runs AFTER parties/projects resolve for this batch -
     # it reads party affiliation/company, which a just-created issue doesn't
     # have until workgraph_parties.run() above has linked them.
-    for issue_id in touched_issues:
+    for issue_id in touched_real_issues:
         title = compute_deterministic_title(issue_id)
         if title:
             ws.set_derived_title("issue", issue_id, title)
 
-    return {"issues_created": created, "items_linked": linked, "noise_skipped": skipped_noise,
+    # "issues_created" is a legacy key name kept as-is (deliberately deferred
+    # per the corrected-ordering plan, "cosmetic") - `created` now always
+    # counts fresh CLUSTERS, since this function no longer creates real
+    # issues directly at all.
+    return {"issues_created": created, "clusters_touched": len(touched_clusters),
+            "items_linked": linked, "noise_skipped": skipped_noise,
             "fyi_standalone_skipped": skipped_fyi_standalone,
             "teams_standalone_skipped": skipped_teams_standalone,
             "attached_via_reference": attached_via_reference,

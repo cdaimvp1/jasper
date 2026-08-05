@@ -262,6 +262,68 @@ def extract_ariba_requisition_fields(subject: str) -> Optional[dict]:
     }
 
 
+# 2026-08-05 (Marc's direct design ask, live on the Authenticx case): the
+# requisition's ACTUAL vendor lives in the line-item table's own "Supplier"
+# field in the FULL BODY - never the subject, which is why
+# extract_ariba_requisition_fields above can't see it. Confirmed against a
+# real captured body (PR854779-V4, Conversational AI): text_extract.
+# resolve_item_text's _html_to_text collapses every tag to one space and
+# every run of spaces/tabs to one, so the real HTML cell sequence
+# "...>Supplier </td>...<td>AUTHENTICX INC </td>...<td>...>Qty</td>..."
+# comes out as the flat, single-spaced "Supplier AUTHENTICX INC Qty 1.00
+# Unit Power Unit Price ...". The value is bounded by the next known
+# field label from that same real template, not by counting characters -
+# a supplier name can be more than one word ("AUTHENTICX INC").
+_ARIBA_SUPPLIER_NEXT_FIELD_RE = "|".join([
+    "Qty", "Unit", "Price", "Amount", "Account Assignment", "Deliver To",
+    "Max Amount", "Expected Amount", "Service Start Date", "Service End Date",
+    "GL Account", "Cost Center", "Description",
+])
+_ARIBA_SUPPLIER_FIELD_RE = re.compile(
+    r"\bSupplier\b\s*[:\s]\s*(?P<supplier>[A-Z][A-Za-z0-9&,\.\-'/ ]{1,80}?)"
+    r"(?:\s*[\r\n]|\s{2,}|\s+(?:" + _ARIBA_SUPPLIER_NEXT_FIELD_RE + r")\b|\s*$)"
+)
+
+# Suppliers that must never surface as "the vendor" - Marc's own words:
+# "a PR request that comes from Ariba for Authenticx, the supplier needs to
+# be identified as authenticx and not ariba/sap" - this is a defensive
+# floor, not the primary guard (the real template's Supplier field names
+# the actual vendor, never the transport system itself); it only fires if
+# a malformed/atypical body ever put one of these literal names there.
+_NON_SUPPLIER_NAMES = {"ariba", "sap", "sap ariba", "sap ariba buying"}
+
+_COMPANY_SUFFIX_RE = re.compile(
+    r"\b(?:inc|incorporated|llc|l\.l\.c|ltd|limited|corp|corporation|co)\.?\s*$", re.I)
+
+
+def normalize_company_name(name: Optional[str]) -> str:
+    """Lowercases and strips a trailing corporate suffix (INC/LLC/CORP/...)
+    so a party's tracked company name ("Authenticx") and the Ariba
+    line-item's own formal supplier field ("AUTHENTICX INC") compare equal
+    as the same real vendor - see workgraph_projects._matched_data_points'
+    "supplier" point. ""/None in, "" out - never fabricates a name to
+    compare against."""
+    if not name:
+        return ""
+    return _COMPANY_SUFFIX_RE.sub("", name.lower().strip()).strip()
+
+
+def extract_ariba_supplier_field(body_text: str) -> Optional[str]:
+    """The real vendor name out of an Ariba requisition's own line-item
+    table (e.g. "AUTHENTICX INC"), read from the full body - see this
+    function's own regex comment for the exact real shape confirmed live.
+    Returns None (never guesses) when the text doesn't contain this exact
+    field, or when the matched value is itself one of the automated
+    system's own names (_NON_SUPPLIER_NAMES) rather than a real vendor."""
+    m = _ARIBA_SUPPLIER_FIELD_RE.search(body_text or "")
+    if not m:
+        return None
+    supplier = m.group("supplier").strip(" -–—")
+    if not supplier or normalize_company_name(supplier) in _NON_SUPPLIER_NAMES:
+        return None
+    return supplier
+
+
 def _escalation_target_is_owner(subject: str) -> bool:
     m = re.search(r"escalated to (.+?) for approval", subject or "", re.I)
     return bool(m and m.group(1).strip().upper() == OWNER_NAME_UPPER)

@@ -1225,6 +1225,103 @@ def test_matched_data_points_cannot_merge_constraint_vetoes_everything(ws_db):
     assert _matched_points_pair(a, b) == []
 
 
+# --- real Ariba "Supplier:" body field folded into "supplier" point -------
+# (2026-08-05, Marc's direct design ask, live on the Authenticx case): an
+# Ariba-routed requisition's only sender (ansmtp.ariba.com) is correctly
+# excluded from party/company matching by is_automated_sender, so two
+# different Authenticx PRs used to share NO supplier signal at all - real
+# vendor or not. _ariba_supplier_for_work_object now reads the real vendor
+# out of each linked raw_item's own body text, and _matched_data_points
+# folds it into the SAME "supplier" point as a tracked party's company,
+# normalized so casing/corporate-suffix differences don't matter.
+
+def _raw_item_with_body(ws_db, issue_id, subject, key, body_preview, from_actor="no-reply@ansmtp.ariba.com"):
+    """Same real pr_number persistence _raw_item above uses, plus a real
+    body_preview (resolve_item_text falls back to it when raw_ref is
+    unset, exactly the pre-task-#43 shape) so the Ariba supplier extractor
+    has real body text to read."""
+    rid = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key=key, thread_key=key, dedupe_key=key,
+        occurred_ts=time.time(), subject=subject, from_actor=from_actor,
+        participants_json="[]", body_preview=body_preview,
+    )
+    ws_db.link_raw_item_to_issue(rid, issue_id)
+    m = workgraph_signals.REFERENCE_ID_RE.search(subject or "")
+    if m:
+        pr_number = m.group(0).upper()
+        conn = ws_db._connect()
+        conn.execute(
+            "UPDATE raw_items SET pr_number = ?, pr_number_base = ? WHERE id = ?",
+            (pr_number, workgraph_signals.reference_base(pr_number), rid),
+        )
+        conn.close()
+    return rid
+
+
+def test_compute_work_object_signature_reads_real_ariba_supplier_from_body(ws_db):
+    a = _issue(ws_db, "Action required: Approve the Requisition that ALICIA MORRIS submitted  - PR854779-V4 - Conversational AI ($1,938,100.00 USD)")
+    _raw_item_with_body(
+        ws_db, a, "PR854779-V4", "pa1",
+        "Description Authenticx will enable Eli Lilly to analyze call recordings. "
+        "Supplier AUTHENTICX INC Qty 1.00 Unit Power Unit Price $1,575,600.00 USD",
+    )
+
+    sig = wp.compute_work_object_signature(a, ws_db.get_issue(a))
+
+    assert sig["positive_vocabulary"]["ariba_supplier"] == "AUTHENTICX INC"
+    assert sig["external_orgs"] == []  # is_automated_sender excludes the Ariba sender - no party signal at all
+
+
+def test_matched_data_points_ariba_supplier_alone_creates_supplier_point(ws_db):
+    """Two different, otherwise-unrelated Authenticx PRs (different PR#,
+    different requester) now share a real supplier point purely from each
+    one's own body field - the exact gap that kept them from ever becoming
+    candidates for the same project."""
+    a = _issue(ws_db, "Action required: Approve the Requisition that ALICIA MORRIS submitted  - PR854779-V4 - Conversational AI ($1,938,100.00 USD)")
+    _raw_item_with_body(ws_db, a, "PR854779-V4", "pa1", "Supplier AUTHENTICX INC Qty 1.00")
+    b = _issue(ws_db, "Action required: Approve the Requisition that CLAUDIA HERNANDEZ submitted  - PR1175200 - Omvoh Olumiant Ebglyss ($500,000.00 USD)")
+    _raw_item_with_body(ws_db, b, "PR1175200", "pb1", "Supplier AUTHENTICX INC Qty 1.00")
+
+    points = _matched_points_pair(a, b)
+
+    assert "reference" not in points  # different real PR#s, no shared reference
+    assert "supplier" in points
+
+
+def test_matched_data_points_ariba_supplier_normalizes_against_tracked_party_company(ws_db):
+    """The Ariba field's formal "AUTHENTICX INC" and a tracked party's own
+    "Authenticx" company name must compare as the same real vendor."""
+    a = _issue(ws_db, "Action required: Approve the Requisition that X submitted")
+    _raw_item_with_body(ws_db, a, "PR1", "pa1", "Supplier AUTHENTICX INC Qty 1.00")
+    b = _issue(ws_db, "Cameron Hilt - Authenticx relationship check-in")
+    _link_party(ws_db, b, "cameron", "cameron.hilt@authenticx.com", company="Authenticx")
+
+    points = _matched_points_pair(a, b)
+
+    assert "supplier" in points
+
+
+def test_matched_data_points_no_supplier_point_when_suppliers_differ(ws_db):
+    a = _issue(ws_db, "Action required: Approve the Requisition that X submitted")
+    _raw_item_with_body(ws_db, a, "PR1", "pa1", "Supplier AUTHENTICX INC Qty 1.00")
+    b = _issue(ws_db, "Action required: Approve the Requisition that Y submitted")
+    _raw_item_with_body(ws_db, b, "PR2", "pb1", "Supplier WORKDAY INC Qty 1.00")
+
+    assert "supplier" not in _matched_points_pair(a, b)
+
+
+def test_compute_work_object_signature_malformed_body_never_names_ariba_itself_as_supplier(ws_db):
+    """Defensive floor - if a body somehow put the transport system's own
+    name in the Supplier field, it must never surface as a real vendor
+    signal (Marc's own words: 'not ariba/sap')."""
+    a = _issue(ws_db, "Some malformed requisition notification")
+    _raw_item_with_body(ws_db, a, "PR1", "pa1", "Supplier Ariba Qty 1.00")
+
+    sig = wp.compute_work_object_signature(a, ws_db.get_issue(a))
+
+    assert (sig["positive_vocabulary"] or {}).get("ariba_supplier") is None
+
+
 # --- work_object_signatures caching (Section 12.7) ------------------------
 
 def test_get_or_compute_work_object_signature_caches_the_result(ws_db):

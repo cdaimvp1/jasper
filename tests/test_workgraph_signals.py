@@ -208,6 +208,62 @@ def test_extract_ariba_requisition_fields_none_for_empty():
     assert sig.extract_ariba_requisition_fields(None) is None
 
 
+# --- extract_ariba_supplier_field / normalize_company_name (2026-08-05, ---
+# Marc's direct design ask, live on the Authenticx case): the requisition's
+# real vendor lives in the line-item table's own "Supplier" field in the
+# BODY, never the subject - extract_ariba_requisition_fields above can't
+# see it at all. Ariba/SAP must never surface as "the supplier" - only the
+# real vendor named in that field counts.
+
+def test_extract_ariba_supplier_field_from_real_html_shape():
+    """Real captured shape (PR854779-V4, Conversational AI) run through
+    text_extract._html_to_text exactly the way resolve_item_text would -
+    every tag collapses to one space, so the real cell sequence
+    '...>Supplier </td>...<td>AUTHENTICX INC </td>...<td>...>Qty</td>...'
+    comes out flat: 'Supplier AUTHENTICX INC Qty 1.00 Unit Power Unit...'."""
+    import text_extract as te
+    html = (
+        '<td style="padding-bottom:2px">Description</td></tr><tr>'
+        '<td style="padding-bottom:15px">Authenticx will enable Eli Lilly to '
+        'analyze (TLAC) and (LAC) call recordings.</td></tr></tbody></table>'
+        '</td><td style="padding-right:15px"><table><tbody><tr>'
+        '<td style="padding-bottom:2px">Supplier </td></tr><tr>'
+        '<td style="padding-bottom:15px">AUTHENTICX INC </td></tr></tbody>'
+        '</table></td><td style="padding-right:15px"><table><tbody><tr>'
+        '<td style="padding-bottom:2px">Qty</td></tr><tr>'
+        '<td style="padding-bottom:15px">1.00</td></tr></tbody></table></td>'
+    )
+    text = te._html_to_text(html)
+    assert sig.extract_ariba_supplier_field(text) == "AUTHENTICX INC"
+
+
+def test_extract_ariba_supplier_field_plain_text_with_newline():
+    text = "Description: Widgets\nSupplier: Acme Vendor Co\nQty: 1.00\n"
+    assert sig.extract_ariba_supplier_field(text) == "Acme Vendor Co"
+
+
+def test_extract_ariba_supplier_field_none_when_absent():
+    assert sig.extract_ariba_supplier_field("no supplier field in this text at all") is None
+    assert sig.extract_ariba_supplier_field("") is None
+    assert sig.extract_ariba_supplier_field(None) is None
+
+
+def test_extract_ariba_supplier_field_never_returns_the_transport_system():
+    """Marc's own words: 'the supplier needs to be identified as authenticx
+    and not ariba/sap' - a defensive floor in case a malformed/atypical
+    body ever put the transport system's own name in this field."""
+    assert sig.extract_ariba_supplier_field("Supplier Ariba Qty 1.00") is None
+    assert sig.extract_ariba_supplier_field("Supplier SAP Qty 1.00") is None
+
+
+def test_normalize_company_name_strips_corporate_suffix_and_case():
+    assert sig.normalize_company_name("AUTHENTICX INC") == "authenticx"
+    assert sig.normalize_company_name("Authenticx") == "authenticx"
+    assert sig.normalize_company_name("Acme Vendor Co") == "acme vendor"
+    assert sig.normalize_company_name("") == ""
+    assert sig.normalize_company_name(None) == ""
+
+
 def test_is_automated_sender_covers_sap_alert_domain():
     """Task #169/#170 (2026-08-04, Marc's direct report): SAP's bulk alert
     feed uses alerts.ondemand.com, a different domain than plain sap.com -

@@ -42,6 +42,7 @@ from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
+import text_extract
 import workgraph_store as ws
 import workgraph_lessons
 import workgraph_signals
@@ -676,6 +677,26 @@ def _issue_signal_snapshot(issue_id: str, issue: Optional[dict] = None) -> dict:
     }
 
 
+def _ariba_supplier_for_work_object(work_object_id: str) -> Optional[str]:
+    """The real vendor name (e.g. "AUTHENTICX INC"), read from every
+    raw_item linked to this work_object's own full body text - first
+    supplier-bearing body wins. 2026-08-05 (Marc's direct design ask, live
+    on the Authenticx case): the Ariba line-item table's "Supplier" field
+    only ever appears in the BODY, never the subject/title
+    compute_work_object_signature's ariba_fields already reads - and it
+    names the real vendor, not the notification system that carried it
+    (workgraph_signals.extract_ariba_supplier_field's own guard). Without
+    this, two different Authenticx PRs shared NO supplier signal at all:
+    is_automated_sender correctly excludes the ansmtp.ariba.com sender from
+    party/company matching, and nothing else ever populated a real
+    party.company for an Ariba-routed requisition."""
+    for item in ws.get_raw_items_for_issue(work_object_id):
+        supplier = workgraph_signals.extract_ariba_supplier_field(text_extract.resolve_item_text(item))
+        if supplier:
+            return supplier
+    return None
+
+
 def compute_work_object_signature(work_object_id: str, issue: Optional[dict] = None) -> dict:
     """Design doc Section 12.7: the real content behind one work_object's
     cached signature, built from the same real data _issue_signal_snapshot
@@ -692,20 +713,26 @@ def compute_work_object_signature(work_object_id: str, issue: Optional[dict] = N
     requisitions - or two versions of the same one - look identical to the
     grouping signature) plus a real dollar-amount extraction
     (workgraph_nba.value_amount_for_issue, task #24's heuristic, previously
-    unused for grouping). negative_vocabulary stays None - still no real
-    producer for it. Returns plain Python values (lists/sets as lists) -
+    unused for grouping). ariba_supplier (2026-08-05) is the real vendor
+    name out of the body's own line-item table - see
+    _ariba_supplier_for_work_object's own docstring for why this is a
+    separate producer from ariba_fields, which only ever reads the title.
+    negative_vocabulary stays None - still no real producer for it. Returns
+    plain Python values (lists/sets as lists) -
     get_or_compute_work_object_signature is what JSON-encodes for the
     cache."""
     if issue is None:
         issue = ws.get_issue_or_cluster(work_object_id)
     ariba_fields = workgraph_signals.extract_ariba_requisition_fields(issue.get("title") or "") if issue else None
     value_amount = workgraph_nba.value_amount_for_issue(work_object_id)
+    ariba_supplier = _ariba_supplier_for_work_object(work_object_id)
     positive_vocabulary = None
-    if ariba_fields or value_amount:
+    if ariba_fields or value_amount or ariba_supplier:
         positive_vocabulary = {
             "ariba_requester": (ariba_fields or {}).get("requester"),
             "ariba_descriptor": (ariba_fields or {}).get("descriptor"),
             "value_amount": value_amount or None,
+            "ariba_supplier": ariba_supplier,
         }
     parties = ws.list_parties_for_issue(work_object_id)
     real_parties = [
@@ -813,7 +840,14 @@ def _matched_data_points(a_id: str, a_sig: dict, a_topic_key: str,
         scored_grouping_decision (_shared_reference_id) - included here
         too so it participates honestly in the count for any candidate
         that reaches this far without having triggered that early return.
-      - "supplier": shared external company/org.
+      - "supplier": shared external company/org - either a tracked party's
+        company in common, or a matching Ariba-extracted real vendor name
+        (workgraph_signals.extract_ariba_supplier_field, 2026-08-05, Marc's
+        direct design ask) read from the requisition's own line-item table,
+        never the notification system's own address. Company-name
+        comparison is normalized (workgraph_signals.normalize_company_name)
+        so a tracked party's "Authenticx" and the Ariba field's formal
+        "AUTHENTICX INC" count as the same real vendor.
       - "stakeholder": a shared NAMED person - either a tracked external
         party in common, or a matching Ariba-extracted requester name.
         Deliberately one point type, not two, even when both fire - they
@@ -885,12 +919,26 @@ def _matched_data_points(a_id: str, a_sig: dict, a_topic_key: str,
     points = []
     if a_ids and b_ids and not a_ids.isdisjoint(b_ids):
         points.append("reference")
-    if a_sig["external_orgs"] and b_sig["external_orgs"] and not set(a_sig["external_orgs"]).isdisjoint(b_sig["external_orgs"]):
+
+    a_vocab, b_vocab = a_sig.get("positive_vocabulary") or {}, b_sig.get("positive_vocabulary") or {}
+    # Real vendor from the Ariba body field folds into the SAME "supplier"
+    # signal as tracked party companies, normalized so "Authenticx" (a
+    # party record) and "AUTHENTICX INC" (the requisition's own field)
+    # compare equal - see normalize_company_name's own docstring. Without
+    # this fold-in, an Ariba-routed requisition (whose only sender is
+    # excluded from party/company matching by design) never carried ANY
+    # supplier signal at all, real vendor or not.
+    a_suppliers = {workgraph_signals.normalize_company_name(o) for o in a_sig["external_orgs"]}
+    b_suppliers = {workgraph_signals.normalize_company_name(o) for o in b_sig["external_orgs"]}
+    a_suppliers.add(workgraph_signals.normalize_company_name(a_vocab.get("ariba_supplier")))
+    b_suppliers.add(workgraph_signals.normalize_company_name(b_vocab.get("ariba_supplier")))
+    a_suppliers.discard("")
+    b_suppliers.discard("")
+    if a_suppliers and b_suppliers and not a_suppliers.isdisjoint(b_suppliers):
         points.append("supplier")
 
     a_external = {p["party_id"] for p in a_sig["participant_roles"] if p.get("affiliation") == "external"}
     b_external = {p["party_id"] for p in b_sig["participant_roles"] if p.get("affiliation") == "external"}
-    a_vocab, b_vocab = a_sig.get("positive_vocabulary") or {}, b_sig.get("positive_vocabulary") or {}
     a_req, b_req = a_vocab.get("ariba_requester"), b_vocab.get("ariba_requester")
     shared_named_person = (a_external and b_external and not a_external.isdisjoint(b_external)) or (
         a_req and b_req and a_req.lower().strip() == b_req.lower().strip())

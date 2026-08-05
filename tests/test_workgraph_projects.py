@@ -640,6 +640,74 @@ def test_confirm_suggestion_merge_kind_marks_both_issues_confirmed(ws_db):
     assert ws_db.get_work_object_membership_exposure(b)["membership_state"] == "confirmed"
 
 
+# --- resolve_work_object_relationship (task #184 Phase F) ------------------
+
+def test_resolve_work_object_relationship_confirmed_merges_via_existing_safety_net(ws_db):
+    """Confirming a relationship-graph row reuses confirm_suggestion's
+    entire existing merge path - not a second, parallel decision
+    mechanism that could ever disagree with it."""
+    a = _issue(ws_db, "A")
+    b = _issue(ws_db, "B")
+    rid = ws_db.upsert_work_object_relationship(a_id=a, b_id=b, relationship_type="candidate",
+                                                 match_count=2, matched_signals=["supplier", "stakeholder"])
+
+    result = wp.resolve_work_object_relationship(rid, "confirmed")
+
+    assert result["action"] == "merged"
+    assert ws_db.get_issue(a)["project_id"] == result["project_id"]
+    assert ws_db.get_issue(b)["project_id"] == result["project_id"]
+    assert ws_db.get_work_object_relationship_by_id(rid)["relationship_type"] == "confirmed"
+
+
+def test_resolve_work_object_relationship_rejected_writes_cannot_merge_constraint(ws_db):
+    a = _issue(ws_db, "A")
+    b = _issue(ws_db, "B")
+    rid = ws_db.upsert_work_object_relationship(a_id=a, b_id=b, relationship_type="candidate",
+                                                 match_count=2, matched_signals=["supplier", "stakeholder"])
+
+    result = wp.resolve_work_object_relationship(rid, "rejected")
+
+    assert result["action"] == "rejected"
+    assert ws_db.find_identity_constraint("cannot_merge", a, b) is not None
+    assert ws_db.get_work_object_relationship_by_id(rid)["relationship_type"] == "rejected"
+
+
+def test_resolve_work_object_relationship_invalid_status_raises(ws_db):
+    a = _issue(ws_db, "A")
+    b = _issue(ws_db, "B")
+    rid = ws_db.upsert_work_object_relationship(a_id=a, b_id=b, relationship_type="candidate",
+                                                 match_count=2, matched_signals=["supplier", "stakeholder"])
+    with pytest.raises(ValueError):
+        wp.resolve_work_object_relationship(rid, "maybe")
+
+
+def test_resolve_work_object_relationship_confirm_against_existing_veto_raises(ws_db):
+    """A rare race: some OTHER path already vetoed this exact pair after
+    the relationship row was written. Confirming must refuse outright
+    rather than silently succeed against a live cannot_merge constraint."""
+    a = _issue(ws_db, "A")
+    b = _issue(ws_db, "B")
+    rid = ws_db.upsert_work_object_relationship(a_id=a, b_id=b, relationship_type="candidate",
+                                                 match_count=2, matched_signals=["supplier", "stakeholder"])
+    ws_db.create_identity_constraint("cannot_merge", a, b, reason="test veto", actor="marc")
+
+    with pytest.raises(ValueError):
+        wp.resolve_work_object_relationship(rid, "confirmed")
+
+
+def test_resolve_work_object_relationship_reject_against_existing_veto_is_consistent(ws_db):
+    a = _issue(ws_db, "A")
+    b = _issue(ws_db, "B")
+    rid = ws_db.upsert_work_object_relationship(a_id=a, b_id=b, relationship_type="candidate",
+                                                 match_count=2, matched_signals=["supplier", "stakeholder"])
+    ws_db.create_identity_constraint("cannot_merge", a, b, reason="test veto", actor="marc")
+
+    result = wp.resolve_work_object_relationship(rid, "rejected")
+
+    assert result["action"] == "rejected"
+    assert ws_db.get_work_object_relationship_by_id(rid)["relationship_type"] == "rejected"
+
+
 def test_reject_suggestion_link_kind_does_not_record_a_lesson(ws_db):
     """A link-suggestion rejection must NOT feed Total Recall's merge
     precedent bucket - that's a different question (same project or not)

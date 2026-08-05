@@ -1353,6 +1353,58 @@ def reject_suggestion(suggestion_id: int) -> dict:
     return {"action": "rejected"}
 
 
+def resolve_work_object_relationship(relationship_id: int, status: str) -> dict:
+    """Task #184 Phase F (2026-08-05): curator's real judgment call on one
+    row from the persisted relationship graph (work_object_relationships),
+    the eventual replacement for pending_project_suggestions as this
+    review queue's source of truth. Deliberately reuses confirm_suggestion/
+    reject_suggestion's ENTIRE existing safety net (deferred reconciliation
+    on a contested collision, Total Recall lesson recording, the durable
+    cannot_merge veto on reject, cached-signature invalidation) rather than
+    re-implementing any of it - a real pending_project_suggestions row is
+    created and immediately resolved as a mechanical bridge between the two
+    review queues, not a second, parallel decision path that could ever
+    disagree with the first about what confirming/rejecting a pair means.
+
+    status must be 'confirmed' or 'rejected' - there is no third option
+    here, same as project-suggestion resolution. A genuinely unsure
+    verdict is simply never called with this function at all - the row
+    stays 'candidate'/'bridge' for curator's own next pass (see
+    ws.resolve_work_object_relationship's own docstring)."""
+    if status not in ("confirmed", "rejected"):
+        raise ValueError(f"resolve_work_object_relationship: invalid status {status!r}")
+    rel = ws.get_work_object_relationship_by_id(relationship_id)
+    if rel is None:
+        raise ValueError(f"no such relationship: {relationship_id}")
+    reason = f"relationship graph {rel['relationship_type']} (match_count={rel['match_count']})"
+    suggestion_id = ws.create_project_suggestion(
+        issue_id_a=rel["from_id"], issue_id_b=rel["to_id"], reason=reason, suggestion_kind="merge",
+    )
+    if suggestion_id is None:
+        # A durable cannot_merge/cannot_link veto already exists for this
+        # exact pair (create_project_suggestion's own check) - in normal
+        # operation this shouldn't happen (a vetoed pair never clears
+        # _matched_data_points' own veto check to get a relationship row
+        # in the first place), but a constraint created by some OTHER path
+        # after this row was written is a real, if rare, race. Confirming
+        # against a live veto would contradict it silently - refuse rather
+        # than pretend to succeed; rejecting is consistent with the veto
+        # already in place, so that resolves cleanly.
+        if status == "confirmed":
+            raise ValueError(
+                f"relationship {relationship_id} ({rel['from_id']}/{rel['to_id']}) is vetoed by an "
+                "existing cannot_merge/cannot_link constraint - cannot confirm"
+            )
+        ws.resolve_work_object_relationship(relationship_id, "rejected")
+        return {"action": "rejected", "note": "already vetoed by an existing identity_constraint"}
+    if status == "confirmed":
+        result = confirm_suggestion(suggestion_id)
+    else:
+        result = reject_suggestion(suggestion_id)
+    ws.resolve_work_object_relationship(relationship_id, status)
+    return result
+
+
 # reject_suggestion has created a durable identity_constraint on every
 # call since v2.4 (task #117) - but rejections that happened BEFORE that
 # shipped never got one, so the same pair could still resurface today

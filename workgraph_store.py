@@ -5230,6 +5230,18 @@ def upsert_work_object_relationship(*, a_id: str, b_id: str, relationship_type: 
             conn.close()
 
 
+def get_work_object_relationship_by_id(relationship_id: int) -> Optional[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM work_object_relationships WHERE id = ?", (relationship_id,)
+            ).fetchone()
+        finally:
+            conn.close()
+    return dict(row) if row else None
+
+
 def get_work_object_relationship(a_id: str, b_id: str) -> Optional[dict]:
     """Order-normalized read counterpart to upsert_work_object_relationship -
     the "have I already decided this pair" check Phase C/H need before

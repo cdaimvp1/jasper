@@ -2126,6 +2126,44 @@ async def api_project_suggestion_resolve(suggestion_id: int, body: ProjectSugges
     return JSONResponse({"ok": True, "result": result})
 
 
+@app.get("/api/workgraph/relationships")
+async def api_work_object_relationships_list(limit: int = MAX_GROUPING_SUGGESTIONS_PER_WAKE):
+    """Task #184 Phase F (2026-08-05): curator's review queue over the
+    persisted relationship graph (work_object_relationships) - the
+    eventual replacement for /project-suggestions as this queue's source
+    of truth. Already ranked by match_count DESC (ws.list_pending_
+    work_object_relationships' own ordering - the highest-match_count
+    candidates get reviewed first, per Marc's direct ask), so the cap
+    here (same budget-governor discipline as project-suggestions above)
+    never silently drops the strongest candidates in favor of weaker
+    ones - `deferred` reports what's left, still pending, for next wake."""
+    all_pending = wg.list_pending_work_object_relationships()
+    capped = all_pending[:limit]
+    deferred = max(0, len(all_pending) - limit)
+    return JSONResponse({"relationships": sanitize_surrogates(capped), "deferred": deferred})
+
+
+class WorkObjectRelationshipResolveBody(BaseModel):
+    status: str  # confirmed | rejected
+
+
+@app.post("/api/workgraph/relationships/{relationship_id}/resolve")
+async def api_work_object_relationship_resolve(relationship_id: int, body: WorkObjectRelationshipResolveBody):
+    """Curator's real content judgment on one relationship-graph row -
+    see workgraph_projects.resolve_work_object_relationship's own
+    docstring for why this reuses confirm_suggestion/reject_suggestion's
+    entire existing safety net rather than a second decision path."""
+    if body.status not in ("confirmed", "rejected"):
+        raise HTTPException(400, "status must be 'confirmed' or 'rejected'")
+    if wg.get_work_object_relationship_by_id(relationship_id) is None:
+        raise HTTPException(404, f"no such relationship: {relationship_id}")
+    try:
+        result = workgraph_projects.resolve_work_object_relationship(relationship_id, body.status)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    return JSONResponse({"ok": True, "result": result})
+
+
 @app.get("/api/workgraph/issues/{issue_id}/claim-suggestions")
 async def api_claim_suggestions_list(issue_id: str):
     """Task #155: pending claim-resolution suggestions (both evidence

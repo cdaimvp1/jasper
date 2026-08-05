@@ -662,6 +662,34 @@ def test_fyi_standalone_item_with_reference_but_internal_sender_is_promoted(ws_d
     assert ws_db.get_raw_item(rid)["issue_id"] is not None
 
 
+def test_fyi_standalone_item_with_external_participant_but_internal_organizer_is_promoted(ws_db):
+    """Real gap caught live running the Authenticx acceptance test: a
+    calendar meeting organized by a Lilly-internal person (from_actor) with
+    the real external counterparty only listed as a participant/attendee -
+    must still count as real signal, not just the organizer's own domain."""
+    rid = _pending_item(
+        ws_db, "pe6", "VOC & Authenticx", item_class="FYI-EVIDENCE", source="calendar",
+        from_actor="internal.organizer@lilly.com",
+        participants_json='["internal.organizer@lilly.com", "cameron.hilt@authenticx.com"]',
+    )
+    result = wc.cluster_and_link()
+
+    assert result["fyi_promoted_to_cluster"] == 1
+    assert ws_db.get_raw_item(rid)["issue_id"] is not None
+
+
+def test_fyi_standalone_item_with_only_internal_participants_is_still_dropped(ws_db):
+    rid = _pending_item(
+        ws_db, "pe7", "Authenticx (Project Isabella and KBO)", item_class="FYI-EVIDENCE", source="calendar",
+        from_actor="internal.organizer@lilly.com",
+        participants_json='["internal.organizer@lilly.com", "another.internal@lilly.com"]',
+    )
+    result = wc.cluster_and_link()
+
+    assert result["fyi_standalone_skipped"] == 1
+    assert ws_db.get_raw_item(rid)["issue_id"] is None
+
+
 def test_fyi_standalone_item_with_ariba_fields_but_internal_sender_is_promoted(ws_db):
     rid = _pending_item(
         ws_db, "pe5",

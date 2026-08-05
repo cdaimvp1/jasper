@@ -718,11 +718,22 @@ def _fyi_item_has_a_real_signal(item: dict) -> bool:
     affiliation is a pure domain-heuristic function (no DB read) - safe to
     call here on a not-yet-linked item.
 
+    Fixed 2026-08-05 (same day, caught live running the Authenticx
+    acceptance test end-to-end): the first version of this only checked
+    item['from_actor'] - blind to the real, common shape where a Lilly-
+    internal person ORGANIZES the meeting (from_actor) but the actual
+    external counterparty is only a PARTICIPANT/attendee. Confirmed live:
+    several real "VOC & Authenticx"/"Authenticx VOC QBR" meetings organized
+    by a Lilly employee, with cameron.hilt@authenticx.com listed only in
+    participants, were still being dropped by the from_actor-only check -
+    exactly the case this phase exists to fix. Now checks every participant,
+    not just the organizer.
+
     Checks, any one of which is sufficient:
       - a real captured PR/PO reference (item['pr_number_base']).
-      - a real external company on the sender's own domain (excludes an
-        automated/system sender, which classify_affiliation already
-        resolves to company=None).
+      - a real external company on the sender's OR any participant's
+        domain (excludes an automated/system sender, which classify_
+        affiliation already resolves to company=None).
       - an Ariba-extracted requester/descriptor/amount on the subject line
         (workgraph_signals.extract_ariba_requisition_fields) - the same
         stakeholder/product_service/amount vocabulary compute_work_object_
@@ -734,9 +745,13 @@ def _fyi_item_has_a_real_signal(item: dict) -> bool:
     actual identifiable data point."""
     if item.get("pr_number_base"):
         return True
-    affiliation = workgraph_parties.classify_affiliation(item.get("from_actor") or "")
-    if affiliation.get("affiliation") == "external" and affiliation.get("company"):
-        return True
+    emails = [item.get("from_actor") or ""] + (_parse_participants(item) or [])
+    for email in emails:
+        if not email:
+            continue
+        affiliation = workgraph_parties.classify_affiliation(email)
+        if affiliation.get("affiliation") == "external" and affiliation.get("company"):
+            return True
     ariba_fields = workgraph_signals.extract_ariba_requisition_fields(item.get("subject") or "")
     return bool(ariba_fields and (ariba_fields.get("requester") or ariba_fields.get("descriptor")))
 

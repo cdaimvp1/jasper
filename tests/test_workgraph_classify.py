@@ -536,8 +536,15 @@ def test_cluster_and_link_subject_match_shadow_counts_but_does_not_attach_when_f
     assert result["subject_match_auto_attach_enabled"] is False
     assert result["would_attach_via_subject_match"] == 1
     assert result["attached_via_subject_match"] == 0
-    assert result["fyi_standalone_skipped"] == 1
-    assert ws_db.get_raw_item(rid)["issue_id"] is None
+    # Corrected pipeline Phase E (2026-08-05): a real external sender
+    # (dan@workday.com, a real company by the same domain heuristic
+    # classify_affiliation always used) is genuine signal now, not
+    # standalone-FYI noise - the flag being off only means it doesn't
+    # attach to the EXISTING issue (still proven by would_attach above);
+    # it gets its own cluster instead of being dropped.
+    assert result["fyi_standalone_skipped"] == 0
+    assert result["fyi_promoted_to_cluster"] == 1
+    assert ws_db.get_raw_item(rid)["issue_id"] is not None
 
 
 def test_cluster_and_link_subject_match_attaches_when_flag_enabled_and_domain_matches(ws_db, monkeypatch, tmp_path):
@@ -573,8 +580,12 @@ def test_cluster_and_link_subject_match_requires_same_domain_too(ws_db, monkeypa
 
     assert result["attached_via_subject_match"] == 0
     assert result["would_attach_via_subject_match"] == 0
-    assert result["fyi_standalone_skipped"] == 1
-    assert ws_db.get_raw_item(rid)["issue_id"] is None
+    # Corrected pipeline Phase E: a real external sender is genuine signal
+    # now - never attaches to the wrong issue (still proven above), but
+    # gets its own cluster instead of being dropped as noise.
+    assert result["fyi_standalone_skipped"] == 0
+    assert result["fyi_promoted_to_cluster"] == 1
+    assert ws_db.get_raw_item(rid)["issue_id"] is not None
 
 
 def test_cluster_and_link_writes_breadcrumb_evidence_when_attached_via_subject_match(ws_db, monkeypatch, tmp_path):
@@ -602,6 +613,67 @@ def test_cluster_and_link_creates_new_issue_when_no_reference_match(ws_db):
     assert result["would_attach_via_reference"] == 0
 
 
+# --- Corrected pipeline Phase E (2026-08-05): FYI-standalone-skip gap ------
+# fix. A standalone FYI-EVIDENCE item (no thread/reference/jasper-ref/
+# subject match) carrying a real data point of its own must become a
+# cluster - eligible for pass-2 matching later - instead of being dropped
+# permanently. Zero real signal is still genuine noise, unchanged.
+
+def test_fyi_standalone_item_with_external_sender_is_promoted_not_dropped(ws_db):
+    rid = _pending_item(ws_db, "pe1", "quarterly business review notes", item_class="FYI-EVIDENCE",
+                         from_actor="jane@authenticx.com")
+    result = wc.cluster_and_link()
+
+    assert result["fyi_standalone_skipped"] == 0
+    assert result["fyi_promoted_to_cluster"] == 1
+    cluster_id = ws_db.get_raw_item(rid)["issue_id"]
+    assert cluster_id is not None
+    assert ws_db.get_cluster(cluster_id) is not None
+
+
+def test_fyi_standalone_item_with_internal_only_sender_is_still_dropped(ws_db):
+    rid = _pending_item(ws_db, "pe2", "reminder: badge photo day is Friday", item_class="FYI-EVIDENCE",
+                         from_actor="hr@lilly.com")
+    result = wc.cluster_and_link()
+
+    assert result["fyi_standalone_skipped"] == 1
+    assert result["fyi_promoted_to_cluster"] == 0
+    assert ws_db.get_raw_item(rid)["issue_id"] is None
+
+
+def test_fyi_standalone_item_with_automated_sender_and_no_other_signal_is_still_dropped(ws_db):
+    """An automated/system sender's own domain never counts as a real
+    supplier (classify_affiliation already resolves company=None for one) -
+    without a reference or Ariba field too, this is still real noise."""
+    rid = _pending_item(ws_db, "pe3", "your weekly digest is ready", item_class="FYI-EVIDENCE",
+                         from_actor="no-reply@ansmtp.ariba.com")
+    result = wc.cluster_and_link()
+
+    assert result["fyi_standalone_skipped"] == 1
+    assert ws_db.get_raw_item(rid)["issue_id"] is None
+
+
+def test_fyi_standalone_item_with_reference_but_internal_sender_is_promoted(ws_db):
+    rid = _pending_item(ws_db, "pe4", "FYI - PR9988776 has moved to the next stage", pr_number="PR9988776",
+                         item_class="FYI-EVIDENCE", from_actor="bob@lilly.com")
+    result = wc.cluster_and_link()
+
+    assert result["fyi_promoted_to_cluster"] == 1
+    assert ws_db.get_raw_item(rid)["issue_id"] is not None
+
+
+def test_fyi_standalone_item_with_ariba_fields_but_internal_sender_is_promoted(ws_db):
+    rid = _pending_item(
+        ws_db, "pe5",
+        "Action required: Approve the Requisition that JANE SMITH submitted - PR3344556 - Workday HCM SaaS ($12,500.00 USD)",
+        item_class="FYI-EVIDENCE", from_actor="bob@lilly.com",
+    )
+    result = wc.cluster_and_link()
+
+    assert result["fyi_promoted_to_cluster"] == 1
+    assert ws_db.get_raw_item(rid)["issue_id"] is not None
+
+
 # --- get_items_pending_link backlog starvation (2026-08-01, real incident) --
 
 def test_cluster_and_link_stamps_check_ts_on_noise_skip(ws_db):
@@ -611,7 +683,11 @@ def test_cluster_and_link_stamps_check_ts_on_noise_skip(ws_db):
 
 
 def test_cluster_and_link_stamps_check_ts_on_fyi_standalone_skip(ws_db):
-    rid = _pending_item(ws_db, "ckf1", "just an fyi note", item_class="FYI-EVIDENCE")
+    # Corrected pipeline Phase E: an internal-only sender with no reference/
+    # Ariba signal is still real noise, genuinely skipped - see
+    # _fyi_item_has_a_real_signal's own docstring for what now counts as
+    # signal instead (a real external sender, a reference, Ariba fields).
+    rid = _pending_item(ws_db, "ckf1", "just an fyi note", item_class="FYI-EVIDENCE", from_actor="bob@lilly.com")
     wc.cluster_and_link()
     assert ws_db.get_raw_item(rid)["last_link_check_ts"] is not None
 
@@ -675,7 +751,13 @@ def test_cluster_and_link_unmatched_teams_fyi_still_uses_fyi_path_not_teams_path
     """A Teams FYI-EVIDENCE item keeps going through the pre-existing
     fyi_standalone path (with its own subject-match check) - the new Teams
     branch only ever applies to ACTIONABLE-ASK/WAITING-ON-OTHERS."""
-    rid = _pending_item(ws_db, "tfyi1", "fyi, meeting moved to 3pm", item_class="FYI-EVIDENCE", source="teams_chat")
+    # Corrected pipeline Phase E: an internal-only sender with no other
+    # signal is still real noise - see _fyi_item_has_a_real_signal's own
+    # docstring. What matters for THIS test is which path decided that
+    # (fyi_standalone, not the Teams-specific one), not signal detection
+    # itself.
+    rid = _pending_item(ws_db, "tfyi1", "fyi, meeting moved to 3pm", item_class="FYI-EVIDENCE",
+                         source="teams_chat", from_actor="bob@lilly.com")
 
     result = wc.cluster_and_link()
 
@@ -989,8 +1071,12 @@ def test_cluster_and_link_backlog_of_old_skips_does_not_starve_new_items(ws_db):
     permanently-skipped items exceeding `limit` must not prevent a
     genuinely new, real ask from being linked on the very next run."""
     # Round 1: 5 standalone FYIs, no thread/reference match - all skipped.
+    # Corrected pipeline Phase E: internal-only senders, so they carry no
+    # real signal and are still genuinely dropped (see
+    # _fyi_item_has_a_real_signal) - this test is about backlog/limit
+    # starvation, not signal detection.
     for i in range(5):
-        _pending_item(ws_db, f"stale{i}", "just an fyi note", item_class="FYI-EVIDENCE")
+        _pending_item(ws_db, f"stale{i}", "just an fyi note", item_class="FYI-EVIDENCE", from_actor="bob@lilly.com")
     first = wc.cluster_and_link(limit=5)
     assert first["fyi_standalone_skipped"] == 5
     assert first["issues_created"] == 0

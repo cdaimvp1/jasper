@@ -698,6 +698,49 @@ def recompute_issue_state(issue_id: str, *, new_item_is_actionable: bool = True)
     return target
 
 
+def _fyi_item_has_a_real_signal(item: dict) -> bool:
+    """Corrected pipeline Phase E (2026-08-05): the gate on whether a
+    standalone FYI-EVIDENCE item (no thread/container match, no reference/
+    jasper-ref/subject-match attach) is real signal worth a cluster of its
+    own, or genuine noise to drop exactly as before. A lightweight version
+    of the same data-point vocabulary _matched_data_points checks on an
+    already-linked work_object (reference/supplier/stakeholder/subject_
+    entity/product_service/amount) - deliberately computed straight off the
+    bare item here, since it has no issue/cluster of its own YET for the
+    real signature machinery (compute_work_object_signature) to read parties/
+    lineage from.
+
+    Real gap this closes: a calendar meeting whose organizer/attendees are a
+    real external company (Marc's own confirmed example - ~19 Authenticx
+    meetings, no shared ConversationID/thread with anything, but every one
+    carries a real supplier) used to hit this exact skip path and vanish
+    permanently before ANY data-point matching ever ran on it. classify_
+    affiliation is a pure domain-heuristic function (no DB read) - safe to
+    call here on a not-yet-linked item.
+
+    Checks, any one of which is sufficient:
+      - a real captured PR/PO reference (item['pr_number_base']).
+      - a real external company on the sender's own domain (excludes an
+        automated/system sender, which classify_affiliation already
+        resolves to company=None).
+      - an Ariba-extracted requester/descriptor/amount on the subject line
+        (workgraph_signals.extract_ariba_requisition_fields) - the same
+        stakeholder/product_service/amount vocabulary compute_work_object_
+        signature already derives from an issue's title, here read straight
+        off the raw item's own subject instead.
+
+    Zero of the above is treated as real noise, same as before this phase -
+    not every FYI-EVIDENCE item becomes a cluster, only ones carrying an
+    actual identifiable data point."""
+    if item.get("pr_number_base"):
+        return True
+    affiliation = workgraph_parties.classify_affiliation(item.get("from_actor") or "")
+    if affiliation.get("affiliation") == "external" and affiliation.get("company"):
+        return True
+    ariba_fields = workgraph_signals.extract_ariba_requisition_fields(item.get("subject") or "")
+    return bool(ariba_fields and (ariba_fields.get("requester") or ariba_fields.get("descriptor")))
+
+
 def _sender_domain_seen_on_issue(issue_id: str, from_actor: Optional[str]) -> bool:
     """True if `from_actor`'s domain matches (exact or real subdomain,
     workgraph_signals.domain_matches - never a spoofable substring check)
@@ -977,6 +1020,7 @@ def cluster_and_link(limit: int = 500) -> dict:
     linked = 0
     skipped_noise = 0
     skipped_fyi_standalone = 0
+    promoted_fyi_to_cluster = 0
     skipped_teams_standalone = 0
     attached_via_reference = 0
     would_attach_via_reference = 0
@@ -1056,9 +1100,25 @@ def cluster_and_link(limit: int = 500) -> dict:
                             issue_id = subject_match
                             attached_via_subject_match += 1
                     if issue_id is None:
-                        skipped_fyi_standalone += 1
-                        ws.mark_link_checked(item["id"], now)
-                        continue
+                        # Corrected pipeline Phase E (2026-08-05): before
+                        # giving up entirely, check whether this standalone
+                        # FYI actually carries a real data point of its own
+                        # (see _fyi_item_has_a_real_signal's own docstring -
+                        # the exact gap that dropped ~1,475 of 1,936 real
+                        # unlinked raw_items, including every one of a real
+                        # ~19-meeting series with a genuine external
+                        # supplier, permanently before any matching ever ran
+                        # on them). Zero signal types is still real noise,
+                        # skipped exactly as before; one or more falls
+                        # through to the normal cluster-creation path below
+                        # instead of being dropped - it gets a real
+                        # signature and becomes eligible for pass-2 matching
+                        # on the next wake.
+                        if not _fyi_item_has_a_real_signal(item):
+                            skipped_fyi_standalone += 1
+                            ws.mark_link_checked(item["id"], now)
+                            continue
+                        promoted_fyi_to_cluster += 1
                 # Task #179 (2026-08-04, Marc's direct design ask), tried
                 # BEFORE the task #54/#55 hold-aside below: "the sender being
                 # the main link... you'd match the sender's message to any
@@ -1186,6 +1246,7 @@ def cluster_and_link(limit: int = 500) -> dict:
     return {"issues_created": created, "clusters_touched": len(touched_clusters),
             "items_linked": linked, "noise_skipped": skipped_noise,
             "fyi_standalone_skipped": skipped_fyi_standalone,
+            "fyi_promoted_to_cluster": promoted_fyi_to_cluster,
             "teams_standalone_skipped": skipped_teams_standalone,
             "attached_via_reference": attached_via_reference,
             "would_attach_via_reference": would_attach_via_reference,

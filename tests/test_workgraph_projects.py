@@ -1270,30 +1270,37 @@ def test_scored_grouping_decision_shared_party_alone_is_suggest_not_auto_merge(w
     assert decision["matched_signals"] == ["party"]
 
 
-def test_scored_grouping_decision_party_plus_sender_alone_stays_suggest_not_auto_merge(ws_db):
-    """Real bug backtest_scored_model() surfaced while reviewing before task
-    #180: party(0.45)+sender(0.20) sums to EXACTLY AUTO_MERGE_THRESHOLD
-    (0.65), but _suggestion_kind_for_scored_signals(['party','sender'])
-    correctly classifies that combination as 'link' - same contact, no
-    topic overlap, a genuinely different deal - not 'merge'. The raw score
-    crossing threshold must not override that composition check; 71 real
-    different-project pairs in the live corpus hit exactly this shape
-    (the same busy-contact-touches-many-unrelated-deals false positive
-    task #81 already fixed for the ordered model)."""
-    a = _issue(ws_db, "Renewal negotiation")
-    _link_party(ws_db, a, "p_shared", "rep@acme.com")
-    ws_db.upsert_party(id="int-shared", primary_email="me@lilly.com", display_name="Me",
-                        affiliation="internal", affiliation_confidence="H", affiliation_source="domain", company=None)
-    ws_db.link_party_to_issue(a, "int-shared")
+def test_scored_grouping_decision_party_plus_topic_raw_score_composition_merge(ws_db):
+    """Marc's detailed correction (2026-08-04) to the plain count-based rule
+    this replaces: signals are weighted strong/medium/weak, not counted
+    flatly - party+topic is 2 MEDIUM anchors ("named counterparty" +
+    "specific product/service" in his own framing), which clears his
+    stated bar ("2 medium anchors") - so the composition classification is
+    "merge". party+SENDER (a medium + a weak anchor) does NOT clear it on
+    its own - see test_suggestion_kind_for_scored_signals_weak_anchors_
+    need_two below.
 
-    b = _issue(ws_db, "Completely unrelated support escalation")
+    The verdict itself still comes back "suggest" here, NOT "auto_merge" -
+    a SEPARATE, still-open issue found while fixing this: effective_score
+    = raw_score * context_accuracy (workgraph_confidence.py), and
+    context_accuracy's referential_resolution component is 0.0 whenever
+    this issue has no captured PR/PO reference of its own (unrelated to
+    whether party+topic actually match), which single-handedly caps
+    effective_score below 0.65 for almost any non-reference-based match,
+    composition notwithstanding. That's flagged back to Marc as its own
+    question, not silently patched here - this test only locks in the
+    composition half of the fix, which is settled."""
+    a = _issue(ws_db, "Workday HCM SaaS renewal negotiation")
+    _link_party(ws_db, a, "p_shared", "rep@acme.com")
+
+    b = _issue(ws_db, "Workday HCM SaaS renewal negotiation follow-up")
     _link_party(ws_db, b, "p_shared", "rep@acme.com")
-    ws_db.link_party_to_issue(b, "int-shared")
 
     decision = wp.scored_grouping_decision(a, ws_db.get_issue(a))
 
-    assert decision["score"] == 0.65
-    assert set(decision["matched_signals"]) == {"party", "sender"}
+    assert decision["score"] == 0.9
+    assert set(decision["matched_signals"]) == {"party", "topic"}
+    assert wp._suggestion_kind_for_scored_signals(decision["matched_signals"]) == "merge"
     assert decision["verdict"] == "suggest"
 
 
@@ -1493,64 +1500,92 @@ def test_group_issue_flag_on_single_weak_signal_creates_suggestion_not_merge(ws_
     assert ws_db.get_issue(a)["project_id"] is None
 
 
-# --- 2026-08-04 regression fix: scored-enabled path must preserve the -----
-# --- merge / link / no-match distinction, not collapse every "suggest" ---
-# --- verdict into a generic merge suggestion --------------------------
+# --- 2026-08-04 (Marc's second, more detailed correction, superseding the ---
+# --- plain count-based rule this replaces): "every signal should not count --
+# --- equally... one extremely strong identifier may be enough... two weak --
+# --- matches... should not generate a serious candidate." Tiered anchors: --
+# --- strong (any 1 alone), medium (need 2, or 1 + 2 weak), weak (support ---
+# --- only, never alone or in pairs of just weak). ---------------------
 
-def test_suggestion_kind_for_scored_signals_party_with_topic_is_merge():
+def test_suggestion_kind_for_scored_signals_one_strong_anchor_is_enough():
+    assert wp._suggestion_kind_for_scored_signals(["attachment"]) == "merge"
+
+
+def test_suggestion_kind_for_scored_signals_two_medium_anchors_merge():
+    """His own examples of medium anchors: supplier (company), named
+    counterparty (party), specific product/service (ariba_descriptor),
+    specific dollar amount (amount)."""
     assert wp._suggestion_kind_for_scored_signals(["party", "topic"]) == "merge"
+    assert wp._suggestion_kind_for_scored_signals(["company", "amount"]) == "merge"
+    assert wp._suggestion_kind_for_scored_signals(["ariba_descriptor", "ariba_requester"]) == "merge"
 
 
-def test_suggestion_kind_for_scored_signals_party_without_topic_is_link():
+def test_suggestion_kind_for_scored_signals_medium_plus_two_weak_merges():
+    assert wp._suggestion_kind_for_scored_signals(["party", "sender", "category"]) == "merge"
+
+
+def test_suggestion_kind_for_scored_signals_medium_plus_one_weak_is_link():
+    """A medium anchor with only ONE weak signal alongside it (not two)
+    doesn't clear his stated bar - his own example shape (sender alone
+    paired with just one company/party match) stays a link, the exact
+    task #81 lesson (party+sender was the original real bug's shape)."""
+    assert wp._suggestion_kind_for_scored_signals(["party", "sender"]) == "link"
+    assert wp._suggestion_kind_for_scored_signals(["company", "sender"]) == "link"
+
+
+def test_suggestion_kind_for_scored_signals_two_weak_anchors_alone_is_link():
+    """Weak anchors are 'useful only as supporting evidence' - his own
+    words - never sufficient by themselves, even two of them with no
+    medium/strong backing at all."""
+    assert wp._suggestion_kind_for_scored_signals(["sender", "category"]) == "link"
+
+
+def test_suggestion_kind_for_scored_signals_exactly_one_signal_is_link():
+    """Exactly one data point is never enough to merge on its own - the
+    task #81 lesson (a single shared party/company/topic proves a
+    relationship, not the same transaction) - still surfaced as a link for
+    a human to judge, never silently dropped."""
     assert wp._suggestion_kind_for_scored_signals(["party"]) == "link"
-
-
-def test_suggestion_kind_for_scored_signals_company_alone_is_link():
     assert wp._suggestion_kind_for_scored_signals(["company"]) == "link"
+    assert wp._suggestion_kind_for_scored_signals(["topic"]) == "link"
+    assert wp._suggestion_kind_for_scored_signals(["sender"]) == "link"
 
 
-def test_suggestion_kind_for_scored_signals_company_with_topic_is_still_link():
-    """A shared company NEVER proves the same transaction on its own, even
-    with topic overlap - the exact boilerplate false-positive shape task
-    #81 already fixed for _shared_topic_key (Ariba's own requisition-
-    approval template text produces a real topic-key match between two
-    DIFFERENT reps' DIFFERENT requisitions at the same company)."""
-    assert wp._suggestion_kind_for_scored_signals(["company", "topic"]) == "link"
+def test_suggestion_kind_for_scored_signals_no_signals_is_none():
+    assert wp._suggestion_kind_for_scored_signals([]) is None
 
 
-def test_suggestion_kind_for_scored_signals_topic_alone_is_merge():
-    assert wp._suggestion_kind_for_scored_signals(["topic"]) == "merge"
+def test_group_issue_flag_on_same_supplier_and_topic_now_suggests_merge_kind(ws_db, monkeypatch, tmp_path):
+    """Marc's corrected rule applied end-to-end: company + topic is 2
+    MEDIUM anchors (his own framing: "supplier" + "specific product/
+    service"), and the suggestion it produces is now correctly kind=
+    'merge' (confirming it actually merges the two issues) rather than
+    the old hierarchy's blanket 'link' for anything paired with company
+    that wasn't one of four hand-picked "precise" signals.
 
-
-def test_suggestion_kind_for_scored_signals_sender_and_category_alone_is_none():
-    """No external identity (party/company) and no topic overlap - never
-    reached a suggestion under the ordered model either (same-category-
-    proximity suggestions are config-gated off by default)."""
-    assert wp._suggestion_kind_for_scored_signals(["sender", "category"]) is None
-
-
-def test_group_issue_flag_on_same_supplier_different_work_creates_link_suggestion(ws_db, monkeypatch, tmp_path):
-    """The regression's real shape: same Acme company, two DIFFERENT reps,
-    two DIFFERENT Ariba requisition emails whose subjects nonetheless share
-    Ariba's own boilerplate phrasing - matched_signals ends up ['company',
-    'topic'], and the FIX must still classify this as suggestion_kind=
-    'link' (same supplier, different work), not the pre-fix bug's blanket
-    'merge'."""
+    Doesn't reach action='auto_merged' here - a separate, still-open issue
+    (see test_scored_grouping_decision_party_plus_topic_raw_score_
+    composition_merge's docstring): confidence damping via
+    referential_resolution caps effective_score below AUTO_MERGE_THRESHOLD
+    for any pair with no captured reference ID, composition aside. What
+    Marc's fix DOES change today: the suggestion Marc/curator actually
+    sees is now correctly labeled 'merge', not 'link' - confirming it will
+    really merge the two issues, not just record a relationship."""
     config = _isolate_config(monkeypatch, tmp_path)
     config.set_value(True, "grouping", "scored_model_enabled")
 
-    a = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted")
+    a = _issue(ws_db, "Workday HCM SaaS renewal negotiation")
     _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
-    b = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted again")
+    b = _issue(ws_db, "Workday HCM SaaS renewal negotiation follow-up")
     _link_party(ws_db, b, "p2", "other@acme.com", company="Acme")
 
     result = wp.group_issue(a)
 
     assert result["action"] == "suggested"
-    assert result["suggestion_kind"] == "link"
+    assert result["suggestion_kind"] == "merge"
     pending = ws_db.list_project_suggestions(status="pending")
     assert len(pending) == 1
-    assert pending[0]["suggestion_kind"] == "link"
+    assert pending[0]["suggestion_kind"] == "merge"
 
 
 def test_group_issue_flag_on_shared_definitive_reference_still_auto_merges(ws_db, monkeypatch, tmp_path):
@@ -1636,14 +1671,18 @@ def test_replay_repairs_a_wrongly_classified_merge_suggestion_into_link(ws_db):
     exists (as create_project_suggestion's old no-suggestion_kind call
     would have created it) for a pair whose live signals are really
     company-alone - the replay must expire the wrong row and create the
-    correct 'link' suggestion in its place."""
-    a = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted")
+    correct 'link' suggestion in its place. Subjects deliberately don't
+    share a topic-key match (unlike the sibling tests below) so the ONLY
+    live signal is company - under Marc's 2026-08-04 count-based rule,
+    exactly one matching data point is still never enough to merge on its
+    own, the one case this replay still needs to catch."""
+    a = _issue(ws_db, "Quarterly business review notes")
     _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
-    b = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted again")
+    b = _issue(ws_db, "Invoice discrepancy follow-up")
     _link_party(ws_db, b, "p2", "other@acme.com", company="Acme")
     bad_sid = ws_db.create_project_suggestion(
         issue_id_a=a, issue_id_b=b,
-        reason="scored signal (company,topic, score=0.8)", suggestion_kind="merge",
+        reason="scored signal (company, score=0.45)", suggestion_kind="merge",
     )
 
     result = wp.replay_scored_merge_link_regression(since_ts=0.0)
@@ -1688,13 +1727,13 @@ def test_replay_ignores_suggestions_before_since_ts(ws_db):
 
 
 def test_replay_is_idempotent(ws_db):
-    a = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted")
+    a = _issue(ws_db, "Quarterly business review notes")
     _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
-    b = _issue(ws_db, "Action required: Approve the Requisition that BRIAN submitted again")
+    b = _issue(ws_db, "Invoice discrepancy follow-up")
     _link_party(ws_db, b, "p2", "other@acme.com", company="Acme")
     ws_db.create_project_suggestion(
         issue_id_a=a, issue_id_b=b,
-        reason="scored signal (company,topic, score=0.8)", suggestion_kind="merge",
+        reason="scored signal (company, score=0.45)", suggestion_kind="merge",
     )
 
     first = wp.replay_scored_merge_link_regression(since_ts=0.0)
@@ -1808,33 +1847,34 @@ def test_backtest_scored_model_flags_different_project_pair_scoring_above_thresh
     assert any({h["a"], h["b"]} == {a, b} for h in hits)
 
 
-def test_backtest_scored_model_actual_verdict_distinguishes_link_from_merge(ws_db):
-    """Task #181 fix: raw score alone overstates risk for a bare party+
-    sender match (signal composition is 'link', not 'merge') - actual_
-    verdict is what tells a reviewer which raw-threshold crossings are a
-    real remaining auto-merge risk vs one the composition check already
-    demotes to a safe suggestion."""
-    # party+sender only (0.65) - composition is "link".
+def test_backtest_scored_model_actual_verdict_reflects_tiered_anchor_rule(ws_db):
+    """actual_verdict, restored (2026-08-04) after briefly looking redundant
+    under the short-lived plain count-based rule: Marc's tiered-anchor
+    correction means raw score crossing AUTO_MERGE_THRESHOLD does NOT
+    always imply a real merge candidate again - party+sender reaches 0.65
+    (0.45+0.20) but is medium+weak, one weak signal short of his stated
+    bar, so actual_verdict must say "suggest" even though it's in the
+    at-or-above-threshold list. party+topic (medium+medium, 0.90) is a
+    genuine merge candidate for comparison."""
     a = _issue(ws_db, "Renewal negotiation")
     _link_party(ws_db, a, "p_shared", "rep@acme.com")
     ws_db.upsert_party(id="int-shared", primary_email="me@lilly.com", display_name="Me",
                         affiliation="internal", affiliation_confidence="H", affiliation_source="domain", company=None)
     ws_db.link_party_to_issue(a, "int-shared")
-    b = _issue(ws_db, "Completely unrelated support escalation")
+    b = _issue(ws_db, "A different real request, same two people")
     _link_party(ws_db, b, "p_shared", "rep@acme.com")
     ws_db.link_party_to_issue(b, "int-shared")
 
-    # party+topic (0.90) - composition is "merge", a genuine remaining risk.
-    c = _issue(ws_db, "Workday HCM SaaS renewal negotiation kickoff")
+    c = _issue(ws_db, "Workday HCM SaaS renewal negotiation")
     _link_party(ws_db, c, "p_shared2", "rep2@acme.com")
-    d = _issue(ws_db, "Workday HCM SaaS renewal negotiation kickoff meeting")
+    d = _issue(ws_db, "Workday HCM SaaS renewal negotiation follow-up")
     _link_party(ws_db, d, "p_shared2", "rep2@acme.com")
 
     result = wp.backtest_scored_model()
     hits = {frozenset({h["a"], h["b"]}): h for h in result["different_project_pairs_at_or_above_threshold"]}
 
     assert hits[frozenset({a, b})]["actual_verdict"] == "suggest"
-    assert hits[frozenset({c, d})]["actual_verdict"] == "auto_merge"
+    assert hits[frozenset({c, d})]["actual_verdict"] == "merge"
 
 
 def test_backtest_scored_model_task81_boilerplate_case_stays_a_veto(ws_db):
@@ -2197,18 +2237,29 @@ def test_pairwise_score_no_new_signals_when_vocab_empty():
 
 def test_suggestion_kind_company_alone_stays_link():
     assert wp._suggestion_kind_for_scored_signals(["company"]) == "link"
-    assert wp._suggestion_kind_for_scored_signals(["company", "sender"]) == "link"
-    assert wp._suggestion_kind_for_scored_signals(["company", "topic"]) == "link"
 
 
-def test_suggestion_kind_company_plus_precise_signal_merges():
-    """Task #169/#170: company + a real precise content signal (amount,
-    attachment, an Ariba descriptor/requester match) is trustworthy enough
-    to merge - unlike company+topic, these don't share the same-company-
-    different-requisition coincidental-overlap risk (see the module-level
-    comment above this function)."""
+def test_suggestion_kind_company_plus_medium_anchor_merges():
+    """Marc's tiered-anchor correction (2026-08-04, superseding the
+    plain-count rule this replaces same day): company is a MEDIUM anchor,
+    so it merges when paired with another MEDIUM anchor (2 medium anchors
+    clears his stated bar) - but NOT when paired with only a WEAK one
+    (sender), which needs a second weak signal alongside it instead.
+
+    company+topic specifically is flagged, not silently assumed settled:
+    it's the exact shape of the real task #81 incident (two DIFFERENT
+    Ariba reps' DIFFERENT requisitions at the same company, sharing only
+    boilerplate phrasing, no reference number captured on either side to
+    trigger the disjoint-reference veto) - 71 issues wrongly merged into
+    one project. Whether that specific combination should still be an
+    exception to the general rule is an open question raised back to
+    Marc, not decided here - this test locks in the code's CURRENT
+    behavior (merge, since topic is medium-tier) so a future change shows
+    up as a deliberate diff."""
     assert wp._suggestion_kind_for_scored_signals(["company", "amount"]) == "merge"
     assert wp._suggestion_kind_for_scored_signals(["company", "ariba_descriptor"]) == "merge"
+    assert wp._suggestion_kind_for_scored_signals(["company", "topic"]) == "merge"
+    assert wp._suggestion_kind_for_scored_signals(["company", "sender"]) == "link"
 
 
 def test_suggestion_kind_combined_new_signals_merge():
@@ -2224,7 +2275,7 @@ def test_suggestion_kind_combined_new_signals_merge():
 def test_suggestion_kind_party_and_topic_semantics_unchanged():
     assert wp._suggestion_kind_for_scored_signals(["party"]) == "link"
     assert wp._suggestion_kind_for_scored_signals(["party", "topic"]) == "merge"
-    assert wp._suggestion_kind_for_scored_signals(["topic"]) == "merge"
+    assert wp._suggestion_kind_for_scored_signals(["topic"]) == "link"
 
 
 # --- connected-components candidate search + bridge detection --------------

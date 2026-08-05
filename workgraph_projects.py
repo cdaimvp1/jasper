@@ -809,6 +809,17 @@ def _pairwise_score_from_signature(a_id: str, a_sig: dict, a_topic_key: str, a_c
         return 0.0, []
     if b_id in a_sig["cannot_link_ids"] or a_id in b_sig["cannot_link_ids"]:
         return 0.0, []
+    # NOTE (2026-08-04): Marc's broader "hard contradiction" concept (a
+    # different PO/legal-entity/requester should "materially reduce
+    # confidence or trigger an LLM review boundary," his own words - not
+    # necessarily an absolute veto the way a disjoint reference ID is) is
+    # deliberately NOT implemented as a new hard veto here yet. A first
+    # attempt (zeroing the score outright on any ariba_requester mismatch)
+    # broke a legitimate bridge scenario in testing - a real bridging item
+    # sharing descriptor+amount with a DIFFERENT named requester is exactly
+    # the kind of case that should reach curator's LLM review, not get
+    # silently vetoed before ever being seen. Left as an open question back
+    # to Marc rather than guessed at further under time pressure.
 
     a_external = {p["party_id"] for p in a_sig["participant_roles"] if p.get("affiliation") == "external"}
     b_external = {p["party_id"] for p in b_sig["participant_roles"] if p.get("affiliation") == "external"}
@@ -1014,10 +1025,13 @@ def backtest_scored_model() -> dict:
         would now score AT/OR-ABOVE threshold - the actual false-positive
         class that matters (the exact task #81 shape) and needs human
         review before the flag is ever enabled. Each entry's actual_verdict
-        ("auto_merge" or "suggest") is what genuinely happens post-fix
-        (task #180 prep) - a raw score crossing that the signal composition
-        demotes to "suggest" is not a real auto-merge risk, just noise in
-        this report if left unlabeled.
+        ("merge" or "suggest") is what genuinely happens: Marc's tiered
+        anchor rule (2026-08-04 - see _suggestion_kind_for_scored_signals)
+        means crossing the raw score threshold does NOT always imply a
+        real merge candidate (party+sender alone reaches 0.65 but is
+        medium+weak, not 2+ medium anchors) - re-added after briefly being
+        removed the same day under an earlier, simpler count-based rule
+        where it happened to always be "merge" and looked redundant.
     Every issue's signature is computed ONCE up front (real queries, O(n)),
     then compared pairwise purely in memory (O(n^2) cheap set ops) - fast
     even at real corpus scale. Section 12.7: reads/writes the same cached
@@ -1051,22 +1065,11 @@ def backtest_scored_model() -> dict:
                 same_project_below_threshold.append(
                     {"a": a_id, "b": b_id, "score": round(score, 2), "project_id": projects[a_id]})
             elif not same_project and score >= AUTO_MERGE_THRESHOLD:
-                # actual_verdict (2026-08-04, added while reviewing THIS
-                # backtest's own output before task #180): raw score alone
-                # is no longer what scored_grouping_decision acts on - see
-                # its own fix note. Reporting every raw-score crossing as
-                # equally risky would overstate the real exposure (71 pairs
-                # in the live corpus hit party+sender=0.65 exactly, and
-                # EVERY one of them is signal composition "link", not
-                # "merge" - none would actually auto-merge post-fix). This
-                # field is what a reviewer actually needs: which pairs still
-                # WOULD auto-merge (the real remaining risk) vs which only
-                # cross the raw threshold but get correctly demoted.
-                actual_verdict = "auto_merge" if _suggestion_kind_for_scored_signals(signals) == "merge" else "suggest"
+                actual_verdict = _suggestion_kind_for_scored_signals(signals) or "suggest"
                 different_project_at_or_above.append({
                     "a": a_id, "b": b_id, "score": round(score, 2), "signals": signals,
                     "a_project": projects[a_id], "b_project": projects[b_id],
-                    "actual_verdict": actual_verdict,
+                    "actual_verdict": "merge" if actual_verdict == "merge" else "suggest",
                 })
     return {
         "issues_checked": len(ids),
@@ -1524,53 +1527,47 @@ def split_issue_from_project(issue_id: str, *, actor: str = "marc", reason: Opti
     }
 
 
-def _suggestion_kind_for_scored_signals(matched_signals: list) -> Optional[str]:
-    """Regression fix (2026-08-04): maps scored_grouping_decision's
-    matched_signals to the same merge-vs-link verdict _strong_signal_match
-    already encodes for the ordered model, so group_issue()'s scored-
-    enabled path stops collapsing every "suggest" verdict into a generic
-    merge suggestion (create_project_suggestion's own default) - the bug
-    that made "relationships are not projects" dead code the moment
-    scored_model_enabled went on (link suggestions/day: 67 -> 0 on
-    2026-08-03, the day the flag flipped).
+_STRONG_ANCHOR_SIGNALS = {"attachment"}  # reference (PR/PO) is its own earlier early-return, not routed through here
+_MEDIUM_ANCHOR_SIGNALS = {"party", "company", "topic", "ariba_descriptor", "ariba_requester", "amount"}
+_WEAK_ANCHOR_SIGNALS = {"sender", "category"}
 
-    Not just "topic present -> merge": a shared PARTY only proves the same
-    transaction if the topic keys ALSO overlap (mirrors _topic_keys_match,
-    the exact discriminator _strong_signal_match uses for its own "party"
-    kind) - otherwise it's the same contact on a different deal (link). A
-    shared COMPANY ALONE is always link, even WITH topic overlap - checked
-    before falling through to topic, because Ariba's own requisition-
-    approval boilerplate ("Action required: Approve the Requisition that
-    BRIAN submitted") routinely produces a real topic-key match between
-    two DIFFERENT reps' DIFFERENT requisitions at the same company - the
-    exact false-positive shape task #81 already fixed for _shared_topic_
-    key. A signal set with none of party/company/topic (e.g. sender+
-    category alone) never reached a suggestion under the ordered model
-    either (same-category-proximity suggestions are config-gated off by
-    default) - returns None so the caller treats it as no_match, not a
-    new suggestion class the ordered model never had."""
+
+def _suggestion_kind_for_scored_signals(matched_signals: list) -> Optional[str]:
+    """Marc's direct, detailed correction (2026-08-04) to the plain
+    count-based rule this replaces same day: "every signal should not
+    count equally... two weak matches such as sender+year should not
+    generate a serious candidate... one extremely strong identifier may be
+    enough." His stated threshold, applied directly:
+
+        candidate (merge) if: 1 strong anchor
+                           OR 2+ medium anchors
+                           OR 1 medium anchor + 2+ weak anchors
+
+    Strong: a shared attachment/document lineage (his own example - "a
+    shared document ID" is listed as a strong anchor) - reference ID
+    (PR/PO) is stronger still, but that's scored_grouping_decision's own
+    earlier _shared_reference_id early-return, never reaching this
+    function at all. Medium: party, company, topic, and the Ariba
+    content fields (descriptor/requester/amount) - each specific enough
+    on its own to mean something, per his examples ("supplier", "specific
+    dollar amount", "specific product/service"). Weak: sender, category -
+    his own examples ("sender", "department") - real corroboration, never
+    sufficient alone OR paired with just one other weak signal.
+
+    Exactly one medium anchor and nothing else (or any number of weak
+    anchors with no medium/strong backing) still surfaces as a link for a
+    human to judge - the task #81 lesson (a single shared identity proves
+    a relationship, not the same transaction) - never silently dropped.
+    Zero signals is no_match."""
     signals = set(matched_signals)
-    if "party" in signals:
-        return "merge" if "topic" in signals else "link"
-    if "company" in signals:
-        # Added task #169/#170 (2026-08-04): company + only topic/sender/
-        # category still stays link, unchanged - the exact false-positive
-        # shape above (two different Ariba reps' different requisitions at
-        # the same company routinely share a topic-key match too, since
-        # neither discriminates the actual transaction). company + one of
-        # the NEW, more precise content signals (amount/attachment/an Ariba
-        # descriptor or requester match) is trustworthy enough to merge -
-        # those don't share that same coincidental-overlap risk.
-        precise = signals & {"ariba_descriptor", "ariba_requester", "amount", "attachment"}
-        return "merge" if precise else "link"
-    if "topic" in signals:
+    if not signals:
+        return None
+    strong = signals & _STRONG_ANCHOR_SIGNALS
+    medium = signals & _MEDIUM_ANCHOR_SIGNALS
+    weak = signals & _WEAK_ANCHOR_SIGNALS
+    if strong or len(medium) >= 2 or (len(medium) >= 1 and len(weak) >= 2):
         return "merge"
-    if signals & {"ariba_descriptor", "ariba_requester", "amount", "attachment"}:
-        # None of these alone reaches AUTO_MERGE_THRESHOLD (see SCORE_
-        # WEIGHTS) - reaching this branch at all means 2+ combined, a real,
-        # specific content match, not a coincidental single weak overlap.
-        return "merge"
-    return None
+    return "link"
 
 
 def group_issue(issue_id: str, *, lookback_days: Optional[int] = None) -> dict:

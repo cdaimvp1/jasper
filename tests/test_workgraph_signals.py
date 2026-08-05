@@ -208,14 +208,15 @@ def test_extract_ariba_requisition_fields_none_for_empty():
     assert sig.extract_ariba_requisition_fields(None) is None
 
 
-# --- extract_ariba_supplier_field / normalize_company_name (2026-08-05, ---
-# Marc's direct design ask, live on the Authenticx case): the requisition's
-# real vendor lives in the line-item table's own "Supplier" field in the
-# BODY, never the subject - extract_ariba_requisition_fields above can't
-# see it at all. Ariba/SAP must never surface as "the supplier" - only the
-# real vendor named in that field counts.
+# --- extract_labeled_party_field / normalize_company_name (2026-08-05, ---
+# generalized same day from an Ariba-only extract_ariba_supplier_field per
+# Marc's direct correction: "this has to be designed to work for
+# everyone"). Confirmed against TWO independently-built real systems'
+# actual bodies - Ariba's flattened no-colon table, and ContractPodAI's
+# colon-delimited paragraph. Ariba/SAP/DocuSign/etc. must never surface as
+# "the party" - only a real counterparty named in the field counts.
 
-def test_extract_ariba_supplier_field_from_real_html_shape():
+def test_extract_labeled_party_field_from_real_ariba_html_shape():
     """Real captured shape (PR854779-V4, Conversational AI) run through
     text_extract._html_to_text exactly the way resolve_item_text would -
     every tag collapses to one space, so the real cell sequence
@@ -234,26 +235,51 @@ def test_extract_ariba_supplier_field_from_real_html_shape():
         '<td style="padding-bottom:15px">1.00</td></tr></tbody></table></td>'
     )
     text = te._html_to_text(html)
-    assert sig.extract_ariba_supplier_field(text) == "AUTHENTICX INC"
+    assert sig.extract_labeled_party_field(text) == "AUTHENTICX INC"
 
 
-def test_extract_ariba_supplier_field_plain_text_with_newline():
+def test_extract_labeled_party_field_from_real_contractpodai_shape():
+    """Real captured shape (a live ContractPodAI contract-request
+    notification) - a completely different system, completely different
+    body layout (colon-delimited paragraph, not a table), same underlying
+    concept and even the same label word. Proves the generalization is
+    real, not just theoretical for a second, independently-built vendor."""
+    import text_extract as te
+    html = (
+        '<p><strong>Sourcing Lead: </strong>Marc Lane</p>'
+        '<p><strong>Functional Area: </strong> T@L</p>'
+        '<p><strong>What do you want the S2P team to do: </strong>New supplier needs new MSA</p>'
+        '<p><strong>Supplier Name: </strong>Fullstory, Inc</p>'
+        '<p><strong>What is the Priority?: </strong>High</p>'
+        '<p><strong>Request ID: </strong>90988</p>'
+    )
+    text = te._html_to_text(html)
+    assert sig.extract_labeled_party_field(text) == "Fullstory, Inc"
+
+
+def test_extract_labeled_party_field_plain_text_with_newline():
     text = "Description: Widgets\nSupplier: Acme Vendor Co\nQty: 1.00\n"
-    assert sig.extract_ariba_supplier_field(text) == "Acme Vendor Co"
+    assert sig.extract_labeled_party_field(text) == "Acme Vendor Co"
 
 
-def test_extract_ariba_supplier_field_none_when_absent():
-    assert sig.extract_ariba_supplier_field("no supplier field in this text at all") is None
-    assert sig.extract_ariba_supplier_field("") is None
-    assert sig.extract_ariba_supplier_field(None) is None
+def test_extract_labeled_party_field_recognizes_other_label_words():
+    assert sig.extract_labeled_party_field("Vendor: Acme Corp\nAmount: $500\n") == "Acme Corp"
+    assert sig.extract_labeled_party_field("Counterparty: Beta LLC\nStatus: Active\n") == "Beta LLC"
 
 
-def test_extract_ariba_supplier_field_never_returns_the_transport_system():
+def test_extract_labeled_party_field_none_when_absent():
+    assert sig.extract_labeled_party_field("no supplier field in this text at all") is None
+    assert sig.extract_labeled_party_field("") is None
+    assert sig.extract_labeled_party_field(None) is None
+
+
+def test_extract_labeled_party_field_never_returns_the_transport_system():
     """Marc's own words: 'the supplier needs to be identified as authenticx
     and not ariba/sap' - a defensive floor in case a malformed/atypical
-    body ever put the transport system's own name in this field."""
-    assert sig.extract_ariba_supplier_field("Supplier Ariba Qty 1.00") is None
-    assert sig.extract_ariba_supplier_field("Supplier SAP Qty 1.00") is None
+    body ever put a transport system's own name in this field."""
+    assert sig.extract_labeled_party_field("Supplier Ariba Qty 1.00") is None
+    assert sig.extract_labeled_party_field("Supplier SAP Qty 1.00") is None
+    assert sig.extract_labeled_party_field("Vendor: DocuSign\nStatus: Sent\n") is None
 
 
 def test_normalize_company_name_strips_corporate_suffix_and_case():

@@ -677,23 +677,24 @@ def _issue_signal_snapshot(issue_id: str, issue: Optional[dict] = None) -> dict:
     }
 
 
-def _ariba_supplier_for_work_object(work_object_id: str) -> Optional[str]:
-    """The real vendor name (e.g. "AUTHENTICX INC"), read from every
-    raw_item linked to this work_object's own full body text - first
-    supplier-bearing body wins. 2026-08-05 (Marc's direct design ask, live
-    on the Authenticx case): the Ariba line-item table's "Supplier" field
-    only ever appears in the BODY, never the subject/title
-    compute_work_object_signature's ariba_fields already reads - and it
-    names the real vendor, not the notification system that carried it
-    (workgraph_signals.extract_ariba_supplier_field's own guard). Without
-    this, two different Authenticx PRs shared NO supplier signal at all:
-    is_automated_sender correctly excludes the ansmtp.ariba.com sender from
-    party/company matching, and nothing else ever populated a real
-    party.company for an Ariba-routed requisition."""
+def _system_party_for_work_object(work_object_id: str) -> Optional[str]:
+    """The real counterparty name (e.g. "AUTHENTICX INC", "Fullstory, Inc"),
+    read from every raw_item linked to this work_object's own full body
+    text - first labeled-field-bearing body wins. Generalized 2026-08-05
+    (Marc's direct correction: "this has to be designed to work for
+    everyone... identify system email addresses and apply the same process
+    to all of them") - not tied to Ariba specifically; works for any
+    automated system whose body labels its real party
+    (workgraph_signals.extract_labeled_party_field's own docstring has the
+    two independently-confirmed real shapes this covers). Without this, an
+    automated-system-routed communication shared NO party signal at all:
+    is_automated_sender correctly excludes the system's own sender address
+    from party/company matching, and nothing else ever populated a real
+    party.company for it."""
     for item in ws.get_raw_items_for_issue(work_object_id):
-        supplier = workgraph_signals.extract_ariba_supplier_field(text_extract.resolve_item_text(item))
-        if supplier:
-            return supplier
+        party = workgraph_signals.extract_labeled_party_field(text_extract.resolve_item_text(item))
+        if party:
+            return party
     return None
 
 
@@ -713,9 +714,11 @@ def compute_work_object_signature(work_object_id: str, issue: Optional[dict] = N
     requisitions - or two versions of the same one - look identical to the
     grouping signature) plus a real dollar-amount extraction
     (workgraph_nba.value_amount_for_issue, task #24's heuristic, previously
-    unused for grouping). ariba_supplier (2026-08-05) is the real vendor
-    name out of the body's own line-item table - see
-    _ariba_supplier_for_work_object's own docstring for why this is a
+    unused for grouping). system_party (2026-08-05, generalized same day
+    from an Ariba-only ariba_supplier field per Marc's direct correction)
+    is the real counterparty name out of the body's own labeled field,
+    for ANY automated system, not just Ariba - see
+    _system_party_for_work_object's own docstring for why this is a
     separate producer from ariba_fields, which only ever reads the title.
     negative_vocabulary stays None - still no real producer for it. Returns
     plain Python values (lists/sets as lists) -
@@ -725,14 +728,14 @@ def compute_work_object_signature(work_object_id: str, issue: Optional[dict] = N
         issue = ws.get_issue_or_cluster(work_object_id)
     ariba_fields = workgraph_signals.extract_ariba_requisition_fields(issue.get("title") or "") if issue else None
     value_amount = workgraph_nba.value_amount_for_issue(work_object_id)
-    ariba_supplier = _ariba_supplier_for_work_object(work_object_id)
+    system_party = _system_party_for_work_object(work_object_id)
     positive_vocabulary = None
-    if ariba_fields or value_amount or ariba_supplier:
+    if ariba_fields or value_amount or system_party:
         positive_vocabulary = {
             "ariba_requester": (ariba_fields or {}).get("requester"),
             "ariba_descriptor": (ariba_fields or {}).get("descriptor"),
             "value_amount": value_amount or None,
-            "ariba_supplier": ariba_supplier,
+            "system_party": system_party,
         }
     parties = ws.list_parties_for_issue(work_object_id)
     real_parties = [
@@ -772,15 +775,36 @@ def compute_work_object_signature(work_object_id: str, issue: Optional[dict] = N
     }
 
 
+_SIGNATURE_SCHEMA_VERSION = 1
+# Bump this whenever compute_work_object_signature's real OUTPUT SHAPE
+# changes (a new key, a changed meaning for an existing one) - see
+# get_or_compute_work_object_signature's own docstring for the real bug
+# this closes (2026-08-05): a cached row has no other way to know the
+# CODE that produced it is now stale, as opposed to the DATA it was
+# computed from. History: 1 = adds "system_party" to positive_vocabulary
+# (generalized same day from an Ariba-only "ariba_supplier" before this
+# version was ever written against the live DB, so no bump needed for
+# that rename alone).
+
+
 def get_or_compute_work_object_signature(work_object_id: str, issue: Optional[dict] = None) -> dict:
     """Cache-first read (design doc Section 12.7) - a cached row survives
     until the real write sites that change its content invalidate it (see
     workgraph_store.invalidate_work_object_signature's callers), so a
     given work_object's signature is normally computed ONCE, not on every
     single scored_grouping_decision call that happens to consider it as a
-    candidate."""
+    candidate.
+
+    Fixed 2026-08-05 (real live bug): a cached row whose schema_version
+    doesn't match _SIGNATURE_SCHEMA_VERSION is now treated as a cache MISS,
+    not a hit - without this, 355 of 361 real issues had a cached row from
+    before compute_work_object_signature grew the system_party field, and
+    every one of them was trusted forever, silently never recomputing.
+    invalidate_work_object_signature's own callers still matter for real
+    DATA changes (a new party linked, evidence added) - this is the
+    orthogonal CODE-changed case those callers can't see."""
     cached = ws.get_work_object_signature(work_object_id)
-    if cached is not None:
+    if cached is not None and cached.get("schema_version") == _SIGNATURE_SCHEMA_VERSION:
         return {
             "definitive_ids": json.loads(cached["definitive_ids"]),
             "accepted_lineages": json.loads(cached["accepted_lineages"]),
@@ -806,6 +830,7 @@ def get_or_compute_work_object_signature(work_object_id: str, issue: Optional[di
         positive_vocabulary_json=json.dumps(sig["positive_vocabulary"]) if sig["positive_vocabulary"] is not None else None,
         negative_vocabulary_json=json.dumps(sig["negative_vocabulary"]) if sig["negative_vocabulary"] is not None else None,
         cannot_link_ids_json=json.dumps(sig["cannot_link_ids"]),
+        schema_version=_SIGNATURE_SCHEMA_VERSION,
     )
     return sig
 
@@ -841,13 +866,14 @@ def _matched_data_points(a_id: str, a_sig: dict, a_topic_key: str,
         too so it participates honestly in the count for any candidate
         that reaches this far without having triggered that early return.
       - "supplier": shared external company/org - either a tracked party's
-        company in common, or a matching Ariba-extracted real vendor name
-        (workgraph_signals.extract_ariba_supplier_field, 2026-08-05, Marc's
-        direct design ask) read from the requisition's own line-item table,
-        never the notification system's own address. Company-name
-        comparison is normalized (workgraph_signals.normalize_company_name)
-        so a tracked party's "Authenticx" and the Ariba field's formal
-        "AUTHENTICX INC" count as the same real vendor.
+        company in common, or a matching real counterparty name extracted
+        from ANY automated system's body (workgraph_signals.
+        extract_labeled_party_field, 2026-08-05, generalized per Marc's
+        direct correction - not Ariba-specific), never the notification
+        system's own address. Company-name comparison is normalized
+        (workgraph_signals.normalize_company_name) so a tracked party's
+        "Authenticx" and a system field's formal "AUTHENTICX INC" count as
+        the same real vendor.
       - "stakeholder": a shared NAMED person - either a tracked external
         party in common, or a matching Ariba-extracted requester name.
         Deliberately one point type, not two, even when both fire - they
@@ -921,17 +947,17 @@ def _matched_data_points(a_id: str, a_sig: dict, a_topic_key: str,
         points.append("reference")
 
     a_vocab, b_vocab = a_sig.get("positive_vocabulary") or {}, b_sig.get("positive_vocabulary") or {}
-    # Real vendor from the Ariba body field folds into the SAME "supplier"
-    # signal as tracked party companies, normalized so "Authenticx" (a
-    # party record) and "AUTHENTICX INC" (the requisition's own field)
-    # compare equal - see normalize_company_name's own docstring. Without
-    # this fold-in, an Ariba-routed requisition (whose only sender is
-    # excluded from party/company matching by design) never carried ANY
-    # supplier signal at all, real vendor or not.
+    # Real counterparty from ANY automated system's body field folds into
+    # the SAME "supplier" signal as tracked party companies, normalized so
+    # "Authenticx" (a party record) and "AUTHENTICX INC" (a system's own
+    # field) compare equal - see normalize_company_name's own docstring.
+    # Without this fold-in, a system-routed communication (whose only
+    # sender is excluded from party/company matching by design) never
+    # carried ANY supplier signal at all, real vendor or not.
     a_suppliers = {workgraph_signals.normalize_company_name(o) for o in a_sig["external_orgs"]}
     b_suppliers = {workgraph_signals.normalize_company_name(o) for o in b_sig["external_orgs"]}
-    a_suppliers.add(workgraph_signals.normalize_company_name(a_vocab.get("ariba_supplier")))
-    b_suppliers.add(workgraph_signals.normalize_company_name(b_vocab.get("ariba_supplier")))
+    a_suppliers.add(workgraph_signals.normalize_company_name(a_vocab.get("system_party")))
+    b_suppliers.add(workgraph_signals.normalize_company_name(b_vocab.get("system_party")))
     a_suppliers.discard("")
     b_suppliers.discard("")
     if a_suppliers and b_suppliers and not a_suppliers.isdisjoint(b_suppliers):

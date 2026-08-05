@@ -1231,15 +1231,17 @@ def test_matched_data_points_cannot_merge_constraint_vetoes_everything(ws_db):
     assert _matched_points_pair(a, b) == []
 
 
-# --- real Ariba "Supplier:" body field folded into "supplier" point -------
-# (2026-08-05, Marc's direct design ask, live on the Authenticx case): an
-# Ariba-routed requisition's only sender (ansmtp.ariba.com) is correctly
-# excluded from party/company matching by is_automated_sender, so two
-# different Authenticx PRs used to share NO supplier signal at all - real
-# vendor or not. _ariba_supplier_for_work_object now reads the real vendor
-# out of each linked raw_item's own body text, and _matched_data_points
-# folds it into the SAME "supplier" point as a tracked party's company,
-# normalized so casing/corporate-suffix differences don't matter.
+# --- real labeled "Supplier:" body field folded into "supplier" point -----
+# (2026-08-05, Marc's direct design ask, live on the Authenticx case, then
+# generalized same day per his direct correction to work for any automated
+# system, not just Ariba): a system-routed communication's only sender is
+# correctly excluded from party/company matching by is_automated_sender, so
+# two different Authenticx PRs used to share NO supplier signal at all -
+# real vendor or not. _system_party_for_work_object now reads the real
+# counterparty out of each linked raw_item's own body text, and
+# _matched_data_points folds it into the SAME "supplier" point as a
+# tracked party's company, normalized so casing/corporate-suffix
+# differences don't matter.
 
 def _raw_item_with_body(ws_db, issue_id, subject, key, body_preview, from_actor="no-reply@ansmtp.ariba.com"):
     """Same real pr_number persistence _raw_item above uses, plus a real
@@ -1274,7 +1276,7 @@ def test_compute_work_object_signature_reads_real_ariba_supplier_from_body(ws_db
 
     sig = wp.compute_work_object_signature(a, ws_db.get_issue(a))
 
-    assert sig["positive_vocabulary"]["ariba_supplier"] == "AUTHENTICX INC"
+    assert sig["positive_vocabulary"]["system_party"] == "AUTHENTICX INC"
     assert sig["external_orgs"] == []  # is_automated_sender excludes the Ariba sender - no party signal at all
 
 
@@ -1325,7 +1327,7 @@ def test_compute_work_object_signature_malformed_body_never_names_ariba_itself_a
 
     sig = wp.compute_work_object_signature(a, ws_db.get_issue(a))
 
-    assert (sig["positive_vocabulary"] or {}).get("ariba_supplier") is None
+    assert (sig["positive_vocabulary"] or {}).get("system_party") is None
 
 
 # --- work_object_signatures caching (Section 12.7) ------------------------
@@ -1341,6 +1343,47 @@ def test_get_or_compute_work_object_signature_caches_the_result(ws_db):
     cached = ws_db.get_work_object_signature(a)
     assert cached is not None
     assert json.loads(cached["external_orgs"]) == ["acme"]
+
+
+# --- signature cache schema-version invalidation (2026-08-05, real live --
+# bug: 355/361 real issues had a cached row from before ariba_supplier
+# existed, and every one was trusted forever since nothing about a DATA
+# write ever touched them) ---------------------------------------------
+
+def test_get_or_compute_work_object_signature_stale_schema_version_recomputes(ws_db):
+    a = _issue(ws_db, "A")
+    _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
+    # Simulate a pre-fix cached row (schema_version defaults to 0, same as
+    # every real row that predates this column existing at all).
+    ws_db.upsert_work_object_signature(
+        a, definitive_ids_json="[]", accepted_lineages_json="[]", containers_json="[]",
+        external_orgs_json='["stale value"]', participant_roles_json="[]",
+        active_period_start=None, active_period_end=None,
+        positive_vocabulary_json=None, negative_vocabulary_json=None, cannot_link_ids_json="[]",
+    )
+    cached_before = ws_db.get_work_object_signature(a)
+    assert cached_before["schema_version"] == 0
+
+    sig = wp.get_or_compute_work_object_signature(a, ws_db.get_issue(a))
+
+    assert sig["external_orgs"] == ["acme"]  # real recompute, not the stale cached value
+    cached_after = ws_db.get_work_object_signature(a)
+    assert cached_after["schema_version"] == wp._SIGNATURE_SCHEMA_VERSION
+
+
+def test_get_or_compute_work_object_signature_current_version_is_a_real_cache_hit(ws_db, monkeypatch):
+    a = _issue(ws_db, "A")
+    _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
+    wp.get_or_compute_work_object_signature(a, ws_db.get_issue(a))  # populates cache at current version
+
+    calls = []
+    real_compute = wp.compute_work_object_signature
+    monkeypatch.setattr(wp, "compute_work_object_signature",
+                         lambda *a_, **kw: (calls.append(1), real_compute(*a_, **kw))[1])
+
+    wp.get_or_compute_work_object_signature(a, ws_db.get_issue(a))
+
+    assert calls == []  # a real cache hit never calls compute_work_object_signature again
 
 
 def test_compute_work_object_signature_reports_real_accepted_lineages(ws_db):

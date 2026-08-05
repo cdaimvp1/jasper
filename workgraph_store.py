@@ -1289,6 +1289,25 @@ def init_workgraph() -> None:
                 )
             """)
 
+            # Fixed 2026-08-05 (real live bug, found investigating why the
+            # Ariba supplier signal never showed up in a retroactive pass):
+            # this cache had NO way to know compute_work_object_signature's
+            # own OUTPUT SHAPE had changed (a code deploy, not a data write) -
+            # 355 of 361 real issues already had a cached row from before
+            # today's ariba_supplier field existed, and get_or_compute_work_
+            # object_signature trusted every one of them forever, silently
+            # never recomputing. schema_version lets a stale row be detected
+            # and treated as a cache miss the moment the code's own idea of
+            # "what a signature contains" changes, without a bulk one-time
+            # clear that would just recur on the next such change. Bump
+            # workgraph_projects._SIGNATURE_SCHEMA_VERSION, not this column
+            # def, whenever compute_work_object_signature's real output
+            # shape changes again.
+            try:
+                conn.execute("ALTER TABLE work_object_signatures ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass  # already added by a prior init_workgraph() call
+
             # artifact_lineages/artifact_versions (design doc Section 12.5):
             # the real answer to attachment-hashing's open question - sha256
             # was already computed on every attachment (task #29) but never
@@ -6771,7 +6790,7 @@ def upsert_work_object_signature(work_object_id: str, *, definitive_ids_json: st
                                   containers_json: str, external_orgs_json: str, participant_roles_json: str,
                                   active_period_start: Optional[float], active_period_end: Optional[float],
                                   positive_vocabulary_json: Optional[str], negative_vocabulary_json: Optional[str],
-                                  cannot_link_ids_json: str) -> None:
+                                  cannot_link_ids_json: str, schema_version: int = 0) -> None:
     with _lock:
         conn = _connect()
         try:
@@ -6779,8 +6798,8 @@ def upsert_work_object_signature(work_object_id: str, *, definitive_ids_json: st
                 """INSERT INTO work_object_signatures
                    (work_object_id, definitive_ids, accepted_lineages, containers, external_orgs,
                     participant_roles, active_period_start, active_period_end, positive_vocabulary,
-                    negative_vocabulary, cannot_link_ids, updated_ts)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    negative_vocabulary, cannot_link_ids, updated_ts, schema_version)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(work_object_id) DO UPDATE SET
                        definitive_ids = excluded.definitive_ids, accepted_lineages = excluded.accepted_lineages,
                        containers = excluded.containers, external_orgs = excluded.external_orgs,
@@ -6789,10 +6808,11 @@ def upsert_work_object_signature(work_object_id: str, *, definitive_ids_json: st
                        active_period_end = excluded.active_period_end,
                        positive_vocabulary = excluded.positive_vocabulary,
                        negative_vocabulary = excluded.negative_vocabulary,
-                       cannot_link_ids = excluded.cannot_link_ids, updated_ts = excluded.updated_ts""",
+                       cannot_link_ids = excluded.cannot_link_ids, updated_ts = excluded.updated_ts,
+                       schema_version = excluded.schema_version""",
                 (work_object_id, definitive_ids_json, accepted_lineages_json, containers_json, external_orgs_json,
                  participant_roles_json, active_period_start, active_period_end, positive_vocabulary_json,
-                 negative_vocabulary_json, cannot_link_ids_json, time.time()),
+                 negative_vocabulary_json, cannot_link_ids_json, time.time(), schema_version),
             )
         finally:
             conn.close()

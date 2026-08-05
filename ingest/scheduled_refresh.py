@@ -42,6 +42,7 @@ import retention
 import health_check
 import personal_patterns
 import workgraph_aristotle
+import workgraph_pipeline2
 
 from paths import DATA_DIR
 
@@ -400,10 +401,29 @@ def run() -> dict:
     nba_result_2 = workgraph_nba.recompute_all()
     alerts_result_2 = workgraph_alerts.run()
 
-    # 5. Judge weak-signal project-suggestion residue - AFTER classification
-    #    (this cycle's suggestions exist by now) and BEFORE synthesis (so
-    #    synthesis groups issues by their final, settled project boundaries).
-    grouping_result = run_project_grouping_oneshot()
+    # 5. Turned OFF 2026-08-05 (Marc's explicit, direct instruction: the
+    # curator-reviewed suggestion queue this fed is retired - a real match
+    # must be judged and acted on immediately when found, not deferred to
+    # a periodic wake reviewing a backlog; and no previously-built
+    # mechanism, curator included, may touch the new grouping pipeline at
+    # all - it gets entirely new, separate mechanisms instead, see
+    # workgraph_pipeline2.py). run_project_grouping_oneshot() itself is
+    # left intact, just no longer called from here - not deleted, in case
+    # the old suggestion queue's residue (pre-existing pending rows) still
+    # needs a way to be manually drained later.
+    grouping_result = {"ok": True, "skipped": True, "reason": "turned off 2026-08-05 - see comment"}
+
+    # 5.1. Marc's exact replacement (2026-08-05) - the NEW, entirely
+    # separate grouping+extraction pipeline. Every issue/cluster with no
+    # project_id yet (this cycle's classify pass above just made some):
+    # find 2+-point candidates, get an immediate real LLM read of both
+    # sides' full text, merge right then on "yes" (no queue, no permanent
+    # veto on "no"). Runs its own post-grouping extraction immediately on
+    # every group event - see workgraph_pipeline2.run_project_extraction.
+    try:
+        pipeline2_result = workgraph_pipeline2.run_pipeline_for_ungrouped_items()
+    except Exception as e:
+        pipeline2_result = {"ok": False, "error": str(e)}
 
     # 5.5. Deterministic derived-title backfill (task #52, 2026-08-04) -
     # cheap, zero-LLM, no-op on an issue that already has one (curator's
@@ -513,6 +533,7 @@ def run() -> dict:
         "nba_final": nba_result_2,
         "alerts_final": alerts_result_2,
         "project_grouping": grouping_result,
+        "pipeline2_grouping": pipeline2_result,
         "derived_title_backfill": derived_title_result,
         "synthesis": synthesis_result,
         "deep_dive": deepdive_result,

@@ -1075,6 +1075,120 @@ def backtest_scored_model() -> dict:
     }
 
 
+RETROACTIVE_REPROCESS_LOOKBACK_DAYS = 3650
+
+
+def run_retroactive_scored_reprocess(*, apply: bool = False, lookback_days: int = RETROACTIVE_REPROCESS_LOOKBACK_DAYS) -> dict:
+    """Task #180 - Marc's explicit request once grouping v3 was built and
+    reviewed: "once the build is complete, you need to go back over
+    everything in the db with this new process." group_issue() can't do
+    this on its own - it early-returns "already_grouped" for any issue that
+    already has a project_id, which is exactly the structural gap tasks
+    #170-173 fixed for NEW items joining an existing project but never
+    applied to the EXISTING corpus. The whole point of a retroactive pass
+    is reconsidering issues that already have a home, since that's where
+    the real fragmentation lives (SAP split across 8 projects, LEAH across
+    3 - Marc's own original complaint that started this phase).
+
+    Requires config('grouping','scored_model_enabled') already on - this
+    reprocesses the corpus AS the now-live model would act on it, not as a
+    second, different simulation; enable the flag first, same order Marc
+    asked for ("enable it" then "go back over everything").
+
+    apply=False (default) is the required dry run - computes and reports
+    every verdict, writes nothing. Only apply=True actually merges/creates
+    suggestions. lookback_days defaults to a decade, NOT the live 45-day
+    grace period (GROUPING_LOOKBACK_GRACE_DAYS) - a retroactive pass exists
+    specifically to reconnect OLD, possibly-closed history; the live
+    default would defeat its own purpose.
+
+    Every real decision still goes through the SAME safety machinery the
+    live path uses - merge_issues' deferred-reconciliation guard (a
+    contested collision between two already-multi-member projects becomes
+    a reviewable merge_projects suggestion, never a silent double-merge),
+    create_project_suggestion's idempotent reuse, and the bridge-candidate
+    suggestion shape curator's routine already knows how to judge. Nothing
+    here bypasses human review for anything short of a clean, uncontested
+    match.
+
+    Processed oldest-first (opened_at) so an established project's own
+    long history is considered before whatever fragment split off it
+    later, and each issue is re-fetched fresh right before scoring (not
+    read from the initial snapshot) so an earlier merge in the SAME pass
+    is reflected in later decisions - deliberate, since reconnecting one
+    fragment can change what the next one should now match too."""
+    if apply and not bool(config.get("grouping", "scored_model_enabled")):
+        raise RuntimeError(
+            "run_retroactive_scored_reprocess(apply=True) refuses to run while "
+            "grouping.scored_model_enabled is off - enable the flag first."
+        )
+    stubs = sorted(ws.list_issues(states=None, limit=10000), key=lambda i: i.get("opened_at") or 0)
+    auto_merged, deferred, suggested, bridged, errors = [], [], [], [], []
+    no_match_count = 0
+
+    for stub in stubs:
+        issue_id = stub["id"]
+        issue = ws.get_issue(issue_id)
+        if issue is None:
+            continue
+        try:
+            decision = scored_grouping_decision(issue_id, issue, lookback_days=lookback_days)
+        except Exception as e:
+            errors.append({"issue_id": issue_id, "error": str(e)})
+            continue
+
+        if decision["verdict"] == "bridge":
+            entry = {"issue_id": issue_id, "bridges": []}
+            for pid, info in decision["bridged_projects"].items():
+                kind = _suggestion_kind_for_scored_signals(info["matched_signals"]) or "link"
+                reason = (f"retroactive reprocess: bridge candidate - connects to project {pid} via "
+                          f"scored signal ({','.join(info['matched_signals'])}, score={info['score']})")
+                if apply:
+                    ws.create_project_suggestion(
+                        issue_id_a=issue_id, issue_id_b=info["sibling_id"], reason=reason, suggestion_kind=kind,
+                    )
+                entry["bridges"].append({"project_id": pid, "sibling_id": info["sibling_id"], "kind": kind})
+            bridged.append(entry)
+        elif decision["verdict"] == "auto_merge":
+            sibling_id = decision["sibling_id"]
+            sibling = ws.get_issue(sibling_id)
+            if issue.get("project_id") and sibling and issue["project_id"] == sibling.get("project_id"):
+                continue  # already the same project - nothing to do, don't count as a change
+            reason_label = f"retroactive reprocess: scored signal ({','.join(decision['matched_signals'])}, score={decision['score']})"
+            record = {"issue_id": issue_id, "sibling_id": sibling_id,
+                      "signals": decision["matched_signals"], "score": decision["score"]}
+            if apply:
+                result = merge_issues(issue_id, sibling_id, reason_label=reason_label)
+                if result["status"] == "deferred":
+                    deferred.append({**record, "suggestion_id": result["suggestion_id"]})
+                else:
+                    auto_merged.append({**record, "project_id": result["project_id"]})
+            else:
+                auto_merged.append(record)
+        elif decision["verdict"] == "suggest":
+            sibling_id = decision["sibling_id"]
+            kind = _suggestion_kind_for_scored_signals(decision["matched_signals"])
+            if kind is None:
+                no_match_count += 1
+                continue
+            reason = f"retroactive reprocess: scored signal ({','.join(decision['matched_signals'])}, score={decision['score']})"
+            if kind == "link":
+                reason = f"possibly related (not necessarily same project) - {reason}"
+            if apply:
+                ws.create_project_suggestion(issue_id_a=issue_id, issue_id_b=sibling_id, reason=reason, suggestion_kind=kind)
+            suggested.append({"issue_id": issue_id, "sibling_id": sibling_id, "kind": kind,
+                               "signals": decision["matched_signals"], "score": decision["score"]})
+        else:
+            no_match_count += 1
+
+    return {
+        "apply": apply, "issues_checked": len(stubs),
+        "auto_merged": auto_merged, "deferred_reconciliation": deferred,
+        "suggested": suggested, "bridged": bridged,
+        "no_match_count": no_match_count, "errors": errors,
+    }
+
+
 def merge_issues(issue_id_a: str, issue_id_b: str, *, reason_label: str) -> dict:
     """The one place two issues actually become the same project - joins
     whichever of the two already has a project, or creates a new one.

@@ -14,6 +14,8 @@ from __future__ import annotations
 import json
 import time
 
+import pytest
+
 import workgraph_lessons
 import workgraph_projects as wp
 import workgraph_signals
@@ -1851,6 +1853,90 @@ def test_backtest_scored_model_task81_boilerplate_case_stays_a_veto(ws_db):
 
     hits = result["different_project_pairs_at_or_above_threshold"]
     assert not any({h["a"], h["b"]} == {a, b} for h in hits)
+
+
+# --- run_retroactive_scored_reprocess (task #180, 2026-08-04, Marc's direct ---
+# request: "once the build is complete, you need to go back over everything
+# in the db with this new process") --------------------------------------
+
+def test_run_retroactive_scored_reprocess_apply_requires_flag_on(ws_db, monkeypatch, tmp_path):
+    _isolate_config(monkeypatch, tmp_path)
+    with pytest.raises(RuntimeError):
+        wp.run_retroactive_scored_reprocess(apply=True)
+
+
+def test_run_retroactive_scored_reprocess_dry_run_reports_without_mutating(ws_db, monkeypatch, tmp_path):
+    config = _isolate_config(monkeypatch, tmp_path)
+    config.set_value(True, "grouping", "scored_model_enabled")
+
+    a = _ariba_issue(ws_db, "JANE DOE", "PR991001", "Workday HCM SaaS", 75000.00)
+    b = _ariba_issue(ws_db, "JANE DOE", "PR991001", "Workday HCM SaaS", 75000.00)
+
+    result = wp.run_retroactive_scored_reprocess(apply=False)
+
+    assert result["apply"] is False
+    assert ws_db.get_issue(a)["project_id"] is None
+    assert ws_db.get_issue(b)["project_id"] is None
+    assert any(e["issue_id"] in (a, b) for e in result["auto_merged"])
+
+
+def test_run_retroactive_scored_reprocess_apply_reconnects_already_grouped_issues(ws_db, monkeypatch, tmp_path):
+    """The real point of this function: group_issue() can never reconsider
+    an issue that already has a project_id (its own early return), so a
+    clean reference-ID match between two issues ALREADY sitting in
+    different, established projects would never get reconnected any other
+    way."""
+    config = _isolate_config(monkeypatch, tmp_path)
+    config.set_value(True, "grouping", "scored_model_enabled")
+
+    p1 = ws_db.create_project_with_new_id(name="P1", category="other")
+    p2 = ws_db.create_project_with_new_id(name="P2", category="other")
+    a = _issue(ws_db, "Approve PR775533")
+    _raw_item(ws_db, a, "Approve PR775533", "rr1")
+    ws_db.assign_issue_to_project(a, p1)
+    b = _issue(ws_db, "RE: Approve PR775533")
+    _raw_item(ws_db, b, "RE: Approve PR775533", "rr2")
+    ws_db.assign_issue_to_project(b, p2)
+
+    result = wp.run_retroactive_scored_reprocess(apply=True)
+
+    assert ws_db.get_issue(a)["project_id"] == ws_db.get_issue(b)["project_id"]
+    assert any(e["issue_id"] in (a, b) for e in result["auto_merged"])
+
+
+def test_run_retroactive_scored_reprocess_dry_run_detects_a_real_bridge(ws_db, monkeypatch, tmp_path):
+    """A dry run (apply=False, the required first pass against the real
+    corpus) reads every issue against the SAME untouched snapshot, so a
+    genuine 3-way bridge (b connects to both p1 and p2, each via its own
+    independently-qualifying member) is correctly detected regardless of
+    processing order - unlike apply=True, where an issue processed earlier
+    in the same pass (a, being older) can legitimately claim b for its own
+    project first, resolving the ambiguity as a direct merge rather than
+    ever needing to ask "which one, human?" - not a bug, just a different
+    (still safety-netted) outcome specific to a live, order-dependent
+    apply pass. This test is scoped to what the dry run itself can
+    guarantee: correct bridge STRUCTURE on a stable snapshot."""
+    config = _isolate_config(monkeypatch, tmp_path)
+    config.set_value(True, "grouping", "scored_model_enabled")
+
+    p1 = ws_db.create_project_with_new_id(name="Project one", category="other")
+    a = _ariba_issue(ws_db, "JANE DOE", "PR991001", "Workday HCM SaaS", 50000.00)
+    ws_db.assign_issue_to_project(a, p1)
+    p2 = ws_db.create_project_with_new_id(name="Project two", category="other")
+    c = _ariba_issue(ws_db, "BOB SMITH", "PR991002", "Workday HCM SaaS", 100050.00)
+    ws_db.assign_issue_to_project(c, p2)
+    b = _ariba_issue(ws_db, "JANE DOE", None, "Workday HCM SaaS", 100050.00)
+
+    result = wp.run_retroactive_scored_reprocess(apply=False)
+
+    entry = next((e for e in result["bridged"] if e["issue_id"] == b), None)
+    assert entry is not None
+    assert {br["project_id"] for br in entry["bridges"]} == {p1, p2}
+    # Dry run - genuinely nothing written.
+    assert ws_db.get_issue(a)["project_id"] == p1
+    assert ws_db.get_issue(b)["project_id"] is None
+    assert ws_db.get_issue(c)["project_id"] == p2
+    assert ws_db.list_project_suggestions(status="pending") == []
 
 
 # --- aggregate_parties_for_project (project-detail redesign, 2026-07-31) --

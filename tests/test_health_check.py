@@ -286,6 +286,34 @@ def test_outlook_cache_freshness_ok_when_already_running(ws_db):
     assert result["last_scan_cold_started"] is False
 
 
+# --- check_body_capture_healthy (fixed 2026-08-05, real live gap) ---------
+
+def test_body_capture_healthy_ok_with_no_prior_failures(ws_db):
+    result = hc.check_body_capture_healthy()
+    assert result["ok"] is True
+    assert result["detail"] == "no body-capture failures recorded yet"
+
+
+def test_body_capture_healthy_ok_below_threshold(ws_db):
+    ws_db.set_cursor("outlook_mail", "body_capture_failures_total", "5")
+    ws_db.set_cursor("outlook_mail", "last_body_capture_failure", "field=body error=some COM error")
+
+    result = hc.check_body_capture_healthy()
+
+    assert result["ok"] is True
+    assert result["body_capture_failures_total"] == 5
+    assert result["last_body_capture_failure"] == "field=body error=some COM error"
+
+
+def test_body_capture_healthy_flags_past_threshold(ws_db):
+    ws_db.set_cursor("outlook_mail", "body_capture_failures_total", str(hc.BODY_CAPTURE_FAILURE_ALERT_THRESHOLD))
+
+    result = hc.check_body_capture_healthy()
+
+    assert result["ok"] is False
+    assert result["body_capture_failures_total"] == hc.BODY_CAPTURE_FAILURE_ALERT_THRESHOLD
+
+
 def test_daily_gate_runs_once_per_day(ws_db):
     struct = time.localtime()
     now = time.mktime((struct.tm_year, struct.tm_mon, struct.tm_mday, 12, 0, 0, 0, 0, -1))

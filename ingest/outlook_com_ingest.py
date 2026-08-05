@@ -78,6 +78,24 @@ def _absorb_body(row_id: int, item_staged_dir: str | None, text_file: str | None
     return json.dumps(ref, ensure_ascii=False) if ref else None
 
 
+def _parse_body_capture_failures(stderr_text: str) -> list[str]:
+    """Shared by run()/sweep_unread() - see Save-FullBody's own docstring
+    (outlook_scan.ps1, fixed 2026-08-05) for the real gap this surfaces:
+    every JASPER_DIAG: body_capture_failed line stderr emits for this
+    invocation, reduced to just the reason/error text."""
+    out = []
+    for line in stderr_text.splitlines():
+        if not line.startswith("JASPER_DIAG: body_capture_failed"):
+            continue
+        if "error=" in line:
+            out.append(line.split("error=", 1)[1])
+        elif "reason=" in line:
+            out.append(line.split("reason=", 1)[1])
+        else:
+            out.append(line)
+    return out
+
+
 def backfill_docx_extracted_text() -> dict:
     """One-time backfill (enhancement idea panel #7/E6): attachment_
     extract.py just got a real .docx extractor - this re-extracts text
@@ -211,6 +229,23 @@ def run(folder: str = "Careful", max_items: int = 500) -> dict:
         streak = streak + 1 if cold_started else 0
         ws.set_cursor(_SOURCE, "consecutive_cold_starts", str(streak))
 
+    # Fixed 2026-08-05, real live gap: raw_items.raw_ref was NULL for every
+    # single ingested item, every source - outlook_scan.ps1's Save-FullBody
+    # used to swallow a failing .Body/.HTMLBody COM access (or a WriteAllText
+    # failure) completely silently, so this had no way to ever surface. Now
+    # parsed the same way cold_started already is (unconditionally, off
+    # stderr, regardless of exit code) and persisted as a running total so
+    # health_check.py's own alerting has a real, cumulative signal to read -
+    # a single failure is not alarming (a real S-MIME/encrypted message
+    # genuinely can throw), but this NEVER being zero across every run is
+    # exactly the "the whole full-text pipeline has been silently starved
+    # since it shipped" shape this fix exists to catch.
+    body_capture_failures = _parse_body_capture_failures(proc.stderr)
+    if body_capture_failures:
+        total = int(ws.get_cursor(_SOURCE, "body_capture_failures_total") or "0")
+        ws.set_cursor(_SOURCE, "body_capture_failures_total", str(total + len(body_capture_failures)))
+        ws.set_cursor(_SOURCE, "last_body_capture_failure", body_capture_failures[0])
+
     inserted = 0
     duplicates = 0
     attachments_absorbed = 0
@@ -271,7 +306,8 @@ def run(folder: str = "Careful", max_items: int = 500) -> dict:
 
     result = {"ok": not had_error, "inserted": inserted, "duplicates": duplicates,
               "attachments_absorbed": attachments_absorbed, "cursor": max_seen_ts,
-              "outlook_cold_started": cold_started}
+              "outlook_cold_started": cold_started,
+              "body_capture_failures": body_capture_failures}
     if had_error:
         result["error"] = proc.stderr.strip() or f"exit code {proc.returncode}"
     return result
@@ -303,6 +339,14 @@ def sweep_unread(folder: str = "Careful", max_items: int = 200) -> dict:
     # Same fix as run() above: salvage already-valid lines instead of
     # discarding the whole batch on a non-zero exit.
     had_error = proc.returncode not in (0,)
+
+    # Same body-capture-failure surfacing as run() - see _parse_body_
+    # capture_failures' own docstring.
+    body_capture_failures = _parse_body_capture_failures(proc.stderr)
+    if body_capture_failures:
+        total = int(ws.get_cursor(_SOURCE, "body_capture_failures_total") or "0")
+        ws.set_cursor(_SOURCE, "body_capture_failures_total", str(total + len(body_capture_failures)))
+        ws.set_cursor(_SOURCE, "last_body_capture_failure", body_capture_failures[0])
 
     inserted = 0
     duplicates = 0
@@ -352,7 +396,8 @@ def sweep_unread(folder: str = "Careful", max_items: int = 200) -> dict:
             shutil.rmtree(Path(staged_dir_str), ignore_errors=True)
 
     result = {"ok": not had_error, "unread_seen": unread_seen, "inserted": inserted,
-              "duplicates": duplicates, "attachments_absorbed": attachments_absorbed}
+              "duplicates": duplicates, "attachments_absorbed": attachments_absorbed,
+              "body_capture_failures": body_capture_failures}
     if had_error:
         result["error"] = proc.stderr.strip() or f"exit code {proc.returncode}"
     return result

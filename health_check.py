@@ -301,6 +301,36 @@ def check_outlook_cache_freshness() -> dict:
     }
 
 
+# Real, high threshold on purpose - a handful of encrypted/S-MIME messages
+# genuinely can't have their .Body/.HTMLBody read via COM, ever, and that's
+# not a bug. What this exists to catch is the OTHER shape: the full-body
+# capture pipeline silently starving on every single item, invisibly,
+# forever (confirmed live 2026-08-05 - raw_ref was NULL for all 2,757
+# raw_items across every source, and outlook_scan.ps1's Save-FullBody had
+# been swallowing every failure with a bare `catch { }` since task #43).
+BODY_CAPTURE_FAILURE_ALERT_THRESHOLD = 20
+
+
+def check_body_capture_healthy() -> dict:
+    """Sibling check to check_outlook_cache_freshness, same (source,
+    cursor_key) persistence shape - outlook_com_ingest.py's run()/
+    sweep_unread() both now parse Save-FullBody's JASPER_DIAG: body_
+    capture_failed lines off stderr (fixed 2026-08-05, see that function's
+    own docstring) and accumulate a running total here. This is the first
+    real, ongoing signal that pipeline has ever had - before this fix, a
+    100%-failing body-capture path looked EXACTLY like "every item
+    legitimately has no body," with zero way to tell the difference."""
+    total = ws.get_cursor("outlook_mail", "body_capture_failures_total")
+    if total is None:
+        return {"ok": True, "detail": "no body-capture failures recorded yet"}
+    total = int(total)
+    return {
+        "ok": total < BODY_CAPTURE_FAILURE_ALERT_THRESHOLD,
+        "body_capture_failures_total": total,
+        "last_body_capture_failure": ws.get_cursor("outlook_mail", "last_body_capture_failure"),
+    }
+
+
 def run(now: float | None = None) -> dict:
     if now is None:
         now = time.time()
@@ -314,6 +344,7 @@ def run(now: float | None = None) -> dict:
         "classify_link_progressing": check_classify_link_progressing(now),
         "suggestion_queue_depth": check_suggestion_queue_not_unboundedly_growing(now),
         "outlook_cache_freshness": check_outlook_cache_freshness(),
+        "body_capture_healthy": check_body_capture_healthy(),
     }
     # persist today's disk snapshot for TOMORROW's growth comparison
     ws.set_cursor(_SNAPSHOT_CURSOR_SOURCE, _SNAPSHOT_CURSOR_KEY, json.dumps(retention.disk_usage_report()))

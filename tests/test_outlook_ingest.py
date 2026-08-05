@@ -414,6 +414,87 @@ def test_missing_diagnostic_line_leaves_cursor_untouched(ws_db, isolated_paths, 
     assert ws_db.get_cursor("outlook_mail", "last_scan_outlook_cold_started") is None
 
 
+# --- body-capture-failure diagnostic (fixed 2026-08-05, real live gap:
+# raw_ref was NULL for 100% of the corpus because Save-FullBody's catch
+# blocks silently swallowed every COM failure) ------------------------------
+
+def test_parse_body_capture_failures_extracts_error_reason():
+    stderr = (
+        "JASPER_DIAG: outlook_was_running=True\n"
+        "JASPER_DIAG: body_capture_failed field=body error=COM object failed\n"
+        "some unrelated line\n"
+        "JASPER_DIAG: body_capture_failed field=htmlbody error=another COM error\n"
+    )
+    assert oci._parse_body_capture_failures(stderr) == [
+        "COM object failed",
+        "another COM error",
+    ]
+
+
+def test_parse_body_capture_failures_extracts_no_item_dir_reason():
+    stderr = "JASPER_DIAG: body_capture_failed reason=no_item_dir\n"
+    assert oci._parse_body_capture_failures(stderr) == ["no_item_dir"]
+
+
+def test_parse_body_capture_failures_empty_when_no_failures():
+    stderr = "JASPER_DIAG: outlook_was_running=False\n"
+    assert oci._parse_body_capture_failures(stderr) == []
+
+
+def test_run_persists_body_capture_failure_cursors(ws_db, isolated_paths, monkeypatch):
+    def fake_run(*a, **kw):
+        return _FakeCompletedProcess(
+            "", stderr="JASPER_DIAG: body_capture_failed field=body error=boom\n"
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = oci.run(folder="Careful")
+
+    assert result["body_capture_failures"] == ["boom"]
+    assert ws_db.get_cursor("outlook_mail", "body_capture_failures_total") == "1"
+    assert ws_db.get_cursor("outlook_mail", "last_body_capture_failure") == "boom"
+
+
+def test_run_body_capture_failure_total_accumulates_across_runs(ws_db, isolated_paths, monkeypatch):
+    def fake_run(*a, **kw):
+        return _FakeCompletedProcess(
+            "", stderr="JASPER_DIAG: body_capture_failed field=body error=boom\n"
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    oci.run(folder="Careful")
+    oci.run(folder="Careful")
+    result = oci.run(folder="Careful")
+
+    assert result["body_capture_failures"] == ["boom"]
+    assert ws_db.get_cursor("outlook_mail", "body_capture_failures_total") == "3"
+
+
+def test_run_no_body_capture_failures_leaves_cursors_untouched(ws_db, isolated_paths, monkeypatch):
+    def fake_run(*a, **kw):
+        return _FakeCompletedProcess("", stderr="JASPER_DIAG: outlook_was_running=True\n")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = oci.run(folder="Careful")
+
+    assert result["body_capture_failures"] == []
+    assert ws_db.get_cursor("outlook_mail", "body_capture_failures_total") is None
+
+
+def test_sweep_unread_also_persists_body_capture_failure_cursors(ws_db, isolated_paths, monkeypatch):
+    def fake_run(*a, **kw):
+        return _FakeCompletedProcess(
+            "", stderr="JASPER_DIAG: body_capture_failed field=htmlbody error=sweep boom\n"
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = oci.sweep_unread(folder="Careful")
+
+    assert result["body_capture_failures"] == ["sweep boom"]
+    assert ws_db.get_cursor("outlook_mail", "body_capture_failures_total") == "1"
+    assert ws_db.get_cursor("outlook_mail", "last_body_capture_failure") == "sweep boom"
+
+
 def test_schema_migration_entry_id_column_idempotent(ws_db):
     """init_workgraph()'s ALTER TABLE ADD COLUMN entry_id must be safe to run
     against an already-migrated DB (every real wake calls init_workgraph()

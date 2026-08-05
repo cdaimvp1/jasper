@@ -97,20 +97,48 @@ function Save-FullBody {
     # UTF8 without BOM - Out-File defaults to BOM'd UTF8 on Windows PowerShell
     # 5.1, which a naive later `open(path).read()` in Python would leave a
     # stray ﻿ on the front of; System.IO.File]::WriteAllText avoids that.
+    #
+    # Fixed 2026-08-05, real live gap found investigating why raw_items.
+    # raw_ref was NULL for every single ingested item (all 2,757 rows, every
+    # source) despite this function having existed since task #43: both
+    # catch blocks below used to be entirely silent (bare `catch { }`) - a
+    # genuinely failing .Body/.HTMLBody COM access (or a WriteAllText
+    # failure) had NO way to ever surface, on any run, ever - it just looked
+    # identical to "this item legitimately has no body," forever. Never
+    # reproduced live from an unattended automation context (Outlook cold-
+    # starts every time here, with no persistent interactive desktop session
+    # to let Cached Exchange Mode actually sync - the same class of gap
+    # task #149's own diagnostic exists for) - so the real fix here is
+    # observability, not a guessed root cause: every failure is now reported
+    # to stderr as a JASPER_DIAG line (same convention as outlook_was_
+    # running above), so the NEXT real scheduled run - under Marc's own
+    # actual desktop session, where this has a real chance to succeed or
+    # fail for a real, diagnosable reason - finally reveals what's actually
+    # happening instead of staying invisible.
     param($item, [string]$itemDir)
     $result = [ordered]@{ text_file = ""; html_file = "" }
-    if (-not $itemDir) { return $result }
+    if (-not $itemDir) {
+        [Console]::Error.WriteLine("JASPER_DIAG: body_capture_failed reason=no_item_dir")
+        return $result
+    }
     if (-not (Test-Path $itemDir)) { New-Item -ItemType Directory -Path $itemDir -Force | Out-Null }
     try {
         $textPath = Join-Path $itemDir "body.txt"
         [System.IO.File]::WriteAllText($textPath, [string]$item.Body, [System.Text.Encoding]::UTF8)
         $result.text_file = "body.txt"
-    } catch { }  # one bad item's .Body throwing (e.g. an encrypted/S-MIME message) shouldn't fail the whole scan
+    } catch {
+        # One bad item's .Body throwing (e.g. an encrypted/S-MIME message)
+        # must not fail the whole scan - but it must not be silently
+        # invisible either, which is the actual bug this fixes.
+        [Console]::Error.WriteLine("JASPER_DIAG: body_capture_failed field=body error=$($_.Exception.Message -replace '[\r\n]+', ' ')")
+    }
     try {
         $htmlPath = Join-Path $itemDir "body.html"
         [System.IO.File]::WriteAllText($htmlPath, [string]$item.HTMLBody, [System.Text.Encoding]::UTF8)
         $result.html_file = "body.html"
-    } catch { }
+    } catch {
+        [Console]::Error.WriteLine("JASPER_DIAG: body_capture_failed field=htmlbody error=$($_.Exception.Message -replace '[\r\n]+', ' ')")
+    }
     return $result
 }
 

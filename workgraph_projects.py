@@ -238,10 +238,16 @@ def _shared_reference_id(issue_id: str):
     Matches on the version-stripped base (2026-07-31 fix) - so an issue
     whose only raw_item says "PR416079-V32" now correctly finds a sibling
     whose raw_item says "PR416079-V33", instead of the two never matching
-    at all."""
+    at all.
+
+    Corrected pipeline Phase C (2026-08-05): list_open_work_objects_for_
+    reference (cluster-aware), not list_open_issue_ids_for_reference - a
+    cluster clearing this exact-reference bar is one of the two things
+    that promotes it into a real project (see this module's merge_issues),
+    so the sibling search must see clusters too, not just real issues."""
     my_refs = reference_base_ids_for_issue(issue_id)
     for ref in sorted(my_refs):
-        for sibling_id in ws.list_open_issue_ids_for_reference(ref):
+        for sibling_id in ws.list_open_work_objects_for_reference(ref):
             if sibling_id != issue_id:
                 return ref, sibling_id
     return None
@@ -622,7 +628,13 @@ def _candidate_pool(*, lookback_days: Optional[int] = None) -> list:
     window_seconds = (lookback_days if lookback_days is not None else GROUPING_LOOKBACK_GRACE_DAYS) * 86400
     cutoff = time.time() - window_seconds
     out = []
-    for other in ws.list_issues(states=None, limit=10000):
+    # Corrected pipeline Phase C (2026-08-05): includes clusters, not just
+    # real issues - pass-2 (2+ matched data points) has to be able to find
+    # a cluster as a candidate sibling, since a fresh, unmatched
+    # communication now becomes a cluster (Phase B), never a real issue,
+    # and the whole point of this search is to let a cluster group clear
+    # the bar and get promoted into a project.
+    for other in ws.list_issues(states=None, limit=10000) + ws.list_clusters(limit=10000):
         if other.get("state") in _OPEN_ISSUE_STATES:
             out.append(other)
             continue
@@ -685,7 +697,7 @@ def compute_work_object_signature(work_object_id: str, issue: Optional[dict] = N
     get_or_compute_work_object_signature is what JSON-encodes for the
     cache."""
     if issue is None:
-        issue = ws.get_issue(work_object_id)
+        issue = ws.get_issue_or_cluster(work_object_id)
     ariba_fields = workgraph_signals.extract_ariba_requisition_fields(issue.get("title") or "") if issue else None
     value_amount = workgraph_nba.value_amount_for_issue(work_object_id)
     positive_vocabulary = None
@@ -1203,8 +1215,13 @@ def merge_issues(issue_id_a: str, issue_id_b: str, *, reason_label: str) -> dict
     here; the actual merge is one all-or-nothing transaction in
     workgraph_store.merge_issues_txn (see its own docstring for why it has
     to talk to a single connection directly instead of calling back into
-    other ws.* helpers)."""
-    issue_a = ws.get_issue(issue_id_a)
+    other ws.* helpers).
+
+    Corrected pipeline Phase C (2026-08-05): get_issue_or_cluster, not
+    get_issue - issue_id_a is now routinely a cluster (Phase B), and a
+    cluster clearing the bar is exactly what this function promotes into
+    a real project."""
+    issue_a = ws.get_issue_or_cluster(issue_id_a)
     parties = ws.list_parties_for_issue(issue_id_a)
     category = issue_a.get("category")
     return ws.merge_issues_txn(
@@ -1225,8 +1242,8 @@ def _confirm_link_suggestion(sugg: dict, suggestion_id: int, link_type: str = "r
     _strong_signal_match's own docstring explains why a causal type
     (enables/depends_on/etc.) can't be mechanically inferred and must stay
     a human's call, not guessed here."""
-    issue_a = ws.get_issue(sugg["issue_id_a"])
-    issue_b = ws.get_issue(sugg["issue_id_b"])
+    issue_a = ws.get_issue_or_cluster(sugg["issue_id_a"])
+    issue_b = ws.get_issue_or_cluster(sugg["issue_id_b"])
     project_a = issue_a.get("project_id") if issue_a else None
     project_b = issue_b.get("project_id") if issue_b else None
     if not project_a and issue_a:
@@ -1253,9 +1270,14 @@ def _confirm_merge_projects_suggestion(sugg: dict, suggestion_id: int) -> dict:
     since - e.g. one side already reassigned by something else) before
     doing the actual reassign-and-archive work. issue_id_a's project always
     wins - same tie-break merge_issues_txn's own collision branch already
-    used before this gate existed."""
-    issue_a = ws.get_issue(sugg["issue_id_a"])
-    issue_b = ws.get_issue(sugg["issue_id_b"])
+    used before this gate existed.
+
+    Corrected pipeline Phase C: get_issue_or_cluster - either side of a
+    'merge_projects' reconciliation can be a cluster now (merge_issues_
+    txn's own collision check, would_collide_established_projects, is
+    already cluster-aware)."""
+    issue_a = ws.get_issue_or_cluster(sugg["issue_id_a"])
+    issue_b = ws.get_issue_or_cluster(sugg["issue_id_b"])
     project_a = issue_a.get("project_id") if issue_a else None
     project_b = issue_b.get("project_id") if issue_b else None
     if not (project_a and project_b and project_a != project_b):
@@ -1580,8 +1602,14 @@ def group_issue(issue_id: str, *, lookback_days: Optional[int] = None) -> dict:
     model below has no lookback concept of its own and isn't getting one,
     since it's the path this whole phase is retiring, not extending. Real
     caller: POST /api/workgraph/issues/{id}/regroup, the worker-via-chat
-    'look back further' action Marc asked for."""
-    issue = ws.get_issue(issue_id)
+    'look back further' action Marc asked for.
+
+    Corrected pipeline Phase C (2026-08-05): get_issue_or_cluster, not
+    get_issue - issue_id is now routinely a cluster (workgraph_classify.
+    cluster_and_link no longer creates real issues directly, Phase B), and
+    a cluster clearing the grouping bar is exactly what this function has
+    to detect and promote into a real project."""
+    issue = ws.get_issue_or_cluster(issue_id)
     if issue is None:
         return {"issue_id": issue_id, "action": "not_found"}
     if issue.get("project_id"):

@@ -4650,15 +4650,20 @@ def list_issues_for_project(project_id: str) -> list[dict]:
 def assign_issue_to_project(issue_id: str, project_id: Optional[str], *, reason: Optional[str] = None) -> None:
     """The one place issue.project_id ever changes - covers auto-grouping,
     a worker splitting/merging on Marc's conversational correction, and
-    manual reassignment alike. Logs the transition to audit_log."""
+    manual reassignment alike. Logs the transition to audit_log.
+
+    Corrected pipeline Phase C: raw work_objects read/write, not the
+    `issues` view - issue_id may now be a cluster (is_raw_cluster=1),
+    invisible to that view by construction (same class of bug as
+    merge_issues_txn's own fix, same day)."""
     with _lock:
         conn = _connect()
         try:
-            row = conn.execute("SELECT project_id FROM issues WHERE id = ?", (issue_id,)).fetchone()
-            old_project_id = row["project_id"] if row else None
+            row = conn.execute("SELECT parent_id FROM work_objects WHERE id = ?", (issue_id,)).fetchone()
+            old_project_id = row["parent_id"] if row else None
             if old_project_id == project_id:
                 return
-            conn.execute("UPDATE issues SET project_id = ?, updated_at = ? WHERE id = ?", (project_id, time.time(), issue_id))
+            conn.execute("UPDATE work_objects SET parent_id = ?, updated_at = ? WHERE id = ?", (project_id, time.time(), issue_id))
             if project_id is not None:
                 conn.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (time.time(), project_id))
             conn.execute(
@@ -4709,16 +4714,25 @@ def would_collide_established_projects(issue_id_a: str, issue_id_b: str, *,
 
     _conn lets merge_issues_txn reuse its own already-open, already-locked
     connection instead of re-acquiring _lock (a plain non-reentrant
-    threading.Lock - re-acquiring it from the same thread would deadlock)."""
+    threading.Lock - re-acquiring it from the same thread would deadlock).
+
+    Corrected pipeline Phase C (2026-08-05): queries work_objects directly
+    rather than through the `issues` view - issue_id_a/issue_id_b may now be
+    clusters (is_raw_cluster=1), which the view excludes by construction
+    (see the `issues` view's own definition). A raw work_objects query has
+    no such filter and gives the identical column shape (parent_id is
+    project_id) for either kind."""
     def _query(conn: sqlite3.Connection) -> Optional[dict]:
-        row_a = conn.execute("SELECT project_id FROM issues WHERE id = ?", (issue_id_a,)).fetchone()
-        row_b = conn.execute("SELECT project_id FROM issues WHERE id = ?", (issue_id_b,)).fetchone()
-        project_a = row_a["project_id"] if row_a else None
-        project_b = row_b["project_id"] if row_b else None
+        row_a = conn.execute("SELECT parent_id FROM work_objects WHERE id = ?", (issue_id_a,)).fetchone()
+        row_b = conn.execute("SELECT parent_id FROM work_objects WHERE id = ?", (issue_id_b,)).fetchone()
+        project_a = row_a["parent_id"] if row_a else None
+        project_b = row_b["parent_id"] if row_b else None
         if not (project_a and project_b and project_a != project_b):
             return None
         winner, loser = project_a, project_b
-        members = conn.execute("SELECT id FROM issues WHERE project_id = ?", (loser,)).fetchall()
+        members = conn.execute(
+            "SELECT id FROM work_objects WHERE parent_id = ? AND object_type = 'request'", (loser,)
+        ).fetchall()
         loser_members = [m["id"] for m in members if m["id"] not in (issue_id_a, issue_id_b)]
         if not loser_members:
             return None
@@ -4756,10 +4770,15 @@ def force_merge_projects(project_a: str, project_b: str, *, reason_label: str) -
                         raise
                     time.sleep(random.uniform(0, 0.02) * (attempt + 1))
             try:
-                members = conn.execute("SELECT id FROM issues WHERE project_id = ?", (project_b,)).fetchall()
+                # Corrected pipeline Phase C: raw work_objects query/write,
+                # not the `issues` view - a losing project's members may
+                # now be clusters, invisible to that view by construction.
+                members = conn.execute(
+                    "SELECT id FROM work_objects WHERE parent_id = ? AND object_type = 'request'", (project_b,)
+                ).fetchall()
                 for member in members:
                     conn.execute(
-                        "UPDATE issues SET project_id = ?, updated_at = ? WHERE id = ?",
+                        "UPDATE work_objects SET parent_id = ?, updated_at = ? WHERE id = ?",
                         (project_a, now, member["id"]),
                     )
                     conn.execute(
@@ -4841,22 +4860,28 @@ def merge_issues_txn(issue_id_a: str, issue_id_b: str, *, reason_label: str,
                         raise
                     time.sleep(random.uniform(0, 0.02) * (attempt + 1))
             try:
-                row_a = conn.execute("SELECT project_id FROM issues WHERE id = ?", (issue_id_a,)).fetchone()
-                row_b = conn.execute("SELECT project_id FROM issues WHERE id = ?", (issue_id_b,)).fetchone()
-                project_a = row_a["project_id"] if row_a else None
-                project_b = row_b["project_id"] if row_b else None
+                # Corrected pipeline Phase C (2026-08-05): raw work_objects
+                # reads/writes throughout this transaction, not the `issues`
+                # view - issue_id_a/issue_id_b (and any project's members)
+                # may now be clusters (is_raw_cluster=1), which the view
+                # excludes by construction. work_objects.parent_id is the
+                # same underlying column the view calls project_id.
+                row_a = conn.execute("SELECT parent_id FROM work_objects WHERE id = ?", (issue_id_a,)).fetchone()
+                row_b = conn.execute("SELECT parent_id FROM work_objects WHERE id = ?", (issue_id_b,)).fetchone()
+                project_a = row_a["parent_id"] if row_a else None
+                project_b = row_b["parent_id"] if row_b else None
 
                 if project_a and project_b and project_a != project_b:
                     winner, loser = project_a, project_b
                     members = conn.execute(
-                        "SELECT id FROM issues WHERE project_id = ?", (loser,)
+                        "SELECT id FROM work_objects WHERE parent_id = ? AND object_type = 'request'", (loser,)
                     ).fetchall()
                     for member in members:
                         member_id = member["id"]
                         if member_id in (issue_id_a, issue_id_b):
                             continue  # reassigned explicitly below either way
                         conn.execute(
-                            "UPDATE issues SET project_id = ?, updated_at = ? WHERE id = ?",
+                            "UPDATE work_objects SET parent_id = ?, updated_at = ? WHERE id = ?",
                             (winner, now, member_id),
                         )
                         conn.execute(
@@ -4878,11 +4903,11 @@ def merge_issues_txn(issue_id_a: str, issue_id_b: str, *, reason_label: str,
                     )
 
                 for iid, other in ((issue_id_a, issue_id_b), (issue_id_b, issue_id_a)):
-                    row = conn.execute("SELECT project_id FROM issues WHERE id = ?", (iid,)).fetchone()
-                    old_project_id = row["project_id"] if row else None
+                    row = conn.execute("SELECT parent_id FROM work_objects WHERE id = ?", (iid,)).fetchone()
+                    old_project_id = row["parent_id"] if row else None
                     if old_project_id == project_id:
                         continue
-                    conn.execute("UPDATE issues SET project_id = ?, updated_at = ? WHERE id = ?", (project_id, now, iid))
+                    conn.execute("UPDATE work_objects SET parent_id = ?, updated_at = ? WHERE id = ?", (project_id, now, iid))
                     conn.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (now, project_id))
                     conn.execute(
                         """INSERT INTO audit_log (entity_type, entity_id, field, old_value, new_value, changed_ts, reason)

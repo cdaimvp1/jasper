@@ -1153,10 +1153,8 @@ def cluster_and_link(limit: int = 500) -> dict:
     # a mix of real issue ids (attached via an existing container/reference/
     # subject/Teams-sender match) and cluster ids (attached via the SAME
     # paths, or freshly created above) - split them, since recompute_issue_
-    # state/parties/projects/title-generation are all real-issue concepts
-    # that don't apply to a cluster (no state machine, no NBA scoring, no
-    # project-grouping candidacy of its own yet - pass-2 matching over
-    # clusters is Phase C's job, not triggered inline here).
+    # state/parties/title-generation are all real-issue concepts that don't
+    # apply to a cluster (no state machine, no NBA scoring of its own).
     touched_real_issues = {i for i in touched_issues if ws.get_cluster(i) is None}
     touched_clusters = touched_issues - touched_real_issues
 
@@ -1164,7 +1162,14 @@ def cluster_and_link(limit: int = 500) -> dict:
         recompute_issue_state(issue_id, new_item_is_actionable=issue_id in newly_actionable_issues)
 
     party_result = workgraph_parties.run(list(touched_real_issues))
-    project_result = workgraph_projects.run(list(touched_real_issues))
+    # Corrected pipeline Phase C (2026-08-05): runs over EVERY touched work
+    # object, clusters included - group_issue()/scored_grouping_decision()
+    # are now cluster-aware (get_issue_or_cluster, a cluster-inclusive
+    # candidate pool, and a cluster-aware _shared_reference_id), so this is
+    # what actually lets a cluster group clear the 2+-data-point bar (or an
+    # exact shared reference) and get promoted into a real project - the
+    # gap the whole corrected-ordering plan exists to close.
+    project_result = workgraph_projects.run(list(touched_issues))
 
     # Title generation runs AFTER parties/projects resolve for this batch -
     # it reads party affiliation/company, which a just-created issue doesn't

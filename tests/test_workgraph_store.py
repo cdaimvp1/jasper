@@ -993,7 +993,7 @@ def test_merge_issues_txn_is_crash_safe(ws_db):
 
     class _CrashingConnection(sqlite3.Connection):
         def execute(self, sql, *args, **kwargs):
-            if sql.startswith("UPDATE issues SET project_id") and args and args[0] and args[0][0] == proj_a and args[0][2] == b:
+            if sql.startswith("UPDATE work_objects SET parent_id") and args and args[0] and args[0][0] == proj_a and args[0][2] == b:
                 call_count["reassigns"] += 1
                 result = super().execute(sql, *args, **kwargs)
                 raise RuntimeError("simulated crash right after reassigning b to the winner")

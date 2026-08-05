@@ -2331,3 +2331,112 @@ def test_scored_grouping_decision_lookback_days_surfaces_an_old_closed_match(ws_
 
     assert default_decision["verdict"] == "no_match"
     assert wide_decision["sibling_id"] == old_sibling
+
+
+# --- Corrected pipeline Phase C (2026-08-05): cluster group -> project ------
+# promotion. A cluster (is_raw_cluster=1) is the raw pass-1/pass-2 matching
+# unit now (Phase B) - these confirm group_issue()/scored_grouping_decision()
+# actually process a cluster the same way they process a real issue, since
+# that's the only thing that lets a cluster group clear the bar and get
+# promoted into a real project (this module's merge_issues/merge_issues_txn).
+
+def _cluster(ws_db, title):
+    return ws_db.create_cluster_with_new_id(title=title, category="other")
+
+
+def test_group_issue_on_a_cluster_is_not_not_found(ws_db, monkeypatch, tmp_path):
+    """The bug this phase exists to fix: group_issue()/scored_grouping_
+    decision() used to call ws.get_issue (the `issues` view), which is
+    blind to clusters by construction - every cluster silently short-
+    circuited to action='not_found', so pass-2 matching never ran on it at
+    all."""
+    config = _isolate_config(monkeypatch, tmp_path)
+    config.set_value(True, "grouping", "scored_model_enabled")
+    c = _cluster(ws_db, "Some fresh unmatched communication")
+
+    result = wp.group_issue(c)
+
+    assert result["action"] != "not_found"
+
+
+def test_group_issue_two_clusters_sharing_reference_auto_merge_into_project(ws_db, monkeypatch, tmp_path):
+    """The core Phase C acceptance case: two clusters (never real issues -
+    Phase B's cluster_and_link no longer creates one directly) that share
+    an exact PR/PO reference clear the standalone-sufficient auto_merge bar
+    and get promoted into a real object_type='project' work_object, exactly
+    as merge_issues_txn already does for two real issues - clusters stay
+    is_raw_cluster=1 (still invisible to the `issues` view/Inbox/NBA), only
+    now reparented under a real project instead of floating unlinked."""
+    config = _isolate_config(monkeypatch, tmp_path)
+    config.set_value(True, "grouping", "scored_model_enabled")
+    a = _cluster(ws_db, "First notice")
+    _raw_item(ws_db, a, "PR7001122 approval needed", "clus-ref-a")
+    b = _cluster(ws_db, "Totally different subject")
+    _raw_item(ws_db, b, "REMINDER PR7001122", "clus-ref-b")
+
+    result = wp.group_issue(a)
+
+    assert result["action"] == "auto_merged"
+    project_id = result["project_id"]
+    assert project_id is not None
+    assert ws_db.get_project(project_id) is not None
+    assert ws_db.get_cluster(a)["project_id"] == project_id
+    assert ws_db.get_cluster(b)["project_id"] == project_id
+    # still clusters, never promoted into a real issue by this alone -
+    # Phase D (curator extracting real issues from a confirmed project) is
+    # the only thing that ever creates a real object_type='request',
+    # is_raw_cluster=0 row.
+    assert ws_db.get_cluster(a) is not None
+    assert ws_db.get_cluster(b) is not None
+    assert ws_db.get_issue(a) is None
+    assert ws_db.get_issue(b) is None
+
+
+def test_group_issue_cluster_and_real_issue_sharing_reference_auto_merge(ws_db, monkeypatch, tmp_path):
+    """Mixed case: a cluster and an already-real issue share an exact
+    reference - the common shape once some issues predate this phase
+    (grandfathered, Phase F) and new communications keep arriving as
+    clusters (Phase B). Both sides must still land in the same real
+    project."""
+    config = _isolate_config(monkeypatch, tmp_path)
+    config.set_value(True, "grouping", "scored_model_enabled")
+    real_issue = _issue(ws_db, "An existing real issue")
+    _raw_item(ws_db, real_issue, "PR7002233 approval needed", "mix-ref-a")
+    cluster = _cluster(ws_db, "REMINDER: still needs approval")
+    _raw_item(ws_db, cluster, "REMINDER PR7002233", "mix-ref-b")
+
+    result = wp.group_issue(cluster)
+
+    assert result["action"] == "auto_merged"
+    project_id = result["project_id"]
+    assert ws_db.get_issue(real_issue)["project_id"] == project_id
+    assert ws_db.get_cluster(cluster)["project_id"] == project_id
+
+
+def test_candidate_pool_includes_clusters(ws_db):
+    """_candidate_pool feeds scored_grouping_decision's pairwise search -
+    it has to see clusters, not just real issues, since a fresh unmatched
+    communication is always a cluster now (Phase B)."""
+    c = _cluster(ws_db, "A fresh cluster")
+
+    pool_ids = {i["id"] for i in wp._candidate_pool()}
+
+    assert c in pool_ids
+
+
+def test_scored_grouping_decision_finds_a_candidate_between_two_clusters(ws_db):
+    """Two clusters sharing 2+ matched data points (supplier + subject
+    core, the same shape test_group_issue_flag_on_same_supplier_and_topic_
+    now_suggests_merge_kind already proves for real issues) must clear the
+    candidate bar exactly the same way for clusters - this is what lets
+    curator's relationship-graph review queue ever see a cluster pair at
+    all."""
+    a = _cluster(ws_db, "Workday HCM SaaS renewal negotiation")
+    _link_party(ws_db, a, "p1", "rep@acme.com", company="Acme")
+    b = _cluster(ws_db, "Workday HCM SaaS renewal negotiation follow-up")
+    _link_party(ws_db, b, "p2", "other@acme.com", company="Acme")
+
+    decision = wp.scored_grouping_decision(a, ws_db.get_cluster(a))
+
+    assert decision["verdict"] == "candidate"
+    assert decision["sibling_id"] == b

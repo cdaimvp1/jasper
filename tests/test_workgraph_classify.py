@@ -1080,9 +1080,10 @@ def test_cluster_and_link_reference_match_ignores_closed_issues(ws_db, monkeypat
     config = _isolate_config(ws_db, monkeypatch, tmp_path)
     config.set_value(True, "grouping", "reference_id_auto_attach_enabled")
 
-    # A real, already-promoted issue (Phase C isn't built yet - this stands
-    # in for "an issue that's already been promoted and closed"), with a
-    # matching reference already on it, then closed.
+    # A real, already-promoted issue (stands in for "an issue that's
+    # already been promoted and closed" - promotion itself is Phase C,
+    # tested directly in test_workgraph_projects.py), with a matching
+    # reference already on it, then closed.
     closed_issue_id = ws_db.create_issue_with_new_id(title="First notice", state="done", category="other")
     old_rid = ws_db.insert_raw_item(source="outlook_mail", stable_key="ck8", thread_key="ck8", dedupe_key="ck8",
                                      occurred_ts=time.time(), subject="First notice", from_actor="alice@example.com",
@@ -1098,6 +1099,34 @@ def test_cluster_and_link_reference_match_ignores_closed_issues(ws_db, monkeypat
 
     assert result["attached_via_reference"] == 0
     assert result["issues_created"] == 1
+
+
+def test_cluster_and_link_promotes_two_independent_clusters_sharing_reference_into_one_project(ws_db, monkeypatch, tmp_path):
+    """Corrected pipeline Phase C (2026-08-05) end-to-end: with the inline
+    reference-auto-attach path OFF (so two same-reference items each become
+    their OWN independent cluster, no thread match either - different
+    thread_keys), the end-of-loop pass-2 wiring (workgraph_projects.run
+    over every touched work object, clusters included) must still find the
+    shared exact reference across the two clusters and promote them into
+    one real project - this is what actually closes the gap the whole
+    corrected-ordering plan exists for: a cluster group clearing the bar on
+    its own, not just via the inline same-wake attach shortcut."""
+    _isolate_config(ws_db, monkeypatch, tmp_path)
+
+    first_rid = _pending_item(ws_db, "ckp1", "First notice", pr_number="PR445566", from_actor="alice@example.com")
+    wc.cluster_and_link()
+    second_rid = _pending_item(ws_db, "ckp2", "A totally different subject", pr_number="PR445566", from_actor="carol@example.com")
+    wc.cluster_and_link()
+
+    first_cluster_id = ws_db.get_raw_item(first_rid)["issue_id"]
+    second_cluster_id = ws_db.get_raw_item(second_rid)["issue_id"]
+    assert first_cluster_id != second_cluster_id, "must be two independent clusters, not attached inline"
+
+    first_cluster = ws_db.get_cluster(first_cluster_id)
+    second_cluster = ws_db.get_cluster(second_cluster_id)
+    assert first_cluster is not None and second_cluster is not None
+    assert first_cluster["project_id"] is not None
+    assert first_cluster["project_id"] == second_cluster["project_id"]
 
 
 # --- Jasper reference-tag direct match (task #36) -------------------------

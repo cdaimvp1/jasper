@@ -2721,6 +2721,43 @@ def reset_work_object_membership_to_provisional(work_object_id: str) -> None:
             conn.close()
 
 
+def grandfather_existing_grouping_as_confirmed() -> dict:
+    """Corrected pipeline Phase F (2026-08-05) - one-time migration of the
+    live pre-existing corpus, same 'cold start = migration' principle as
+    the identity_anchors/claims backfills earlier this session. Every real
+    issue (object_type='request', is_raw_cluster=0 - a cluster is never a
+    candidate here, it has no meaningful confirmed/provisional state of
+    its own until it's actually promoted) that predates the provisional/
+    confirmed distinction (v2.8, task #121) sits at membership_state's own
+    schema DEFAULT 'provisional' whether or not a human ever actually
+    reviewed its grouping - not because anyone judged it uncertain, but
+    because the column didn't exist yet when most of them were created.
+
+    No reinterpretation: this does NOT re-run any matching/grouping logic,
+    does not touch project_id/parent_id, and does not re-derive anything
+    about an issue's own tasks/evidence/NBA score - it only flips
+    membership_state so ws.project_has_confirmed_grouping (Phase D's own
+    trigger for curator's real-issue extraction) correctly recognizes an
+    already-established project as eligible, instead of it looking exactly
+    like a fresh, unreviewed guess forever.
+
+    Idempotent - only ever touches a row still at 'provisional' (the
+    schema default), so a second run against an already-migrated corpus is
+    a real no-op, not just a harmless one. Returns {"confirmed": N} - the
+    real count of rows this run actually changed."""
+    with _lock:
+        conn = _connect()
+        try:
+            cur = conn.execute(
+                """UPDATE work_objects SET membership_state = 'confirmed'
+                   WHERE object_type = 'request' AND is_raw_cluster = 0 AND membership_state = 'provisional'"""
+            )
+            confirmed = cur.rowcount
+        finally:
+            conn.close()
+    return {"confirmed": confirmed}
+
+
 def advance_work_object_exposure_state(work_object_id: str, new_state: str) -> None:
     """Forward-only (design doc Section 12.8's own rule: 'once exposed,
     never silently moved again') - ranked not_exposed < shown_in_project <

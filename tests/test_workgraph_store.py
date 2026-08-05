@@ -2161,6 +2161,52 @@ def test_upsert_synthesis_advances_exposure_state_to_used_in_summary(ws_db):
     assert ws_db.get_work_object_membership_exposure(a)["exposure_state"] == "used_in_summary"
 
 
+# --- grandfather_existing_grouping_as_confirmed (Corrected pipeline Phase F, 2026-08-05)
+
+def test_grandfather_confirms_a_provisional_real_issue(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    assert ws_db.get_work_object_membership_exposure(a)["membership_state"] == "provisional"
+
+    result = ws_db.grandfather_existing_grouping_as_confirmed()
+
+    assert result["confirmed"] == 1
+    assert ws_db.get_work_object_membership_exposure(a)["membership_state"] == "confirmed"
+
+
+def test_grandfather_never_touches_a_cluster(ws_db):
+    """A cluster has no meaningful confirmed/provisional state of its own
+    until it's actually promoted (see create_cluster's own docstring) -
+    this migration is scoped to real issues only, never clusters."""
+    cid = ws_db.create_cluster_with_new_id(title="A fresh cluster", category="other")
+
+    ws_db.grandfather_existing_grouping_as_confirmed()
+
+    assert ws_db.get_work_object_membership_exposure(cid)["membership_state"] == "provisional"
+
+
+def test_grandfather_is_idempotent(ws_db):
+    ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+
+    first = ws_db.grandfather_existing_grouping_as_confirmed()
+    second = ws_db.grandfather_existing_grouping_as_confirmed()
+
+    assert first["confirmed"] == 1
+    assert second["confirmed"] == 0
+
+
+def test_grandfather_does_not_touch_an_already_confirmed_issue(ws_db):
+    """Not just idempotent overall - an issue a real human/curator already
+    confirmed keeps that exact same status, not silently re-stamped by a
+    migration that has no idea whether that's still true."""
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    ws_db.confirm_work_object_membership(a)
+
+    result = ws_db.grandfather_existing_grouping_as_confirmed()
+
+    assert result["confirmed"] == 0
+    assert ws_db.get_work_object_membership_exposure(a)["membership_state"] == "confirmed"
+
+
 # --- three-tier timeline (Section 12.9) ------------------------------------
 
 def test_list_complete_timeline_includes_evidence_and_claim_events(ws_db):

@@ -280,10 +280,19 @@ def run_project_grouping_oneshot() -> dict:
     pending suggestions, scoped to Bash only, exits when done. Runs AFTER
     classification (so this cycle's newly-created suggestions are in scope)
     and BEFORE synthesis (so synthesis operates on final, settled project
-    boundaries rather than pre-merge ones)."""
+    boundaries rather than pre-merge ones).
+
+    Task #184 Phase F (2026-08-05): also checks the newer persisted
+    relationship graph (work_object_relationships) - the eventual
+    replacement for pending_project_suggestions as this queue's real
+    source of truth. Both are checked so a wake still fires when only
+    the NEW queue has real work, not just the old one - see
+    PROJECT_GROUPING_ROUTINE.md's own "two review queues" section for
+    why both are still live rather than one already retired."""
     pending = ws.list_project_suggestions(status="pending")
-    if not pending:
-        return {"ok": True, "skipped": True, "reason": "no pending suggestions"}
+    pending_relationships = ws.list_pending_work_object_relationships()
+    if not pending and not pending_relationships:
+        return {"ok": True, "skipped": True, "reason": "no pending suggestions or relationships"}
 
     env_prefix = {
         "SYMPHONY_WORKER": "curator",
@@ -302,10 +311,11 @@ def run_project_grouping_oneshot() -> dict:
             cwd=str(BODY), env=env, timeout=1200,
         )
         return {"ok": proc.returncode == 0, "returncode": proc.returncode,
-                "pending_count": len(pending),
+                "pending_count": len(pending), "pending_relationships_count": len(pending_relationships),
                 "stdout_tail": proc.stdout[-1000:], "stderr_tail": proc.stderr[-1000:]}
     except Exception as e:
-        return {"ok": False, "pending_count": len(pending), "error": str(e)}
+        return {"ok": False, "pending_count": len(pending),
+                "pending_relationships_count": len(pending_relationships), "error": str(e)}
 
 
 PROJECT_DEEPDIVE_PROMPT = (

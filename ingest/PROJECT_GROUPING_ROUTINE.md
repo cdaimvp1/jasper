@@ -1,19 +1,41 @@
 # Project-grouping routine — curator's (Colleen's) wake checklist
 
-**What this is for:** the deterministic auto-grouper (`workgraph_projects.py`) already merges issues
-on a STRONG signal (shared external party, shared external company, or a matching normalized
-subject/topic core) with no confirmation needed. What's left over — same category, opened within
-the proximity window, but no shared external contact and no subject-core match — is genuinely
-ambiguous: it needs a real read of both issues' content to judge, which is your job here, not
-mechanical code's. This is real judgment work, same spirit as synthesis (see SYNTHESIS_ROUTINE.md)
-— never a mechanical rubber-stamp of every pending suggestion.
+**What this is for:** the deterministic auto-grouper (`workgraph_projects.py`, task #184's count-
+based redesign) only ever auto-merges on ONE thing - an exact shared reference ID (PR/PO), a real
+shared transaction key, no confirmation needed. Everything else - 2 or more matched normalized
+data points (supplier, named stakeholder, subject entity, product/service, dollar amount, document
+lineage - a plain count, never weighted) - is a real CANDIDATE, not a merge: it needs a real read
+of both issues' content to judge, which is your job here, not mechanical code's. This is real
+judgment work, same spirit as synthesis (see SYNTHESIS_ROUTINE.md) — never a mechanical rubber-
+stamp of every pending suggestion or relationship.
 
 **Three possible verdicts per pair, not two.** Confident same underlying deal → confirm (this now
 actually merges the two issues into one project, not just marks the suggestion reviewed). Confident
-genuinely unrelated → reject (dismisses it, so it stops sitting in Marc's queue for no reason).
+genuinely unrelated → reject (dismisses it, so it stops sitting in the queue for no reason).
 Genuinely unsure → do nothing and leave it pending. Abstaining is a real, correct outcome here, not
-a failure — Marc would rather see a smaller number of suggestions he actually needs to look at than
-have every ambiguous pair force-resolved one way or the other.
+a failure - it's not a decision that gets kicked to Marc either. Grouping ambiguity is never his
+call (his own direct correction, 2026-08-05): a pair you're genuinely unsure about just stays
+pending for YOUR OWN next pass, when more evidence may have arrived to resolve it. Marc only ever
+sees resolved projects/issues, never a raw grouping queue to adjudicate himself.
+
+## Two review queues right now (task #184, 2026-08-05)
+
+There are currently TWO sources of pending grouping decisions, both real, neither retired yet:
+
+1. **`GET /api/workgraph/project-suggestions`** - the original queue, described in the steps
+   below. issue_id_a/issue_id_b pairs with a `reason` string, resolved via `POST /api/workgraph/
+   project-suggestions/{id}/resolve`.
+2. **`GET /api/workgraph/relationships`** - the newer persisted relationship graph
+   (work_object_relationships), already ranked by `match_count` descending (review the strongest
+   candidates first). Each row has `from_id`/`to_id` (the same shape as issue_id_a/issue_id_b),
+   `relationship_type` (`candidate` or `bridge` - matches the bridge-candidate shape in its own
+   section below), and `matched_signals_json`. Resolved via `POST /api/workgraph/relationships/
+   {id}/resolve` with the same `{"status": "confirmed"|"rejected"}` body - it reuses the exact
+   same confirm/reject safety net as queue 1 underneath, just a different row shape on top.
+
+Check BOTH queues on every wake until told otherwise - queue 1 isn't retired yet, and queue 2 is
+where all NEW candidate detection is landing going forward. The same judgment rules (read real
+content, three verdicts, never force-resolve an unsure pair) apply identically to both.
 
 ## Steps, in order
 
@@ -50,7 +72,8 @@ have every ambiguous pair force-resolved one way or the other.
      {"status": "rejected"}
      ```
    - Genuinely unsure: make no call at all for this suggestion. It stays pending exactly as it is
-     today, for Marc (or a future pass with more evidence) to judge instead.
+     today, for YOUR OWN future pass to judge once more evidence has arrived - never something
+     that gets kicked to Marc to decide (see the top of this doc).
 
 4. **Report your status:**
    ```python

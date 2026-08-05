@@ -967,6 +967,22 @@ def scored_grouping_decision(issue_id: str, issue: dict, *, lookback_days: Optio
 
     if effective_score >= AUTO_MERGE_THRESHOLD:
         verdict = "auto_merge"
+        # Real bug found by backtest_scored_model()'s own mandatory review
+        # (task #180 prep, 2026-08-04): party(0.45)+sender(0.20) sums to
+        # EXACTLY AUTO_MERGE_THRESHOLD, so this branch used to auto_merge
+        # on that combination alone with no regard for what those signals
+        # actually mean - even though _suggestion_kind_for_scored_signals
+        # correctly classifies a bare party+sender match (no topic overlap)
+        # as "link", not "merge" - the exact task #81 false-positive shape
+        # (a busy contact who's the shared party on many genuinely
+        # different real deals). 71 real different-project pairs in the
+        # live corpus hit exactly this contradiction. The raw score alone
+        # is never enough to auto-merge if the signal COMPOSITION only
+        # supports a relationship, not a same-transaction claim - demote to
+        # suggest instead, same bar _strong_signal_match's own "merge" vs
+        # "link" verdict already applies for the ordered model.
+        if best_signals and _suggestion_kind_for_scored_signals(best_signals) != "merge":
+            verdict = "suggest"
     elif effective_score >= WEAK_SUGGESTION_FLOOR:
         verdict = "suggest"
     else:
@@ -997,7 +1013,11 @@ def backtest_scored_model() -> dict:
     (b) different-project (or one/both ungrouped) pairs the new model
         would now score AT/OR-ABOVE threshold - the actual false-positive
         class that matters (the exact task #81 shape) and needs human
-        review before the flag is ever enabled.
+        review before the flag is ever enabled. Each entry's actual_verdict
+        ("auto_merge" or "suggest") is what genuinely happens post-fix
+        (task #180 prep) - a raw score crossing that the signal composition
+        demotes to "suggest" is not a real auto-merge risk, just noise in
+        this report if left unlabeled.
     Every issue's signature is computed ONCE up front (real queries, O(n)),
     then compared pairwise purely in memory (O(n^2) cheap set ops) - fast
     even at real corpus scale. Section 12.7: reads/writes the same cached
@@ -1031,9 +1051,22 @@ def backtest_scored_model() -> dict:
                 same_project_below_threshold.append(
                     {"a": a_id, "b": b_id, "score": round(score, 2), "project_id": projects[a_id]})
             elif not same_project and score >= AUTO_MERGE_THRESHOLD:
+                # actual_verdict (2026-08-04, added while reviewing THIS
+                # backtest's own output before task #180): raw score alone
+                # is no longer what scored_grouping_decision acts on - see
+                # its own fix note. Reporting every raw-score crossing as
+                # equally risky would overstate the real exposure (71 pairs
+                # in the live corpus hit party+sender=0.65 exactly, and
+                # EVERY one of them is signal composition "link", not
+                # "merge" - none would actually auto-merge post-fix). This
+                # field is what a reviewer actually needs: which pairs still
+                # WOULD auto-merge (the real remaining risk) vs which only
+                # cross the raw threshold but get correctly demoted.
+                actual_verdict = "auto_merge" if _suggestion_kind_for_scored_signals(signals) == "merge" else "suggest"
                 different_project_at_or_above.append({
                     "a": a_id, "b": b_id, "score": round(score, 2), "signals": signals,
                     "a_project": projects[a_id], "b_project": projects[b_id],
+                    "actual_verdict": actual_verdict,
                 })
     return {
         "issues_checked": len(ids),

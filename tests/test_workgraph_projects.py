@@ -1268,6 +1268,33 @@ def test_scored_grouping_decision_shared_party_alone_is_suggest_not_auto_merge(w
     assert decision["matched_signals"] == ["party"]
 
 
+def test_scored_grouping_decision_party_plus_sender_alone_stays_suggest_not_auto_merge(ws_db):
+    """Real bug backtest_scored_model() surfaced while reviewing before task
+    #180: party(0.45)+sender(0.20) sums to EXACTLY AUTO_MERGE_THRESHOLD
+    (0.65), but _suggestion_kind_for_scored_signals(['party','sender'])
+    correctly classifies that combination as 'link' - same contact, no
+    topic overlap, a genuinely different deal - not 'merge'. The raw score
+    crossing threshold must not override that composition check; 71 real
+    different-project pairs in the live corpus hit exactly this shape
+    (the same busy-contact-touches-many-unrelated-deals false positive
+    task #81 already fixed for the ordered model)."""
+    a = _issue(ws_db, "Renewal negotiation")
+    _link_party(ws_db, a, "p_shared", "rep@acme.com")
+    ws_db.upsert_party(id="int-shared", primary_email="me@lilly.com", display_name="Me",
+                        affiliation="internal", affiliation_confidence="H", affiliation_source="domain", company=None)
+    ws_db.link_party_to_issue(a, "int-shared")
+
+    b = _issue(ws_db, "Completely unrelated support escalation")
+    _link_party(ws_db, b, "p_shared", "rep@acme.com")
+    ws_db.link_party_to_issue(b, "int-shared")
+
+    decision = wp.scored_grouping_decision(a, ws_db.get_issue(a))
+
+    assert decision["score"] == 0.65
+    assert set(decision["matched_signals"]) == {"party", "sender"}
+    assert decision["verdict"] == "suggest"
+
+
 def test_scored_grouping_decision_two_signals_without_a_real_anchor_only_suggests(ws_db):
     """Confidence spine v1 (2026-08-03): a 2-signal heuristic match
     (party+topic, raw 0.90 - bumped from 0.80 task #169/#170, 2026-08-04,
@@ -1777,6 +1804,35 @@ def test_backtest_scored_model_flags_different_project_pair_scoring_above_thresh
 
     hits = result["different_project_pairs_at_or_above_threshold"]
     assert any({h["a"], h["b"]} == {a, b} for h in hits)
+
+
+def test_backtest_scored_model_actual_verdict_distinguishes_link_from_merge(ws_db):
+    """Task #181 fix: raw score alone overstates risk for a bare party+
+    sender match (signal composition is 'link', not 'merge') - actual_
+    verdict is what tells a reviewer which raw-threshold crossings are a
+    real remaining auto-merge risk vs one the composition check already
+    demotes to a safe suggestion."""
+    # party+sender only (0.65) - composition is "link".
+    a = _issue(ws_db, "Renewal negotiation")
+    _link_party(ws_db, a, "p_shared", "rep@acme.com")
+    ws_db.upsert_party(id="int-shared", primary_email="me@lilly.com", display_name="Me",
+                        affiliation="internal", affiliation_confidence="H", affiliation_source="domain", company=None)
+    ws_db.link_party_to_issue(a, "int-shared")
+    b = _issue(ws_db, "Completely unrelated support escalation")
+    _link_party(ws_db, b, "p_shared", "rep@acme.com")
+    ws_db.link_party_to_issue(b, "int-shared")
+
+    # party+topic (0.90) - composition is "merge", a genuine remaining risk.
+    c = _issue(ws_db, "Workday HCM SaaS renewal negotiation kickoff")
+    _link_party(ws_db, c, "p_shared2", "rep2@acme.com")
+    d = _issue(ws_db, "Workday HCM SaaS renewal negotiation kickoff meeting")
+    _link_party(ws_db, d, "p_shared2", "rep2@acme.com")
+
+    result = wp.backtest_scored_model()
+    hits = {frozenset({h["a"], h["b"]}): h for h in result["different_project_pairs_at_or_above_threshold"]}
+
+    assert hits[frozenset({a, b})]["actual_verdict"] == "suggest"
+    assert hits[frozenset({c, d})]["actual_verdict"] == "auto_merge"
 
 
 def test_backtest_scored_model_task81_boilerplate_case_stays_a_veto(ws_db):

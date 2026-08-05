@@ -126,6 +126,15 @@ def list_stale_entities(limit: int = DEFAULT_SYNTHESIS_LIMIT, *, stats: Optional
             "current_marker": marker,
             "previous_marker": existing.get("synthesized_from_marker") if existing else None,
             "previous_summary": existing.get("summary") if existing else None,
+            # Corrected pipeline Phase D (2026-08-05): does this project have
+            # at least one confirmed member (see ws.project_has_confirmed_
+            # grouping's own docstring)? Additive to the existing staleness
+            # decision, not a filter on it - a still-provisional project
+            # keeps getting its synthesis narrative refreshed same as
+            # always; this just tells curator whether the SEPARATE real-
+            # issue-extraction step (POST /api/workgraph/projects/{id}/
+            # issues) also applies to it this wake.
+            "has_confirmed_grouping": ws.project_has_confirmed_grouping(project["id"]),
         })
 
     for issue_id in ws.list_standalone_issue_ids():

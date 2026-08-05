@@ -1642,8 +1642,24 @@ def group_issue(issue_id: str, *, lookback_days: Optional[int] = None) -> dict:
         losing side) - see merge_issues_txn's own docstring. Every call
         site that used to treat merge_issues()'s return as a bare
         project_id funnels through here so none of them can forget to
-        check the new tagged result."""
+        check the new tagged result.
+
+        Corrected pipeline Phase D (2026-08-05): every actual merge reaching
+        this helper is a HIGH-confidence, no-suggestion-needed auto-merge
+        (an exact shared reference, or Total Recall's repeated-confirmed-
+        pattern precedent) - real confirmed-grade evidence, same reasoning
+        confirm_suggestion's own docstring already uses for a human/curator
+        explicit confirm ("both sides just joined the same project together,
+        so both get marked 'confirmed'"). Without this, an auto_merge-only
+        project (the common shape for an exact-reference cluster group -
+        the one thing that's standalone-sufficient without ever going
+        through the suggestion/confirm queue at all) would sit at
+        membership_state='provisional' forever, and Phase D's own
+        extraction trigger (a confirmed grouping) would never fire for it."""
         result = merge_issues(issue_id, sibling_id, reason_label=reason_label)
+        if result["status"] == "merged":
+            ws.confirm_work_object_membership(issue_id)
+            ws.confirm_work_object_membership(sibling_id)
         if result["status"] == "deferred":
             return _finish("deferred_reconciliation", signal=signal, sibling_id=sibling_id,
                             suggestion_id=result["suggestion_id"], winner_project_id=result["winner_project_id"],
@@ -1927,6 +1943,84 @@ def find_relationship_links_for_grouped_issues() -> dict:
             seen_pairs.add(pair)
             suggested += 1
     return {"checked": checked, "suggested": suggested}
+
+
+# Corrected pipeline Phase D data-point mapping (2026-08-05): a small local
+# copy of workgraph_classify._evidence_type's own {source: type} mapping,
+# not an import - workgraph_classify already imports THIS module (its
+# cluster_and_link() calls workgraph_projects.run()), so importing it back
+# here would be circular.
+_EVIDENCE_TYPE_BY_SOURCE = {
+    "outlook_mail": "email", "teams_chat": "teams", "calendar": "calendar", "sharepoint": "sharepoint",
+}
+
+
+def extract_issue_from_project(project_id: str, *, title: str, category: Optional[str] = None,
+                                claim_ids: list) -> dict:
+    """Corrected pipeline Phase D (2026-08-05) - curator's real content-
+    extraction step, Marc's own words: 'only then does the LLM read the
+    project's real content and extract the actual issues/asks/deliverables
+    from inside it.' The real judgment (which of a confirmed project's
+    already-materialized claims - written the normal way, via POST /api/
+    workgraph/raw_items/{id}/extraction against its cluster members'
+    raw_items - genuinely belong together as ONE trackable issue) happens
+    in curator's head, not here; this function is the deterministic
+    mechanics once that call is made: create a real issue, join it to the
+    project, and move exactly the cited claims (and the evidence for their
+    underlying raw_items) onto it.
+
+    Deliberately moves only the CITED claims, not everything on their
+    source cluster(s) - a single meeting-series cluster can carry the
+    material for more than one real issue (Marc's own Authenticz example:
+    a pricing-negotiation ask and a separate onboarding-scope ask living
+    on the same set of recurring-meeting clusters), so a whole-cluster move
+    (the shape merge_issue_into already provides, for a different case)
+    would be too coarse here.
+
+    Every claim_id must currently belong to a work object that's a member
+    of THIS project (a cluster or an already-real issue) - a real safety
+    check against citing a claim from somewhere unrelated, never a guess.
+    Raises ValueError (not a silent no-op) if the project doesn't exist, if
+    any claim_id doesn't exist, or if any claim doesn't belong to one of
+    this project's members."""
+    if ws.get_project(project_id) is None:
+        raise ValueError(f"no such project: {project_id}")
+    member_ids = {c["id"] for c in ws.list_clusters_for_project(project_id)} | \
+                 {i["id"] for i in ws.list_issues_for_project(project_id)}
+    claims = []
+    for claim_id in claim_ids:
+        claim = ws.get_claim(claim_id)
+        if claim is None:
+            raise ValueError(f"no such claim: {claim_id}")
+        if claim["issue_id"] not in member_ids:
+            raise ValueError(f"claim {claim_id} does not belong to a member of project {project_id}")
+        claims.append(claim)
+
+    new_issue_id = ws.create_issue_with_new_id(title=title, category=category, state="active")
+    ws.assign_issue_to_project(new_issue_id, project_id, reason="extracted by curator from confirmed project content")
+
+    raw_item_ids_cited = set()
+    for claim in claims:
+        ws.reassign_claim(claim["id"], new_issue_id)
+        if claim.get("raw_item_id"):
+            raw_item_ids_cited.add(claim["raw_item_id"])
+
+    evidence_added = 0
+    for raw_item_id in sorted(raw_item_ids_cited):
+        raw_item = ws.get_raw_item(raw_item_id)
+        if raw_item is None:
+            continue
+        summary = raw_item.get("subject") or raw_item.get("body_preview") or "(no summary)"
+        ws.add_evidence(
+            issue_id=new_issue_id,
+            type=_EVIDENCE_TYPE_BY_SOURCE.get(raw_item.get("source"), "email"),
+            summary=f"{summary} [extracted from project {project_id} by curator]",
+            raw_item_id=raw_item_id,
+        )
+        evidence_added += 1
+
+    return {"issue_id": new_issue_id, "project_id": project_id,
+            "claims_moved": len(claims), "evidence_added": evidence_added}
 
 
 def run(issue_ids: list) -> dict:

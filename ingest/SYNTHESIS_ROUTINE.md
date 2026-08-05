@@ -38,6 +38,14 @@ different jobs.
    - For a project: every issue in it (`GET /api/workgraph/projects/{project_id}` gives you the
      issue list). For a standalone issue: just that one issue
      (`GET /api/workgraph/issues/{issue_id}`).
+   - **A project's response also carries `clusters` (added 2026-08-05, corrected-ordering
+     pipeline Phase D) — raw, not-yet-promoted-into-a-real-issue members. A freshly-confirmed
+     project is routinely made up ENTIRELY of clusters at first (nothing under `issues` yet at
+     all) — never read `clusters` as empty just because `issues` looks thin; check both. Each
+     cluster entry carries its own `evidence`/`raw_item_ids` the same shape `issues` entries do,
+     so steps 2-3 below (read `full_text`, extract via `POST /api/workgraph/raw_items/{id}/
+     extraction`) work identically whether the citing work object is a cluster or a real issue —
+     extraction is keyed on the raw_item, not on which kind of thing currently owns it.**
    - The evidence rows for those issue(s), from that same response. The real "is this new"
      signal is per-raw_item, not the entity-level marker: for each evidence row's `raw_item_id`,
      call `GET /api/workgraph/raw_items/{raw_item_id}` — if its `extraction` field is already
@@ -226,6 +234,47 @@ different jobs.
    ```
    The server computes and stores `synthesized_from_marker` itself at write time (from the current
    evidence marker) — you never send one.
+
+4a. **For a project, extract real issues from confirmed cluster content** (added 2026-08-05,
+    corrected-ordering pipeline Phase D) — only when the project's `has_confirmed_grouping` field
+    (from the same `GET /api/workgraph/projects/{project_id}` response) is `true`. A still-
+    `false` project's grouping hasn't cleared a real confidence bar yet (no exact shared
+    reference, no confirmed review) — extracting permanent real issues from a match that might
+    still get split back apart would produce issues that are wrong too, so leave it at the
+    synthesis narrative alone (steps 1-4 above) until a later wake finds it confirmed.
+
+    This is the step Marc described directly: *"raw communications get extracted for data
+    points → matched/clustered into a validated group → that validated group becomes the
+    project → only THEN does the LLM read the project's real content and extract the actual
+    issues/asks/deliverables from inside it."* Once you've extracted (step 3) every new raw_item
+    across the project's `clusters`, you have real, already-materialized `ask`/`decision`/
+    `commitment` claims sitting on those clusters — this step is where you decide which of them
+    genuinely belong together as one separately-trackable real issue, and make that real:
+    ```
+    POST /api/workgraph/projects/{project_id}/issues
+    {"title": "...", "category": "...", "claim_ids": [123, 124, 129]}
+    ```
+    - `title` — a short, specific, real title for what this ONE issue actually is (same bar as
+      `derived_title` above — never a raw subject line, never a restatement of the project's own
+      name).
+    - `claim_ids` — the specific claim ids (visible on each cluster's evidence, or read back via
+      `GET /api/workgraph/issues/{cluster_or_issue_id}` the same way you'd read any issue's
+      asks/decisions) that together make up this one real issue's content. Cite ONLY what
+      genuinely belongs to this one issue — a single cluster (e.g. a recurring meeting series)
+      can carry the material for more than one real issue at once (Marc's own Authenticz
+      example: a pricing-negotiation ask and a separate onboarding-scope ask living on the same
+      meeting-series cluster's claims) — don't lump them into one issue just because they share a
+      source.
+    - The route validates every cited claim actually belongs to one of this project's current
+      members (a cluster or an already-real issue) and rejects the call otherwise — never retry
+      by inventing a claim id; re-read the project's evidence and cite what's actually there.
+    - Safe to call more than once per project as more clusters accumulate real content across
+      later wakes — each call only ever creates ONE new issue from the claims you cite that wake;
+      it never touches issues you already extracted earlier.
+    - This does NOT replace step 4's synthesis write for the project itself — write both: the
+      project's own narrative (who's involved, where the whole negotiation stands) AND the real
+      issue(s) extracted from inside it (the specific trackable asks/deliverables Marc's
+      checklist/NBA actually act on).
 
 5. **Ground timeline/duration/next-step language in
    `$TEAM_DATA_DIR/documents/reference/sourcing_process_knowledge_base.md`** (the shared document

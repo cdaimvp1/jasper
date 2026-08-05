@@ -1850,6 +1850,23 @@ async def api_project_detail(project_id: str):
     synthesis = wg.get_synthesis("project", project_id)
     attachments = wg.list_attachments_for_project(project_id)
     issue_ids = [i["id"] for i in issues]
+
+    # Corrected pipeline Phase D (2026-08-05): raw cluster membership,
+    # additive to `issues` above - never rendered by cockpit.html (clusters
+    # stay invisible to Marc's UI by construction, same as every other
+    # issue-only reader in this file), but this is the ONE route curator's
+    # SYNTHESIS_ROUTINE already reads for "every issue in this project" -
+    # without a real source for cluster content here, a Phase-C-promoted
+    # project made up entirely of clusters would look completely empty to
+    # curator, with nothing to extract real issues from at all.
+    clusters = wg.list_clusters_for_project(project_id)
+    cluster_ids = [c["id"] for c in clusters]
+    cluster_evidence_by_id = wg.list_evidence_for_issues(cluster_ids)
+    cluster_raw_items_by_id = {cid: wg.get_raw_items_for_issue(cid) for cid in cluster_ids}
+    for c in clusters:
+        c["evidence"] = cluster_evidence_by_id.get(c["id"], [])
+        c["raw_item_ids"] = [r["id"] for r in cluster_raw_items_by_id.get(c["id"], [])]
+    has_confirmed_grouping = wg.project_has_confirmed_grouping(project_id)
     # Design doc Section 12.8: this GET is the real render point - the
     # project itself and every member issue are genuinely shown to Marc
     # here, unlike wg.list_issues_for_project's OTHER callers (deep_dive
@@ -1955,6 +1972,8 @@ async def api_project_detail(project_id: str):
     deep_links.attach_deep_links(thread_feed)
     thread_feed.sort(key=lambda ev: ev.get("ts") or 0, reverse=True)
     return JSONResponse({"project": sanitize_surrogates(project), "issues": sanitize_surrogates(issues),
+                        "clusters": sanitize_surrogates(clusters),
+                        "has_confirmed_grouping": has_confirmed_grouping,
                         "thread_feed": sanitize_surrogates(thread_feed),
                         "synthesis": sanitize_surrogates(synthesis),
                         "attachments": sanitize_surrogates(attachments),
@@ -1970,6 +1989,33 @@ async def api_project_detail(project_id: str):
                             "issue_id": top_issue["id"], "title": top_issue.get("display_title") or top_issue["title"],
                             "reason": top_issue.get("nba_reason"),
                         }) if top_issue and top_issue.get("nba_reason") else None})
+
+
+class ProjectExtractIssueBody(BaseModel):
+    title: str
+    category: Optional[str] = None
+    claim_ids: list[int] = Field(default_factory=list)
+
+
+@app.post("/api/workgraph/projects/{project_id}/issues")
+async def api_project_extract_issue(project_id: str, body: ProjectExtractIssueBody):
+    """Corrected pipeline Phase D (2026-08-05): curator's real content-
+    extraction route - see workgraph_projects.extract_issue_from_project's
+    own docstring for the full design. Curator calls this once it's read a
+    confirmed project's aggregated evidence (GET /api/workgraph/projects/
+    {id} now returns `clusters`/`has_confirmed_grouping` alongside the
+    existing `issues`, for exactly this purpose) and judged that a specific
+    set of already-materialized claims genuinely belong together as one
+    real, separately-trackable issue."""
+    if not body.claim_ids:
+        raise HTTPException(400, "claim_ids must be non-empty - this route creates an issue FROM cited claims")
+    try:
+        result = workgraph_projects.extract_issue_from_project(
+            project_id, title=body.title, category=body.category, claim_ids=body.claim_ids,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return JSONResponse({"ok": True, "result": result})
 
 
 class WorkgraphProjectStatusBody(BaseModel):

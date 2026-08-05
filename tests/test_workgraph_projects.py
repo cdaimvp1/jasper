@@ -2440,3 +2440,95 @@ def test_scored_grouping_decision_finds_a_candidate_between_two_clusters(ws_db):
 
     assert decision["verdict"] == "candidate"
     assert decision["sibling_id"] == b
+
+
+def test_group_issue_reference_auto_merge_confirms_membership_of_both_sides(ws_db, monkeypatch, tmp_path):
+    """Corrected pipeline Phase D's own trigger (ws.project_has_confirmed_
+    grouping) depends on this: an exact-reference auto-merge is the ONE
+    thing that's standalone-sufficient without ever going through the
+    suggestion/confirm queue at all - without _merge_or_defer marking both
+    sides confirmed itself, that whole class of project would sit at
+    membership_state='provisional' forever and never become eligible for
+    curator's real-issue extraction."""
+    config = _isolate_config(monkeypatch, tmp_path)
+    config.set_value(True, "grouping", "scored_model_enabled")
+    a = _cluster(ws_db, "First notice")
+    _raw_item(ws_db, a, "PR7003344 approval needed", "confirm-ref-a")
+    b = _cluster(ws_db, "Totally different subject")
+    _raw_item(ws_db, b, "REMINDER PR7003344", "confirm-ref-b")
+
+    wp.group_issue(a)
+
+    project_id = ws_db.get_cluster(a)["project_id"]
+    assert ws_db.project_has_confirmed_grouping(project_id) is True
+
+
+# --- Corrected pipeline Phase D (2026-08-05): curator's real issue-------
+# extraction step (extract_issue_from_project) ------------------------------
+
+def _claim_on(ws_db, work_object_id, text, claim_type="ask", raw_item_id=None):
+    if raw_item_id is None:
+        raw_item_id = _raw_item(ws_db, work_object_id, text, f"claim-src-{time.time()}")
+    return ws_db.insert_claim(
+        issue_id=work_object_id, raw_item_id=raw_item_id, claim_type=claim_type,
+        text=text, author="counterparty", author_basis="direction",
+    )
+
+
+def test_extract_issue_from_project_creates_a_real_issue_and_moves_cited_claims(ws_db):
+    pid = ws_db.create_project_with_new_id(name="P", category="other")
+    cid = _cluster(ws_db, "Recurring meeting cluster")
+    ws_db.assign_issue_to_project(cid, pid)
+    rid = _raw_item(ws_db, cid, "Weekly sync notes", "extract1")
+    claim_id = _claim_on(ws_db, cid, "please send updated pricing", raw_item_id=rid)
+
+    result = wp.extract_issue_from_project(pid, title="Pricing negotiation", category="financial", claim_ids=[claim_id])
+
+    new_issue_id = result["issue_id"]
+    assert result["claims_moved"] == 1
+    assert result["evidence_added"] == 1
+    new_issue = ws_db.get_issue(new_issue_id)
+    assert new_issue is not None
+    assert new_issue["project_id"] == pid
+    assert new_issue["title"] == "Pricing negotiation"
+    moved_claim = ws_db.get_claim(claim_id)
+    assert moved_claim["issue_id"] == new_issue_id
+    # the cluster it came from still exists, untouched, still a cluster -
+    # this is a claim-level move, never a whole-cluster promotion.
+    assert ws_db.get_cluster(cid) is not None
+
+
+def test_extract_issue_from_project_only_moves_cited_claims_not_the_whole_cluster(ws_db):
+    """A single cluster can carry the material for more than one real
+    issue (Marc's own Authenticz example) - extracting one issue must
+    leave an uncited claim on the SAME cluster exactly where it was."""
+    pid = ws_db.create_project_with_new_id(name="P", category="other")
+    cid = _cluster(ws_db, "Recurring meeting cluster")
+    ws_db.assign_issue_to_project(cid, pid)
+    pricing_claim = _claim_on(ws_db, cid, "please send updated pricing")
+    onboarding_claim = _claim_on(ws_db, cid, "confirm onboarding scope")
+
+    result = wp.extract_issue_from_project(pid, title="Pricing negotiation", claim_ids=[pricing_claim])
+
+    assert ws_db.get_claim(pricing_claim)["issue_id"] == result["issue_id"]
+    assert ws_db.get_claim(onboarding_claim)["issue_id"] == cid
+
+
+def test_extract_issue_from_project_rejects_unknown_project(ws_db):
+    with pytest.raises(ValueError):
+        wp.extract_issue_from_project("proj-does-not-exist", title="X", claim_ids=[1])
+
+
+def test_extract_issue_from_project_rejects_claim_not_belonging_to_project(ws_db):
+    pid = ws_db.create_project_with_new_id(name="P", category="other")
+    other_cluster = _cluster(ws_db, "Unrelated cluster")
+    stray_claim = _claim_on(ws_db, other_cluster, "unrelated ask")
+
+    with pytest.raises(ValueError):
+        wp.extract_issue_from_project(pid, title="X", claim_ids=[stray_claim])
+
+
+def test_extract_issue_from_project_rejects_unknown_claim_id(ws_db):
+    pid = ws_db.create_project_with_new_id(name="P", category="other")
+    with pytest.raises(ValueError):
+        wp.extract_issue_from_project(pid, title="X", claim_ids=[999999])

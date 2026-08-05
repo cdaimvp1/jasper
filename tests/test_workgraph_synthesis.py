@@ -15,6 +15,10 @@ def _issue(ws_db, title="Issue", state="active"):
     return ws_db.create_issue_with_new_id(title=title, state=state, category="other")
 
 
+def _cluster(ws_db, title="Cluster"):
+    return ws_db.create_cluster_with_new_id(title=title, category="other")
+
+
 def _material_raw_item(ws_db, issue_id, key, text, occurred_ts=None, direction="outbound"):
     """A raw_item with a real ask - materializing it bumps claims_revision."""
     rid = ws_db.insert_raw_item(
@@ -249,6 +253,77 @@ def test_stats_dict_reports_skipped_immaterial_zero_and_deferred(ws_db):
     assert len(stale) == 1
     assert stats["skipped_immaterial"] == 0
     assert stats["deferred"] == 2
+
+
+# --- Corrected pipeline Phase D (2026-08-05): clusters must participate ---
+# in claims_revision/synthesis-staleness exactly like real issues - a
+# raw_item now attaches to a CLUSTER first (Phase B), and the real bug this
+# closes: bump_claims_revision/get_claims_revision/get_project_claims_
+# fingerprint used to write/read through the `issues` view, which silently
+# no-ops for any is_raw_cluster=1 row (zero matching rows), so a cluster's
+# revision counter never advanced at all and a project made entirely of
+# clusters would look permanently fresh after its first (empty) marker.
+
+def test_marker_bumps_after_material_claim_on_a_cluster(ws_db):
+    cid = _cluster(ws_db)
+    assert wsyn.compute_evidence_marker("issue", cid) == "rev:0"
+    _material_raw_item(ws_db, cid, "cm1", "please send the SOW")
+    assert wsyn.compute_evidence_marker("issue", cid) == "rev:1"
+
+
+def test_project_marker_changes_when_a_cluster_member_gets_a_new_claim(ws_db):
+    """The real gap this phase closes: a project made up ENTIRELY of
+    clusters (the common shape right after a Phase C promotion, before
+    curator has extracted any real issue from it) must not read as
+    permanently fresh no matter how much real claims activity accumulates
+    on its cluster members."""
+    pid = ws_db.create_project_with_new_id(name="P", category="other")
+    cid = _cluster(ws_db, "Cluster One")
+    ws_db.assign_issue_to_project(cid, pid)
+
+    before = wsyn.compute_evidence_marker("project", pid)
+    _material_raw_item(ws_db, cid, "cm2", "an ask on the cluster")
+    after = wsyn.compute_evidence_marker("project", pid)
+
+    assert before != after
+
+
+def test_project_with_mixed_cluster_and_issue_members_aggregates_both(ws_db):
+    pid = ws_db.create_project_with_new_id(name="P", category="other")
+    cid = _cluster(ws_db, "Cluster")
+    iid = _issue(ws_db, "Issue")
+    ws_db.assign_issue_to_project(cid, pid)
+    ws_db.assign_issue_to_project(iid, pid)
+    _material_raw_item(ws_db, iid, "mix1", "ask on the real issue")
+
+    before = wsyn.compute_evidence_marker("project", pid)
+    _material_raw_item(ws_db, cid, "mix2", "ask on the cluster")
+    after = wsyn.compute_evidence_marker("project", pid)
+
+    assert before != after
+
+
+# --- has_confirmed_grouping (Phase D trigger) -----------------------------
+
+def test_stale_project_has_confirmed_grouping_false_by_default(ws_db):
+    pid = ws_db.create_project_with_new_id(name="P", category="other")
+    cid = _cluster(ws_db, "Cluster")
+    ws_db.assign_issue_to_project(cid, pid)
+
+    stale = wsyn.list_stale_entities()
+    entry = next(s for s in stale if s["entity_id"] == pid)
+    assert entry["has_confirmed_grouping"] is False
+
+
+def test_stale_project_has_confirmed_grouping_true_once_a_member_is_confirmed(ws_db):
+    pid = ws_db.create_project_with_new_id(name="P", category="other")
+    cid = _cluster(ws_db, "Cluster")
+    ws_db.assign_issue_to_project(cid, pid)
+    ws_db.confirm_work_object_membership(cid)
+
+    stale = wsyn.list_stale_entities()
+    entry = next(s for s in stale if s["entity_id"] == pid)
+    assert entry["has_confirmed_grouping"] is True
 
 
 def test_never_synthesized_ranked_before_stale_existing(ws_db):

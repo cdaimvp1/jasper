@@ -4647,6 +4647,61 @@ def list_issues_for_project(project_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def list_clusters_for_project(project_id: str) -> list[dict]:
+    """Cluster counterpart to list_issues_for_project - a Phase-C-promoted
+    project's members are routinely clusters, not real issues, until Phase
+    D (curator's content extraction) ever runs on it. Deliberately a
+    SEPARATE function, not a widened list_issues_for_project: every
+    existing caller of that one (the project-detail render route, deep-
+    dive picker, aristotle gating, split-siblings) renders or acts on real
+    issues specifically, and clusters must stay invisible to all of them by
+    construction - only curator's own extraction step needs to see this."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                """SELECT id, title, category, status AS state, priority, priority_score,
+                          nba_action_kind, nba_reason, owner, due, opened_at, updated_at,
+                          confidence_tier, parent_id AS project_id, lesson_id_cited,
+                          has_unmet_prerequisite, claims_revision
+                   FROM work_objects WHERE parent_id = ? AND object_type = 'request' AND is_raw_cluster = 1
+                   ORDER BY id""",
+                (project_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def project_has_confirmed_grouping(project_id: str) -> bool:
+    """Corrected pipeline Phase D (2026-08-05): a project is only eligible
+    for curator's real-issue extraction once at least one member's
+    membership_state is 'confirmed' - either an exact-reference/precedent
+    auto-merge (_merge_or_defer now marks both sides confirmed, see
+    workgraph_projects's own docstring on why) or a real human/curator
+    confirm (confirm_suggestion). membership_state lives on the MEMBER, not
+    the project row itself (a project has no parent of its own for the
+    column to mean anything) - this is the project-level proxy for "was
+    this grouping actually reviewed/high-confidence, not just a raw
+    provisional guess still open to correction." A still-provisional-only
+    project keeps getting its synthesis narrative refreshed as usual (see
+    list_stale_entities) - it just isn't handed to the extraction step
+    yet, since extracting permanent real issues from a grouping that might
+    still get split back apart would produce issues that are wrong too."""
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                """SELECT 1 FROM work_objects
+                   WHERE parent_id = ? AND object_type = 'request' AND membership_state = 'confirmed'
+                   LIMIT 1""",
+                (project_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+    return row is not None
+
+
 def assign_issue_to_project(issue_id: str, project_id: Optional[str], *, reason: Optional[str] = None) -> None:
     """The one place issue.project_id ever changes - covers auto-grouping,
     a worker splitting/merging on Marc's conversational correction, and
@@ -6260,8 +6315,13 @@ def reconcile_extraction_claims(*, issue_id: str, raw_item_id: int, to_insert: l
                     (claim_id, now, "removed by a corrected extraction, not completed real-world work", raw_item_id),
                 )
             if to_insert or to_supersede:
+                # Corrected pipeline (2026-08-05): work_objects directly, not
+                # the `issues` view - issue_id is now routinely a cluster
+                # (raw_items attach to clusters first, Phase B), and the
+                # view's UPDATE trigger silently matches zero rows for one,
+                # so a cluster's claims_revision never advanced at all.
                 conn.execute(
-                    "UPDATE issues SET claims_revision = claims_revision + 1 WHERE id = ?", (issue_id,)
+                    "UPDATE work_objects SET claims_revision = claims_revision + 1 WHERE id = ?", (issue_id,)
                 )
             conn.execute(
                 "UPDATE raw_item_extractions SET materialized_hash = ? WHERE raw_item_id = ?",
@@ -6402,8 +6462,11 @@ def insert_claim(
                  owner, date_kind, now, now, canonical_key),
             )
             claim_id = cur.lastrowid
+            # Corrected pipeline (2026-08-05): work_objects, not the `issues`
+            # view - issue_id may be a cluster (see materialize_claims_for_
+            # raw_item's own fix, same day, same root cause).
             conn.execute(
-                "UPDATE issues SET claims_revision = claims_revision + 1 WHERE id = ?",
+                "UPDATE work_objects SET claims_revision = claims_revision + 1 WHERE id = ?",
                 (issue_id,),
             )
             conn.execute("COMMIT")
@@ -6441,10 +6504,39 @@ def touch_claim(
                 )
             row = conn.execute("SELECT issue_id FROM claims WHERE id = ?", (claim_id,)).fetchone()
             if row:
+                # Corrected pipeline (2026-08-05): work_objects, not `issues`.
                 conn.execute(
-                    "UPDATE issues SET claims_revision = claims_revision + 1 WHERE id = ?",
+                    "UPDATE work_objects SET claims_revision = claims_revision + 1 WHERE id = ?",
                     (row["issue_id"],),
                 )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.close()
+
+
+def reassign_claim(claim_id: int, new_issue_id: str) -> None:
+    """Corrected pipeline Phase D (2026-08-05): the real primitive behind
+    curator's issue-extraction step (workgraph_projects.
+    extract_issue_from_project) - a claim's issue_id is a plain FK, not
+    tied through the `issues` view, so moving it to a newly-created real
+    issue is a direct UPDATE, same as insert_claim/touch_claim/update_
+    claim_status already write it. Bumps the NEW owner's claims_revision
+    (not the old owner's - the old owner, a cluster or issue, may still
+    hold other claims of its own that didn't move, and its own revision
+    already reflects those correctly)."""
+    now = time.time()
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("UPDATE claims SET issue_id = ? WHERE id = ?", (new_issue_id, claim_id))
+            conn.execute(
+                "UPDATE work_objects SET claims_revision = claims_revision + 1 WHERE id = ?",
+                (new_issue_id,),
+            )
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
@@ -6472,8 +6564,9 @@ def update_claim_status(claim_id: int, status: str, *, actor: str, superseded_by
             )
             row = conn.execute("SELECT issue_id FROM claims WHERE id = ?", (claim_id,)).fetchone()
             if row:
+                # Corrected pipeline (2026-08-05): work_objects, not `issues`.
                 conn.execute(
-                    "UPDATE issues SET claims_revision = claims_revision + 1 WHERE id = ?",
+                    "UPDATE work_objects SET claims_revision = claims_revision + 1 WHERE id = ?",
                     (row["issue_id"],),
                 )
             conn.execute("COMMIT")
@@ -6687,12 +6780,16 @@ def bump_claims_revision(issue_id: str) -> None:
     its synthesis marker stayed byte-for-byte unchanged. Callers that have
     no claim row of their own to attach the bump to (workgraph_claims.
     materialize_claims_for_raw_item, for a key-facts-only extraction) call
-    this directly instead of duplicating the inline UPDATE."""
+    this directly instead of duplicating the inline UPDATE.
+
+    Corrected pipeline (2026-08-05): work_objects directly, not the
+    `issues` view - issue_id is now routinely a cluster (Phase B), and the
+    view's UPDATE trigger silently no-ops for one (zero matching rows)."""
     with _lock:
         conn = _connect()
         try:
             conn.execute(
-                "UPDATE issues SET claims_revision = claims_revision + 1 WHERE id = ?",
+                "UPDATE work_objects SET claims_revision = claims_revision + 1 WHERE id = ?",
                 (issue_id,),
             )
         finally:
@@ -6700,11 +6797,13 @@ def bump_claims_revision(issue_id: str) -> None:
 
 
 def get_claims_revision(issue_id: str) -> int:
+    """Corrected pipeline (2026-08-05): reads work_objects directly, not
+    the `issues` view - issue_id may be a cluster."""
     with _lock:
         conn = _connect()
         try:
             row = conn.execute(
-                "SELECT claims_revision FROM issues WHERE id = ?", (issue_id,)
+                "SELECT claims_revision FROM work_objects WHERE id = ?", (issue_id,)
             ).fetchone()
         finally:
             conn.close()
@@ -6730,12 +6829,23 @@ def get_project_claims_fingerprint(project_id: str) -> int:
     the encoded string and therefore the fingerprint. Kept as a plain int
     (not a hex string) so compute_evidence_marker's "rev:{n}" format and
     list_stale_entities' _parse_rev sort key both keep working unchanged -
-    only what's fed into the aggregation changed, not the marker shape."""
+    only what's fed into the aggregation changed, not the marker shape.
+
+    Corrected pipeline Phase D (2026-08-05): queries work_objects directly,
+    not the `issues` view - a project's members are routinely clusters now
+    (Phase C promotes a cluster group by reparenting under a real project,
+    same as it's always worked for real issues), and the view excludes
+    them by construction. Without this, a project made up entirely of
+    clusters (the common case right after Phase C promotion, before any
+    real issue has been extracted from it) would read a permanently empty
+    member set here - crc32("") forever - so its synthesis would never be
+    flagged stale again after the first pass, no matter how much real
+    claims activity accumulated on its clusters."""
     with _lock:
         conn = _connect()
         try:
             rows = conn.execute(
-                "SELECT id, claims_revision FROM issues WHERE project_id = ? ORDER BY id",
+                "SELECT id, claims_revision FROM work_objects WHERE parent_id = ? AND object_type = 'request' ORDER BY id",
                 (project_id,),
             ).fetchall()
         finally:

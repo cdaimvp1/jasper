@@ -179,7 +179,7 @@ def _absorb_attachments(row_id: int, staged: list[dict]) -> int:
     return absorbed
 
 
-def run(folder: str = "Careful", max_items: int = 500, timeout: int = 120) -> dict:
+def run(folder: str = "Careful", max_items: int = 500, timeout: int = 120, sync_wait_seconds: int = 0) -> dict:
     """timeout (2026-08-05, real need found sizing a 90-day/2,849-item
     manual backfill): was hardcoded at 120s with NO except around it at
     all - unlike every other failure mode in this function (a non-zero
@@ -191,7 +191,18 @@ def run(folder: str = "Careful", max_items: int = 500, timeout: int = 120) -> di
     already written before the kill, when capture_output=True (confirmed
     in the stdlib docs, not assumed). The 120s default is unchanged for
     the normal live scheduled cadence - only a deliberate large one-off
-    call needs to raise this."""
+    call needs to raise this.
+
+    sync_wait_seconds (2026-08-05, same real need): 0 by default, no
+    behavior change for the live cadence. Every real invocation of this
+    script cold-starts Outlook in a fresh subprocess and it fully quits
+    again once that process exits - Cached Exchange Mode never gets to
+    catch up across separate calls, only within one. Pass a generous
+    value (e.g. 60-90) for a deliberate one-off catch-up pull that needs
+    the most recent mail an already-stale local cache hasn't synced yet -
+    see outlook_scan.ps1's own SyncWaitSeconds comment for why this is a
+    plain wall-clock wait, not an event callback (none exists to wait on
+    from a one-shot script)."""
     since_epoch = ws.get_cursor(_SOURCE, f"folder:{folder}") or "0"
     paths.ATTACHMENT_STAGING_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -202,6 +213,8 @@ def run(folder: str = "Careful", max_items: int = 500, timeout: int = 120) -> di
         "-MaxItems", str(max_items),
         "-StagingDir", str(paths.ATTACHMENT_STAGING_DIR),
     ]
+    if sync_wait_seconds > 0:
+        args += ["-SyncWaitSeconds", str(sync_wait_seconds)]
     try:
         proc = subprocess.run(args, capture_output=True, encoding="utf-8", timeout=timeout)
     except subprocess.TimeoutExpired as e:

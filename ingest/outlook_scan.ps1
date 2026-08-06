@@ -38,7 +38,8 @@ param(
     [double]$SinceEpoch = 0,
     [int]$MaxItems = 500,
     [string]$StagingDir = "",
-    [switch]$UnreadOnly
+    [switch]$UnreadOnly,
+    [int]$SyncWaitSeconds = 0
 )
 
 # Force UTF-8 stdout - the console's OEM codepage (437 on this box) doesn't
@@ -209,6 +210,22 @@ try {
     # ShowProgressDialog=$false - never pop a visible dialog on Marc's
     # screen for an unattended scheduled scan.
     try { $ns.SendAndReceive($false) } catch { }
+
+    # SyncWaitSeconds (2026-08-05, real gap found closing a manual mailbox
+    # gap): every real invocation of this script - live scheduled cadence
+    # included - runs in a FRESH subprocess that cold-starts Outlook, and
+    # Outlook fully quits again once this process's COM reference is
+    # released, so there is never a persistently-warm session for Cached
+    # Exchange Mode to catch up in across separate calls. Still no COM
+    # event to wait on synchronously (see SendAndReceive's own comment
+    # above), so this is a plain, honest wall-clock wait in the SAME COM
+    # session SendAndReceive just kicked a sync in - 0 by default (no
+    # behavior change for the normal live cadence), a real caller passes
+    # a generous value for a deliberate one-off catch-up pull.
+    if ($SyncWaitSeconds -gt 0) {
+        [Console]::Error.WriteLine("JASPER_DIAG: sync_wait_seconds=$SyncWaitSeconds")
+        Start-Sleep -Seconds $SyncWaitSeconds
+    }
 
     $target = $null
     foreach ($store in $ns.Folders) {

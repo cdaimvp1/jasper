@@ -495,6 +495,36 @@ def test_sweep_unread_also_persists_body_capture_failure_cursors(ws_db, isolated
     assert ws_db.get_cursor("outlook_mail", "last_body_capture_failure") == "sweep boom"
 
 
+# --- sync_wait_seconds passthrough (2026-08-05, real need: closing a ------
+# real gap the local Outlook cache hadn't synced yet) ----------------------
+
+def test_run_default_sync_wait_omits_the_flag_entirely(ws_db, isolated_paths, monkeypatch):
+    captured = {}
+
+    def fake_run(args, **kw):
+        captured["args"] = args
+        return _FakeCompletedProcess("")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    oci.run(folder="Careful")
+
+    assert "-SyncWaitSeconds" not in captured["args"]  # no behavior change for the live cadence
+
+
+def test_run_passes_a_real_sync_wait_value(ws_db, isolated_paths, monkeypatch):
+    captured = {}
+
+    def fake_run(args, **kw):
+        captured["args"] = args
+        return _FakeCompletedProcess("")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    oci.run(folder="Careful", sync_wait_seconds=60)
+
+    assert "-SyncWaitSeconds" in captured["args"]
+    assert captured["args"][captured["args"].index("-SyncWaitSeconds") + 1] == "60"
+
+
 # --- timeout salvage (2026-08-05, real need: sizing a 90-day/2,849-item --
 # manual backfill exposed a timeout with NO except around it at all) -----
 

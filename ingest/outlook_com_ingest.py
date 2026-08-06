@@ -179,20 +179,36 @@ def _absorb_attachments(row_id: int, staged: list[dict]) -> int:
     return absorbed
 
 
-def run(folder: str = "Careful", max_items: int = 500) -> dict:
+def run(folder: str = "Careful", max_items: int = 500, timeout: int = 120) -> dict:
+    """timeout (2026-08-05, real need found sizing a 90-day/2,849-item
+    manual backfill): was hardcoded at 120s with NO except around it at
+    all - unlike every other failure mode in this function (a non-zero
+    exit, a malformed JSON line), a timeout on a genuinely large pull
+    used to raise TimeoutExpired uncaught, losing 100% of an otherwise-
+    good batch's already-printed JSON lines with zero partial credit.
+    Now salvaged the same way a non-zero exit already is - subprocess.
+    TimeoutExpired's own .stdout/.stderr carry whatever PowerShell had
+    already written before the kill, when capture_output=True (confirmed
+    in the stdlib docs, not assumed). The 120s default is unchanged for
+    the normal live scheduled cadence - only a deliberate large one-off
+    call needs to raise this."""
     since_epoch = ws.get_cursor(_SOURCE, f"folder:{folder}") or "0"
     paths.ATTACHMENT_STAGING_DIR.mkdir(parents=True, exist_ok=True)
 
-    proc = subprocess.run(
-        [
-            "powershell", "-NoProfile", "-File", str(_SCRIPT),
-            "-FolderName", folder,
-            "-SinceEpoch", str(since_epoch),
-            "-MaxItems", str(max_items),
-            "-StagingDir", str(paths.ATTACHMENT_STAGING_DIR),
-        ],
-        capture_output=True, encoding="utf-8", timeout=120,
-    )
+    args = [
+        "powershell", "-NoProfile", "-File", str(_SCRIPT),
+        "-FolderName", folder,
+        "-SinceEpoch", str(since_epoch),
+        "-MaxItems", str(max_items),
+        "-StagingDir", str(paths.ATTACHMENT_STAGING_DIR),
+    ]
+    try:
+        proc = subprocess.run(args, capture_output=True, encoding="utf-8", timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        proc = subprocess.CompletedProcess(
+            args, returncode=1, stdout=e.stdout or "",
+            stderr=(e.stderr or "") + f"\nJASPER_DIAG: subprocess timed out after {timeout}s",
+        )
     # Fixed 2026-07-29: this used to return immediately on any non-zero exit,
     # discarding every already-valid JSON line PowerShell had already printed
     # for items processed before whatever failed - one bad email (or, after

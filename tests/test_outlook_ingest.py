@@ -495,6 +495,39 @@ def test_sweep_unread_also_persists_body_capture_failure_cursors(ws_db, isolated
     assert ws_db.get_cursor("outlook_mail", "last_body_capture_failure") == "sweep boom"
 
 
+# --- timeout salvage (2026-08-05, real need: sizing a 90-day/2,849-item --
+# manual backfill exposed a timeout with NO except around it at all) -----
+
+def test_run_salvages_partial_output_on_timeout(ws_db, isolated_paths, monkeypatch, tmp_path):
+    item, staged_dir = _stage_item(tmp_path, "to", "entryid-TO", "body", "<p>b</p>")
+
+    def fake_run(*a, **kw):
+        # encoding="utf-8" is passed at the real call site, so subprocess
+        # itself hands TimeoutExpired a real str (not bytes) here - same
+        # shape this test reproduces.
+        raise subprocess.TimeoutExpired(cmd=a[0] if a else "claude", timeout=kw.get("timeout", 120),
+                                         output=json.dumps(item) + "\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = oci.run(folder="Careful", timeout=5)
+
+    assert result["inserted"] == 1  # the one already-valid JSON line before the timeout is salvaged
+    assert result["ok"] is False  # still reported as a real failure, not silently swallowed
+
+
+def test_run_accepts_a_custom_timeout_value(ws_db, isolated_paths, monkeypatch):
+    captured = {}
+
+    def fake_run(*a, **kw):
+        captured["timeout"] = kw.get("timeout")
+        return _FakeCompletedProcess("")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    oci.run(folder="Careful", timeout=1800)
+
+    assert captured["timeout"] == 1800
+
+
 def test_schema_migration_entry_id_column_idempotent(ws_db):
     """init_workgraph()'s ALTER TABLE ADD COLUMN entry_id must be safe to run
     against an already-migrated DB (every real wake calls init_workgraph()

@@ -3515,6 +3515,13 @@ html[data-theme="dark"]{
         <div class="card pcc-list-card">
           <div class="ch"><h3>Projects</h3><span class="ph">Auto-grouped by shared external contact</span></div>
           <input type="search" id="pjSearch" class="pcc-search" placeholder="Search projects (name, id, category)…" aria-label="Search projects" style="margin:0 12px 8px">
+          <select id="pjStatusFilter" class="pcc-search" aria-label="Filter projects by status" style="margin:0 12px 8px">
+            <option value="active" selected>Active</option>
+            <option value="done">Done</option>
+            <option value="dismissed">Dismissed</option>
+            <option value="archived">Archived</option>
+            <option value="noise-archived">Noise-archived</option>
+          </select>
           <div class="pcc-list" id="pjProjectList"><div class="pcc-empty">Loading…</div></div>
         </div>
         <div class="card pcc-detail-card">
@@ -6259,7 +6266,10 @@ html[data-theme="dark"]{
   function pccProjectIsHidden(projectId) {
     if (!projectId) return false;
     const status = pccProjectStatusById[projectId];
-    return status === "dismissed" || status === "archived";
+    // "done" added (task #206, 2026-08-06, Marc's direct report) - this
+    // used to omit done, so a project marked done had zero downstream
+    // effect anywhere in the Inbox, unlike dismissed/archived/noise.
+    return status === "dismissed" || status === "archived" || status === "done" || status === "noise-archived";
   }
 
   let pccIssues = [];               // active + waiting + blocked, server-sorted by priority_score
@@ -8869,8 +8879,21 @@ html[data-theme="dark"]{
   }
 
   // ---- Projects lane: list + detail --------------------------------------
+  // Task #205/#206 (2026-08-06, Marc's direct report): a done/dismissed/
+  // archived/noise project used to stay visible forever in this one flat
+  // list (no status filter existed anywhere in the Projects panel) - the
+  // backend already supported GET /api/workgraph/projects?status=... via
+  // list_projects(status=...), it just had no caller. "active" here means
+  // both active+waiting (still in flight), matching the issue-level Inbox's
+  // own default-open-states convention.
+  const PJ_STATUS_FILTER_PARAMS = {
+    active: "active,waiting", done: "done", dismissed: "dismissed",
+    archived: "archived", "noise-archived": "noise-archived",
+  };
   async function pjLoadProjects() {
-    const r = await fetch("/api/workgraph/projects", { cache: "no-store" });
+    const filterEl = document.getElementById("pjStatusFilter");
+    const statusParam = PJ_STATUS_FILTER_PARAMS[filterEl ? filterEl.value : "active"] || "active,waiting";
+    const r = await fetch(`/api/workgraph/projects?status=${encodeURIComponent(statusParam)}`, { cache: "no-store" });
     const d = await r.json();
     pjProjects = d.projects || [];
     document.getElementById("pjCtProjects").textContent = pjProjects.length || "";
@@ -8879,6 +8902,10 @@ html[data-theme="dark"]{
   const pjSearchInput = document.getElementById("pjSearch");
   if (pjSearchInput) {
     pjSearchInput.addEventListener("input", () => { pjSearchQuery = pjSearchInput.value.trim().toLowerCase(); pjRenderProjectList(); });
+  }
+  const pjStatusFilterInput = document.getElementById("pjStatusFilter");
+  if (pjStatusFilterInput) {
+    pjStatusFilterInput.addEventListener("change", () => { pjLoadProjects(); });
   }
 
   let pjSearchQuery = "";
@@ -9050,7 +9077,7 @@ html[data-theme="dark"]{
     }
 
     const pjStatusCls = project.status === "waiting" ? "status-waiting" : project.status === "done" ? "status-done"
-      : (project.status === "archived" || project.status === "dismissed") ? "status-noise-archived" : "status-active";
+      : (project.status === "archived" || project.status === "dismissed" || project.status === "noise-archived") ? "status-noise-archived" : "status-active";
 
     // "Milestones and unresolved dependencies" (design brief) - gated/hard-
     // deadline counts and value-in-play were already being computed by
@@ -9179,11 +9206,12 @@ html[data-theme="dark"]{
           ${topActionHtml}
         </div>
         <div class="pcc-detail-hd-actions pcc-actions-row">
-          ${project.status === "done" || project.status === "archived" || project.status === "dismissed" ? `
+          ${project.status === "done" || project.status === "archived" || project.status === "dismissed" || project.status === "noise-archived" ? `
             <button class="mqb ghost" type="button" data-proj-act="revert">Revert to active</button>
           ` : `
             <button class="mqb ghost" type="button" data-proj-act="done">Mark done</button>
             <button class="mqb ghost" type="button" data-proj-act="archive">Archive</button>
+            <button class="mqb ghost" type="button" data-proj-act="noise">Mark as noise</button>
             <button class="mqb ghost" type="button" style="border-color:var(--lk-danger);color:var(--lk-danger)" data-proj-act="dismiss">Dismiss</button>
           `}
         </div>
@@ -9223,20 +9251,20 @@ html[data-theme="dark"]{
     });
   }
 
-  // Task #62/#20: real project-level Mark done/Dismiss/Archive/Revert -
-  // there was no way to change a project's own status from this view at
-  // all before (see POST /api/workgraph/projects/{id}/status, added
-  // server-side for this). Revert (task #20) just posts "active" - the
-  // header above swaps to show it in place of Mark done/Archive/Dismiss
-  // once a project is already done/archived/dismissed.
-  // Unlike the issue-level Detail Panel, a project stays visible in
-  // pjProjectList regardless of status (the list has no status filter) -
-  // so rather than guessing at a "next project" to jump to, this just
-  // refreshes the list (for its status badge) and re-renders this same
-  // project's detail in place (forceRefresh, so the new status actually
-  // shows in its own header badge).
+  // Task #62/#20: real project-level Mark done/Dismiss/Archive/Mark as
+  // noise/Revert - there was no way to change a project's own status from
+  // this view at all before (see POST /api/workgraph/projects/{id}/status,
+  // added server-side for this). Revert (task #20) just posts "active" -
+  // the header above swaps to show it in place of Mark done/Archive/
+  // Dismiss/Mark as noise once a project is already closed.
+  // Task #206 (2026-08-06, Marc's direct report): the Projects panel now
+  // has a real status filter (#pjStatusFilter/PJ_STATUS_FILTER_PARAMS
+  // above) - once a project's new status no longer matches the CURRENTLY
+  // selected filter, it needs to actually leave pjProjects/pjProjectList,
+  // not just get a badge-text update, or it would still "not work" from
+  // Marc's point of view even though the write succeeded.
   async function pjRunProjectAction(projectId, act) {
-    const statusByAct = { done: "done", dismiss: "dismissed", archive: "archived", revert: "active" };
+    const statusByAct = { done: "done", dismiss: "dismissed", archive: "archived", noise: "noise-archived", revert: "active" };
     const status = statusByAct[act];
     if (!status) return;
     try {
@@ -9245,18 +9273,33 @@ html[data-theme="dark"]{
         body: JSON.stringify({ status }),
       });
       if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.detail || "failed"); }
-      // Fixed 2026-08-02 (Marc's direct report: buttons "reacting very
-      // slowly"): this used to await a full pjLoadProjects() (GET the
-      // ENTIRE project list, up to hundreds of rows) just to update ONE
-      // project's own status badge in the sidebar list - a whole extra
-      // network round-trip for a one-field change already known locally.
-      // Patches pjProjects in place and re-renders from memory instead;
-      // pjSelectProject(true) below still does the one real refetch this
-      // action actually needs (the detail view's own header/actions).
-      const cached = pjProjects.find(p => p.id === projectId);
-      if (cached) cached.status = status;
-      pjRenderProjectList();
-      await pjSelectProject(projectId, true);
+      const filterEl = document.getElementById("pjStatusFilter");
+      const activeFilter = filterEl ? filterEl.value : "active";
+      const stillMatchesFilter = activeFilter === "active"
+        ? (status === "active" || status === "waiting")
+        : status === activeFilter;
+      if (stillMatchesFilter) {
+        // Fixed 2026-08-02 (Marc's direct report: buttons "reacting very
+        // slowly"): patch pjProjects in place and re-render from memory
+        // instead of a full pjLoadProjects() round-trip just to update one
+        // project's own badge.
+        const cached = pjProjects.find(p => p.id === projectId);
+        if (cached) cached.status = status;
+        pjRenderProjectList();
+        await pjSelectProject(projectId, true);
+      } else {
+        // The project no longer belongs in this filtered view - remove it
+        // from the in-memory list (real refetch would say the same thing,
+        // this just avoids the round-trip) and clear the detail pane, since
+        // showing details for a project that just vanished from the list
+        // reads as "did that actually work?" even though it did.
+        pjProjects = pjProjects.filter(p => p.id !== projectId);
+        document.getElementById("pjCtProjects").textContent = pjProjects.length || "";
+        if (pjSelectedProjectId === projectId) pjSelectedProjectId = null;
+        pjRenderProjectList();
+        document.getElementById("pjProjectDetail").innerHTML =
+          `<div class="pcc-empty">Select a project to see its issues and parties.</div>`;
+      }
     } catch (e) {
       window.alert("Couldn't update this project's status - please try again.");
     }

@@ -4650,8 +4650,13 @@ def set_project_status(project_id: str, status: str) -> None:
     row with real history/synthesis attached is not).
 
     'dismissed' added task #62 - a real, distinct-from-'done' outcome at
-    the project level, same reasoning as issues.state's task #44."""
-    if status not in ("active", "waiting", "done", "archived", "dismissed"):
+    the project level, same reasoning as issues.state's task #44.
+
+    'noise-archived' added (2026-08-06, Marc's direct request): a whole
+    project can now be marked noise the same way an individual issue
+    already could - the DB CHECK constraint on work_objects.status already
+    permitted this value, this whitelist was just never extended to match."""
+    if status not in ("active", "waiting", "done", "archived", "dismissed", "noise-archived"):
         raise ValueError(f"invalid project status: {status!r}")
     with _lock:
         conn = _connect()

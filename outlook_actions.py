@@ -19,7 +19,21 @@ _OPEN_ITEM_SCRIPT = _SCRIPT_DIR / "outlook_open_item.ps1"
 _DRAFT_REPLY_SCRIPT = _SCRIPT_DIR / "outlook_draft_reply.ps1"
 _DRAFT_FORWARD_SCRIPT = _SCRIPT_DIR / "outlook_draft_forward.ps1"
 _DRAFT_COMPOSE_SCRIPT = _SCRIPT_DIR / "outlook_draft_compose.ps1"
-_TIMEOUT_SECONDS = 20
+_TIMEOUT_SECONDS = 120
+# Raised from 20 (2026-08-06, Marc's direct report: these actions "take 2-3
+# minutes" or appear to silently fail). Root cause: `New-Object -ComObject
+# Outlook.Application` in each PowerShell script below routinely has to
+# cold-start Outlook from scratch on this machine - ingest/outlook_com_
+# ingest.py's own docstring already documents that Outlook does not stay
+# running between uses here, and health_check.py tracks a real
+# consecutive_cold_starts streak for the same reason. A cold start commonly
+# takes well over 20s (profile load, Exchange/autodiscover, add-ins), so the
+# old 20s timeout was killing the Python/PowerShell caller before Outlook
+# finished launching - and since Outlook is DCOM-activated (not a child
+# process of the PowerShell script), killing the caller does NOT kill the
+# still-initializing OUTLOOK.EXE, which keeps warming up orphaned in the
+# background. 120s matches the timeout ingest/outlook_com_ingest.py's own
+# bulk-ingest calls already use successfully for the same cold-start reality.
 
 
 def _run_powershell(args: list[str]) -> dict:

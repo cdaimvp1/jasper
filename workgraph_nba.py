@@ -660,10 +660,25 @@ def recompute_all(now: float | None = None) -> dict:
     """Re-score every non-closed issue and persist priority_score + nba_reason.
     Called after curator's classify/cluster pass, and (per the plan) on a
     periodic tick even with zero new evidence — urgency marches forward on
-    its own as due dates approach and threads go quiet."""
+    its own as due dates approach and threads go quiet.
+
+    Fixed 2026-08-06 (Marc's direct report, root-caused against a real
+    example - marc-1172, an issue that stayed labeled "your move" long
+    after recompute_issue_state had already flipped it to "waiting"):
+    this used to cap at limit=1000, and list_issues orders by
+    priority_score DESC NULLS LAST - issues that already have a score keep
+    winning that window every tick (self-reinforcing), while a freshly
+    created or freshly state-changed issue (NULL/stale score) sorts toward
+    the bottom and can be starved out of ever being reached once the open-
+    issue count exceeds 1000. The pipeline2 backfill just grew that count
+    past 2,600 - comfortably past the old cap, so this was silently
+    excluding a large and growing fraction of issues from ever being
+    rescored, not just a theoretical edge case. Raised well above any
+    realistic near-term corpus size rather than removing the cap outright,
+    since list_issues still needs *some* bound to build its SQL LIMIT."""
     if now is None:
         now = time.time()
-    issues = ws.list_issues(states=["active", "waiting", "blocked"], limit=1000)
+    issues = ws.list_issues(states=["active", "waiting", "blocked"], limit=10000)
     # Confidence spine v1: one batched query for every issue's real
     # identity_anchors, not one query per issue (list_identity_anchors_
     # for_issues, same batching discipline as list_parties_for_issues).

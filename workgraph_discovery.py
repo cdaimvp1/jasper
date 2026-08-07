@@ -410,6 +410,24 @@ def run_monthly_sweep() -> dict:
     }
 
 
+def run_monthly_sweep_if_due(now: float | None = None) -> dict | None:
+    """Real schedule for run_monthly_sweep() (task #249) - same once-per-
+    period atomic-claim gate every other periodic sweep in this codebase
+    uses (ws.claim_daily_run), just keyed by a "YYYY-MM" string instead of
+    a day - the gate itself is period-agnostic (a plain string-equality
+    UPSERT, see claim_daily_run's own docstring), so reusing it for a
+    monthly cadence needs no new mechanism or schema. Piggybacks the 5x/day
+    scheduled_refresh cycle without redoing this sweep's real work (a scan
+    of every candidate_pattern_observations row) on all but one call a
+    month."""
+    if now is None:
+        now = time.time()
+    month = time.strftime("%Y-%m", time.localtime(now))
+    if not ws.claim_daily_run("discovery_monthly_sweep", month):
+        return None
+    return run_monthly_sweep()
+
+
 def _raw_items_matching_signature(signature: str, limit: int = _MAX_EXAMPLES) -> list[dict]:
     """Monthly sweep's sample-gathering path - unlike the setup bulk pass
     (which already has the whole window's raw_items in memory), this has

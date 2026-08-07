@@ -43,6 +43,8 @@ import health_check
 import personal_patterns
 import workgraph_aristotle
 import workgraph_pipeline2
+import workgraph_claims_backfill
+import workgraph_discovery
 import config
 
 from paths import DATA_DIR
@@ -461,6 +463,30 @@ def run() -> dict:
     except Exception as e:
         prepared_action_expiry_result = {"error": str(e)}
 
+    # 15. Phase 3 claims/FTS/resolution-signal daily safety net (task #248) -
+    # same once/day gate as every other periodic sweep above. Wasn't wired
+    # into the live cadence before this - backfill_claims/backfill_
+    # evidence_fts/backfill_resolution_signal_suggestions only ever ran
+    # from a manual one-off invocation, so any raw_item whose extraction
+    # landed outside server_lean.py's live-wiring point (e.g. curator's own
+    # direct POST during a synthesis wake) could go unmaterialized/
+    # unindexed indefinitely with nothing catching it.
+    try:
+        claims_backfill_result = workgraph_claims_backfill.run_backfill_daily_if_due()
+    except Exception as e:
+        claims_backfill_result = {"error": str(e)}
+
+    # 16. Discovery monthly sweep, on a real schedule (task #249) - same
+    # atomic-claim gate, keyed by calendar month instead of day (see
+    # workgraph_discovery.run_monthly_sweep_if_due's own docstring). Was
+    # previously built (task #213) but never actually called from
+    # anywhere but a manual invocation - this is the periodic complement
+    # to the continuous per-item observation hook, not a duplicate of it.
+    try:
+        discovery_monthly_result = workgraph_discovery.run_monthly_sweep_if_due()
+    except Exception as e:
+        discovery_monthly_result = {"error": str(e)}
+
     summary = {
         "mail": mail_result,
         "sent_mail": sent_mail_result,
@@ -481,6 +507,8 @@ def run() -> dict:
         "choice_log_expiry": choice_log_expiry_result,
         "identity_backfill": identity_backfill_result,
         "prepared_action_expiry": prepared_action_expiry_result,
+        "claims_backfill": claims_backfill_result,
+        "discovery_monthly": discovery_monthly_result,
     }
     _log(f"REFRESH ok mail_inserted={mail_result.get('inserted', '?')} "
         f"relay_ok={relay_result.get('ok')} relay_calendar_advanced={relay_result.get('cursor_advanced')} "

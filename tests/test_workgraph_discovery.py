@@ -205,3 +205,22 @@ def test_parse_proposal_returns_none_for_genuinely_all_none_output():
     assert wd._parse_proposal("PROPOSAL: NONE") is None
     assert wd._parse_proposal("") is None
     assert wd._parse_proposal("some preamble with no PROPOSAL line at all") is None
+
+
+# --- run_monthly_sweep_if_due (task #249) -----------------------------------
+
+def test_run_monthly_sweep_if_due_runs_once_then_gates_within_the_same_month(ws_db):
+    now = time.time()
+    r1 = wd.run_monthly_sweep_if_due(now=now)
+    assert r1 is not None
+    assert "proposals_drafted" in r1
+
+    r2 = wd.run_monthly_sweep_if_due(now=now + 86400)  # next day, same month - gated
+    assert r2 is None
+
+
+def test_run_monthly_sweep_if_due_runs_again_the_following_month(ws_db):
+    now = time.time()
+    wd.run_monthly_sweep_if_due(now=now)
+    r2 = wd.run_monthly_sweep_if_due(now=now + 32 * 86400)  # a month later
+    assert r2 is not None

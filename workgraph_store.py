@@ -1308,6 +1308,54 @@ def init_workgraph() -> None:
             except sqlite3.OperationalError:
                 pass  # already added by a prior init_workgraph() call
 
+            # docs/design/PERSONALIZED_DATA_POINT_DISCOVERY.md - per-installation
+            # discovered data-point vocabulary, replacing the hardcoded procurement-
+            # specific fields (ariba_requester/ariba_descriptor/value_amount/
+            # system_party in positive_vocabulary above, the fixed point-type list
+            # in workgraph_projects._matched_data_points) with real, confirmed,
+            # per-person configuration. point_type is deliberately a small
+            # STRUCTURAL taxonomy (how a value participates in matching: can it
+            # auto-merge, does it count toward the 2+-point gate, etc.) - never a
+            # content category. A definition starts 'proposed' (discovery found it,
+            # nothing trusts it yet) and only becomes 'confirmed' via explicit human
+            # review - same abstain-by-default discipline as Aristotle's
+            # detect_candidate_rules() and workgraph_lessons' trust arithmetic,
+            # which trust_score here deliberately reuses the same shape of (never a
+            # hard cliff, bump on repeat-confirm, penalty on reversal).
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS data_point_definitions (
+                    id                  TEXT PRIMARY KEY,
+                    name                TEXT NOT NULL,
+                    description         TEXT,
+                    point_type          TEXT NOT NULL CHECK (point_type IN
+                                           ('entity','reference','amount','person','freetext')),
+                    deterministic_rule  TEXT,
+                    status              TEXT NOT NULL DEFAULT 'proposed'
+                                           CHECK (status IN ('proposed','confirmed','rejected')),
+                    trust_score         REAL NOT NULL DEFAULT 0.6,
+                    discovered_from     TEXT,
+                    last_matched_ts     REAL,
+                    created_ts          REAL NOT NULL,
+                    confirmed_ts        REAL,
+                    confirmed_by        TEXT
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_data_point_definitions_status ON data_point_definitions(status)")
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS data_point_values (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    definition_id    TEXT NOT NULL REFERENCES data_point_definitions(id),
+                    work_object_id   TEXT NOT NULL REFERENCES work_objects(id),
+                    value            TEXT NOT NULL,
+                    extraction_source TEXT NOT NULL CHECK (extraction_source IN
+                                          ('deterministic','llm_backfill','llm_judgment')),
+                    extracted_ts     REAL NOT NULL
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_data_point_values_wo ON data_point_values(work_object_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_data_point_values_def ON data_point_values(definition_id)")
+
             # artifact_lineages/artifact_versions (design doc Section 12.5):
             # the real answer to attachment-hashing's open question - sha256
             # was already computed on every attachment (task #29) but never
@@ -7232,7 +7280,25 @@ def index_evidence_fts(raw_item_id: int, issue_id: Optional[str], body: str) -> 
             conn.close()
 
 
+def _fts5_safe_query(query: str) -> str:
+    """Turn free-typed user text into an FTS5-safe MATCH expression.
+
+    FTS5 treats characters like ``-`` (column filter / NOT), ``"``, ``*``,
+    ``(``/``)``, ``:`` as query-syntax operators, not literal text. A raw
+    term like ``PR-1189827`` (an ordinary PO/PR number, not a special
+    query) throws a real ``sqlite3.OperationalError`` today. Strip each
+    token to plain alphanumerics and AND them together as quoted phrases,
+    which is always valid FTS5 syntax and still matches term-contains
+    queries (order/adjacency no longer required).
+    """
+    tokens = re.findall(r"[\w]+", query)
+    if not tokens:
+        return '""'
+    return " AND ".join(f'"{t}"' for t in tokens)
+
+
 def search_evidence_fts(query: str, issue_id: Optional[str] = None, limit: int = 50) -> list[dict]:
+    query = _fts5_safe_query(query)
     with _lock:
         conn = _connect()
         try:

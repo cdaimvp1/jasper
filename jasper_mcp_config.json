@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "jasper": {
+      "command": "C:\\Users\\lane_marc@lilly.com\\Symphony\\venv\\Scripts\\python.exe",
+      "args": ["C:\\Users\\lane_marc@lilly.com\\Symphony\\body\\jasper_mcp_server.py"]
+    }
+  }
+}

@@ -41,6 +41,7 @@ chat_id, and a calendar seriesMasterId):
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 from pathlib import Path
@@ -58,7 +59,7 @@ _EXTRACTION_TIMEOUT_SECONDS = 600
 _MAX_TEXT_CHARS = 12000
 
 
-def _run_headless_claude(prompt: str, *, timeout: int) -> subprocess.CompletedProcess:
+def _run_headless_claude(prompt: str, *, timeout: int, model: Optional[str] = None) -> subprocess.CompletedProcess:
     """New, self-contained headless-claude subprocess primitive for this
     pipeline only - deliberately NOT imported from ingest/scheduled_
     refresh.py's own _run_headless_with_tree_kill (Marc's own words:
@@ -67,10 +68,21 @@ def _run_headless_claude(prompt: str, *, timeout: int) -> subprocess.CompletedPr
     correctness requirement (a `claude -p` subprocess can spawn its own
     Bash-tool grandchildren that survive a naive subprocess.run timeout
     as orphans, racing the next call against the same workgraph.db), not
-    "reusing curator's mechanism" in the sense Marc was objecting to."""
+    "reusing curator's mechanism" in the sense Marc was objecting to.
+
+    model (2026-08-06, company-backfill addition): optional cheap-model
+    override (e.g. "haiku") for calls that don't need this pipeline's
+    default model - judge_candidate/run_project_extraction stay on the
+    default (unset) since they're real judgment calls this pipeline
+    already trusts at that quality bar; _llm_backfill_company is
+    deliberately cheap/fast, a narrow single-field lookup, not a judgment
+    call, so it doesn't need to pay for the default model."""
     env = os.environ.copy()
+    args = ["claude", "-p", prompt, "--allowedTools", ""]
+    if model:
+        args += ["--model", model]
     proc = subprocess.Popen(
-        ["claude", "-p", prompt, "--allowedTools", ""],
+        args,
         cwd=str(Path(__file__).resolve().parent), env=env,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
@@ -90,12 +102,23 @@ def _run_headless_claude(prompt: str, *, timeout: int) -> subprocess.CompletedPr
 def full_text_for_work_object(work_object_id: str) -> str:
     """Every linked raw_item's full resolved text (never a preview) -
     subject + real body - what steps 4/6 actually read. Newline-joined,
-    one raw_item per block."""
+    one raw_item per block. Also includes each linked attachment's own
+    extracted_text (2026-08-06, Kinaxis investigation) - real live example
+    that motivated this: a signed Change Request PDF/DOCX carried the only
+    copy of a real reference number nowhere present in any email body on
+    the same issue. Same real, already-extracted text source
+    reference_base_ids_for_issue (workgraph_projects.py) now also scans -
+    kept as a separate read here rather than sharing code, since that
+    function returns a normalized id set and this one needs raw prose."""
     parts = []
     for item in ws.get_raw_items_for_issue(work_object_id):
         subject = item.get("subject") or ""
         body = text_extract.resolve_item_text(item)
         parts.append(f"Subject: {subject}\n{body}")
+    for att in ws.list_attachments_for_issue(work_object_id):
+        text = att.get("extracted_text")
+        if text:
+            parts.append(f"Attachment ({att.get('filename') or 'unnamed'}):\n{text}")
     return "\n\n---\n\n".join(parts)
 
 
@@ -130,6 +153,95 @@ def find_candidates(work_object_id: str, issue: Optional[dict] = None) -> list[d
         if len(points) >= 2:
             candidates.append({"candidate_id": other["id"], "matched_signals": points})
     return candidates
+
+
+_COMPANY_BACKFILL_TIMEOUT_SECONDS = 60
+_COMPANY_BACKFILL_MODEL = "haiku"
+
+_COMPANY_BACKFILL_PROMPT_TEMPLATE = """Read this real business communication.
+
+TEXT:
+{text}
+
+The deterministic extraction found no external company/organization for this item. Look for a real external company genuinely referenced in this text (not Marc Lane's own employer, not an internal team), together with the specific email address of a person at that company who is a sender or participant here.
+
+For each confident (email, company) pair you find, output one line in exactly this format:
+COMPANY_MATCH: <email> | <company name>
+
+If you cannot confidently identify any, output exactly:
+COMPANY_MATCH: NONE
+
+Output nothing else.
+"""
+
+
+def _parse_company_matches(stdout: str) -> list[dict]:
+    matches = []
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line.upper().startswith("COMPANY_MATCH:"):
+            continue
+        rest = line.split(":", 1)[1].strip()
+        if rest.upper() == "NONE":
+            continue
+        parts = [p.strip() for p in rest.split("|", 1)]
+        if len(parts) == 2 and "@" in parts[0] and parts[1]:
+            matches.append({"email": parts[0].lower(), "company": parts[1]})
+    return matches
+
+
+def llm_backfill_company(work_object_id: str) -> list[dict]:
+    """Haiku mid-step (Marc's own design ask, 2026-08-06 Kinaxis
+    investigation): when the deterministic pass leaves external_orgs
+    empty, a cheap/fast model reads the SAME text (full_text_for_work_
+    object, which now also includes attachment text) once, targeted at
+    exactly the one missing field - not a full re-extraction, not the
+    judgment-call model tier judge_candidate uses.
+
+    Writes any confident finding as a REAL party record, tagged
+    affiliation_source='llm_backfill' so it stays auditable/reversible,
+    never indistinguishable from a regex-confirmed extraction. This is
+    what makes it flow into compute_work_object_signature's external_orgs
+    the same way any other party already does - no separate signature
+    concept to maintain.
+
+    Deliberately narrow: only creates a party where NONE exists yet for
+    that email (upsert_party's own existing-row path never touches
+    company - by design, so a real extraction is never silently
+    overwritten - which means this can't safely correct an existing
+    party's blank company field, only fill a genuine gap). A real live
+    example this narrower scope still covers: Jasmine Joseph
+    (jjoseph@kinaxis.com) and DocuSign's own notification address had NO
+    party record at all for the Kinaxis Maestro thread that motivated
+    this - confirmed live against the real DB, not assumed."""
+    issue = ws.get_issue_or_cluster(work_object_id)
+    if issue is None:
+        return []
+    sig = wp.get_or_compute_work_object_signature(work_object_id, issue)
+    if sig["external_orgs"]:
+        return []  # deterministic pass already found a real company - nothing to backfill
+    text = full_text_for_work_object(work_object_id)
+    if not text.strip():
+        return []
+    prompt = _COMPANY_BACKFILL_PROMPT_TEMPLATE.format(text=text[:_MAX_TEXT_CHARS])
+    try:
+        proc = _run_headless_claude(prompt, timeout=_COMPANY_BACKFILL_TIMEOUT_SECONDS, model=_COMPANY_BACKFILL_MODEL)
+    except subprocess.TimeoutExpired:
+        return []
+    applied = []
+    for match in _parse_company_matches(proc.stdout):
+        email = match["email"]
+        if ws.get_party_by_email(email) is not None:
+            continue  # a party already exists for this email - not this function's job to correct it
+        party_id = f"llm-{hashlib.sha256(email.encode()).hexdigest()[:12]}"
+        ws.upsert_party(
+            id=party_id, primary_email=email, display_name=None,
+            affiliation="external", affiliation_confidence="L", affiliation_source="llm_backfill",
+            company=match["company"],
+        )
+        ws.link_party_to_issue(work_object_id, party_id)
+        applied.append(match)
+    return applied
 
 
 _JUDGMENT_PROMPT_TEMPLATE = """You are judging whether two real pieces of business communication describe the SAME underlying deal/project, or two different ones.
@@ -192,13 +304,28 @@ def process_new_item(work_object_id: str) -> dict:
     text, merges immediately on the first "yes" - no queue, no permanent
     veto on a "no". If nothing matches (or every candidate says no),
     this item becomes its own new project immediately - per Marc's own
-    words, every item ends up in SOME project, never left dangling."""
+    words, every item ends up in SOME project, never left dangling.
+
+    Haiku company backfill (2026-08-06, Marc's own design ask) runs here,
+    once, right before candidate search - between the deterministic
+    extraction and the 2+-point matching gate, exactly the order Marc
+    asked to confirm. Only runs for THIS item, never for the existing
+    candidates it gets compared against below - each of those already
+    went through this same step when IT was the new item being
+    processed, so there's nothing to re-backfill. invalidate_work_object_
+    signature is required here, not optional: get_or_compute_work_object_
+    signature is cache-first, so without busting the cache, find_
+    candidates below would read the STALE pre-backfill signature and the
+    new party would never reach the point-matching gate at all this run."""
     issue = ws.get_issue_or_cluster(work_object_id)
     if issue is None:
         return {"work_object_id": work_object_id, "action": "not_found"}
     if issue.get("project_id"):
         return {"work_object_id": work_object_id, "action": "already_grouped",
                 "project_id": issue["project_id"]}
+
+    if llm_backfill_company(work_object_id):
+        ws.invalidate_work_object_signature(work_object_id)
 
     candidates = find_candidates(work_object_id, issue)
     for candidate in candidates:

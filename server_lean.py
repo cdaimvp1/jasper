@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, Request, HTTPException, UploadFile, File, Form
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, HTMLResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -67,6 +68,7 @@ import workgraph_recommend
 import skills_registry
 import deep_links
 import outlook_actions
+import workgraph_assistant
 import workgraph_signals
 import rule_teaching
 import personal_patterns
@@ -145,6 +147,20 @@ JSONResponse = SafeJSONResponse  # all JSONResponse(...) below scrub on render
 
 app = FastAPI(title="Symphony", docs_url=None, redoc_url=None, openapi_url=None,
               default_response_class=SafeJSONResponse)
+# Task #211/M365 plugin (2026-08-06): the Outlook add-in task pane is served
+# from https://localhost:3000 (a separate origin from this server, even
+# though both are loopback - "localhost" and "127.0.0.1" are different
+# hostnames to a browser) and needs to fetch this API's real data. Scoped to
+# that one specific origin, not "*" - this server has no auth of its own
+# (§2.4 of docs/design/M365_PLUGIN_INTEGRATION.md), so a wildcard would let
+# any webpage Marc's browser visits read Jasper's data via JS, not just the
+# add-in pane.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://localhost:3000"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
 app.mount("/static", StaticFiles(directory=str(HERE / "static")), name="static")
 templates = Jinja2Templates(directory=str(HERE / "templates"))
 
@@ -1465,6 +1481,26 @@ async def api_action_draft_forward(body: DraftForwardBody):
         result = await asyncio.to_thread(outlook_actions.draft_forward, entry_id, ref_tag)
     except RuntimeError as e:
         raise HTTPException(500, str(e))
+    return JSONResponse(result)
+
+
+class AssistantMessageBody(BaseModel):
+    message: str
+    session_id: Optional[str] = None
+
+
+@app.post("/api/assistant/message")
+async def api_assistant_message(body: AssistantMessageBody):
+    """The Outlook pane's live chat box. Spawns a real `claude -p` turn
+    (workgraph_assistant.ask) with tools into Jasper's own API plus the
+    already-authorized M365 connector - a genuine conversational turn, not
+    the flat FTS5 search this route replaces. asyncio.to_thread for the
+    same reason as the action routes above: this blocks on a subprocess
+    for up to ~2 minutes, and would otherwise freeze every other request
+    on this single-worker server."""
+    if not body.message or not body.message.strip():
+        raise HTTPException(400, "message is required")
+    result = await asyncio.to_thread(workgraph_assistant.ask, body.message.strip(), body.session_id)
     return JSONResponse(result)
 
 

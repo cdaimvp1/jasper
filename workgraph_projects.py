@@ -109,11 +109,36 @@ def reference_base_ids_for_issue(issue_id: str) -> set:
     veto an otherwise-valid party/company/topic match. reference_ids_for_
     issue (above) stays untouched for display/audit - server_lean.py's
     issue-detail reference-ID chip should keep showing the specific
-    version, not the collapsed base."""
-    return {
+    version, not the collapsed base.
+
+    2026-08-06 fix (Marc's direct catch, Kinaxis grouping investigation):
+    also scans attachments.extracted_text via the exact same REFERENCE_ID_RE
+    + reference_base() already trusted for raw_item text - real live
+    example that motivated this: marc-683's own signed-CR attachment PDF/DOCX
+    both contain "IC-17255" in their extracted text (and even the filename),
+    the same reference proj-006's synthesis already independently identified
+    from body text, but pr_number_base (raw_item-text-only, computed once at
+    classify time) never saw it since the reference only appears in the
+    ATTACHMENT, not the email body/subject. Still deterministic - no LLM
+    call, same regex, just a second, already-ingested text source. Does not
+    persist anywhere (unlike pr_number_base) - recomputed live each call,
+    which is what makes this retroactive for free: no reclassification or
+    backfill needed for existing attachments already absorbed and text-
+    extracted, only a stale signature CACHE (get_or_compute_work_object_
+    signature) needs invalidating/recomputing to pick this up."""
+    base_ids = {
         item["pr_number_base"].upper() for item in ws.get_raw_items_for_issue(issue_id)
         if item.get("pr_number_base")
     }
+    for att in ws.list_attachments_for_issue(issue_id):
+        text = att.get("extracted_text") or ""
+        if not text:
+            continue
+        for match in workgraph_signals.REFERENCE_ID_RE.finditer(text):
+            base = workgraph_signals.reference_base(match.group(0))
+            if base:
+                base_ids.add(base.upper())
+    return base_ids
 
 
 def find_reference_id_collisions_for_issue(issue_id: str, issue: Optional[dict] = None) -> list[dict]:

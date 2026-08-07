@@ -47,6 +47,20 @@ OWNER_NAME_UPPER = "MARC LANE"
 # confirmed formats this session found: "PR1111865", "PR416079-V33",
 # "PO4200703817" - same pattern workgraph_projects.py's grouping veto
 # already uses, now the single shared source instead of two copies.
+#
+# Considered widening 2026-08-06 (Kinaxis grouping investigation) to also
+# match "IC-17255" - retracted on Marc's own direct correction: that's a
+# "Document Number" field on one specific PDF/DOCX, generic metadata a
+# document-generating system (here, Kinaxis's own CLM tool) stamps on
+# whatever it exports - not a transaction/deal identifier with PR/PO's
+# actual guarantees (stable across revisions, scoped to one real deal).
+# Generalizing a reference-ID TYPE from one observed example, without
+# knowing whether it's even stable across that same document's own
+# revisions, isn't a safe basis for the auto-merge-strength "reference"
+# point type this regex feeds. Left as PR/PO only; a real "document
+# number" signal, if built, belongs in _matched_data_points' existing
+# "document" point type (shared attachment/lineage) instead - see that
+# function's own docstring - not folded into this reference-ID pattern.
 REFERENCE_ID_RE = re.compile(r"\b(?:PR|PO)\d{4,}(?:-V\d+)?\b", re.I)
 
 # Task #36: an inconspicuous reference tag Jasper itself appends to outbound

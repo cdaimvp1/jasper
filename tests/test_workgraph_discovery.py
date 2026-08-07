@@ -224,3 +224,94 @@ def test_run_monthly_sweep_if_due_runs_again_the_following_month(ws_db):
     wd.run_monthly_sweep_if_due(now=now)
     r2 = wd.run_monthly_sweep_if_due(now=now + 32 * 86400)  # a month later
     assert r2 is not None
+
+
+# --- generalized system-table detection (task #266) -------------------------
+
+def _make_domain_significant(ws_db, domain, thread_count=2, occurrences=6):
+    """Same real record_pattern_observation_thread + observe_candidate_
+    pattern sequence test_observation_thread_tracking_... above already
+    uses to cross the bar - reused here as a helper since several tests
+    below need a pre-crossed sender_domain observation."""
+    signature = f"sender_domain:{domain}"
+    for i in range(occurrences):
+        thread_key = f"thread-{i % thread_count}"
+        is_new = ws_db.record_pattern_observation_thread(signature, thread_key)
+        ws_db.observe_candidate_pattern(signature, is_new_thread=is_new)
+    return ws_db.get_candidate_pattern_observation(signature)
+
+
+def _system_item(id, domain, body, thread_key=None):
+    return {
+        "id": id, "from_actor": f"notify@{domain}", "thread_key": thread_key or f"t{id}",
+        "subject": "Notification", "participants": "[]", "body_preview": body,
+        "occurred_ts": time.time(),
+    }
+
+
+_THREE_FIELD_BODY = "Request ID: REQ-{n}\nSourcing Lead: Jane Doe\nFunctional Area: Procurement\n"
+
+
+def test_labels_cooccurring_with_domain_collects_distinct_labels_and_samples():
+    pool = [_system_item(i, "cpai.example.com", _THREE_FIELD_BODY.format(n=i)) for i in range(3)]
+    labels = wd._labels_cooccurring_with_domain("cpai.example.com", raw_items_pool=pool)
+    assert set(labels.keys()) == {"request id", "sourcing lead", "functional area"}
+    assert "REQ-0" in labels["request id"]
+
+
+def test_check_and_propose_system_table_none_when_bar_not_crossed(ws_db):
+    pool = [_system_item(0, "cpai.example.com", _THREE_FIELD_BODY.format(n=0))]
+    assert wd.check_and_propose_system_table("sender_domain:cpai.example.com", raw_items_pool=pool) is None
+
+
+def test_check_and_propose_system_table_none_with_too_few_cooccurring_labels(ws_db):
+    _make_domain_significant(ws_db, "cpai.example.com")
+    pool = [_system_item(i, "cpai.example.com", "Sourcing Lead: Jane Doe\n") for i in range(6)]
+    assert wd.check_and_propose_system_table("sender_domain:cpai.example.com", raw_items_pool=pool) is None
+
+
+def test_check_and_propose_system_table_creates_a_proposal(ws_db, monkeypatch):
+    _make_domain_significant(ws_db, "cpai.example.com")
+    pool = [_system_item(i, "cpai.example.com", _THREE_FIELD_BODY.format(n=i)) for i in range(6)]
+    reply = (
+        "SYSTEM: ContractPodAI\n"
+        "FIELD: request id | reference | the system's own internal request identifier\n"
+        "FIELD: sourcing lead | person | the assigned sourcing lead\n"
+        "FIELD: functional area | freetext | which business function this request is for\n"
+    )
+    monkeypatch.setattr(wd, "_run_headless_claude",
+                         lambda prompt, timeout, model=None: type("P", (), {"stdout": reply})())
+
+    proposal = wd.check_and_propose_system_table("sender_domain:cpai.example.com", raw_items_pool=pool)
+
+    assert proposal is not None
+    assert proposal["system_name"] == "ContractPodAI"
+    assert proposal["sender_domain"] == "cpai.example.com"
+    assert proposal["status"] == "proposed"
+    labels = {c["label"] for c in proposal["suggested_columns"]}
+    assert labels == {"request id", "sourcing lead", "functional area"}
+
+
+def test_check_and_propose_system_table_none_when_llm_says_not_one_system(ws_db, monkeypatch):
+    _make_domain_significant(ws_db, "cpai.example.com")
+    pool = [_system_item(i, "cpai.example.com", _THREE_FIELD_BODY.format(n=i)) for i in range(6)]
+    monkeypatch.setattr(wd, "_run_headless_claude",
+                         lambda prompt, timeout, model=None: type("P", (), {"stdout": "SYSTEM: NONE\n"})())
+
+    assert wd.check_and_propose_system_table("sender_domain:cpai.example.com", raw_items_pool=pool) is None
+
+
+def test_check_and_propose_system_table_never_proposes_twice_for_the_same_domain(ws_db, monkeypatch):
+    _make_domain_significant(ws_db, "cpai.example.com")
+    pool = [_system_item(i, "cpai.example.com", _THREE_FIELD_BODY.format(n=i)) for i in range(6)]
+    reply = "SYSTEM: ContractPodAI\nFIELD: request id | reference | id\n" \
+            "FIELD: sourcing lead | person | lead\nFIELD: functional area | freetext | area\n"
+    monkeypatch.setattr(wd, "_run_headless_claude",
+                         lambda prompt, timeout, model=None: type("P", (), {"stdout": reply})())
+
+    first = wd.check_and_propose_system_table("sender_domain:cpai.example.com", raw_items_pool=pool)
+    second = wd.check_and_propose_system_table("sender_domain:cpai.example.com", raw_items_pool=pool)
+
+    assert first is not None
+    assert second is None
+    assert len(ws_db.list_system_table_proposals()) == 1

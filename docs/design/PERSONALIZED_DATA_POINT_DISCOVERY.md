@@ -309,3 +309,31 @@ All four resolved (2026-08-06):
 - Migration tooling for existing installations beyond the one open question above.
 - Any change to `judge_candidate`'s own judgment logic (§5, tier 3) - it already
   generalizes without modification.
+- The actual build step for a confirmed system-table proposal (§9) - by design, that
+  stays a human/dev pass, not an automated one.
+
+## 9. Generalizing to whole systems, not just fields (task #266, 2026-08-07)
+
+contractpodai_requests/ariba_requisitions (built by hand, tasks #265/#267) exist because
+Marc's own correction was that a field like "Request ID" means something different
+depending on which SYSTEM produced it - a real, typed, per-system table beats folding it
+into the generic `data_point_definitions` vocabulary above. `workgraph_discovery.
+check_and_propose_system_table` generalizes the RECOGNITION half of that judgment: a
+sender_domain that already crosses §3's ordinary significance bar AND carries 3+ genuinely
+co-occurring structured labeled fields (`_labels_cooccurring_with_domain`) looks like a
+whole automated system's notification format, not one more isolated field. It drafts a real
+proposal into `proposed_system_tables` - system name, suggested columns with sample values,
+source examples - for human review (`GET`/`POST /api/discovery/system-table-proposals`).
+
+Deliberately does NOT generalize the BUILD half. A confirmed proposal is a real go-ahead
+decision, never a trigger that executes DDL or writes a Python extraction function -
+building the actual table stays a human/dev pass, exactly how ContractPodAI/Ariba
+themselves came to exist. Auto-generating and auto-applying schema/extraction code from an
+LLM's own characterization is a materially riskier class of automation than anything else
+this design produces (every other output is a row in an already-generic, safe table); this
+mechanism stops at the proposal on purpose.
+
+Known, accepted gap: a domain that crosses the system-table bar can also still get
+individual per-field proposals if any of its labels independently cross their OWN
+significance bar - no dedup between the two paths yet. A genuinely useful first cut, not a
+claim this fully resolves review-queue tidiness.

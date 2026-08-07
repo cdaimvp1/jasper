@@ -24,10 +24,36 @@ installation. run_monthly_sweep() is the periodic complement (2) alone:
 re-checks observations for anything the continuous per-item hook missed,
 and separately flags confirmed data points that have gone stale (no real
 match in a long stretch) for human review - never auto-removes anything.
+
+Generalized system-table detection (task #266, 2026-08-07). contractpodai_
+requests/ariba_requisitions (workgraph_store.py) were both built by hand:
+Marc's own direct correction was that a field like "Request ID" means
+something different depending on which SYSTEM produced it, so those two
+got real per-system typed tables instead of generic data_point_
+definitions rows. check_and_propose_system_table below generalizes the
+RECOGNITION half of that judgment call - when a sender_domain crosses the
+ordinary significance bar AND has 3+ genuinely co-occurring structured
+labeled fields (_labels_cooccurring_with_domain), that shape (one
+automated sender, several fields that always show up together) is what a
+whole system's notification format looks like, not one more isolated
+vocabulary field. It drafts a real proposal into proposed_system_tables
+(sender_domain, system_name, suggested columns with sample values) for
+human review via GET/POST /api/discovery/system-table-proposals.
+
+Deliberately does NOT generalize the BUILD half. Confirming a proposal
+never executes DDL, never writes a Python extraction function, and never
+touches the live schema - it is a real go-ahead decision recorded for a
+human/dev pass to actually implement, the same way ContractPodAI/Ariba
+themselves were built. Auto-generating and auto-applying schema or
+extraction code from an LLM's own characterization would be a materially
+riskier class of automation than anything else in this module (every
+other output here is a row in an already-generic, safe table); this
+mechanism stops at the proposal, on purpose.
 """
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -338,7 +364,16 @@ def check_and_propose_for_signatures(
     has the relevant raw_items in memory (a classify batch, a setup scan)
     avoid a redundant DB read for sample-gathering; omitted, this falls
     back to a fresh 180-day lookup per signature (same as the monthly
-    sweep uses)."""
+    sweep uses).
+
+    For a sender_domain: signature specifically, also tries the
+    generalized system-table check (task #266) - non-exclusive with the
+    per-field proposal path below: a domain can get both a system-table
+    proposal AND individual field proposals for labels that happen to
+    cross their OWN significance bar independently. Known, accepted gap:
+    no dedup between the two yet if both fire for the same domain: a
+    genuinely useful first cut, not a claim this is the final word on
+    queue tidiness."""
     proposals = []
     for signature in sorted(set(signatures)):
         row = ws.get_candidate_pattern_observation(signature)
@@ -348,10 +383,163 @@ def check_and_propose_for_signatures(
             _sample_raw_items_for_signature(signature, raw_items_pool) if raw_items_pool is not None
             else _raw_items_matching_signature(signature)
         )
+        if signature.startswith("sender_domain:"):
+            system_proposal = check_and_propose_system_table(signature, raw_items_pool=raw_items_pool)
+            if system_proposal:
+                proposals.append(system_proposal)
         proposal = propose_from_observation(row, sample_raw_items=samples, role_hint=role_hint)
         if proposal:
             proposals.append(proposal)
     return proposals
+
+
+# --- generalized system-table detection (task #266) -------------------------
+
+_SYSTEM_TABLE_MIN_DISTINCT_LABELS = 3  # Marc's own precedent, generalized:
+# ContractPodAI (7 fields) and Ariba (3 fields: requester/descriptor/
+# amount) both had several real structured fields recurring TOGETHER -
+# a domain with only 1-2 co-occurring labels is still just "a couple of
+# generic fields," not "a whole system's format," so it stays on the
+# ordinary per-field data_point_definitions path instead.
+
+_SYSTEM_TABLE_PROPOSAL_TIMEOUT_SECONDS = 90
+
+
+def _labels_cooccurring_with_domain(
+    domain: str, *, raw_items_pool: Optional[list[dict]] = None,
+) -> dict[str, list[str]]:
+    """Every distinct labeled_field label seen (with up to 3 real sample
+    values each) across every raw_item actually sent from `domain` -
+    the co-occurrence signal that distinguishes "one sender with several
+    structured fields" from isolated single-field patterns, computed on
+    demand from the same raw_items a per-field proposal would sample
+    from rather than a separately-tracked table (nothing here is lost by
+    not persisting it: this is cheap local text-regex work, no LLM call)."""
+    matches = (
+        [item for item in raw_items_pool if f"sender_domain:{domain}" in derive_pattern_signatures(item)]
+        if raw_items_pool is not None else _raw_items_matching_signature(f"sender_domain:{domain}", limit=50)
+    )
+    labels: dict[str, list[str]] = {}
+    for item in matches:
+        text = text_extract.resolve_item_text(item)
+        for label_match in _LABELED_FIELD_VALUE_RE.finditer(text):
+            label = _normalize_label(label_match.group(1))
+            if label in _BOILERPLATE_LABELS:
+                continue
+            value = label_match.group(2).strip()
+            samples = labels.setdefault(label, [])
+            if value and value not in samples and len(samples) < 3:
+                samples.append(value)
+    return labels
+
+
+_SYSTEM_TABLE_PROPOSAL_PROMPT_TEMPLATE = """Real emails keep arriving from the domain "{domain}", and they consistently carry several structured labeled fields together - this looks like one automated system's notification format.
+
+Fields seen, with real sample values:
+{fields_block}
+
+Real example emails from this domain:
+{examples}
+
+Decide: is this genuinely ONE coherent automated system worth its own dedicated tracking table (like a procurement/contract/ticketing/HR system's own structured notifications), or is it a coincidence of unrelated fields that happen to share a domain?
+
+If it IS one coherent system, output:
+SYSTEM: <short real name for this system, e.g. "Ariba" or "Workday" - infer from the domain/content, never invent a name unrelated to what's actually there>
+Then one line per field actually worth tracking (skip any that are just noise), in exactly this format:
+FIELD: <the exact label as given above> | <point_type> | <one-sentence description>
+
+point_type must be exactly one of: entity, reference, amount, person, date, freetext (same meanings as: entity=named org/thing, reference=unique lookup ID, amount=dollar/numeric value, person=named individual, date=a date/deadline, freetext=real value with no fixed identity)
+
+If this is NOT one coherent system, output exactly:
+SYSTEM: NONE
+
+Output nothing else.
+"""
+
+
+def _parse_system_table_proposal(stdout: str) -> Optional[dict]:
+    """Same defensive line-scanning discipline as _parse_proposal - a
+    stray SYSTEM: NONE before a real line must not short-circuit the
+    scan, and a malformed FIELD line is skipped rather than aborting the
+    whole parse."""
+    system_name = None
+    fields = []
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if line.upper().startswith("SYSTEM:"):
+            value = line.split(":", 1)[1].strip()
+            if value.upper() != "NONE":
+                system_name = value
+        elif line.upper().startswith("FIELD:") and system_name:
+            parts = [p.strip() for p in line.split(":", 1)[1].split("|", 2)]
+            if len(parts) != 3:
+                continue
+            label, point_type, description = parts
+            point_type = point_type.lower()
+            if point_type not in _POINT_TYPES or not label or not description:
+                continue
+            fields.append({"label": label, "point_type": point_type, "description": description})
+    if system_name is None or not fields:
+        return None
+    return {"system_name": system_name, "fields": fields}
+
+
+def check_and_propose_system_table(
+    domain_signature: str, *, raw_items_pool: Optional[list[dict]] = None,
+) -> Optional[dict]:
+    """domain_signature is the full "sender_domain:x.com" signature string
+    (the caller already has this from check_and_propose_for_signatures'
+    own loop). Returns the created proposal, or None for every honest
+    non-match: bar not crossed, too few co-occurring labels, already
+    proposed for this domain, or the LLM itself decided it's not really
+    one coherent system."""
+    domain = domain_signature.split(":", 1)[1] if ":" in domain_signature else domain_signature
+    row = ws.get_candidate_pattern_observation(domain_signature)
+    if row is None or not crosses_significance_bar(row):
+        return None
+    if ws.get_system_table_proposal_by_domain(domain) is not None:
+        return None
+
+    labels = _labels_cooccurring_with_domain(domain, raw_items_pool=raw_items_pool)
+    if len(labels) < _SYSTEM_TABLE_MIN_DISTINCT_LABELS:
+        return None
+
+    samples = (
+        _sample_raw_items_for_signature(domain_signature, raw_items_pool) if raw_items_pool is not None
+        else _raw_items_matching_signature(domain_signature)
+    )
+    if not samples:
+        return None
+
+    fields_block = "\n".join(
+        f"- {label}: {', '.join(values) if values else '(no sample captured)'}"
+        for label, values in sorted(labels.items())
+    )
+    prompt = _SYSTEM_TABLE_PROPOSAL_PROMPT_TEMPLATE.format(
+        domain=domain, fields_block=fields_block, examples=_format_examples(samples),
+    )
+    try:
+        proc = _run_headless_claude(prompt, timeout=_SYSTEM_TABLE_PROPOSAL_TIMEOUT_SECONDS, model=_PROPOSAL_MODEL)
+    except subprocess.TimeoutExpired:
+        return None
+    parsed = _parse_system_table_proposal(proc.stdout)
+    if parsed is None:
+        return None
+
+    suggested_columns = [
+        {**field, "sample_values": labels.get(_normalize_label(field["label"]), [])}
+        for field in parsed["fields"]
+    ]
+    proposal_id = f"systbl-{domain}".replace(".", "-").replace(":", "-")[:64]
+    if ws.get_system_table_proposal(proposal_id) is not None:
+        return None
+    ws.create_system_table_proposal(
+        id=proposal_id, sender_domain=domain, system_name=parsed["system_name"],
+        suggested_columns_json=json.dumps(suggested_columns),
+        sample_raw_item_ids_json=json.dumps([item["id"] for item in samples[:_MAX_EXAMPLES]]),
+        status="proposed",
+    )
+    return ws.get_system_table_proposal(proposal_id)
 
 
 def run_setup_discovery(*, role_hint: Optional[str] = None, window_days: int = 90) -> dict:

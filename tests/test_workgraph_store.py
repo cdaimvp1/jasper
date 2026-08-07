@@ -2572,3 +2572,45 @@ def test_list_ariba_requisitions_for_issue(ws_db):
 
     assert len(rows) == 1
     assert rows[0]["pr_number"] == "PR1"
+
+
+# --- proposed_system_tables (task #266) -------------------------------------
+
+def test_create_and_get_system_table_proposal_round_trips_json_fields(ws_db):
+    ws_db.create_system_table_proposal(
+        id="systbl-cpai-example-com", sender_domain="cpai.example.com", system_name="ContractPodAI",
+        suggested_columns_json=json.dumps([{"label": "request id", "point_type": "reference"}]),
+        sample_raw_item_ids_json=json.dumps([1, 2, 3]),
+    )
+    row = ws_db.get_system_table_proposal("systbl-cpai-example-com")
+    assert row["status"] == "proposed"
+    assert row["suggested_columns"][0]["label"] == "request id"
+    assert row["sample_raw_item_ids"] == [1, 2, 3]
+
+
+def test_get_system_table_proposal_by_domain(ws_db):
+    ws_db.create_system_table_proposal(
+        id="systbl-1", sender_domain="cpai.example.com", system_name="ContractPodAI",
+        suggested_columns_json="[]", sample_raw_item_ids_json="[]",
+    )
+    assert ws_db.get_system_table_proposal_by_domain("cpai.example.com") is not None
+    assert ws_db.get_system_table_proposal_by_domain("other.example.com") is None
+
+
+def test_list_system_table_proposals_filters_by_status(ws_db):
+    ws_db.create_system_table_proposal(
+        id="systbl-1", sender_domain="a.com", system_name="A",
+        suggested_columns_json="[]", sample_raw_item_ids_json="[]",
+    )
+    ws_db.create_system_table_proposal(
+        id="systbl-2", sender_domain="b.com", system_name="B",
+        suggested_columns_json="[]", sample_raw_item_ids_json="[]",
+    )
+    ws_db.resolve_system_table_proposal("systbl-2", "confirmed", resolved_by="marc")
+
+    assert len(ws_db.list_system_table_proposals()) == 2
+    proposed = ws_db.list_system_table_proposals(status="proposed")
+    assert [p["id"] for p in proposed] == ["systbl-1"]
+    confirmed = ws_db.list_system_table_proposals(status="confirmed")
+    assert confirmed[0]["resolved_by"] == "marc"
+    assert confirmed[0]["resolved_ts"] is not None

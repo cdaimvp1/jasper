@@ -1273,6 +1273,37 @@ def init_workgraph() -> None:
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_ariba_requisitions_issue ON ariba_requisitions(issue_id)")
 
+            # proposed_system_tables (task #266, 2026-08-07): generalizes the
+            # judgment call that produced contractpodai_requests/ariba_
+            # requisitions above by hand - a domain crossing the ordinary
+            # sender_domain significance bar with 3+ genuinely co-occurring
+            # structured labeled fields (workgraph_discovery._labels_
+            # cooccurring_with_domain) looks like a whole automated SYSTEM's
+            # notification format, not one more generic vocabulary field.
+            # Deliberately proposes only a SPEC here (suggested_columns_json:
+            # [{label, point_type, description, sample_values}, ...]) for a
+            # human/dev pass to actually build, same as ContractPodAI/Ariba
+            # themselves were - this table intentionally has no mechanism
+            # anywhere that executes DDL or writes extraction code from a
+            # 'confirmed' row; confirming one is a real go-ahead decision,
+            # not an auto-build trigger. See workgraph_discovery.py's own
+            # module docstring for why that boundary is deliberate.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS proposed_system_tables (
+                    id                      TEXT PRIMARY KEY,
+                    sender_domain           TEXT NOT NULL,
+                    system_name             TEXT NOT NULL,
+                    suggested_columns_json  TEXT NOT NULL,
+                    sample_raw_item_ids_json TEXT NOT NULL,
+                    status                  TEXT NOT NULL DEFAULT 'proposed'
+                                               CHECK (status IN ('proposed','confirmed','rejected')),
+                    created_ts              REAL NOT NULL,
+                    resolved_ts             REAL,
+                    resolved_by             TEXT
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_proposed_system_tables_status ON proposed_system_tables(status)")
+
             # PERSONALIZED_DATA_POINT_DISCOVERY.md section 3's continuous, cheap
             # (no LLM cost) tracker - counts a recurring pattern's real
             # occurrences/distinct-thread spread until it crosses the real
@@ -6864,6 +6895,97 @@ def reject_data_point_definition(definition_id: str) -> None:
         conn = _connect()
         try:
             conn.execute("UPDATE data_point_definitions SET status = 'rejected' WHERE id = ?", (definition_id,))
+        finally:
+            conn.close()
+
+
+# --- proposed_system_tables (task #266) -------------------------------------
+
+def create_system_table_proposal(
+    *, id: str, sender_domain: str, system_name: str,
+    suggested_columns_json: str, sample_raw_item_ids_json: str, status: str = "proposed",
+) -> None:
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                """INSERT INTO proposed_system_tables
+                   (id, sender_domain, system_name, suggested_columns_json,
+                    sample_raw_item_ids_json, status, created_ts)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (id, sender_domain, system_name, suggested_columns_json,
+                 sample_raw_item_ids_json, status, time.time()),
+            )
+        finally:
+            conn.close()
+
+
+def _parse_system_table_proposal_row(row) -> dict:
+    d = dict(row)
+    try:
+        d["suggested_columns"] = json.loads(d["suggested_columns_json"])
+    except Exception:
+        d["suggested_columns"] = []
+    try:
+        d["sample_raw_item_ids"] = json.loads(d["sample_raw_item_ids_json"])
+    except Exception:
+        d["sample_raw_item_ids"] = []
+    return d
+
+
+def get_system_table_proposal(proposal_id: str) -> Optional[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute("SELECT * FROM proposed_system_tables WHERE id = ?", (proposal_id,)).fetchone()
+        finally:
+            conn.close()
+    return _parse_system_table_proposal_row(row) if row else None
+
+
+def get_system_table_proposal_by_domain(sender_domain: str) -> Optional[dict]:
+    """Idempotency check - a domain that already has ANY proposal (still
+    pending, already confirmed, or already rejected) never gets a second
+    one drafted, mirroring get_data_point_definition's own "already
+    proposed under this id" guard in propose_from_observation."""
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM proposed_system_tables WHERE sender_domain = ?", (sender_domain,)
+            ).fetchone()
+        finally:
+            conn.close()
+    return _parse_system_table_proposal_row(row) if row else None
+
+
+def list_system_table_proposals(status: Optional[str] = None) -> list[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            if status:
+                rows = conn.execute(
+                    "SELECT * FROM proposed_system_tables WHERE status = ? ORDER BY created_ts", (status,)
+                ).fetchall()
+            else:
+                rows = conn.execute("SELECT * FROM proposed_system_tables ORDER BY created_ts").fetchall()
+        finally:
+            conn.close()
+    return [_parse_system_table_proposal_row(r) for r in rows]
+
+
+def resolve_system_table_proposal(proposal_id: str, status: str, *, resolved_by: str) -> None:
+    """status is 'confirmed' or 'rejected'. 'confirmed' is a real go-ahead
+    decision for a human/dev pass to actually build the table + extraction
+    function (see the table's own CREATE TABLE comment) - it never
+    triggers any DDL or code generation on its own."""
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                "UPDATE proposed_system_tables SET status = ?, resolved_ts = ?, resolved_by = ? WHERE id = ?",
+                (status, time.time(), resolved_by, proposal_id),
+            )
         finally:
             conn.close()
 

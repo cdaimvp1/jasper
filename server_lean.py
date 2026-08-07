@@ -2273,6 +2273,37 @@ async def api_discovery_sweep():
     return JSONResponse({"ok": True, "result": result})
 
 
+@app.get("/api/discovery/system-table-proposals")
+async def api_discovery_system_table_proposals(status: Optional[str] = None):
+    """Task #266's review surface - mirrors /api/discovery/proposed's own
+    shape for the generalized "this domain looks like a whole system"
+    proposals. Confirming one here is a real go-ahead decision for a
+    human/dev pass to actually build the table + extraction function
+    (see proposed_system_tables' own CREATE TABLE comment) - this route
+    never executes DDL or writes code itself."""
+    return SafeJSONResponse({"proposals": wg.list_system_table_proposals(status=status)})
+
+
+class SystemTableProposalResolveBody(BaseModel):
+    action: str  # "confirm" | "reject"
+    resolved_by: str = "marc"
+
+
+@app.post("/api/discovery/system-table-proposals/{proposal_id}/resolve")
+async def api_discovery_system_table_proposal_resolve(proposal_id: str, body: SystemTableProposalResolveBody):
+    proposal = wg.get_system_table_proposal(proposal_id)
+    if proposal is None:
+        raise HTTPException(404, f"no such system-table proposal: {proposal_id}")
+    if proposal["status"] != "proposed":
+        raise HTTPException(400, f"proposal {proposal_id} is not pending review (status={proposal['status']})")
+    if body.action not in ("confirm", "reject"):
+        raise HTTPException(400, f'action must be "confirm" or "reject", got {body.action!r}')
+    wg.resolve_system_table_proposal(
+        proposal_id, "confirmed" if body.action == "confirm" else "rejected", resolved_by=body.resolved_by,
+    )
+    return JSONResponse({"ok": True, "proposal": wg.get_system_table_proposal(proposal_id)})
+
+
 @app.get("/api/addin/focus-project/{project_id}")
 async def api_addin_focus_project(project_id: str):
     """Same rich card shape as focus-email/focus-party, addressed directly

@@ -1356,6 +1356,27 @@ def init_workgraph() -> None:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_data_point_values_wo ON data_point_values(work_object_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_data_point_values_def ON data_point_values(definition_id)")
 
+            # PERSONALIZED_DATA_POINT_DISCOVERY.md section 3's continuous, cheap
+            # (no LLM cost) tracker - counts a recurring pattern's real
+            # occurrences/distinct-thread spread until it crosses the real
+            # significance bar (5 occurrences, 2+ distinct threads, 60-day
+            # window - Marc's own numbers), which is what triggers the one real
+            # LLM call that drafts an actual proposal. pattern_signature is a
+            # normalized key (sender domain / labeled-field name / structural
+            # signature) - deliberately NOT a FK to anything, since most
+            # observations never graduate into a real definition at all.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS candidate_pattern_observations (
+                    id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+                    pattern_signature         TEXT NOT NULL UNIQUE,
+                    occurrence_count          INTEGER NOT NULL DEFAULT 0,
+                    distinct_thread_count     INTEGER NOT NULL DEFAULT 0,
+                    first_seen_ts             REAL NOT NULL,
+                    last_seen_ts              REAL NOT NULL,
+                    promoted_to_definition_id TEXT REFERENCES data_point_definitions(id)
+                )
+            """)
+
             # artifact_lineages/artifact_versions (design doc Section 12.5):
             # the real answer to attachment-hashing's open question - sha256
             # was already computed on every attachment (task #29) but never
@@ -2505,6 +2526,50 @@ def thread_map_lookup(stable_key: str) -> Optional[str]:
         finally:
             conn.close()
     return row["issue_id"] if row else None
+
+
+def project_id_for_conversation_id(conversation_id: str) -> Optional[str]:
+    """Add-in "focus on the email I have open" (task #240): Office.js's
+    Office.context.mailbox.item.conversationId is the same underlying
+    Exchange conversation-thread GUID Outlook COM exposes as
+    $item.ConversationID, which ingest/outlook_scan.ps1 already writes
+    straight into raw_items.stable_key for every outlook_mail row (line
+    ~281) - so a direct raw_items lookup, not thread_map (a pre-issue-
+    creation staging table, not guaranteed populated for every item), is
+    the ground-truth path here. Picks the most recently occurring linked
+    raw_item in case a long thread's items ended up split across issues
+    (rare, but real) - most recent is the honest "what Marc is looking at
+    right now" answer."""
+    if not conversation_id:
+        return None
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                """SELECT issue_id FROM raw_items
+                   WHERE stable_key = ? AND issue_id IS NOT NULL
+                   ORDER BY occurred_ts DESC LIMIT 1""",
+                (conversation_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+    if row is None:
+        return None
+    # Deliberately NOT get_issue()/the `issues` view here - that view
+    # filters to object_type='request' AND is_raw_cluster=0 (confirmed
+    # live: raw_items.issue_id can point at a still-raw cluster, e.g.
+    # marc-031 -> proj-038, invisible to that view but a completely real,
+    # already-established project association). work_objects.parent_id
+    # is the ground truth for both a promoted issue and a raw cluster.
+    with _lock:
+        conn = _connect()
+        try:
+            wo = conn.execute(
+                "SELECT parent_id FROM work_objects WHERE id = ?", (row["issue_id"],)
+            ).fetchone()
+        finally:
+            conn.close()
+    return wo["parent_id"] if wo else None
 
 
 def thread_map_set(stable_key: str, issue_id: str) -> None:
@@ -4338,6 +4403,91 @@ def list_issues_for_company(company: str) -> list[str]:
         finally:
             conn.close()
     return [r["issue_id"] for r in rows]
+
+
+def search_parties_by_name(query: str, limit: int = 25) -> list[dict]:
+    """Fuzzy party lookup for the add-in's "focus on a supplier or person"
+    capability (task #241) - list_issues_for_company above requires an
+    EXACT company string, no use to a user typing a partial name/company
+    into chat. Matches display_name OR company via a case-insensitive
+    substring, ranked by last_seen_ts (most recently active contact first,
+    same recency bias as list_parties)."""
+    query = (query or "").strip()
+    if not query:
+        return []
+    like = f"%{query}%"
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                """SELECT * FROM parties
+                   WHERE display_name LIKE ? COLLATE NOCASE
+                      OR company LIKE ? COLLATE NOCASE
+                   ORDER BY last_seen_ts DESC LIMIT ?""",
+                (like, like, limit),
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def project_ids_for_party_query(query: str) -> list[str]:
+    """End-to-end resolve for "focus on <supplier/person>" (task #241):
+    fuzzy party match -> every issue those parties are linked to -> the
+    distinct project_ids those issues belong to. Order preserves first-seen
+    project (most-recently-active party's project surfaces first).
+
+    UNIONED with a direct raw_items fallback (2026-08-06, found live while
+    building this): the `parties` table is populated only for real, promoted
+    issues (workgraph_parties.run's own touched_real_issues scope), and a
+    live audit found only 6 of 3478 real issues currently carry any linked
+    raw_item at all - a separate, real gap in the corrected pipeline's
+    extract_issue_from_project (now fixed going forward, but the historical
+    corpus mostly predates that fix and has no evidence trail left to
+    backfill it from). Relying on the parties table alone would make this
+    feature return almost nothing for tonight's demo despite the raw
+    from_actor/participants text for those senders sitting right there in
+    raw_items, already linked to a real project via a cluster. This fallback
+    is honest about being lower-precision (substring match against raw
+    text, no affiliation/company canonicalization) - used only to fill gaps
+    the party match didn't already cover, never to override it."""
+    seen: list[str] = []
+
+    parties = search_parties_by_name(query)
+    issue_ids: list[str] = []
+    for p in parties:
+        issue_ids.extend(list_issues_for_party(p["id"]))
+    if issue_ids:
+        issues_by_id = get_issues_by_ids(list(dict.fromkeys(issue_ids)))
+        for iid in issue_ids:
+            pid = issues_by_id.get(iid, {}).get("project_id")
+            if pid and pid not in seen:
+                seen.append(pid)
+
+    query = (query or "").strip()
+    if query:
+        like = f"%{query}%"
+        with _lock:
+            conn = _connect()
+            try:
+                rows = conn.execute(
+                    """SELECT DISTINCT wo.parent_id AS project_id
+                       FROM raw_items ri
+                       JOIN work_objects wo ON wo.id = ri.issue_id
+                       WHERE wo.parent_id IS NOT NULL
+                         AND (ri.from_actor LIKE ? COLLATE NOCASE
+                              OR ri.participants LIKE ? COLLATE NOCASE)
+                       ORDER BY ri.occurred_ts DESC""",
+                    (like, like),
+                ).fetchall()
+            finally:
+                conn.close()
+        for r in rows:
+            pid = r["project_id"]
+            if pid not in seen:
+                seen.append(pid)
+
+    return seen
 
 
 # --- prerequisite_rules (Aristotle, task #51) --------------------------------
@@ -6880,6 +7030,191 @@ def invalidate_work_object_signature(work_object_id: str) -> None:
         conn = _connect()
         try:
             conn.execute("DELETE FROM work_object_signatures WHERE work_object_id = ?", (work_object_id,))
+        finally:
+            conn.close()
+
+
+def create_data_point_definition(
+    *, id: str, name: str, description: Optional[str], point_type: str,
+    deterministic_rule: Optional[str], discovered_from: Optional[str], status: str = "proposed",
+) -> None:
+    """PERSONALIZED_DATA_POINT_DISCOVERY.md section 4. Always starts 'proposed'
+    unless the caller explicitly fast-tracks (task #217 - Marc's own already-
+    proven procurement fields become initial 'confirmed' rows directly,
+    the one legitimate bypass of the propose-then-confirm gate, since
+    re-discovering something already validated across real use is pure
+    cost with no signal)."""
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                """INSERT INTO data_point_definitions
+                   (id, name, description, point_type, deterministic_rule, status,
+                    trust_score, discovered_from, created_ts)
+                   VALUES (?, ?, ?, ?, ?, ?, 0.6, ?, ?)""",
+                (id, name, description, point_type, deterministic_rule, status,
+                 discovered_from, time.time()),
+            )
+        finally:
+            conn.close()
+
+
+def list_data_point_definitions(status: Optional[str] = None) -> list[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            if status:
+                rows = conn.execute(
+                    "SELECT * FROM data_point_definitions WHERE status = ? ORDER BY created_ts", (status,)
+                ).fetchall()
+            else:
+                rows = conn.execute("SELECT * FROM data_point_definitions ORDER BY created_ts").fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_data_point_definition(definition_id: str) -> Optional[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute("SELECT * FROM data_point_definitions WHERE id = ?", (definition_id,)).fetchone()
+        finally:
+            conn.close()
+    return dict(row) if row else None
+
+
+def confirm_data_point_definition(definition_id: str, *, confirmed_by: str) -> None:
+    """The one real trust gate (design doc section 2.4) - nothing in the
+    extraction pipeline (task #215/#216) reads a 'proposed' row at all,
+    only 'confirmed' ones. Never called automatically."""
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                "UPDATE data_point_definitions SET status = 'confirmed', confirmed_ts = ?, confirmed_by = ? WHERE id = ?",
+                (time.time(), confirmed_by, definition_id),
+            )
+        finally:
+            conn.close()
+
+
+def reject_data_point_definition(definition_id: str) -> None:
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute("UPDATE data_point_definitions SET status = 'rejected' WHERE id = ?", (definition_id,))
+        finally:
+            conn.close()
+
+
+def adjust_data_point_trust(definition_id: str, delta: float, *, floor: float = 0.1, ceiling: float = 0.9) -> None:
+    """Same bounded bump/penalty shape as workgraph_lessons.py's trust
+    arithmetic (never a hard cliff) - the actual DECISION of when/how much
+    to adjust belongs to whatever calls this (the retrofitted pipeline,
+    task #215/#216), not this raw store function."""
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute("SELECT trust_score FROM data_point_definitions WHERE id = ?", (definition_id,)).fetchone()
+            if row is None:
+                return
+            new_score = max(floor, min(ceiling, row["trust_score"] + delta))
+            conn.execute("UPDATE data_point_definitions SET trust_score = ? WHERE id = ?", (new_score, definition_id))
+        finally:
+            conn.close()
+
+
+def touch_data_point_last_matched(definition_id: str) -> None:
+    """Section 3's staleness signal - a confirmed data point that stops
+    getting touched for a long stretch is what eventually surfaces as
+    'hasn't come up in months, still relevant?' (the job-change case)."""
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute("UPDATE data_point_definitions SET last_matched_ts = ? WHERE id = ?", (time.time(), definition_id))
+        finally:
+            conn.close()
+
+
+def record_data_point_value(*, definition_id: str, work_object_id: str, value: str, extraction_source: str) -> None:
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                """INSERT INTO data_point_values (definition_id, work_object_id, value, extraction_source, extracted_ts)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (definition_id, work_object_id, value, extraction_source, time.time()),
+            )
+        finally:
+            conn.close()
+    touch_data_point_last_matched(definition_id)
+
+
+def list_data_point_values_for_work_object(work_object_id: str) -> list[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM data_point_values WHERE work_object_id = ? ORDER BY extracted_ts", (work_object_id,)
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def observe_candidate_pattern(pattern_signature: str, *, is_new_thread: bool) -> dict:
+    """Section 3's continuous, cheap (no LLM cost) tracker. Plain counting -
+    increments occurrence_count always, distinct_thread_count only when the
+    caller has already determined this is a genuinely new thread/sender for
+    this pattern (that judgment belongs to the caller, which has the real
+    raw_item context - this function just counts). Returns the row so the
+    caller can check it against the real significance bar (5 occurrences,
+    2+ distinct threads, 60-day window - Marc's own numbers) and decide
+    whether to promote it to a real LLM-drafted proposal."""
+    now = time.time()
+    with _lock:
+        conn = _connect()
+        try:
+            existing = conn.execute(
+                "SELECT * FROM candidate_pattern_observations WHERE pattern_signature = ?", (pattern_signature,)
+            ).fetchone()
+            if existing is None:
+                conn.execute(
+                    """INSERT INTO candidate_pattern_observations
+                       (pattern_signature, occurrence_count, distinct_thread_count, first_seen_ts, last_seen_ts)
+                       VALUES (?, 1, ?, ?, ?)""",
+                    (pattern_signature, 1 if is_new_thread else 0, now, now),
+                )
+            else:
+                conn.execute(
+                    """UPDATE candidate_pattern_observations
+                       SET occurrence_count = occurrence_count + 1,
+                           distinct_thread_count = distinct_thread_count + ?,
+                           last_seen_ts = ?
+                       WHERE pattern_signature = ?""",
+                    (1 if is_new_thread else 0, now, pattern_signature),
+                )
+            row = conn.execute(
+                "SELECT * FROM candidate_pattern_observations WHERE pattern_signature = ?", (pattern_signature,)
+            ).fetchone()
+        finally:
+            conn.close()
+    return dict(row)
+
+
+def mark_candidate_pattern_promoted(pattern_signature: str, definition_id: str) -> None:
+    """Once a candidate pattern crosses the significance bar and a real
+    proposal is drafted from it, tag the observation row so the same
+    pattern doesn't get proposed again on its next occurrence while the
+    first proposal is still pending review."""
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                "UPDATE candidate_pattern_observations SET promoted_to_definition_id = ? WHERE pattern_signature = ?",
+                (definition_id, pattern_signature),
+            )
         finally:
             conn.close()
 

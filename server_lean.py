@@ -2054,6 +2054,100 @@ async def api_project_extract_issue(project_id: str, body: ProjectExtractIssueBo
     return JSONResponse({"ok": True, "result": result})
 
 
+def _build_addin_focus_card(project_id: str) -> Optional[dict]:
+    """Lean, single-project card for the Outlook/Teams add-in (tasks #240-
+    243): "focus on this email/supplier/person" - reuses the exact same
+    real readers the full cockpit project-detail route does (synthesis,
+    per-issue candidate_actions with real evidence-row recommendations
+    like an Ariba approval deep link or a contract_review offer), but
+    scoped to ONE project and with candidate_actions computed per open
+    issue - something GET /api/workgraph/projects/{id} deliberately skips
+    for its own perf reasons (that route renders every project in a list;
+    the add-in only ever renders one at a time, so the same N-issue
+    candidate_actions cost that route avoids is cheap here)."""
+    project = wg.get_project(project_id)
+    if project is None:
+        return None
+    issues = wg.list_issues_for_project(project_id)
+    workgraph_deadlines.attach_deadline_info(issues)
+    synthesis = wg.get_synthesis("project", project_id)
+    open_issues = [i for i in issues if i["state"] in ("active", "waiting", "blocked")]
+    open_ids = [i["id"] for i in open_issues]
+    evidence_by_issue = wg.list_evidence_for_issues(open_ids)
+    attachments = wg.list_attachments_for_project(project_id)
+    all_evidence = [ev for iid in open_ids for ev in evidence_by_issue.get(iid, [])]
+    workgraph_recommend.attach_recommendations(all_evidence, attachments, time.time())
+    deep_links.attach_deep_links(all_evidence)
+
+    raw_item_ids = {ev["raw_item_id"] for ev in all_evidence if ev.get("raw_item_id")}
+    raw_items_by_id = wg.get_raw_items_by_ids(list(raw_item_ids)) if raw_item_ids else {}
+
+    issue_cards = []
+    for issue in sorted(open_issues, key=lambda i: i.get("priority_score") or 0, reverse=True):
+        actions = workgraph_nba.candidate_actions(issue, evidence_by_issue.get(issue["id"], []), None, synthesis)
+        for a in actions:
+            rid = a.get("raw_item_id")
+            raw_item = raw_items_by_id.get(rid) if rid else None
+            if raw_item:
+                a["open_email"] = deep_links.open_email_action(raw_item)
+                a["draft_reply"] = deep_links.draft_reply_action(raw_item)
+                a["draft_forward"] = deep_links.draft_forward_action(raw_item)
+        issue_cards.append({
+            "id": issue["id"], "title": issue.get("display_title") or issue["title"],
+            "state": issue["state"], "category": issue.get("category"),
+            "nba_reason": issue.get("nba_reason"), "actions": actions,
+        })
+
+    # get_project() (singular) doesn't do list_projects()'s synthesis join -
+    # derived_title lives on the synthesis row already fetched above, name
+    # is the raw fallback (same precedence list_projects uses).
+    project_title = (synthesis or {}).get("derived_title") or project.get("name")
+    return {
+        "project": {"id": project["id"], "title": project_title},
+        "summary": (synthesis or {}).get("summary"),
+        "issues": issue_cards,
+        "attachments": attachments,
+        "parties": workgraph_projects.aggregate_parties_for_project(project_id),
+    }
+
+
+@app.get("/api/addin/focus-email")
+async def api_addin_focus_email(conversation_id: str):
+    """Task #240: "focus on the email I have open" - Office.js's
+    conversationId is the same Exchange conversation-thread GUID Outlook
+    COM writes into raw_items.stable_key (ingest/outlook_scan.ps1),
+    so this is a direct, ground-truth lookup, not a guess."""
+    project_id = wg.project_id_for_conversation_id(conversation_id)
+    if project_id is None:
+        return JSONResponse({"matched": False})
+    card = _build_addin_focus_card(project_id)
+    if card is None:
+        return JSONResponse({"matched": False})
+    return SafeJSONResponse({"matched": True, "card": card})
+
+
+@app.get("/api/addin/focus-project/{project_id}")
+async def api_addin_focus_project(project_id: str):
+    """Same rich card shape as focus-email/focus-party, addressed directly
+    by project_id - lets the add-in's "View full project" drill-down (from
+    the top-actions list) render the identical real-actions card instead of
+    a second, flatter view."""
+    card = _build_addin_focus_card(project_id)
+    if card is None:
+        raise HTTPException(404, f"no such project: {project_id}")
+    return SafeJSONResponse({"card": card})
+
+
+@app.get("/api/addin/focus-party")
+async def api_addin_focus_party(q: str):
+    """Task #241: "focus on a supplier or person" even when it's not the
+    currently open email - fuzzy party name/company match -> every
+    project those parties touch, most-recently-active first."""
+    project_ids = wg.project_ids_for_party_query(q)
+    cards = [c for c in (_build_addin_focus_card(pid) for pid in project_ids) if c is not None]
+    return SafeJSONResponse({"matched": bool(cards), "cards": cards})
+
+
 class WorkgraphProjectStatusBody(BaseModel):
     status: str
     actor: Optional[str] = None

@@ -45,6 +45,9 @@ _ALLOWED_TOOLS = [
     "mcp__jasper__jasper_open_email",
     "mcp__jasper__jasper_draft_reply",
     "mcp__jasper__jasper_draft_forward",
+    "mcp__jasper__jasper_focus_email",
+    "mcp__jasper__jasper_focus_party",
+    "mcp__jasper__jasper_request_contract_review",
     # the already-authorized M365 claude.ai connector - read/search only,
     # no send/write tool is exposed by it today (confirmed from the live
     # tool list); re-check this list if the connector's tool set changes.
@@ -66,10 +69,17 @@ _SYSTEM_PROMPT = (
     "tracked work - they're curated, deduped ground truth. Only reach for "
     "the Microsoft 365 tools when Jasper's own data doesn't have what you "
     "need (something not yet tracked) or the ask is explicitly about live "
-    "mailbox/calendar content. Keep replies short and concrete - this "
-    "renders in a narrow task pane, not a full chat window. Never claim an "
-    "email was sent; jasper_draft_reply/jasper_draft_forward only open a "
-    "draft window in Outlook, they never send."
+    "mailbox/calendar content. When Marc asks to focus on a supplier or "
+    "person by name, use jasper_focus_party, not jasper_search - it returns "
+    "ready-to-render project cards with suggested actions, not raw hits. "
+    "When offering a suggested action, actually offer to do it and follow "
+    "through if Marc says yes: jasper_draft_reply/jasper_draft_forward for "
+    "drafting, jasper_request_contract_review for reviewing an attached "
+    "contract (this queues a real worker run, it does not finish instantly - "
+    "say so). Keep replies short and concrete - this renders in a narrow "
+    "task pane, not a full chat window. Never claim an email was sent; "
+    "jasper_draft_reply/jasper_draft_forward only open a draft window in "
+    "Outlook, they never send."
 )
 
 

@@ -101,10 +101,32 @@ gradual drift, active staleness, and real discontinuity respectively:
   catches a job change in progress: new, unfamiliar recurring patterns showing up
   is exactly what a fresh discovery pass is built to notice.
 
-A real, practical trigger worth designing in explicitly: run a full incremental
-discovery pass (not just field-level Haiku backfill) on some real cadence (e.g.
-monthly, or triggered by a threshold of new never-before-seen sender domains/
-subject patterns) - not only reactively when something breaks.
+**Locked in (2026-08-06), a real two-tier mechanism, not a single trigger:**
+
+1. **Continuous, cheap, deterministic tracking - no LLM cost.** Every new item
+   gets checked against a `candidate_pattern_observations` table (pattern
+   signature - sender domain / labeled-field name / structural signature -
+   count, distinct-thread count, first_seen_ts, last_seen_ts). Pure counting,
+   always on. When a pattern crosses the real significance bar - **5
+   occurrences, across at least 2 genuinely distinct threads/senders (not 5
+   copies of the same forwarded email), within a rolling 60-day window** (Marc's
+   own number, more conservative than this document's first draft of 3 -
+   fewer false-positive proposals cluttering review, at the accepted cost of
+   being slower to catch a real but lower-frequency pattern) - THAT crossing is
+   what triggers a real LLM call: characterize the pattern from the accumulated
+   real examples, draft a proposal, present for confirmation. Never auto-added.
+2. **A monthly full sweep, not instead of (1) - a genuine complement.** (1)
+   catches clear-cut new recurring patterns cheaply; a periodic full
+   LLM-driven re-analysis catches subtler things pure frequency-counting
+   would miss (patterns that look different on the surface but are actually
+   related), and is the natural place to handle REMOVAL/staleness too -
+   checking the WHOLE existing confirmed vocabulary at once for "hasn't
+   matched anything real in months, still relevant?" (§3's job-change case) in
+   a way (1) isn't built to do at all. Same rule as everywhere else in this
+   design: proposes, never auto-commits - additions and removals alike.
+
+Same real, practical trigger for the monthly sweep either way: run it on a
+fixed cadence (monthly), not only reactively when something visibly breaks.
 
 ## 4. Data model (sketch, not final)
 
@@ -132,6 +154,15 @@ data_point_values
   value               TEXT
   extraction_source    TEXT           -- 'deterministic' | 'llm_backfill' | 'llm_judgment'
   extracted_ts         REAL
+
+candidate_pattern_observations       -- §3's continuous cheap tracker, pre-proposal
+  id                  INTEGER PK
+  pattern_signature   TEXT            -- normalized sender domain / labeled-field name / structural key
+  occurrence_count    INTEGER
+  distinct_thread_count INTEGER
+  first_seen_ts       REAL
+  last_seen_ts        REAL
+  promoted_to_definition_id TEXT NULL -- set once this crosses the bar and a real proposal is drafted
 ```
 
 This replaces today's hardcoded shape (`compute_work_object_signature`'s

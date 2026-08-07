@@ -110,5 +110,43 @@ def jasper_draft_forward(raw_item_id: int) -> dict:
     return _post("/api/action/draft-forward", {"raw_item_id": raw_item_id})
 
 
+@mcp.tool()
+def jasper_focus_email(conversation_id: str) -> dict:
+    """Focus on the email Marc currently has open in Outlook/Teams. Pass
+    Office.js's Office.context.mailbox.item.conversationId verbatim. Returns
+    {"matched": false} if that thread isn't tracked yet, or {"matched": true,
+    "card": {...}} with the project's summary, every open issue with real
+    suggested actions (each carrying open_email/draft_reply/draft_forward
+    when it points at a specific message), attachments, and parties. Use
+    this when Marc asks something like 'what's this about' or 'what should
+    I do with this' about his currently open message."""
+    return _get("/api/addin/focus-email", {"conversation_id": conversation_id})
+
+
+@mcp.tool()
+def jasper_focus_party(query: str) -> dict:
+    """Focus on a supplier or person by name/company, independent of
+    whatever email Marc currently has open. Fuzzy-matches against every
+    known contact and returns one focus card (same shape as
+    jasper_focus_email's "card") per distinct project that party touches,
+    most-recently-active first. Use when Marc asks to 'pull up <supplier>'
+    or 'what's going on with <person>'."""
+    return _get("/api/addin/focus-party", {"q": query})
+
+
+@mcp.tool()
+def jasper_request_contract_review(issue_id: str, instructions: str = "") -> dict:
+    """Dispatch a REAL contract-review skill run for this issue via Jasper's
+    existing worker action-bridge (the same mechanism the cockpit's 'Review
+    contract' button uses) - a worker wakes, reads the issue's attached
+    document(s), and produces a real review. This does not happen instantly;
+    it queues a pending action. Use when Marc says something like 'review
+    that contract' or accepts an offered contract-review action."""
+    return _post("/api/cockpit/actions", {
+        "issue_id": issue_id, "action_kind": "review_contract",
+        "worker": "bridge", "instructions": instructions,
+    })
+
+
 if __name__ == "__main__":
     mcp.run(transport="stdio")

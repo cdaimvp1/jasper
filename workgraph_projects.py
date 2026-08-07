@@ -47,6 +47,7 @@ import workgraph_store as ws
 import workgraph_lessons
 import workgraph_signals
 import workgraph_nba
+import workgraph_parties
 
 WEAK_SIGNAL_WINDOW_DAYS = 45
 
@@ -2178,6 +2179,23 @@ def extract_issue_from_project(project_id: str, *, title: str, category: Optiona
             raw_item_id=raw_item_id,
         )
         evidence_added += 1
+        # Real bug found live (2026-08-06, add-in demo prep): this loop cites
+        # each raw_item's claims/evidence onto new_issue_id but never moved
+        # raw_items.issue_id itself - workgraph_parties.extract_and_link_
+        # parties_for_issue reads ws.get_raw_items_for_issue(issue_id), i.e.
+        # raw_items WHERE issue_id = ?, so every issue created via this
+        # function (the ONLY path that creates real 'request' work objects
+        # in the corrected pipeline) ended up with zero linked raw_items by
+        # this column and therefore zero parties - confirmed live against
+        # the post-wipe corpus: 3478 real issues, 0 rows in `parties`.
+        # link_raw_item_to_issue is the same primitive workgraph_classify.py
+        # already uses to establish this exact ownership; using it here
+        # keeps this cited raw_item consistent with every other reader that
+        # trusts raw_items.issue_id (parties, get_raw_items_for_issue,
+        # thread_map-style lookups), not just the newer evidence/claims path.
+        ws.link_raw_item_to_issue(raw_item_id, new_issue_id)
+
+    workgraph_parties.extract_and_link_parties_for_issue(new_issue_id)
 
     return {"issue_id": new_issue_id, "project_id": project_id,
             "claims_moved": len(claims), "evidence_added": evidence_added}

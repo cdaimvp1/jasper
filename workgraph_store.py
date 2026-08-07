@@ -442,32 +442,6 @@ def init_workgraph() -> None:
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_nba_choice_log_issue_status ON nba_choice_log(issue_id, status, offered_ts DESC)")
 
-            # 2026-07-31 grouping-narrowing follow-up: workgraph_projects.
-            # scored_grouping_decision()'s verdict was computed on every
-            # group_issue() call but only ever tallied into outcome counts
-            # by batch callers, never persisted per-pair - so there was no
-            # way to build a real historical dataset to review scored-model
-            # behavior over time, or the adjudicated corpus a real accuracy
-            # evaluation needs. Append-only, one row per group_issue() call
-            # (not just when a project suggestion/merge results) - the
-            # "no_match" rows matter too, since a since-corrected no_match
-            # is itself a data point.
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS shadow_grouping_log (
-                    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-                    issue_id             TEXT NOT NULL REFERENCES issues(id),
-                    logged_ts            REAL NOT NULL,
-                    live_action          TEXT NOT NULL,   -- what group_issue() actually did (auto_merged/suggested/no_match/...)
-                    live_signal          TEXT,             -- reference/party/company/topic/precedent/scored/None
-                    live_sibling_id      TEXT,
-                    scored_verdict       TEXT NOT NULL,   -- scored_grouping_decision()'s verdict, always computed
-                    scored_score         REAL NOT NULL,
-                    scored_sibling_id    TEXT,
-                    scored_signals_json  TEXT NOT NULL    -- matched_signals list, as JSON
-                )
-            """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_shadow_grouping_log_issue ON shadow_grouping_log(issue_id, logged_ts DESC)")
-
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS alerts (
                     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3493,7 +3467,7 @@ def remediate_merge_issue_identity(winner_id: str, loser_id: str, *, reason_labe
                     time.sleep(random.uniform(0, 0.02) * (attempt + 1))
             try:
                 for table in ("raw_items", "evidence", "work_tasks", "issue_state_history",
-                              "nba_choice_log", "shadow_grouping_log"):
+                              "nba_choice_log"):
                     conn.execute(f"UPDATE {table} SET issue_id = ? WHERE issue_id = ?", (winner_id, loser_id))
 
                 loser_parties = conn.execute(
@@ -4069,53 +4043,6 @@ def expire_stale_nba_choice_logs(older_than_days: float) -> int:
             return cur.rowcount
         finally:
             conn.close()
-
-
-def log_shadow_grouping_decision(*, issue_id: str, live_action: str, live_signal: Optional[str],
-                                  live_sibling_id: Optional[str], scored_verdict: str, scored_score: float,
-                                  scored_sibling_id: Optional[str], scored_signals_json: str) -> int:
-    """One row per group_issue() call - see shadow_grouping_log's own
-    CREATE TABLE comment for why this exists (there was previously no
-    historical record of the scored model's shadow verdict at all)."""
-    with _lock:
-        conn = _connect()
-        try:
-            cur = conn.execute(
-                """INSERT INTO shadow_grouping_log
-                   (issue_id, logged_ts, live_action, live_signal, live_sibling_id,
-                    scored_verdict, scored_score, scored_sibling_id, scored_signals_json)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (issue_id, time.time(), live_action, live_signal, live_sibling_id,
-                 scored_verdict, scored_score, scored_sibling_id, scored_signals_json),
-            )
-            return cur.lastrowid
-        finally:
-            conn.close()
-
-
-def list_shadow_grouping_log(*, disagreements_only: bool = False, limit: int = 1000) -> list[dict]:
-    """Read-only review surface for shadow_grouping_log. disagreements_only
-    restricts to rows where the live (ordered) model and the scored model
-    reached a different verdict-shape - the cases actually worth a human
-    looking at before ever reconsidering config('grouping',
-    'scored_model_enabled')."""
-    with _lock:
-        conn = _connect()
-        try:
-            if disagreements_only:
-                rows = conn.execute(
-                    """SELECT * FROM shadow_grouping_log
-                       WHERE (live_action = 'auto_merged') != (scored_verdict = 'auto_merge')
-                       ORDER BY logged_ts DESC LIMIT ?""",
-                    (limit,),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT * FROM shadow_grouping_log ORDER BY logged_ts DESC LIMIT ?", (limit,)
-                ).fetchall()
-        finally:
-            conn.close()
-    return [dict(r) for r in rows]
 
 
 # --- alerts -------------------------------------------------------------

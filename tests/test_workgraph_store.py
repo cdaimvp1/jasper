@@ -1501,45 +1501,6 @@ def test_expire_stale_nba_choice_logs_leaves_recent_offered(ws_db):
     assert ws_db.get_most_recent_open_choice_log(iid)["id"] == log_id
 
 
-def test_log_shadow_grouping_decision_persists_all_fields(ws_db):
-    iid = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
-    log_id = ws_db.log_shadow_grouping_decision(
-        issue_id=iid, live_action="suggested", live_signal="company", live_sibling_id="marc-002",
-        scored_verdict="auto_merge", scored_score=0.7, scored_sibling_id="marc-002",
-        scored_signals_json='["company","topic"]',
-    )
-    rows = ws_db.list_shadow_grouping_log()
-    assert len(rows) == 1
-    row = rows[0]
-    assert row["id"] == log_id
-    assert row["issue_id"] == iid
-    assert row["live_action"] == "suggested"
-    assert row["live_signal"] == "company"
-    assert row["scored_verdict"] == "auto_merge"
-    assert row["scored_score"] == 0.7
-    assert row["scored_signals_json"] == '["company","topic"]'
-
-
-def test_list_shadow_grouping_log_disagreements_only_filters_to_mismatches(ws_db):
-    iid = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
-    # live agrees with scored (both auto_merge) - not a disagreement
-    ws_db.log_shadow_grouping_decision(
-        issue_id=iid, live_action="auto_merged", live_signal="reference", live_sibling_id="marc-001",
-        scored_verdict="auto_merge", scored_score=1.0, scored_sibling_id="marc-001", scored_signals_json="[]",
-    )
-    # live only suggests, but scored would have auto-merged - a real disagreement
-    ws_db.log_shadow_grouping_decision(
-        issue_id=iid, live_action="suggested", live_signal="company", live_sibling_id="marc-002",
-        scored_verdict="auto_merge", scored_score=0.7, scored_sibling_id="marc-002", scored_signals_json="[]",
-    )
-
-    all_rows = ws_db.list_shadow_grouping_log()
-    disagreements = ws_db.list_shadow_grouping_log(disagreements_only=True)
-    assert len(all_rows) == 2
-    assert len(disagreements) == 1
-    assert disagreements[0]["live_action"] == "suggested"
-
-
 
 
 def test_create_and_find_identity_constraint_either_ordering(ws_db):

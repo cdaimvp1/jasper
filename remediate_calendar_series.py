@@ -16,8 +16,8 @@ series and an unrelated governance issue.
 This is a STANDALONE script, not folded into the routine backfill_reclassify
 mechanism, because it's materially more invasive: it reassigns *issue*
 identity itself (not just project membership) across every FK table that
-references issue_id - raw_items, thread_map, evidence, work_tasks,
-issue_parties, issue_state_history, nba_choice_log, shadow_grouping_log
+references issue_id - raw_items, evidence, work_tasks,
+issue_parties, issue_state_history, nba_choice_log
 (synthesis is left alone - see EXECUTE_GROUP's own comment).
 
 SAFE BY DEFAULT: running this file with no arguments only ever finds and
@@ -45,7 +45,7 @@ import workgraph_store as ws
 
 _FK_TABLES_ISSUE_ID = (
     "raw_items", "evidence", "work_tasks", "issue_state_history",
-    "nba_choice_log", "shadow_grouping_log",
+    "nba_choice_log",
 )
 
 

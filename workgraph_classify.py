@@ -251,7 +251,8 @@ def _parse_participants(item: dict) -> Optional[list]:
 
 def classify_item(*, subject: str, body_preview: str, from_actor: str,
                    source: Optional[str] = None, organizer: Optional[str] = None,
-                   participants: Optional[list] = None) -> dict:
+                   participants: Optional[list] = None,
+                   confirmed_direction: Optional[str] = None) -> dict:
     """Pure (well - one settings-table read inside workgraph_signals, fail-
     open to its hardcoded default on any error). Returns
     direction/topic/sentiment/anomaly/item_class/signal_type/pr_number/
@@ -289,8 +290,17 @@ def classify_item(*, subject: str, body_preview: str, from_actor: str,
     # approval. Each now genuinely reflects "was this explicitly matched by
     # a real cue, or just defaulted/guessed" - the ratio deriveConfidence
     # below is supposed to measure.
+    # Task #270 Phase B (2026-08-07): a source that KNOWS an item's direction
+    # structurally (e.g. the sent-items ingester - it came out of Outlook's
+    # own Sent Items folder, there is no ambiguity to infer) wins over the
+    # cue-regex guess below, same precedence pattern this function already
+    # uses for the calendar-personal-block/signal-confirmed-topic overrides
+    # above. direction_inferred=False here is honest, not borrowed from the
+    # cue path - a real known fact, not a keyword match.
     direction_inferred = False
-    if INBOUND_CUE.search(text):
+    if confirmed_direction is not None:
+        direction = confirmed_direction
+    elif INBOUND_CUE.search(text):
         direction = "inbound"
     elif OUTBOUND_CUE.search(text):
         direction = "outbound"
@@ -435,6 +445,23 @@ def classify_item(*, subject: str, body_preview: str, from_actor: str,
     }
 
 
+def _confirmed_direction_from_meta(item: dict) -> Optional[str]:
+    """Task #270 Phase B: the sent-items ingester writes meta_json=
+    '{"confirmed_direction":"outbound"}' on every row it creates - a
+    structural fact of WHERE the item came from (Outlook's own Sent Items
+    folder), not a keyword guess. Reused the existing meta_json field
+    (already used by calendar ingestion for is_recurring/attendees_detailed,
+    see workgraph_store.py) rather than a new column - no migration needed."""
+    meta_json = item.get("meta_json")
+    if not meta_json:
+        return None
+    try:
+        meta = json.loads(meta_json)
+    except (TypeError, ValueError):
+        return None
+    return meta.get("confirmed_direction")
+
+
 def run_classification(limit: int = 500) -> dict:
     items = ws.get_unclassified_raw_items(limit=limit)
     counts = {"NOISE": 0, "ACTIONABLE-ASK": 0, "WAITING-ON-OTHERS": 0, "FYI-EVIDENCE": 0}
@@ -445,6 +472,7 @@ def run_classification(limit: int = 500) -> dict:
             from_actor=item.get("from_actor") or "",
             source=item.get("source"), organizer=item.get("from_actor"),
             participants=_parse_participants(item),
+            confirmed_direction=_confirmed_direction_from_meta(item),
         )
         ws.classify_raw_item(
             item["id"],
@@ -1306,18 +1334,14 @@ def cluster_and_link(limit: int = 500) -> dict:
     # real Kinaxis-fragmentation threads were still raw clusters, so
     # their real, already-mentioned stakeholders (e.g. an internal
     # contact with an existing, resolvable party record) were never
-    # being linked at all. Runs BEFORE workgraph_projects.run below so
-    # fresh party data is visible to this batch's own matching pass, not
-    # just the next one.
+    # being linked at all. (2026-08-07: this used to also run BEFORE
+    # workgraph_projects.run's own grouping pass so fresh party data was
+    # visible to that batch's matching - workgraph_projects.run and the
+    # retired group_issue()/scored_grouping_decision() path it drove are
+    # gone; workgraph_pipeline2.py's find_candidates/process_new_item is
+    # the live replacement, called from its own separate wake, not from
+    # here.)
     party_result = workgraph_parties.run(list(touched_issues))
-    # Corrected pipeline Phase C (2026-08-05): runs over EVERY touched work
-    # object, clusters included - group_issue()/scored_grouping_decision()
-    # are now cluster-aware (get_issue_or_cluster, a cluster-inclusive
-    # candidate pool, and a cluster-aware _shared_reference_id), so this is
-    # what actually lets a cluster group clear the 2+-data-point bar (or an
-    # exact shared reference) and get promoted into a real project - the
-    # gap the whole corrected-ordering plan exists to close.
-    project_result = workgraph_projects.run(list(touched_issues))
 
     # Personalized data-point discovery (task #213), LLM half - only
     # signatures actually touched THIS batch get checked, bounding real
@@ -1358,7 +1382,7 @@ def cluster_and_link(limit: int = 500) -> dict:
             "attached_via_teams_sender_anchor": attached_via_teams_sender_anchor,
             "would_attach_via_teams_sender_anchor": would_attach_via_teams_sender_anchor,
             "teams_sender_anchor_auto_attach_enabled": teams_sender_anchor_auto_attach,
-            "parties": party_result, "projects": project_result}
+            "parties": party_result}
 
 
 class HeldAsideItemError(ValueError):
@@ -1375,8 +1399,8 @@ def track_held_aside_item(raw_item_id: int) -> str:
     own new-issue fallback already builds (title/state/priority/
     confidence_tier, container-identity set, link_raw_item_to_issue, add_evidence,
     a starter task for a genuine ask, recompute_issue_state, then the same
-    parties/projects resolution pass a normal auto-created issue gets) -
-    this is a human overriding the hold-aside, not a second, different way
+    party-resolution pass a normal auto-created issue gets) - this is a
+    human overriding the hold-aside, not a second, different way
     an issue gets created. Returns the new issue_id."""
     item = ws.get_raw_item(raw_item_id)
     if item is None:
@@ -1407,7 +1431,6 @@ def track_held_aside_item(raw_item_id: int) -> str:
         ws.create_task(issue_id=issue_id, label=title, owner=owner)
     recompute_issue_state(issue_id, new_item_is_actionable=item.get("item_class") == "ACTIONABLE-ASK")
     workgraph_parties.run([issue_id])
-    workgraph_projects.run([issue_id])
     derived_title = compute_deterministic_title(issue_id)
     if derived_title:
         ws.set_derived_title("issue", issue_id, derived_title)
@@ -1465,6 +1488,7 @@ def backfill_reclassify() -> dict:
             from_actor=item.get("from_actor") or "",
             source=item.get("source"), organizer=item.get("from_actor"),
             participants=_parse_participants(item),
+            confirmed_direction=_confirmed_direction_from_meta(item),
         )
         # Fixed 2026-07-29: this used to only COMPARE topic/item_class/
         # signal_type, then WRITE direction/sentiment/anomaly_flag straight

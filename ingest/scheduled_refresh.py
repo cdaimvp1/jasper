@@ -34,15 +34,16 @@ import workgraph_classify
 import workgraph_nba
 import workgraph_alerts
 import workgraph_synthesis
-import workgraph_projects
 import workgraph_identity
 import workgraph_deepdive
 import outlook_com_ingest
+import outlook_com_sent_ingest
 import retention
 import health_check
 import personal_patterns
 import workgraph_aristotle
 import workgraph_pipeline2
+import config
 
 from paths import DATA_DIR
 
@@ -325,6 +326,25 @@ def run() -> dict:
     except Exception as e:
         mail_result = {"ok": False, "error": str(e)}
 
+    # 1.1. Sent Items (task #270 Phase A, 2026-08-07) - same source="outlook_
+    # mail" the inbound path uses (NOT a new source value - see outlook_com_
+    # sent_ingest.py's own module docstring for why that's load-bearing), so
+    # a sent reply attaches to its real existing thread via ConversationID
+    # with zero new matching code. Gated behind a config toggle, OFF by
+    # default (task #270 Phase B's own recommendation): the first time this
+    # exact mailbox's Sent Items folder gets machine-read at this depth, so
+    # a short bake-in window against real data is cheap insurance before
+    # trusting it to auto-attach into real issues on the live cadence.
+    # Marc turns this on explicitly once validated (config.set("ingest",
+    # "sent_items_enabled", True) or the equivalent settings.json edit).
+    if config.get("ingest", "sent_items_enabled", default=False):
+        try:
+            sent_mail_result = outlook_com_sent_ingest.run()
+        except Exception as e:
+            sent_mail_result = {"ok": False, "error": str(e)}
+    else:
+        sent_mail_result = {"ok": True, "skipped": True, "reason": "ingest.sent_items_enabled is off"}
+
     # 2. First classify+NBA pass (covers whatever mail just brought in).
     classify_result_1 = workgraph_classify.run()
     nba_result_1 = workgraph_nba.recompute_all()
@@ -415,15 +435,6 @@ def run() -> dict:
     except Exception as e:
         aristotle_detection_result = {"error": str(e)}
 
-    # 11. Phase 0 fix (D2) - expire stale pending merge suggestions, once/day,
-    # same never-block guard. Structural backstop against the queue
-    # accumulating again regardless of the same_category_proximity_
-    # suggestions_enabled flag's setting.
-    try:
-        suggestion_expiry_result = workgraph_projects.run_suggestion_expiry_daily_if_due()
-    except Exception as e:
-        suggestion_expiry_result = {"error": str(e)}
-
     # 12. Phase 0 fix (D12) - same once/day gate, expires stale 'offered'
     # nba_choice_log rows nothing ever resolved before.
     try:
@@ -452,6 +463,7 @@ def run() -> dict:
 
     summary = {
         "mail": mail_result,
+        "sent_mail": sent_mail_result,
         "classify_after_mail": classify_result_1,
         "alerts_after_mail": alerts_result_1,
         "relay": relay_result,
@@ -466,7 +478,6 @@ def run() -> dict:
         "health_check": health_check_result,
         "personal_learning": personal_learning_result,
         "aristotle_detection": aristotle_detection_result,
-        "suggestion_expiry": suggestion_expiry_result,
         "choice_log_expiry": choice_log_expiry_result,
         "identity_backfill": identity_backfill_result,
         "prepared_action_expiry": prepared_action_expiry_result,

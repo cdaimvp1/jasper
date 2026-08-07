@@ -85,6 +85,43 @@ def test_classify_item_without_calendar_params_is_unaffected():
     assert result["item_class"] != "NOISE"
 
 
+# --- confirmed_direction (task #270 Phase B, 2026-08-07) -------------------
+
+def test_classify_item_confirmed_direction_wins_over_cue_regex():
+    """A sent-items row with confirmed_direction="outbound" must not be
+    overridden by OUTBOUND_CUE/INBOUND_CUE - a real known fact (it came out
+    of Outlook's own Sent Items folder) beats a keyword guess. This exact
+    text would otherwise match INBOUND_CUE ("received")."""
+    result = wc.classify_item(
+        subject="Re: SOW", body_preview="Received, thanks - approved.",
+        from_actor="lane_marc@lilly.com", confirmed_direction="outbound",
+    )
+    assert result["direction"] == "outbound"
+    assert result["direction_inferred"] is False
+
+
+def test_classify_item_without_confirmed_direction_falls_back_to_cue_regex():
+    """Every pre-existing caller passes confirmed_direction=None (the
+    default) and is completely unaffected - the cue-regex path still owns
+    direction for anything not sourced from the sent-items ingester."""
+    result = wc.classify_item(
+        subject="Re: SOW", body_preview="Received, thanks - approved.",
+        from_actor="someone@example.com",
+    )
+    assert result["direction"] == "inbound"
+
+
+def test_confirmed_direction_from_meta_reads_meta_json():
+    assert wc._confirmed_direction_from_meta({"meta_json": '{"confirmed_direction":"outbound"}'}) == "outbound"
+
+
+def test_confirmed_direction_from_meta_none_for_missing_or_malformed():
+    assert wc._confirmed_direction_from_meta({}) is None
+    assert wc._confirmed_direction_from_meta({"meta_json": None}) is None
+    assert wc._confirmed_direction_from_meta({"meta_json": "not json"}) is None
+    assert wc._confirmed_direction_from_meta({"meta_json": '{"is_recurring": true}'}) is None
+
+
 def test_parse_participants_handles_valid_json_list():
     assert wc._parse_participants({"participants": '["a@x.com", "b@x.com"]'}) == ["a@x.com", "b@x.com"]
 
@@ -1254,34 +1291,6 @@ def test_cluster_and_link_reference_match_ignores_closed_issues(ws_db, monkeypat
 
     assert result["attached_via_reference"] == 0
     assert result["issues_created"] == 1
-
-
-def test_cluster_and_link_promotes_two_independent_clusters_sharing_reference_into_one_project(ws_db, monkeypatch, tmp_path):
-    """Corrected pipeline Phase C (2026-08-05) end-to-end: with the inline
-    reference-auto-attach path OFF (so two same-reference items each become
-    their OWN independent cluster, no thread match either - different
-    thread_keys), the end-of-loop pass-2 wiring (workgraph_projects.run
-    over every touched work object, clusters included) must still find the
-    shared exact reference across the two clusters and promote them into
-    one real project - this is what actually closes the gap the whole
-    corrected-ordering plan exists for: a cluster group clearing the bar on
-    its own, not just via the inline same-wake attach shortcut."""
-    _isolate_config(ws_db, monkeypatch, tmp_path)
-
-    first_rid = _pending_item(ws_db, "ckp1", "First notice", pr_number="PR445566", from_actor="alice@example.com")
-    wc.cluster_and_link()
-    second_rid = _pending_item(ws_db, "ckp2", "A totally different subject", pr_number="PR445566", from_actor="carol@example.com")
-    wc.cluster_and_link()
-
-    first_cluster_id = ws_db.get_raw_item(first_rid)["issue_id"]
-    second_cluster_id = ws_db.get_raw_item(second_rid)["issue_id"]
-    assert first_cluster_id != second_cluster_id, "must be two independent clusters, not attached inline"
-
-    first_cluster = ws_db.get_cluster(first_cluster_id)
-    second_cluster = ws_db.get_cluster(second_cluster_id)
-    assert first_cluster is not None and second_cluster is not None
-    assert first_cluster["project_id"] is not None
-    assert first_cluster["project_id"] == second_cluster["project_id"]
 
 
 # --- Jasper reference-tag direct match (task #36) -------------------------

@@ -895,8 +895,13 @@ def test_merge_issues_txn_singleton_loser_still_auto_merges(ws_db):
 def test_merge_issues_txn_established_loser_defers_to_reconciliation(ws_db):
     """2026-07-31 (step 5, mandatory reconciliation): a loser project with
     ANY real member beyond the issue being merged is an established
-    project with its own history - refuses to auto-collapse it, creates a
-    'merge_projects' pending suggestion instead of merging."""
+    project with its own history - refuses to auto-collapse it, returns a
+    'deferred' status instead of merging. (2026-08-07: this used to also
+    persist a 'merge_projects' pending_project_suggestions row and return
+    its id - dropped along with that whole retired review queue, since
+    nothing ever read the id back; workgraph_pipeline2.process_new_item's
+    own "try the next candidate" handling of a deferred result needs
+    nothing more than the status itself.)"""
     proj_a = ws_db.create_project_with_new_id(name="Project A", category="other")
     a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
     ws_db.assign_issue_to_project(a, proj_a)
@@ -909,16 +914,11 @@ def test_merge_issues_txn_established_loser_defers_to_reconciliation(ws_db):
 
     result = ws_db.merge_issues_txn(a, b, reason_label="test collision", new_project_name="unused", new_project_category="other")
 
-    assert result["status"] == "deferred"
-    assert result["winner_project_id"] == proj_a
-    assert result["loser_project_id"] == proj_b
+    assert result == {"status": "deferred", "winner_project_id": proj_a, "loser_project_id": proj_b}
     # NOTHING actually merged - other/b/proj_b all untouched.
     assert ws_db.get_issue(other)["project_id"] == proj_b
     assert ws_db.get_issue(b)["project_id"] == proj_b
     assert ws_db.get_project(proj_b)["status"] != "archived"
-    sugg = ws_db.get_project_suggestion(result["suggestion_id"])
-    assert sugg["suggestion_kind"] == "merge_projects"
-    assert sugg["status"] == "pending"
 
 
 def test_would_collide_established_projects_none_when_no_collision(ws_db):
@@ -1540,49 +1540,6 @@ def test_list_shadow_grouping_log_disagreements_only_filters_to_mismatches(ws_db
     assert disagreements[0]["live_action"] == "suggested"
 
 
-# --- suggestion_kind / project_links (related-vs-same-project, 2026-07-31) -
-
-def test_create_project_suggestion_defaults_to_merge_kind(ws_db):
-    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
-    b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
-    sid = ws_db.create_project_suggestion(issue_id_a=a, issue_id_b=b, reason="test")
-    sugg = ws_db.get_project_suggestion(sid)
-    assert sugg["suggestion_kind"] == "merge"
-
-
-def test_create_project_suggestion_link_kind(ws_db):
-    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
-    b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
-    sid = ws_db.create_project_suggestion(issue_id_a=a, issue_id_b=b, reason="test", suggestion_kind="link")
-    sugg = ws_db.get_project_suggestion(sid)
-    assert sugg["suggestion_kind"] == "link"
-
-
-def test_create_project_suggestion_rejects_invalid_kind(ws_db):
-    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
-    b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
-    with pytest.raises(ValueError):
-        ws_db.create_project_suggestion(issue_id_a=a, issue_id_b=b, reason="test", suggestion_kind="bogus")
-
-
-def test_create_project_suggestion_dedup_is_scoped_to_same_kind(ws_db):
-    """A pending 'merge' suggestion for a pair must NOT be reused for a
-    'link' suggestion on the same pair - they're different questions."""
-    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
-    b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
-    merge_id = ws_db.create_project_suggestion(issue_id_a=a, issue_id_b=b, reason="merge reason", suggestion_kind="merge")
-    link_id = ws_db.create_project_suggestion(issue_id_a=a, issue_id_b=b, reason="link reason", suggestion_kind="link")
-    assert merge_id != link_id
-    assert len(ws_db.list_project_suggestions(status="pending")) == 2
-
-
-def test_create_project_suggestion_same_kind_dedups(ws_db):
-    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
-    b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
-    first = ws_db.create_project_suggestion(issue_id_a=a, issue_id_b=b, reason="r1", suggestion_kind="link")
-    second = ws_db.create_project_suggestion(issue_id_a=b, issue_id_b=a, reason="r2", suggestion_kind="link")
-    assert first == second
-    assert len(ws_db.list_project_suggestions(status="pending")) == 1
 
 
 def test_create_and_find_identity_constraint_either_ordering(ws_db):
@@ -2278,49 +2235,6 @@ def test_list_activity_stream_excludes_evidence_behind_a_milestone_claim(ws_db):
     assert "the ask email" not in summaries  # behind a milestone claim's raw_item - excluded
 
 
-def test_expire_stale_project_suggestions_expires_old_pending_merge(ws_db):
-    """Phase 0 fix (D2): the structural backstop against the pending queue
-    accumulating forever, independent of the generation flag's setting."""
-    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
-    b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
-    sid = ws_db.create_project_suggestion(issue_id_a=a, issue_id_b=b, reason="test", suggestion_kind="merge")
-    conn = ws_db._connect()
-    conn.execute("UPDATE pending_project_suggestions SET created_ts = ? WHERE id = ?",
-                 (time.time() - 30 * 86400, sid))
-    conn.close()
-
-    expired = ws_db.expire_stale_project_suggestions(21)
-
-    assert expired == 1
-    assert ws_db.get_project_suggestion(sid)["status"] == "expired"
-
-
-def test_expire_stale_project_suggestions_leaves_recent_pending(ws_db):
-    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
-    b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
-    sid = ws_db.create_project_suggestion(issue_id_a=a, issue_id_b=b, reason="test", suggestion_kind="merge")
-
-    expired = ws_db.expire_stale_project_suggestions(21)
-
-    assert expired == 0
-    assert ws_db.get_project_suggestion(sid)["status"] == "pending"
-
-
-def test_expire_stale_project_suggestions_exempts_link_kind_by_default(ws_db):
-    """A 'related' suggestion doesn't go stale the way a same-project merge
-    guess does - Marc may still want to confirm it long after it surfaced."""
-    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
-    b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
-    sid = ws_db.create_project_suggestion(issue_id_a=a, issue_id_b=b, reason="test", suggestion_kind="link")
-    conn = ws_db._connect()
-    conn.execute("UPDATE pending_project_suggestions SET created_ts = ? WHERE id = ?",
-                 (time.time() - 30 * 86400, sid))
-    conn.close()
-
-    expired = ws_db.expire_stale_project_suggestions(21)
-
-    assert expired == 0
-    assert ws_db.get_project_suggestion(sid)["status"] == "pending"
 
 
 def test_create_project_link_persists_and_is_idempotent(ws_db):
@@ -2483,61 +2397,14 @@ def test_list_source_containers_filters_by_issue(ws_db):
     assert [r["id"] for r in ws_db.list_source_containers(issue_id="marc-1")] == ["sc1"]
 
 
-def test_upsert_work_object_relationship_normalizes_pair_order(ws_db):
-    """Task #184 Phase D: the same real pair, detected from either
-    direction on two different passes, must land as ONE row - not two
-    duplicates depending on which side happened to be iterated first."""
-    ws_db.upsert_work_object_relationship(a_id="marc-b", b_id="marc-a", relationship_type="candidate",
-                                           match_count=2, matched_signals=["supplier", "stakeholder"])
-    ws_db.upsert_work_object_relationship(a_id="marc-a", b_id="marc-b", relationship_type="candidate",
-                                           match_count=3, matched_signals=["supplier", "stakeholder", "amount"])
-    row = ws_db.get_work_object_relationship("marc-a", "marc-b")
-    assert row is not None
-    assert row["from_id"] == "marc-a" and row["to_id"] == "marc-b"
-    assert row["match_count"] == 3  # the later, richer pass's count won - a real update, not a stale duplicate
 
 
-def test_upsert_work_object_relationship_never_overwrites_a_resolved_decision(ws_db):
-    """A curator/human judgment (confirmed or rejected) is permanent -
-    a later detection pass re-finding the same pair as a fresh candidate
-    must never silently re-litigate it."""
-    rid = ws_db.upsert_work_object_relationship(a_id="marc-a", b_id="marc-b", relationship_type="candidate",
-                                                  match_count=2, matched_signals=["supplier", "stakeholder"])
-    ws_db.resolve_work_object_relationship(rid, "rejected")
-    ws_db.upsert_work_object_relationship(a_id="marc-a", b_id="marc-b", relationship_type="candidate",
-                                           match_count=4, matched_signals=["supplier", "stakeholder", "amount", "document"])
-    row = ws_db.get_work_object_relationship("marc-a", "marc-b")
-    assert row["relationship_type"] == "rejected"
-    assert row["match_count"] == 2  # untouched - the rejection stands regardless of later match strength
 
 
-def test_list_pending_work_object_relationships_ranks_by_match_count_desc(ws_db):
-    ws_db.upsert_work_object_relationship(a_id="marc-a", b_id="marc-b", relationship_type="candidate",
-                                           match_count=2, matched_signals=["supplier", "stakeholder"])
-    ws_db.upsert_work_object_relationship(a_id="marc-c", b_id="marc-d", relationship_type="candidate",
-                                           match_count=4, matched_signals=["supplier", "stakeholder", "amount", "document"])
-    ws_db.upsert_work_object_relationship(a_id="marc-e", b_id="marc-f", relationship_type="bridge",
-                                           match_count=3, matched_signals=["supplier", "amount", "document"])
-    rows = ws_db.list_pending_work_object_relationships()
-    assert [r["match_count"] for r in rows] == [4, 3, 2]
 
 
-def test_list_pending_work_object_relationships_excludes_resolved(ws_db):
-    rid = ws_db.upsert_work_object_relationship(a_id="marc-a", b_id="marc-b", relationship_type="candidate",
-                                                   match_count=2, matched_signals=["supplier", "stakeholder"])
-    ws_db.resolve_work_object_relationship(rid, "confirmed")
-    assert ws_db.list_pending_work_object_relationships() == []
 
 
-def test_list_work_object_relationships_for_finds_either_direction(ws_db):
-    ws_db.upsert_work_object_relationship(a_id="marc-a", b_id="marc-b", relationship_type="candidate",
-                                           match_count=2, matched_signals=["supplier", "stakeholder"])
-    ws_db.upsert_work_object_relationship(a_id="marc-c", b_id="marc-a", relationship_type="candidate",
-                                           match_count=2, matched_signals=["amount", "document"])
-    rows = ws_db.list_work_object_relationships_for("marc-a")
-    assert len(rows) == 2
-    pairs = {(r["from_id"], r["to_id"]) for r in rows}
-    assert pairs == {("marc-a", "marc-b"), ("marc-a", "marc-c")}
 
 
 def test_upsert_source_session_is_idempotent_and_updates_end(ws_db):

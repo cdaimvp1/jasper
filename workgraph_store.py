@@ -762,82 +762,6 @@ def init_workgraph() -> None:
             except sqlite3.OperationalError:
                 pass
 
-            # Weak-signal candidate merges (e.g. same company guess but no
-            # shared party, or same party but different category) - NOT
-            # auto-applied, surfaced for confirmation. Strong-signal matches
-            # (shared external party + same category) auto-merge directly
-            # without a row here - see workgraph_projects.py.
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS pending_project_suggestions (
-                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                    issue_id_a  TEXT NOT NULL,
-                    issue_id_b  TEXT NOT NULL,
-                    reason      TEXT NOT NULL,
-                    status      TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','confirmed','rejected')),
-                    created_ts  REAL NOT NULL,
-                    resolved_ts REAL
-                )
-            """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_project_suggestions_status ON pending_project_suggestions(status)")
-            try:
-                # 2026-07-31 (meeting-grouping/related-project identity pass):
-                # every suggestion used to mean "propose a same-project
-                # merge" - no way to represent "these are connected but
-                # should stay separate projects" (Marc's real example:
-                # exiting an IQVIA contract via H1, vs. negotiating a NEW
-                # direct H1 deal - causally related, should very likely stay
-                # separate). 'link' suggestions (see project_links below)
-                # and 'merge_projects' (step 5 - a collision between two
-                # ALREADY-established projects) reuse this same queue rather
-                # than forking a second review surface/routine doc. No CHECK
-                # constraint here (no precedent in this file for ALTER TABLE
-                # ADD COLUMN ... CHECK) - valid values enforced in Python at
-                # create_project_suggestion, same pattern set_project_status
-                # already uses for its own status argument.
-                conn.execute("ALTER TABLE pending_project_suggestions ADD COLUMN suggestion_kind TEXT NOT NULL DEFAULT 'merge'")
-            except sqlite3.OperationalError:
-                pass
-
-            # Phase 0 fix (D2, 2026-08-03): 'expired' is a new resolution for
-            # the sweep in expire_stale_project_suggestions - a status VALUE
-            # on a column whose CHECK is baked into the original CREATE TABLE
-            # (unlike suggestion_kind above, which was added later with no
-            # CHECK at all), so this needs the same detect+rebuild migration
-            # already used for issues.state (task #44) and alerts.kind (task
-            # #55), not a plain ALTER. Only 'merge' suggestions expire -
-            # 'link' suggestions are exempt (see expire_stale_project_
-            # suggestions' own docstring for why).
-            existing_suggestions_sql = conn.execute(
-                "SELECT sql FROM sqlite_master WHERE type='table' AND name='pending_project_suggestions'"
-            ).fetchone()
-            if existing_suggestions_sql and "'expired'" not in (existing_suggestions_sql["sql"] or ""):
-                try:
-                    conn.execute("BEGIN IMMEDIATE")
-                    conn.execute("ALTER TABLE pending_project_suggestions RENAME TO pending_project_suggestions_pre_phase0")
-                    conn.execute("""
-                        CREATE TABLE pending_project_suggestions (
-                            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                            issue_id_a      TEXT NOT NULL,
-                            issue_id_b      TEXT NOT NULL,
-                            reason          TEXT NOT NULL,
-                            status          TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','confirmed','rejected','expired')),
-                            created_ts      REAL NOT NULL,
-                            resolved_ts     REAL,
-                            suggestion_kind TEXT NOT NULL DEFAULT 'merge'
-                        )
-                    """)
-                    cols = [r["name"] for r in conn.execute("PRAGMA table_info(pending_project_suggestions_pre_phase0)").fetchall()]
-                    col_list = ", ".join(cols)
-                    conn.execute(f"INSERT INTO pending_project_suggestions ({col_list}) SELECT {col_list} FROM pending_project_suggestions_pre_phase0")
-                    conn.execute("DROP TABLE pending_project_suggestions_pre_phase0")
-                    conn.execute("CREATE INDEX IF NOT EXISTS idx_project_suggestions_status ON pending_project_suggestions(status)")
-                    conn.execute("COMMIT")
-                except sqlite3.OperationalError:
-                    try:
-                        conn.execute("ROLLBACK")
-                    except sqlite3.OperationalError:
-                        pass
-
             # 2026-07-31: durable relationships between two DIFFERENT real
             # projects that should NOT become one project - e.g. "same
             # vendor team, adjacent topics" (two distinct recurring PwC
@@ -1203,49 +1127,6 @@ def init_workgraph() -> None:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_identity_constraints_a ON identity_constraints(constraint_type, subject_a)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_identity_constraints_b ON identity_constraints(constraint_type, subject_b)")
 
-            # work_object_relationships (task #184 Phase D, 2026-08-05, Marc's
-            # direct redesign): the persisted group-to-group relationship
-            # graph his design calls for ("we want to ensure we are capturing
-            # that somewhere so it can be referenced when the next email
-            # comes in - we don't want to have to keep mapping the whole
-            # backlog over and over again"). Generalizes pending_project_
-            # suggestions' shape (issue_id_a/issue_id_b/reason/status) to
-            # arbitrary work_object pairs at ANY grain (a fresh provisional
-            # group, an already-confirmed project, or a mix) - the thing
-            # that lets a new item's pass-2 match check ask "have I already
-            # decided this pair" instead of recomputing/re-suggesting
-            # against the whole corpus every wake.
-            #
-            # from_id/to_id are stored ORDER-NORMALIZED (from_id < to_id
-            # lexicographically, enforced by upsert_work_object_relationship
-            # - never by the caller) so the same real-world pair can never
-            # exist as two different rows depending on iteration order.
-            # relationship_type: 'candidate' (2+ matched data points, not
-            # yet reviewed), 'bridge' (a candidate that connects to 2+
-            # DISTINCT already-confirmed parent projects at once - stored
-            # explicitly per Marc's own stated shape, not derived at query
-            # time, so a reviewer's queue read never has to reconstruct it),
-            # 'confirmed'/'rejected' (curator's real judgment, Phase F).
-            # match_count/matched_signals_json are the same plain count +
-            # point-type list _matched_data_points already produces (task
-            # #184) - no weights here either.
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS work_object_relationships (
-                    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-                    from_id              TEXT NOT NULL REFERENCES work_objects(id),
-                    to_id                TEXT NOT NULL REFERENCES work_objects(id),
-                    relationship_type    TEXT NOT NULL CHECK (relationship_type IN
-                                             ('candidate','bridge','confirmed','rejected')),
-                    match_count          INTEGER NOT NULL,
-                    matched_signals_json TEXT NOT NULL,
-                    created_ts           REAL NOT NULL,
-                    resolved_ts          REAL,
-                    UNIQUE(from_id, to_id)
-                )
-            """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_work_object_relationships_from ON work_object_relationships(from_id, relationship_type)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_work_object_relationships_to ON work_object_relationships(to_id, relationship_type)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_work_object_relationships_pending ON work_object_relationships(relationship_type, match_count DESC)")
 
             # work_object_signatures (design doc Section 12.7): a cached,
             # invalidate-on-write signature per work_object, read by
@@ -5249,25 +5130,22 @@ def merge_issues_txn(issue_id_a: str, issue_id_b: str, *, reason_label: str,
     2026-07-31 (step 5, mandatory reconciliation): checked FIRST, before
     ever opening a write transaction - if this merge would collide two
     ALREADY-established projects (see would_collide_established_projects),
-    refuses to auto-collapse and creates a 'merge_projects' pending
-    suggestion instead. Returns {"status": "merged", "project_id": ...} or
-    {"status": "deferred", "suggestion_id": ..., "winner_project_id": ...,
+    refuses to auto-collapse. Returns {"status": "merged", "project_id":
+    ...} or {"status": "deferred", "winner_project_id": ...,
     "loser_project_id": ...} - every caller must check "status" now, not
-    assume a bare project_id."""
+    assume a bare project_id. (2026-08-07: this used to also persist a
+    'merge_projects' pending_project_suggestions row and return its id -
+    dropped along with that whole retired review queue, since nothing ever
+    read the id back; workgraph_pipeline2.process_new_item's own "try the
+    next candidate" handling of a deferred result needs nothing more than
+    the status itself.)"""
     now = time.time()
     with _lock:
         conn = _connect()
         try:
             collision = would_collide_established_projects(issue_id_a, issue_id_b, _conn=conn)
             if collision is not None:
-                suggestion_id = _create_project_suggestion_on(
-                    conn, issue_id_a=issue_id_a, issue_id_b=issue_id_b,
-                    reason=(f"{reason_label}: would merge project {collision['loser_project_id']} "
-                            f"({len(collision['loser_members'])} other members) into "
-                            f"{collision['winner_project_id']} - needs review before collapsing an established project"),
-                    suggestion_kind="merge_projects", now=now,
-                )
-                return {"status": "deferred", "suggestion_id": suggestion_id,
+                return {"status": "deferred",
                         "winner_project_id": collision["winner_project_id"],
                         "loser_project_id": collision["loser_project_id"]}
 
@@ -5482,81 +5360,6 @@ def merge_issue_into(loser_id: str, winner_id: str, *, reason: str, actor: str) 
     return result
 
 
-# --- pending_project_suggestions -------------------------------------------
-
-_SUGGESTION_KINDS = ("merge", "link", "merge_projects")
-
-
-_SUGGESTION_KIND_TO_CONSTRAINT_TYPE = {"merge": "cannot_merge", "link": "cannot_link"}
-
-
-def _create_project_suggestion_on(conn: sqlite3.Connection, *, issue_id_a: str, issue_id_b: str,
-                                   reason: str, suggestion_kind: str, now: float) -> Optional[int]:
-    """Same dedupe-then-insert logic as create_project_suggestion, against a
-    GIVEN connection - for merge_issues_txn's own use (2026-07-31, step 5):
-    it already holds _lock for its whole body, so calling back into
-    create_project_suggestion (which acquires _lock itself) would deadlock.
-
-    Design doc Section 12.6: for 'merge'/'link' kinds only, a durable
-    cannot_merge/cannot_link identity_constraint (written by
-    workgraph_projects.reject_suggestion when a human rejects this exact
-    pair) permanently vetoes a new suggestion for the same pair - the real
-    fix for a rejected suggestion resurfacing once it expires, since
-    pending_project_suggestions' own dedupe only ever looked at PENDING rows
-    of the same kind. Returns None when blocked (no suggestion created);
-    'merge_projects'-kind collisions (a different question - an established-
-    project collision, not "these two are the same/related") are not
-    checked against this veto."""
-    constraint_type = _SUGGESTION_KIND_TO_CONSTRAINT_TYPE.get(suggestion_kind)
-    if constraint_type is not None:
-        blocked = conn.execute(
-            """SELECT id FROM identity_constraints WHERE constraint_type = ? AND
-               ((subject_a = ? AND subject_b = ?) OR (subject_a = ? AND subject_b = ?))""",
-            (constraint_type, issue_id_a, issue_id_b, issue_id_b, issue_id_a),
-        ).fetchone()
-        if blocked:
-            return None
-
-    existing = conn.execute(
-        """SELECT id FROM pending_project_suggestions
-           WHERE status = 'pending' AND suggestion_kind = ? AND
-               ((issue_id_a = ? AND issue_id_b = ?) OR (issue_id_a = ? AND issue_id_b = ?))""",
-        (suggestion_kind, issue_id_a, issue_id_b, issue_id_b, issue_id_a),
-    ).fetchone()
-    if existing:
-        return existing["id"]
-    cur = conn.execute(
-        """INSERT INTO pending_project_suggestions (issue_id_a, issue_id_b, reason, created_ts, suggestion_kind)
-           VALUES (?, ?, ?, ?, ?)""",
-        (issue_id_a, issue_id_b, reason, now, suggestion_kind),
-    )
-    return cur.lastrowid
-
-
-def create_project_suggestion(*, issue_id_a: str, issue_id_b: str, reason: str,
-                               suggestion_kind: str = "merge") -> Optional[int]:
-    """suggestion_kind added 2026-07-31 - see pending_project_suggestions'
-    own schema comment. Dedupe is scoped to the SAME kind: a pending 'merge'
-    suggestion for this pair must not be reused for a 'link' suggestion (or
-    vice versa) - they're different questions about the same pair, not
-    interchangeable rows.
-
-    Returns None (no row created) if a durable cannot_merge/cannot_link
-    identity_constraint vetoes this exact pair - see
-    _create_project_suggestion_on's docstring (Section 12.6)."""
-    if suggestion_kind not in _SUGGESTION_KINDS:
-        raise ValueError(f"invalid suggestion_kind: {suggestion_kind!r}")
-    with _lock:
-        conn = _connect()
-        try:
-            return _create_project_suggestion_on(
-                conn, issue_id_a=issue_id_a, issue_id_b=issue_id_b, reason=reason,
-                suggestion_kind=suggestion_kind, now=time.time(),
-            )
-        finally:
-            conn.close()
-
-
 def create_project_link(*, from_project_id: str, to_project_id: str, link_type: str,
                          reason: str, created_by: Optional[str] = None) -> int:
     """Idempotent - reuses an existing link with the same (from, to, type)
@@ -5599,69 +5402,6 @@ def list_project_links_for_project(project_id: str) -> list[dict]:
         finally:
             conn.close()
     return [dict(r) for r in rows]
-
-
-def list_project_suggestions(status: str = "pending") -> list[dict]:
-    with _lock:
-        conn = _connect()
-        try:
-            rows = conn.execute(
-                "SELECT * FROM pending_project_suggestions WHERE status = ? ORDER BY created_ts DESC", (status,)
-            ).fetchall()
-        finally:
-            conn.close()
-    return [dict(r) for r in rows]
-
-
-def get_project_suggestion(id: int) -> Optional[dict]:
-    with _lock:
-        conn = _connect()
-        try:
-            row = conn.execute("SELECT * FROM pending_project_suggestions WHERE id = ?", (id,)).fetchone()
-        finally:
-            conn.close()
-    return dict(row) if row else None
-
-
-def resolve_project_suggestion(id: int, status: str) -> None:
-    with _lock:
-        conn = _connect()
-        try:
-            conn.execute(
-                "UPDATE pending_project_suggestions SET status = ?, resolved_ts = ? WHERE id = ?",
-                (status, time.time(), id),
-            )
-        finally:
-            conn.close()
-
-
-def expire_stale_project_suggestions(older_than_days: float, kinds: tuple = ("merge",)) -> int:
-    """Phase 0 fix (D2, 2026-08-03): the structural guarantee that a stale
-    pending queue can't just silently accumulate forever, independent of
-    whether same_category_proximity_suggestions_enabled is on. Resolves
-    (not deletes - reversible bookkeeping, same as any other resolution) any
-    'pending' row of the given suggestion_kind(s) older than the cutoff to
-    status='expired'. 'link' suggestions are exempt by default - a
-    relationship suggestion doesn't go stale the way a same-project merge
-    guess does; Marc or a worker may still want to confirm a 'related'
-    connection long after it first surfaced. Returns the number of rows
-    resolved."""
-    if not kinds:
-        return 0
-    cutoff = time.time() - older_than_days * 86400
-    placeholders = ",".join("?" for _ in kinds)
-    with _lock:
-        conn = _connect()
-        try:
-            cur = conn.execute(
-                f"""UPDATE pending_project_suggestions
-                    SET status = 'expired', resolved_ts = ?
-                    WHERE status = 'pending' AND created_ts < ? AND suggestion_kind IN ({placeholders})""",
-                (time.time(), cutoff, *kinds),
-            )
-            return cur.rowcount
-        finally:
-            conn.close()
 
 
 # --- source_containers / identity_anchors (identity formalization v0, ------

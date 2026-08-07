@@ -27,6 +27,17 @@ anyway), so respawning the whole Python process + import graph on every
 single conversational turn was pure latency with no benefit.
 jasper_mcp_config.json now points `claude -p --mcp-config` at this
 process's SSE endpoint instead of a stdio command.
+
+Task #234 (2026-08-07): jasper_worker_status/jasper_message_worker expose
+the SAME cockpit "Back Office" worker chat Marc already uses from the web
+app (GET /api/workers/status, POST /api/post) - not a new capability, just
+this same real, already-tested internal messaging surface reachable from
+the add-in's own chat box. Distinct from the Outlook-facing action tools
+above: this never touches Marc's mailbox or any external recipient, only
+Jasper's own cohort of AI workers he already set up and already talks to
+via the cockpit - jasper_message_worker only fires on Marc's explicit
+ask, same "the human's own request is the approval" posture as
+jasper_request_contract_review below.
 """
 from __future__ import annotations
 
@@ -145,6 +156,35 @@ def jasper_focus_party(query: str) -> dict:
     most-recently-active first. Use when Marc asks to 'pull up <supplier>'
     or 'what's going on with <person>'."""
     return _get("/api/addin/focus-party", {"q": query})
+
+
+@mcp.tool()
+def jasper_worker_status() -> dict:
+    """Task #234: real, live status of every background worker in Marc's
+    Symphony cohort (the same Claude Code sessions the cockpit's "Back
+    Office" chat panel already shows) - liveness (last_activity, bucketed
+    live/idle/stale by the caller), and each worker's own self-reported
+    current_task/detail when it has one. Read-only, no side effect. Use
+    this when Marc asks something like 'what is Colleen doing', 'is anyone
+    working on X', or 'are my workers online' - never guess a worker's
+    state from anything else."""
+    return _get("/api/workers/status")
+
+
+@mcp.tool()
+def jasper_message_worker(worker: str, message: str) -> dict:
+    """Send a REAL message into one background worker's own DM thread - the
+    exact same mechanism as typing '@<worker> ...' into the cockpit's Back
+    Office chat. `worker` must be the exact slug from jasper_worker_status
+    (e.g. "colleen", not "Colleen" or a guess) - call that tool first if you
+    don't already have it from this conversation. This does not happen
+    instantly and does not guarantee a reply: it lands in that worker's
+    inbox and wakes its notification poller if a live session is already
+    running, but a worker with no active session won't see it until someone
+    starts one (jasper_worker_status's liveness tells you which). Use this
+    only when Marc explicitly asks to tell/ask/message a specific worker
+    something - never send a worker instructions on your own initiative."""
+    return _post("/api/post", {"from": "marc", "to": f"@{worker}", "body": message})
 
 
 @mcp.tool()

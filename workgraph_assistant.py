@@ -52,6 +52,8 @@ _ALLOWED_TOOLS = [
     "mcp__jasper__jasper_focus_email",
     "mcp__jasper__jasper_focus_party",
     "mcp__jasper__jasper_request_contract_review",
+    "mcp__jasper__jasper_worker_status",
+    "mcp__jasper__jasper_message_worker",
     # the already-authorized M365 claude.ai connector - read/search only,
     # no send/write tool is exposed by it today (confirmed from the live
     # tool list); re-check this list if the connector's tool set changes.
@@ -83,7 +85,14 @@ _SYSTEM_PROMPT = (
     "say so). Keep replies short and concrete - this renders in a narrow "
     "task pane, not a full chat window. Never claim an email was sent; "
     "jasper_draft_reply/jasper_draft_forward only open a draft window in "
-    "Outlook, they never send."
+    "Outlook, they never send. When Marc asks what a background worker is "
+    "doing, whether anyone's online, or what's in progress, use "
+    "jasper_worker_status - never guess. Only use jasper_message_worker "
+    "when Marc explicitly asks you to tell/ask/message a specific worker "
+    "something; get the exact worker slug from jasper_worker_status first, "
+    "and say plainly that it's a real message into that worker's thread, "
+    "not an instant action - it may take a while, or go unanswered if that "
+    "worker has no live session running."
 )
 
 

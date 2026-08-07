@@ -2120,10 +2120,23 @@ def _build_addin_focus_card(project_id: str) -> Optional[dict]:
                 a["open_email"] = deep_links.open_email_action(raw_item)
                 a["draft_reply"] = deep_links.draft_reply_action(raw_item)
                 a["draft_forward"] = deep_links.draft_forward_action(raw_item)
+        # Task #237/#238/#239: this issue's own real reference ID(s) (so a
+        # project card can show distinct PRs/POs as distinct sub-cards
+        # instead of one flat blob), nearest open date claim(s) (real
+        # curator-extracted text/hard-or-soft tier - never a parsed
+        # calendar date, see workgraph_nba.DEFAULT_CLAIM_WEIGHTS' own
+        # docstring on why no such parsing exists in this codebase), and
+        # this issue's own attachments so a document can be opened directly
+        # from its card rather than requiring a trip to the full project
+        # view first.
         issue_cards.append({
             "id": issue["id"], "title": issue.get("display_title") or issue["title"],
             "state": issue["state"], "category": issue.get("category"),
             "nba_reason": issue.get("nba_reason"), "actions": actions,
+            "reference_ids": sorted(workgraph_projects.reference_ids_for_issue(issue["id"])),
+            "dates": [{"text": c["text"], "date_kind": c.get("date_kind")}
+                      for c in wg.list_open_claims_for_issue(issue["id"], claim_type="date")],
+            "attachments": wg.list_attachments_for_issue(issue["id"]),
         })
 
     # get_project() (singular) doesn't do list_projects()'s synthesis join -
@@ -2270,6 +2283,42 @@ async def api_addin_focus_project(project_id: str):
     if card is None:
         raise HTTPException(404, f"no such project: {project_id}")
     return SafeJSONResponse({"card": card})
+
+
+@app.get("/api/addin/top-projects")
+async def api_addin_top_projects(limit: int = 5):
+    """Task #237: the add-in's home view, redesigned around PROJECT as the
+    primary unit instead of a flat list of individual asks that read as N
+    unrelated things even when several were the same deal. Reuses the
+    exact real card _build_addin_focus_card already builds for focus-
+    email/focus-party/focus-project (synthesis, type-aware actions,
+    attachments, and now each issue's reference_ids/dates - see that
+    function's own docstring) - not a second, thinner rendering built from
+    raw claims.
+
+    Which projects make the list is still workgraph_nba.rank_actions' own
+    real global ranking (claim urgency/staleness/value/escalation/
+    confidence) - this only changes the UNIT rendered (project, not
+    individual claim), never the ranking logic. Distinct project_ids are
+    taken in ranked-claim order, so a project's single best-ranked claim
+    determines its position - a project with 3 loud asks doesn't crowd out
+    4 other projects each with one. Over-fetches claims (rank_actions
+    already scores every open issue regardless of its own limit param,
+    only truncating the final sorted list, so a bigger request here is a
+    cheap Python slice, not more DB work) since several top claims can
+    easily collapse into fewer distinct projects than `limit`."""
+    ranked = workgraph_nba.rank_actions(limit=200)
+    project_ids: list[str] = []
+    seen: set[str] = set()
+    for claim in ranked:
+        pid = claim.get("project_id")
+        if pid and pid not in seen:
+            seen.add(pid)
+            project_ids.append(pid)
+        if len(project_ids) >= limit:
+            break
+    cards = [c for c in (_build_addin_focus_card(pid) for pid in project_ids) if c is not None]
+    return SafeJSONResponse({"projects": cards})
 
 
 @app.get("/api/addin/focus-party")

@@ -231,8 +231,8 @@ def recommend_for_evidence(ev: dict, has_attachment: bool, now: float) -> list[d
                 recs.append({
                     "kind": "contract_review",
                     "label": "Review the attached document",
-                    "rationale": "This message has an attachment — contract review compares it "
-                                 "against the MSA and standard positions and returns a redlined copy.",
+                    "rationale": "This message has an attachment — contract review checks the "
+                                 "attached contract against Lilly's playbook and returns a redlined copy.",
                 })
         return recs
 

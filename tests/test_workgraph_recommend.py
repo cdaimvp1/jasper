@@ -24,7 +24,7 @@ def test_email_with_attachment_generic_fallback_when_no_skill_registered(tmp_pat
     rec = recs[0]
     assert rec["kind"] == "contract_review"
     assert rec["label"] == "Review the attached document"
-    assert "MSA and standard positions" in rec["rationale"]
+    assert "Lilly's playbook" in rec["rationale"]
 
 
 def test_email_with_attachment_names_registered_skill(tmp_path, monkeypatch):

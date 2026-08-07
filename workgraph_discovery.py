@@ -27,6 +27,7 @@ match in a long stretch) for human review - never auto-removes anything.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import subprocess
@@ -605,6 +606,13 @@ find a confident, real value, skip it entirely.
 For each one you CAN confidently fill, output one line in exactly this format:
 VALUE: <data point id> | <value>
 
+If "dp-fasttrack-supplier" is one of the data points above AND you found a \
+real company name for it, ALSO check whether a specific real email address \
+for a sender/participant at that company is in the known participants or \
+text above. If so, output one more line:
+SUPPLIER_EMAIL: <email> | <company name>
+Skip this line entirely if you can't confidently pair an email with the company.
+
 Output nothing else - no preamble, no explanation, skip any you can't fill.
 """
 
@@ -669,14 +677,40 @@ def llm_backfill_missing_values(work_object_id: str) -> list[dict]:
     applied = []
     for line in (proc.stdout or "").splitlines():
         line = line.strip()
-        if not line.upper().startswith("VALUE:"):
-            continue
-        rest = line.split(":", 1)[1].strip()
-        parts2 = [p.strip() for p in rest.split("|", 1)]
-        if len(parts2) != 2 or parts2[0] not in missing_ids or not parts2[1]:
-            continue
-        definition_id, value = parts2
-        ws.record_data_point_value(definition_id=definition_id, work_object_id=work_object_id,
-                                    value=value, extraction_source="llm_backfill")
-        applied.append({"definition_id": definition_id, "value": value})
+        upper = line.upper()
+        if upper.startswith("VALUE:"):
+            rest = line.split(":", 1)[1].strip()
+            parts2 = [p.strip() for p in rest.split("|", 1)]
+            if len(parts2) != 2 or parts2[0] not in missing_ids or not parts2[1]:
+                continue
+            definition_id, value = parts2
+            ws.record_data_point_value(definition_id=definition_id, work_object_id=work_object_id,
+                                        value=value, extraction_source="llm_backfill")
+            applied.append({"definition_id": definition_id, "value": value})
+        elif upper.startswith("SUPPLIER_EMAIL:"):
+            # Restores the retired llm_backfill_company's real effect: a
+            # data_point_values row alone is invisible to workgraph_
+            # projects._matched_data_points' EXISTING hardcoded "supplier"
+            # check, which reads parties/external_orgs, not data_point_
+            # values - found live while verifying #219 against the real
+            # Kinaxis cluster (marc-714 etc. all had empty external_orgs
+            # even after a successful data_point_values backfill). Same
+            # narrow, non-destructive rule as before: only creates a party
+            # where none exists yet for that email, never corrects one.
+            rest = line.split(":", 1)[1].strip()
+            parts2 = [p.strip() for p in rest.split("|", 1)]
+            if len(parts2) != 2 or "@" not in parts2[0] or not parts2[1]:
+                continue
+            email, company = parts2[0].lower(), parts2[1]
+            if ws.get_party_by_email(email) is not None:
+                continue
+            party_id = f"llm-{hashlib.sha256(email.encode()).hexdigest()[:12]}"
+            ws.upsert_party(
+                id=party_id, primary_email=email, display_name=None,
+                affiliation="external", affiliation_confidence="L", affiliation_source="llm_backfill",
+                company=company,
+            )
+            ws.link_party_to_issue(work_object_id, party_id)
+            applied.append({"definition_id": "dp-fasttrack-supplier", "value": f"{email} ({company})",
+                             "bridged_to_party": party_id})
     return applied

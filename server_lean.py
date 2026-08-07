@@ -1488,6 +1488,7 @@ async def api_action_draft_forward(body: DraftForwardBody):
 class AssistantMessageBody(BaseModel):
     message: str
     session_id: Optional[str] = None
+    reset: bool = False
 
 
 @app.post("/api/assistant/message")
@@ -1498,11 +1499,37 @@ async def api_assistant_message(body: AssistantMessageBody):
     the flat FTS5 search this route replaces. asyncio.to_thread for the
     same reason as the action routes above: this blocks on a subprocess
     for up to ~2 minutes, and would otherwise freeze every other request
-    on this single-worker server."""
+    on this single-worker server.
+
+    Task #232: session_id is now optional in a real sense, not just in
+    the type signature - omitting it (the normal case now) continues
+    whatever conversation is persisted server-side rather than always
+    starting fresh. reset=True explicitly starts a new one."""
     if not body.message or not body.message.strip():
         raise HTTPException(400, "message is required")
-    result = await asyncio.to_thread(workgraph_assistant.ask, body.message.strip(), body.session_id)
+    result = await asyncio.to_thread(
+        workgraph_assistant.ask, body.message.strip(), body.session_id, reset=body.reset,
+    )
     return JSONResponse(result)
+
+
+@app.get("/api/assistant/session")
+async def api_assistant_session():
+    """Task #232 - lets the task pane check whether an ongoing persisted
+    conversation exists (e.g. right after a reload) without needing to
+    send a throwaway message just to find out."""
+    return JSONResponse({"session_id": wg.get_assistant_session_id()})
+
+
+@app.post("/api/assistant/reset")
+async def api_assistant_reset():
+    """A real "start a new conversation" action that costs nothing - pure
+    store-layer state clear, no claude -p subprocess spawned (the
+    message-route's own reset=True field also does this, but only as a
+    side effect of an actual paid turn; this is the free, direct path for
+    a UI "New conversation" control)."""
+    wg.clear_assistant_session_id()
+    return JSONResponse({"ok": True})
 
 
 class ComposeNewBody(BaseModel):

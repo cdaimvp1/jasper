@@ -1396,6 +1396,23 @@ def init_workgraph() -> None:
                 )
             """)
 
+            # Task #232 (2026-08-06): the live add-in assistant's Claude
+            # session id, persisted SERVER-SIDE instead of living only in
+            # the task pane's own JS variable - a pane reload/reopen (or,
+            # eventually, a second host like Teams) can pick the same
+            # ongoing conversation back up instead of silently starting a
+            # brand-new one. Single-row table (id fixed to 'default') -
+            # Jasper is single-user right now; a real per-user key can be
+            # added if that ever changes, without a schema change (id
+            # would just stop being a constant).
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS assistant_sessions (
+                    id           TEXT PRIMARY KEY,
+                    session_id   TEXT NOT NULL,
+                    updated_ts   REAL NOT NULL
+                )
+            """)
+
             # artifact_lineages/artifact_versions (design doc Section 12.5):
             # the real answer to attachment-hashing's open question - sha256
             # was already computed on every attachment (task #29) but never
@@ -7274,6 +7291,49 @@ def mark_candidate_pattern_promoted(pattern_signature: str, definition_id: str) 
                 "UPDATE candidate_pattern_observations SET promoted_to_definition_id = ? WHERE pattern_signature = ?",
                 (definition_id, pattern_signature),
             )
+        finally:
+            conn.close()
+
+
+_ASSISTANT_SESSION_ID = "default"
+
+
+def get_assistant_session_id() -> Optional[str]:
+    """Task #232 - the currently persisted live-assistant Claude session,
+    or None if no conversation has happened yet (or it was explicitly
+    reset). workgraph_assistant.ask() falls back to minting a fresh
+    session when this is None or a --resume against it fails."""
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT session_id FROM assistant_sessions WHERE id = ?", (_ASSISTANT_SESSION_ID,)
+            ).fetchone()
+        finally:
+            conn.close()
+    return row["session_id"] if row else None
+
+
+def set_assistant_session_id(session_id: str) -> None:
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO assistant_sessions (id, session_id, updated_ts) VALUES (?, ?, ?)",
+                (_ASSISTANT_SESSION_ID, session_id, time.time()),
+            )
+        finally:
+            conn.close()
+
+
+def clear_assistant_session_id() -> None:
+    """Explicit 'start a new conversation' - drops the persisted pointer
+    without deleting anything from claude -p's own session log (that log
+    is Claude Code's own concern, not this database's)."""
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute("DELETE FROM assistant_sessions WHERE id = ?", (_ASSISTANT_SESSION_ID,))
         finally:
             conn.close()
 

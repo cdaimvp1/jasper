@@ -28,9 +28,13 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import uuid
 from pathlib import Path
 from typing import Optional
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import workgraph_store as ws
 
 _TIMEOUT_SECONDS = 120
 _MCP_CONFIG = str(Path(__file__).resolve().parent / "jasper_mcp_config.json")
@@ -124,23 +128,62 @@ def _run_claude(prompt: str, *, session_id: str, is_new: bool, timeout: int) -> 
     return subprocess.CompletedProcess(args, proc.returncode, stdout, stderr)
 
 
-def ask(message: str, session_id: Optional[str] = None, *, timeout: int = _TIMEOUT_SECONDS) -> dict:
-    """One turn of the live assistant. Returns {ok, session_id, reply}.
-    A fresh session_id is minted here when none is passed in (new
-    conversation) - the caller just needs to persist and resend whatever
-    session_id comes back to continue the same conversation next turn."""
-    is_new = session_id is None
-    sid = session_id or str(uuid.uuid4())
+def _call_claude_once(message: str, *, session_id: str, is_new: bool, timeout: int) -> dict:
     try:
-        proc = _run_claude(message, session_id=sid, is_new=is_new, timeout=timeout)
+        proc = _run_claude(message, session_id=session_id, is_new=is_new, timeout=timeout)
     except subprocess.TimeoutExpired:
-        return {"ok": False, "session_id": sid, "reply": "Jasper didn't respond in time - try again.", "error": "timeout"}
+        return {"ok": False, "session_id": session_id, "reply": "Jasper didn't respond in time - try again.",
+                "error": "timeout"}
     if proc.returncode != 0:
-        return {"ok": False, "session_id": sid, "reply": "Jasper hit an error.", "error": (proc.stderr or "")[-2000:]}
+        return {"ok": False, "session_id": session_id, "reply": "Jasper hit an error.",
+                "error": (proc.stderr or "")[-2000:]}
     try:
         result = json.loads(proc.stdout)
     except (json.JSONDecodeError, ValueError):
-        return {"ok": False, "session_id": sid, "reply": "Jasper returned something unexpected.", "error": proc.stdout[-2000:]}
+        return {"ok": False, "session_id": session_id, "reply": "Jasper returned something unexpected.",
+                "error": proc.stdout[-2000:]}
     if result.get("is_error"):
-        return {"ok": False, "session_id": sid, "reply": "Jasper hit an error.", "error": json.dumps(result)[-2000:]}
-    return {"ok": True, "session_id": result.get("session_id", sid), "reply": result.get("result", ""), "cost_usd": result.get("total_cost_usd")}
+        return {"ok": False, "session_id": session_id, "reply": "Jasper hit an error.", "error": json.dumps(result)[-2000:]}
+    return {"ok": True, "session_id": result.get("session_id", session_id), "reply": result.get("result", ""),
+            "cost_usd": result.get("total_cost_usd")}
+
+
+def ask(message: str, session_id: Optional[str] = None, *, timeout: int = _TIMEOUT_SECONDS,
+        reset: bool = False) -> dict:
+    """One turn of the live assistant. Returns {ok, session_id, reply}.
+
+    Task #232 (2026-08-06): conversation continuity is now server-side,
+    not the task pane's own JS variable's job. An explicit session_id
+    still wins if the caller passes one (keeps this function's existing
+    per-turn contract intact for anyone chaining turns manually); when
+    omitted, this looks up the persisted session from workgraph_store
+    instead of always minting a fresh one - so a reloaded/reopened pane
+    (or a future second host) picks the same ongoing conversation back up.
+    reset=True explicitly drops the persisted session first (a real "new
+    conversation" action, not just "no session_id happened to be passed").
+
+    A --resume against a persisted session_id can fail on its own (the
+    underlying Claude Code session log expired or was never written, e.g.
+    right after this feature first shipped) - that failure is handled
+    here by falling back to ONE fresh-session retry rather than surfacing
+    a confusing error for something the caller had no way to avoid."""
+    if reset:
+        ws.clear_assistant_session_id()
+
+    explicit = session_id is not None
+    sid = session_id or ws.get_assistant_session_id()
+    is_new = sid is None
+    if is_new:
+        sid = str(uuid.uuid4())
+
+    result = _call_claude_once(message, session_id=sid, is_new=is_new, timeout=timeout)
+
+    if not result["ok"] and not is_new and not explicit:
+        # The persisted session likely no longer exists on disk - retry
+        # once as a brand-new conversation rather than leaving Marc stuck.
+        fresh_sid = str(uuid.uuid4())
+        result = _call_claude_once(message, session_id=fresh_sid, is_new=True, timeout=timeout)
+
+    if result["ok"]:
+        ws.set_assistant_session_id(result["session_id"])
+    return result

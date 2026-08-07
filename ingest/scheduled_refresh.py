@@ -134,22 +134,6 @@ SYNTHESIS_PROMPT = (
 )
 
 
-PROJECT_GROUPING_PROMPT = (
-    "You are curator (Colleen), a Symphony worker (planner-analyst archetype) for this cohort, "
-    "judging weak-signal PROJECT-GROUPING suggestions this wake - not ingestion, not synthesis, not "
-    "routine classification (each is a separate wake). Follow the routine in "
-    "ingest/PROJECT_GROUPING_ROUTINE.md exactly: fetch GET /api/workgraph/project-suggestions, and "
-    "for each pending pair read both issues' real content (GET /api/workgraph/issues/{issue_id} for "
-    "each - evidence, synthesis, parties) before judging whether they're plausibly the same "
-    "underlying deal or just coincidentally similar. Three verdicts, not two: confident same -> "
-    "POST .../resolve {\"status\": \"confirmed\"} (this actually merges them now); confident "
-    "unrelated -> POST .../resolve {\"status\": \"rejected\"}; genuinely unsure -> make no call at "
-    "all and leave it pending. Abstaining is a correct, expected outcome for a real fraction of "
-    "these - do not force a verdict on a pair you can't actually judge from the evidence given. Do "
-    "not do anything else this wake - no ingestion, no synthesis, no re-classification, no "
-    "team_room posts beyond what the routine itself calls for."
-)
-
 
 def _log(line: str) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -273,52 +257,6 @@ def run_synthesis_oneshot() -> dict:
         return {"ok": False, "stale_count": len(stale), **stats, "error": str(e)}
 
 
-def run_project_grouping_oneshot() -> dict:
-    """Scoped, one-shot headless curator wake to judge weak-signal project-
-    suggestion residue (the pairs the deterministic auto-grouper - shared
-    party/company/subject-core - couldn't resolve on its own). Same safety
-    pattern as the other one-shots: skipped entirely when there are no
-    pending suggestions, scoped to Bash only, exits when done. Runs AFTER
-    classification (so this cycle's newly-created suggestions are in scope)
-    and BEFORE synthesis (so synthesis operates on final, settled project
-    boundaries rather than pre-merge ones).
-
-    Task #184 Phase F (2026-08-05): also checks the newer persisted
-    relationship graph (work_object_relationships) - the eventual
-    replacement for pending_project_suggestions as this queue's real
-    source of truth. Both are checked so a wake still fires when only
-    the NEW queue has real work, not just the old one - see
-    PROJECT_GROUPING_ROUTINE.md's own "two review queues" section for
-    why both are still live rather than one already retired."""
-    pending = ws.list_project_suggestions(status="pending")
-    pending_relationships = ws.list_pending_work_object_relationships()
-    if not pending and not pending_relationships:
-        return {"ok": True, "skipped": True, "reason": "no pending suggestions or relationships"}
-
-    env_prefix = {
-        "SYMPHONY_WORKER": "curator",
-        "TEAM_HOME": str(BODY),
-        "TEAM_SCRIPTS_ROOT": str(BODY / "setup"),
-        "TEAM_DATA_DIR": str(DATA_DIR),
-        "COHORT_BASE": "http://localhost:8700",
-        "TEAM_PORT": "8700",
-    }
-    import os
-    env = os.environ.copy()
-    env.update(env_prefix)
-    try:
-        proc = _run_headless_with_tree_kill(
-            ["claude", "-p", PROJECT_GROUPING_PROMPT, "--allowedTools", "Bash", "--add-dir", str(BODY)],
-            cwd=str(BODY), env=env, timeout=1200,
-        )
-        return {"ok": proc.returncode == 0, "returncode": proc.returncode,
-                "pending_count": len(pending), "pending_relationships_count": len(pending_relationships),
-                "stdout_tail": proc.stdout[-1000:], "stderr_tail": proc.stderr[-1000:]}
-    except Exception as e:
-        return {"ok": False, "pending_count": len(pending),
-                "pending_relationships_count": len(pending_relationships), "error": str(e)}
-
-
 PROJECT_DEEPDIVE_PROMPT = (
     "You are curator (Colleen), a Symphony worker (planner-analyst archetype) for this cohort, "
     "doing a PROJECT DEEP-DIVE this wake - not ingestion, not synthesis, not routine "
@@ -400,18 +338,6 @@ def run() -> dict:
     classify_result_2 = workgraph_classify.run()
     nba_result_2 = workgraph_nba.recompute_all()
     alerts_result_2 = workgraph_alerts.run()
-
-    # 5. Turned OFF 2026-08-05 (Marc's explicit, direct instruction: the
-    # curator-reviewed suggestion queue this fed is retired - a real match
-    # must be judged and acted on immediately when found, not deferred to
-    # a periodic wake reviewing a backlog; and no previously-built
-    # mechanism, curator included, may touch the new grouping pipeline at
-    # all - it gets entirely new, separate mechanisms instead, see
-    # workgraph_pipeline2.py). run_project_grouping_oneshot() itself is
-    # left intact, just no longer called from here - not deleted, in case
-    # the old suggestion queue's residue (pre-existing pending rows) still
-    # needs a way to be manually drained later.
-    grouping_result = {"ok": True, "skipped": True, "reason": "turned off 2026-08-05 - see comment"}
 
     # 5.1. Marc's exact replacement (2026-08-05) - the NEW, entirely
     # separate grouping+extraction pipeline. Every issue/cluster with no
@@ -532,7 +458,6 @@ def run() -> dict:
         "classify_after_relay": classify_result_2,
         "nba_final": nba_result_2,
         "alerts_final": alerts_result_2,
-        "project_grouping": grouping_result,
         "pipeline2_grouping": pipeline2_result,
         "derived_title_backfill": derived_title_result,
         "synthesis": synthesis_result,
@@ -550,7 +475,6 @@ def run() -> dict:
         f"relay_ok={relay_result.get('ok')} relay_calendar_advanced={relay_result.get('cursor_advanced')} "
         f"relay_sharepoint_enabled={relay_result.get('sharepoint_enabled')} relay_sharepoint_advanced={relay_result.get('sharepoint_advanced')} "
         f"classified_total={classify_result_1.get('classify', {}).get('classified', 0) + classify_result_2.get('classify', {}).get('classified', 0)} "
-        f"grouping_ok={grouping_result.get('ok')} grouping_skipped={grouping_result.get('skipped', False)} "
         f"synthesis_ok={synthesis_result.get('ok')} synthesis_skipped={synthesis_result.get('skipped', False)} "
         f"synthesis_deferred={synthesis_result.get('deferred', 0)} synthesis_skipped_immaterial={synthesis_result.get('skipped_immaterial', 0)} "
         f"deep_dive_ok={deepdive_result.get('ok')} deep_dive_skipped={deepdive_result.get('skipped', False)} "

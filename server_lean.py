@@ -2561,6 +2561,47 @@ async def api_claim_suggestion_resolve(suggestion_id: int, body: ClaimSuggestion
     return JSONResponse({"ok": True})
 
 
+@app.get("/api/workgraph/review-queue")
+async def api_review_queue():
+    """Task #260/#262: one aggregated, chat-friendly view across every LIVE
+    review queue (claim suggestions + prerequisite rule suggestions) - the
+    same two queues Marc already resolves one-by-one via the cockpit's
+    per-issue checklist / Settings page, surfaced here with a plain-language
+    description so the assistant can describe and resolve them
+    conversationally (jasper_list_review_queue/jasper_resolve_review_item),
+    mirroring Aristotle's existing #addrule chat-teaching flow (task #236)
+    rather than inventing a second interaction style. Deliberately excludes
+    the retired pending_project_suggestions/work_object_relationships
+    queues (task #269 found them dead - zero live consumer since the
+    2026-08-05 grouping-mechanism cutover)."""
+    claim_suggestions = wg.list_pending_claim_suggestions()
+    prereq_suggestions = wg.list_prerequisite_suggestions("pending")
+    items = []
+    for s in claim_suggestions:
+        claim = wg.get_claim(s["claim_id"])
+        claim_text = (claim or {}).get("text") or "(claim text unavailable)"
+        verb = "Resolve" if s["suggestion_kind"] == "resolve" else "Contradiction on"
+        description = f'{verb} claim "{claim_text}"'
+        if s.get("evidence_note"):
+            description += f": {s['evidence_note']}"
+        items.append({
+            "kind": "claim_suggestion", "id": s["id"],
+            "issue_id": (claim or {}).get("issue_id"),
+            "description": description, "created_ts": s["created_ts"],
+        })
+    for s in prereq_suggestions:
+        description = s.get("raw_explanation") or s.get("reason") or (
+            f"{s.get('trigger_signal_type')} shouldn't be treated as actionable until "
+            f"{s.get('requires_signal_type')} has happened"
+        )
+        items.append({
+            "kind": "prerequisite_suggestion", "id": s["id"], "issue_id": None,
+            "description": description, "created_ts": s["created_ts"],
+        })
+    items.sort(key=lambda i: i["created_ts"])
+    return JSONResponse({"items": sanitize_surrogates(items), "count": len(items)})
+
+
 @app.get("/api/workgraph/parties")
 async def api_parties_list(affiliation: Optional[str] = None):
     return JSONResponse({"parties": sanitize_surrogates(wg.list_parties(affiliation=affiliation))})

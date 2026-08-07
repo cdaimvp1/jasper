@@ -1,3 +1,10 @@
+> **RETIRED (task #269, 2026-08-07).** This whole routine is dead: `run_project_grouping_oneshot()`
+> (the only caller that ever fed curator this prompt) was disabled 2026-08-05 and deleted 2026-08-07
+> after its residue was manually drained. Both queues below are now handled by an entirely separate,
+> newer mechanism (`workgraph_pipeline2.py`) per Marc's own direct instruction that no previously-
+> built mechanism, curator included, may touch it. Left in the tree for historical reference only -
+> do not follow these steps; nothing wakes curator with this prompt anymore.
+
 # Project-grouping routine — curator's (Colleen's) wake checklist
 
 **What this is for:** the deterministic auto-grouper (`workgraph_projects.py`, task #184's count-

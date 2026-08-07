@@ -216,6 +216,49 @@ def jasper_teach_prerequisite_rule(statement: str) -> dict:
 
 
 @mcp.tool()
+def jasper_list_review_queue() -> dict:
+    """Task #260/#262: everything currently waiting on Marc's yes/no across
+    every live review queue - claim-resolution suggestions (a raw_item
+    said an open ask/commitment was fulfilled) and prerequisite-rule
+    suggestions (Aristotle proposing a new "X isn't ready until Y" gate).
+    Each item carries a plain-language `description`, a `kind`
+    ("claim_suggestion" or "prerequisite_suggestion") and an `id` - pass
+    both straight to jasper_resolve_review_item once Marc gives a verdict.
+    Use when Marc asks something like "what's waiting on me" or "anything
+    to review" - this is read-only, never resolves anything on its own."""
+    return _get("/api/workgraph/review-queue")
+
+
+@mcp.tool()
+def jasper_resolve_review_item(kind: str, suggestion_id: int, decision: str) -> dict:
+    """Task #260/#262: resolve ONE item from jasper_list_review_queue with
+    Marc's explicit verdict - same confirm/reject discipline as
+    jasper_teach_prerequisite_rule, just for an already-fully-formed
+    proposal rather than one that needs structuring first. `kind` must be
+    exactly what jasper_list_review_queue returned for that item
+    ("claim_suggestion" or "prerequisite_suggestion"); `decision` must be
+    "confirmed" or "rejected". ONLY call this after Marc has given a real
+    verdict on a SPECIFIC item you already described to him - never guess
+    which item he means from a vague reply, and never resolve something he
+    hasn't actually weighed in on."""
+    if decision not in ("confirmed", "rejected"):
+        raise ValueError('decision must be "confirmed" or "rejected"')
+    if kind == "claim_suggestion":
+        return _post(f"/api/workgraph/claim-suggestions/{suggestion_id}/resolve",
+                     {"status": decision, "actor": "marc"})
+    if kind == "prerequisite_suggestion":
+        # This route's own body shape uses action="confirm"/"reject" (not
+        # status="confirmed"/"rejected" like the claim-suggestion route
+        # above) - confirmed by reading server_lean.py's
+        # PrerequisiteSuggestionResolveBody directly rather than assuming
+        # the two review-queue routes share one convention.
+        action = "confirm" if decision == "confirmed" else "reject"
+        return _post(f"/api/settings/prerequisite-rule-suggestions/{suggestion_id}/resolve",
+                     {"action": action})
+    raise ValueError(f'kind must be "claim_suggestion" or "prerequisite_suggestion", got {kind!r}')
+
+
+@mcp.tool()
 def jasper_request_contract_review(issue_id: str, instructions: str = "") -> dict:
     """Dispatch a REAL contract-review skill run for this issue via Jasper's
     existing worker action-bridge (the same mechanism the cockpit's 'Review

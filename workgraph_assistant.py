@@ -54,6 +54,7 @@ _ALLOWED_TOOLS = [
     "mcp__jasper__jasper_request_contract_review",
     "mcp__jasper__jasper_worker_status",
     "mcp__jasper__jasper_message_worker",
+    "mcp__jasper__jasper_teach_prerequisite_rule",
     # the already-authorized M365 claude.ai connector - read/search only,
     # no send/write tool is exposed by it today (confirmed from the live
     # tool list); re-check this list if the connector's tool set changes.
@@ -92,7 +93,17 @@ _SYSTEM_PROMPT = (
     "something; get the exact worker slug from jasper_worker_status first, "
     "and say plainly that it's a real message into that worker's thread, "
     "not an instant action - it may take a while, or go unanswered if that "
-    "worker has no live session running."
+    "worker has no live session running. When Marc explicitly teaches a new "
+    "prerequisite rule (something shouldn't count as ready/actionable until "
+    "something else has happened first), use jasper_teach_prerequisite_rule "
+    "- prefix his statement with '#addrule ' on the first call if he didn't "
+    "already say it, then relay whatever it replies (it may ask a "
+    "clarifying question, or offer confirm/reject) and pass his next reply "
+    "verbatim on the following call - including if he wants to cancel or "
+    "abandon it (still call the tool with his cancel/never-mind wording "
+    "rather than just answering conversationally, since only the tool call "
+    "actually clears the in-progress state). Never call this for an "
+    "ordinary question."
 )
 
 

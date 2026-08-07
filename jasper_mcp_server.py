@@ -188,6 +188,34 @@ def jasper_message_worker(worker: str, message: str) -> dict:
 
 
 @mcp.tool()
+def jasper_teach_prerequisite_rule(statement: str) -> dict:
+    """Task #236: teach Jasper's Aristotle gating a new prerequisite rule -
+    "X shouldn't be treated as ready until Y has already happened" (e.g. "a
+    signature request shouldn't count as actionable until the contract
+    review is done"). Wraps the SAME real, already-built, already-tested
+    conversational rule-teaching flow the cockpit's Back Office chat uses
+    ("#addrule ..." -> best-effort structuring -> confirm/reject, or a
+    clarifying back-and-forth when the statement wasn't specific enough) -
+    POST /api/socrates/ask, entirely server-side state keyed by asker, not
+    a new mechanism.
+
+    ONLY use this when Marc is explicitly teaching a new rule, or
+    continuing/confirming/rejecting one from earlier in THIS SAME
+    conversation - never for an ordinary question, which the other
+    jasper_* tools already answer better. On the FIRST call for a new rule,
+    prefix `statement` with "#addrule " if Marc's own words didn't already
+    include it (that prefix is what tells the server this is a rule to
+    capture, not a question) - the reflected structure comes back in the
+    reply, along with confirm/reject instructions. On every FOLLOW-UP call
+    (answering a clarifying question, replying confirm/reject/yes/no), pass
+    Marc's literal reply text verbatim, unprefixed - relay whatever this
+    tool's reply says back to Marc exactly, since it may be asking a
+    specific follow-up question you should wait for his answer to before
+    calling this again."""
+    return _post("/api/socrates/ask", {"question": statement, "asker": "marc"})
+
+
+@mcp.tool()
 def jasper_request_contract_review(issue_id: str, instructions: str = "") -> dict:
     """Dispatch a REAL contract-review skill run for this issue via Jasper's
     existing worker action-bridge (the same mechanism the cockpit's 'Review

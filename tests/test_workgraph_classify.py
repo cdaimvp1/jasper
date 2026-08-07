@@ -613,6 +613,47 @@ def test_cluster_and_link_creates_new_issue_when_no_reference_match(ws_db):
     assert result["would_attach_via_reference"] == 0
 
 
+# --- ariba_requisitions wiring (task #267, 2026-08-07) ---------------------
+
+def test_cluster_and_link_persists_ariba_requisition_fields(ws_db):
+    """extract_ariba_requisition_fields already ran as a significance check
+    before this task (_has_matchable_signal) but its result was discarded -
+    now a real Ariba-signal-typed item's requester/descriptor/amount land in
+    the system-scoped ariba_requisitions table, keyed by its own PR#."""
+    rid = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key="ar1", thread_key="ar1", dedupe_key="ar1",
+        occurred_ts=time.time(),
+        subject=("Action required: Approve the Requisition that THOMAS TURNER submitted  - "
+                  "PR1193376 - Workday HCM SaaS ($53,702,143.00 USD)"),
+        from_actor="ariba-notifications@ariba.com", participants_json="[]",
+    )
+    ws_db.classify_raw_item(
+        rid, item_class="ACTIONABLE-ASK", direction="inbound", direction_inferred=False,
+        topic="other", topic_inferred=True, sentiment="neutral", sentiment_inferred=True,
+        anomaly_flag=False, signal_type="ariba_pr_approval_needed",
+        pr_number="PR1193376", pr_number_base="PR1193376", jasper_ref_issue_id=None,
+    )
+
+    wc.cluster_and_link()
+
+    row = ws_db.get_ariba_requisition("PR1193376")
+    assert row is not None
+    assert row["requester"] == "THOMAS TURNER"
+    assert row["descriptor"] == "Workday HCM SaaS"
+    assert row["amount"] == 53702143.0
+    assert row["issue_id"] is not None
+
+
+def test_cluster_and_link_skips_ariba_table_for_non_ariba_signal_type(ws_db):
+    """Same gate as the ContractPodAI wiring - only signal_type startswith
+    'ariba_' attempts extraction, so an unrelated item with a coincidentally
+    PR-shaped subject never gets a spurious ariba_requisitions row."""
+    rid = _pending_item(ws_db, "ar2", "PR1193376 status update, nothing structured")
+    wc.cluster_and_link()
+
+    assert ws_db.get_ariba_requisition("PR1193376") is None
+
+
 # --- Corrected pipeline Phase E (2026-08-05): FYI-standalone-skip gap ------
 # fix. A standalone FYI-EVIDENCE item (no thread/reference/jasper-ref/
 # subject match) carrying a real data point of its own must become a

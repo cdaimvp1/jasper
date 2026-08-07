@@ -2680,3 +2680,67 @@ def test_list_calendar_meetings_for_issue_handles_no_meta_json(ws_db):
     assert len(meetings) == 1
     assert meetings[0]["subject"] == "Old event"
     assert "location" not in meetings[0]
+
+
+# --- ariba_requisitions (task #267, 2026-08-07) -----------------------------
+
+def test_upsert_ariba_requisition_creates_row(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    ws_db.upsert_ariba_requisition(
+        {"pr_number": "PR1193376", "requester": "THOMAS TURNER",
+         "descriptor": "Workday HCM SaaS", "amount": 53702143.0},
+        raw_item_id=1, issue_id=a,
+    )
+
+    row = ws_db.get_ariba_requisition("PR1193376")
+
+    assert row["requester"] == "THOMAS TURNER"
+    assert row["descriptor"] == "Workday HCM SaaS"
+    assert row["amount"] == 53702143.0
+    assert row["issue_id"] == a
+
+
+def test_upsert_ariba_requisition_never_blanks_existing_field(ws_db):
+    """Same COALESCE discipline as upsert_contractpodai_request/upsert_party -
+    a later sighting missing a field (e.g. a bare escalation reminder with no
+    descriptor) must not blank out what an earlier sighting already found."""
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    ws_db.upsert_ariba_requisition(
+        {"pr_number": "PR1193376", "requester": "THOMAS TURNER",
+         "descriptor": "Workday HCM SaaS", "amount": 53702143.0},
+        raw_item_id=1, issue_id=a,
+    )
+
+    ws_db.upsert_ariba_requisition(
+        {"pr_number": "PR1193376", "requester": None, "descriptor": None, "amount": None},
+        raw_item_id=2, issue_id=None,
+    )
+
+    row = ws_db.get_ariba_requisition("PR1193376")
+    assert row["requester"] == "THOMAS TURNER"
+    assert row["descriptor"] == "Workday HCM SaaS"
+    assert row["amount"] == 53702143.0
+    assert row["raw_item_id"] == 2  # always advances to the latest sighting
+    assert row["issue_id"] == a  # COALESCE keeps the prior issue_id
+
+
+def test_get_ariba_requisition_missing_returns_none(ws_db):
+    assert ws_db.get_ariba_requisition("PR9999999") is None
+
+
+def test_list_ariba_requisitions_for_issue(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
+    ws_db.upsert_ariba_requisition(
+        {"pr_number": "PR1", "requester": "X", "descriptor": "D1", "amount": 1.0},
+        raw_item_id=1, issue_id=a,
+    )
+    ws_db.upsert_ariba_requisition(
+        {"pr_number": "PR2", "requester": "Y", "descriptor": "D2", "amount": 2.0},
+        raw_item_id=2, issue_id=b,
+    )
+
+    rows = ws_db.list_ariba_requisitions_for_issue(a)
+
+    assert len(rows) == 1
+    assert rows[0]["pr_number"] == "PR1"

@@ -1243,6 +1243,17 @@ def cluster_and_link(limit: int = 500) -> dict:
             )
             if cpai_fields:
                 ws.upsert_contractpodai_request(cpai_fields, raw_item_id=item["id"], issue_id=issue_id)
+        # Task #267 (2026-08-07): same system-scoped treatment for Ariba's
+        # requester/descriptor/amount - extract_ariba_requisition_fields
+        # already ran as a significance check in _has_matchable_signal, but
+        # its result was read-and-discarded there, never persisted anywhere
+        # queryable. Reference-ID matching itself needs no new wiring -
+        # REFERENCE_ID_RE's generic full-text scan already catches the PR#
+        # in the subject the same as any other PR/PO number.
+        if (item.get("signal_type") or "").startswith("ariba_"):
+            ariba_fields = workgraph_signals.extract_ariba_requisition_fields(item.get("subject") or "")
+            if ariba_fields and ariba_fields.get("pr_number"):
+                ws.upsert_ariba_requisition(ariba_fields, raw_item_id=item["id"], issue_id=issue_id)
         linked += 1
         touched_issues.add(issue_id)
         if item["item_class"] == "ACTIONABLE-ASK":

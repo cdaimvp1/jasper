@@ -1389,6 +1389,35 @@ def init_workgraph() -> None:
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_cpai_requests_issue ON contractpodai_requests(issue_id)")
 
+            # ariba_requisitions (task #267, 2026-08-07): same system-scoped
+            # treatment as contractpodai_requests above, for the requester/
+            # descriptor/amount fields workgraph_signals.extract_ariba_
+            # requisition_fields already pulls off an Ariba requisition-
+            # approval subject line. Reference-ID matching itself needs no new
+            # table - REFERENCE_ID_RE's generic full-text scan already catches
+            # "PR1193376" the same as any other PR/PO number - this table's
+            # only job is to persist the requester/descriptor/amount that were
+            # previously read-and-discarded every time (used only as a one-
+            # shot "is this significant" boolean in workgraph_classify.
+            # _has_matchable_signal, never stored anywhere queryable).
+            # pr_number is the primary key (not a separate id) because
+            # extract_ariba_requisition_fields is only ever called on an
+            # Ariba-shaped subject that already contains the real PR number -
+            # there is no case where this table has a row without one.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS ariba_requisitions (
+                    pr_number     TEXT PRIMARY KEY,
+                    requester     TEXT,
+                    descriptor    TEXT,
+                    amount        REAL,
+                    raw_item_id   INTEGER,
+                    issue_id      TEXT,
+                    first_seen_ts REAL NOT NULL,
+                    last_seen_ts  REAL NOT NULL
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_ariba_requisitions_issue ON ariba_requisitions(issue_id)")
+
             # PERSONALIZED_DATA_POINT_DISCOVERY.md section 3's continuous, cheap
             # (no LLM cost) tracker - counts a recurring pattern's real
             # occurrences/distinct-thread spread until it crosses the real
@@ -7233,6 +7262,59 @@ def list_contractpodai_requests_for_issue(issue_id: str) -> list[dict]:
         try:
             rows = conn.execute(
                 "SELECT * FROM contractpodai_requests WHERE issue_id = ? ORDER BY last_seen_ts DESC", (issue_id,)
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def upsert_ariba_requisition(fields: dict, *, raw_item_id: Optional[int], issue_id: Optional[str]) -> None:
+    """Partial upsert, same COALESCE discipline as upsert_contractpodai_
+    request/upsert_party - a later sighting of the same PR# (e.g. a
+    reminder/escalation subject that only restates the PR# without the
+    full descriptor) never blanks out a field an earlier sighting already
+    populated."""
+    now = time.time()
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                """INSERT INTO ariba_requisitions
+                   (pr_number, requester, descriptor, amount, raw_item_id, issue_id,
+                    first_seen_ts, last_seen_ts)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(pr_number) DO UPDATE SET
+                     requester = COALESCE(ariba_requisitions.requester, excluded.requester),
+                     descriptor = COALESCE(ariba_requisitions.descriptor, excluded.descriptor),
+                     amount = COALESCE(ariba_requisitions.amount, excluded.amount),
+                     raw_item_id = excluded.raw_item_id,
+                     issue_id = COALESCE(excluded.issue_id, ariba_requisitions.issue_id),
+                     last_seen_ts = excluded.last_seen_ts""",
+                (fields.get("pr_number"), fields.get("requester"), fields.get("descriptor"),
+                 fields.get("amount"), raw_item_id, issue_id, now, now),
+            )
+        finally:
+            conn.close()
+
+
+def get_ariba_requisition(pr_number: str) -> Optional[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM ariba_requisitions WHERE pr_number = ?", (pr_number,)
+            ).fetchone()
+        finally:
+            conn.close()
+    return dict(row) if row else None
+
+
+def list_ariba_requisitions_for_issue(issue_id: str) -> list[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM ariba_requisitions WHERE issue_id = ? ORDER BY last_seen_ts DESC", (issue_id,)
             ).fetchall()
         finally:
             conn.close()

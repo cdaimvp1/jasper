@@ -2,7 +2,7 @@
 jasper_mcp_server.py — MCP server exposing Jasper's own REST API
 (server_lean.py) as tools for a live Claude Code session (see
 workgraph_assistant.py, the orchestrator that spawns `claude -p --resume`
-with this as its --mcp-config).
+per conversational turn).
 
 Deliberately a thin proxy, not new business logic: every tool here is a
 direct call to a route that already exists and is already tested
@@ -16,6 +16,17 @@ send anything (outlook_actions.py's own contract: Reply()/ReplyAll()/
 Forward() + Display(), never Send()) - so a live session calling them
 autonomously carries the same risk as Marc clicking the existing cockpit
 buttons himself, not a new capability.
+
+Task #231 (2026-08-06): runs over SSE as one persistent, long-lived
+process (started once, alongside server_lean.py - see START_SERVICES.md
+or the equivalent launch step) rather than being spawned fresh by every
+`claude -p` turn's stdio --mcp-config. The old stdio-per-turn shape was
+correct but wasteful: this server holds no real per-turn state (every
+tool call is a fresh, stateless HTTP round-trip to server_lean.py
+anyway), so respawning the whole Python process + import graph on every
+single conversational turn was pure latency with no benefit.
+jasper_mcp_config.json now points `claude -p --mcp-config` at this
+process's SSE endpoint instead of a stdio command.
 """
 from __future__ import annotations
 
@@ -27,6 +38,8 @@ from mcp.server.mcpserver import MCPServer
 
 JASPER_API = os.environ.get("JASPER_API_BASE", "http://127.0.0.1:8700")
 TIMEOUT = 15
+MCP_HOST = os.environ.get("JASPER_MCP_HOST", "127.0.0.1")
+MCP_PORT = int(os.environ.get("JASPER_MCP_PORT", "8701"))
 
 mcp = MCPServer("jasper")
 
@@ -149,4 +162,4 @@ def jasper_request_contract_review(issue_id: str, instructions: str = "") -> dic
 
 
 if __name__ == "__main__":
-    mcp.run(transport="stdio")
+    mcp.run(transport="sse", host=MCP_HOST, port=MCP_PORT)

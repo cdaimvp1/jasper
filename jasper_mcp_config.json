@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "jasper": {
-      "command": "C:\\Users\\lane_marc@lilly.com\\Symphony\\venv\\Scripts\\python.exe",
-      "args": ["C:\\Users\\lane_marc@lilly.com\\Symphony\\body\\jasper_mcp_server.py"]
+      "type": "sse",
+      "url": "http://127.0.0.1:8701/sse"
     }
   }
 }

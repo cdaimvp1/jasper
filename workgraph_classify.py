@@ -1240,15 +1240,35 @@ def cluster_and_link(limit: int = 500) -> dict:
     # a mix of real issue ids (attached via an existing container/reference/
     # subject/Teams-sender match) and cluster ids (attached via the SAME
     # paths, or freshly created above) - split them, since recompute_issue_
-    # state/parties/title-generation are all real-issue concepts that don't
-    # apply to a cluster (no state machine, no NBA scoring of its own).
+    # state/title-generation are real-issue concepts that don't apply to a
+    # cluster (no state machine, no NBA scoring of its own - those are
+    # genuinely premature on unreviewed, not-yet-promoted content).
     touched_real_issues = {i for i in touched_issues if ws.get_cluster(i) is None}
     touched_clusters = touched_issues - touched_real_issues
 
     for issue_id in touched_real_issues:
         recompute_issue_state(issue_id, new_item_is_actionable=issue_id in newly_actionable_issues)
 
-    party_result = workgraph_parties.run(list(touched_real_issues))
+    # Real bug found and fixed live (2026-08-06, Marc's own direct
+    # correction during the Kinaxis fragmentation follow-up): party
+    # extraction was ALSO scoped to touched_real_issues only, lumped in
+    # with the state-machine/NBA concepts above by the same comment - but
+    # unlike those, resolving who's actually on a thread is not a
+    # judgment call that could be "wrong" if the cluster later gets
+    # restructured; it's a fact about the raw content, independent of
+    # promotion status. workgraph_parties.run's OWN docstring already
+    # says it expects "cluster_and_link's touched_issues set" (the FULL
+    # set) - this call site had drifted to the narrower touched_real_
+    # issues, silently starving every cluster (most of the corpus, most
+    # of the time) of the exact name-resolution/company-matching signal
+    # _matched_data_points already depends on. Confirmed live: 4 of 5
+    # real Kinaxis-fragmentation threads were still raw clusters, so
+    # their real, already-mentioned stakeholders (e.g. an internal
+    # contact with an existing, resolvable party record) were never
+    # being linked at all. Runs BEFORE workgraph_projects.run below so
+    # fresh party data is visible to this batch's own matching pass, not
+    # just the next one.
+    party_result = workgraph_parties.run(list(touched_issues))
     # Corrected pipeline Phase C (2026-08-05): runs over EVERY touched work
     # object, clusters included - group_issue()/scored_grouping_decision()
     # are now cluster-aware (get_issue_or_cluster, a cluster-inclusive

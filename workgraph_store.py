@@ -7,8 +7,6 @@ legacy `events` table and has no bearing on this brand-new database.
 
 raw_items      — one row per ingested item (mail/Teams/calendar/SharePoint),
                  pre-classification.
-thread_map     — deterministic stable_key -> issue_id lookup, so a thread is
-                 never re-clustered by an LLM once it's been resolved once.
 issues         — the curated work graph itself.
 evidence       — append-only links from an issue back to its source items
                  (and to worker-generated actions).
@@ -125,13 +123,6 @@ def init_workgraph() -> None:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_raw_unclassified ON raw_items(classified, ingested_ts)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_raw_thread_key ON raw_items(thread_key)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_raw_stable_key ON raw_items(source, stable_key)")
-
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS thread_map (
-                    stable_key TEXT PRIMARY KEY,
-                    issue_id   TEXT NOT NULL
-                )
-            """)
 
             # --- work_objects (design doc Section 12.1, 2026-08-03): issues and
             # projects are migrated into ONE typed, nestable table further
@@ -1080,14 +1071,19 @@ def init_workgraph() -> None:
             )
 
             # claim_edges (design doc Section 12.3 / 8.2): the edge types
-            # Section 8.2 named back when Phase 3 was built, now real. Only
-            # `supersedes` has an actual writer in this pass (touch_claim's
-            # existing repeat_signals-driven dedup, Section 9.3) -
-            # `contradicts`/`supports` stay schema-ready but empty, same
-            # "don't build a producer nothing calls yet" discipline as
-            # everything else in this doc: Evidence Assembly's conflict
-            # detection (Section 8.1, still "always empty in v0") is the real
-            # future producer for those two, not invented here speculatively.
+            # Section 8.2 named back when Phase 3 was built. Corrected
+            # 2026-08-07 (DB audit): NONE of the four edge types has a real
+            # production writer yet, including `supersedes` - this comment
+            # used to claim touch_claim wrote supersedes edges through here,
+            # but touch_claim only ever bumps last_seen_ts/escalation, and
+            # the real supersede mechanism (update_claim_status's own
+            # superseded_by column write) never calls create_claim_edge
+            # either. create_claim_edge/list_claim_edges_for_claim exist and
+            # are tested, just not called from any live pipeline path -
+            # schema-ready, genuinely empty, same "don't build a producer
+            # nothing calls yet" discipline as everything else in this doc.
+            # Evidence Assembly's conflict detection (Section 8.1) remains
+            # the real intended future producer for contradicts/supports.
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS claim_edges (
                     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1355,6 +1351,43 @@ def init_workgraph() -> None:
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_data_point_values_wo ON data_point_values(work_object_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_data_point_values_def ON data_point_values(definition_id)")
+
+            # contractpodai_requests (task #265, 2026-08-07): a real, external
+            # SYSTEM's own structured fields, kept in a table scoped to that
+            # system rather than folded into generic personal vocabulary
+            # (data_point_definitions above) - Marc's own direct correction,
+            # since a field like "Request ID" means something completely
+            # different depending on which system produced it (this table's
+            # own request_id is a ContractPodAI-internal number, unrelated to
+            # an Ariba PR/PO despite the shared English label). One row per
+            # real request (request_id is that system's own stable key, with
+            # a real cloud22.contractpod.com permalink - not a guess), fields
+            # populated incrementally as different real ContractPodAI
+            # notification templates about the SAME request arrive (see
+            # workgraph_signals.extract_contractpodai_request_fields) - a
+            # later template filling in a field an earlier one didn't carry
+            # is expected, not an error.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS contractpodai_requests (
+                    request_id           TEXT PRIMARY KEY,
+                    contractpod_url      TEXT,
+                    sourcing_lead        TEXT,
+                    functional_area      TEXT,
+                    s2p_action           TEXT,
+                    supplier_name        TEXT,
+                    priority             TEXT,
+                    primary_assignee     TEXT,
+                    additional_assignees TEXT,
+                    reviewer             TEXT,
+                    requester            TEXT,
+                    agreement_title      TEXT,
+                    raw_item_id          INTEGER,
+                    issue_id             TEXT,
+                    first_seen_ts        REAL NOT NULL,
+                    last_seen_ts         REAL NOT NULL
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_cpai_requests_issue ON contractpodai_requests(issue_id)")
 
             # PERSONALIZED_DATA_POINT_DISCOVERY.md section 3's continuous, cheap
             # (no LLM cost) tracker - counts a recurring pattern's real
@@ -2550,29 +2583,16 @@ def link_raw_item_to_issue(raw_item_id: int, issue_id: str) -> None:
     invalidate_work_object_signature(issue_id)
 
 
-# --- thread_map ---------------------------------------------------------------
-
-def thread_map_lookup(stable_key: str) -> Optional[str]:
-    with _lock:
-        conn = _connect()
-        try:
-            row = conn.execute(
-                "SELECT issue_id FROM thread_map WHERE stable_key = ?", (stable_key,)
-            ).fetchone()
-        finally:
-            conn.close()
-    return row["issue_id"] if row else None
-
-
 def project_id_for_conversation_id(conversation_id: str) -> Optional[str]:
     """Add-in "focus on the email I have open" (task #240): Office.js's
     Office.context.mailbox.item.conversationId is the same underlying
     Exchange conversation-thread GUID Outlook COM exposes as
     $item.ConversationID, which ingest/outlook_scan.ps1 already writes
     straight into raw_items.stable_key for every outlook_mail row (line
-    ~281) - so a direct raw_items lookup, not thread_map (a pre-issue-
-    creation staging table, not guaranteed populated for every item), is
-    the ground-truth path here. Picks the most recently occurring linked
+    ~281) - so a direct raw_items lookup is the ground-truth path here
+    (the old thread_map table this used to defer to was dead code - zero
+    real callers anywhere - removed 2026-08-07 during the DB audit).
+    Picks the most recently occurring linked
     raw_item in case a long thread's items ended up split across issues
     (rare, but real) - most recent is the honest "what Marc is looking at
     right now" answer."""
@@ -2606,18 +2626,6 @@ def project_id_for_conversation_id(conversation_id: str) -> Optional[str]:
         finally:
             conn.close()
     return wo["parent_id"] if wo else None
-
-
-def thread_map_set(stable_key: str, issue_id: str) -> None:
-    with _lock:
-        conn = _connect()
-        try:
-            conn.execute(
-                "INSERT OR REPLACE INTO thread_map (stable_key, issue_id) VALUES (?, ?)",
-                (stable_key, issue_id),
-            )
-        finally:
-            conn.close()
 
 
 # --- issues ---------------------------------------------------------------
@@ -3577,7 +3585,6 @@ def remediate_merge_issue_identity(winner_id: str, loser_id: str, *, reason_labe
                 for table in ("raw_items", "evidence", "work_tasks", "issue_state_history",
                               "nba_choice_log", "shadow_grouping_log"):
                     conn.execute(f"UPDATE {table} SET issue_id = ? WHERE issue_id = ?", (winner_id, loser_id))
-                conn.execute("UPDATE thread_map SET issue_id = ? WHERE issue_id = ?", (winner_id, loser_id))
 
                 loser_parties = conn.execute(
                     "SELECT party_id, role FROM issue_parties WHERE issue_id = ?", (loser_id,)
@@ -5655,9 +5662,10 @@ def source_container_lookup(*, source: str, container_type: str, exact_key: str)
     key was always meant to support - list_source_containers only ever
     supported the reverse direction (by issue_id). This is what lets the
     live clustering path check "does a container for this exact key
-    already exist" BEFORE an issue is created, the same way thread_map_
-    lookup already did for the older flat-string-key model this is
-    replacing. Returns the full row (including issue_id, possibly None if
+    already exist" BEFORE an issue is created, the same role the older
+    flat-string-key thread_map model played before this replaced it
+    (thread_map itself removed 2026-08-07, dead code). Returns the full
+    row (including issue_id, possibly None if
     a container was ever recorded with no issue attached yet) or None if
     no such container exists at all."""
     with _lock:
@@ -7162,6 +7170,73 @@ def reject_data_point_definition(definition_id: str) -> None:
             conn.execute("UPDATE data_point_definitions SET status = 'rejected' WHERE id = ?", (definition_id,))
         finally:
             conn.close()
+
+
+# --- contractpodai_requests (task #265) -------------------------------------
+
+def upsert_contractpodai_request(fields: dict, *, raw_item_id: Optional[int], issue_id: Optional[str]) -> None:
+    """Partial upsert, same discipline as upsert_party: COALESCE keeps
+    whatever's already there when a later template doesn't carry a given
+    field, only filling gaps or refreshing raw_item_id/issue_id/
+    last_seen_ts - never overwrites a real value with a later NULL just
+    because a different ContractPodAI template didn't mention that field."""
+    now = time.time()
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                """INSERT INTO contractpodai_requests
+                   (request_id, contractpod_url, sourcing_lead, functional_area, s2p_action,
+                    supplier_name, priority, primary_assignee, additional_assignees, reviewer,
+                    requester, agreement_title, raw_item_id, issue_id, first_seen_ts, last_seen_ts)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(request_id) DO UPDATE SET
+                     contractpod_url = COALESCE(contractpodai_requests.contractpod_url, excluded.contractpod_url),
+                     sourcing_lead = COALESCE(contractpodai_requests.sourcing_lead, excluded.sourcing_lead),
+                     functional_area = COALESCE(contractpodai_requests.functional_area, excluded.functional_area),
+                     s2p_action = COALESCE(contractpodai_requests.s2p_action, excluded.s2p_action),
+                     supplier_name = COALESCE(contractpodai_requests.supplier_name, excluded.supplier_name),
+                     priority = COALESCE(contractpodai_requests.priority, excluded.priority),
+                     primary_assignee = COALESCE(contractpodai_requests.primary_assignee, excluded.primary_assignee),
+                     additional_assignees = COALESCE(contractpodai_requests.additional_assignees, excluded.additional_assignees),
+                     reviewer = COALESCE(contractpodai_requests.reviewer, excluded.reviewer),
+                     requester = COALESCE(contractpodai_requests.requester, excluded.requester),
+                     agreement_title = COALESCE(contractpodai_requests.agreement_title, excluded.agreement_title),
+                     raw_item_id = excluded.raw_item_id,
+                     issue_id = COALESCE(excluded.issue_id, contractpodai_requests.issue_id),
+                     last_seen_ts = excluded.last_seen_ts""",
+                (fields["request_id"], fields.get("contractpod_url"), fields.get("sourcing_lead"),
+                 fields.get("functional_area"), fields.get("s2p_action"), fields.get("supplier_name"),
+                 fields.get("priority"), fields.get("primary_assignee"), fields.get("additional_assignees"),
+                 fields.get("reviewer"), fields.get("requester"), fields.get("agreement_title"),
+                 raw_item_id, issue_id, now, now),
+            )
+        finally:
+            conn.close()
+
+
+def get_contractpodai_request(request_id: str) -> Optional[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM contractpodai_requests WHERE request_id = ?", (request_id,)
+            ).fetchone()
+        finally:
+            conn.close()
+    return dict(row) if row else None
+
+
+def list_contractpodai_requests_for_issue(issue_id: str) -> list[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM contractpodai_requests WHERE issue_id = ? ORDER BY last_seen_ts DESC", (issue_id,)
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
 
 
 def adjust_data_point_trust(definition_id: str, delta: float, *, floor: float = 0.1, ceiling: float = 0.9) -> None:

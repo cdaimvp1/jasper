@@ -181,6 +181,15 @@ _RULES: list[tuple[str, Optional[str], "re.Pattern[str]", str]] = [
      re.compile(r"Important Dates/Key Obligations updates", re.I), "fyi"),
     ("contractpodai_contract_request_submitted", "contractpodai.com",
      re.compile(r"^\[EXTERNAL\]\s*Contract Request Submitted", re.I), "fyi"),
+    # Task #265 (2026-08-07): two more real ContractPodAI templates found
+    # unclassified (signal_type NULL) while tracing the discovery
+    # mechanism's proposals back to their real source system. Both carry a
+    # real Request ID (extract_contractpodai_request_fields above) and
+    # genuinely need Marc's action, unlike the fyi-only rules above.
+    ("contractpodai_review_requested", "contractpodai.com",
+     re.compile(r"Lilly Contracting Requests Your Review", re.I), "actionable"),
+    ("contractpodai_reassignment_requested", "contractpodai.com",
+     re.compile(r"^\[EXTERNAL\]\s*Request Reassignment of Assignee", re.I), "actionable"),
 
     ("intake_new_project_assigned", None,
      re.compile(r"Intake PowerApp - New Project Submitted", re.I), "fyi"),
@@ -273,6 +282,109 @@ def extract_ariba_requisition_fields(subject: str) -> Optional[dict]:
         "pr_number": (m.group("pr_number") or "").upper() or None,
         "descriptor": m.group("descriptor").strip(" -–—"),
         "amount": amount,
+    }
+
+
+# --- ContractPodAI structured-field extraction (task #265, 2026-08-07) -----
+# Same rationale as extract_ariba_requisition_fields above: the discovery
+# mechanism's catch-up sweep surfaced 5 real labeled fields (Request ID,
+# Sourcing Lead, Functional Area, Supplier Name, "what do you want the S2P
+# team to do"), and checking their real backing raw_items found every one
+# traces to the same sender (no-reply@contractpodai.com). Marc's own direct
+# correction: a field discovered from one specific system's own notification
+# template belongs in a table SCOPED to that system, keyed by that system's
+# own reference id - not folded into generic personal vocabulary next to an
+# unrelated system's field that happens to share a label like "Request ID".
+# Confirmed against THREE real, distinct ContractPodAI templates while
+# investigating this (not just the one the discovery sweep happened to
+# sample): "Contract Request Submitted" (the full intake form - Sourcing
+# Lead/Functional Area/Supplier Name/Priority/S2P action + Request ID),
+# "Lilly Contracting Requests Your Review" (a short review-request note -
+# reviewer/requester/agreement title + Request ID), and "Request
+# Reassignment of Assignee - <Supplier> - Master Agreement - <RequestID>"
+# (Request ID literally in the subject line + Primary/Additional Assignee).
+# Every field below is independently optional (re.search per field, never
+# one all-or-nothing template match) since a real body might legitimately
+# carry only a subset - the one thing every real template shares is a real
+# Request ID with a stable cloud22.contractpod.com permalink.
+
+# `[ \t]*` (never `\s*`) between a label and its value below - confirmed
+# real bug (2026-08-07, caught in this build's own backfill sanity check):
+# `\s*` matches a newline too, so a genuinely EMPTY field ("What is the
+# Priority?: " with nothing after it, a real, observed case) let the
+# match skip clean over the blank line and grab the START OF THE NEXT
+# LABELED FIELD instead ("Request ID: 90996 <url>" ended up stored as a
+# priority). Horizontal-whitespace-only plus `.*` (not `.+`) makes an
+# empty field capture an empty string - correctly normalized to None
+# below - rather than reaching past its own line for content that isn't
+# this field's value at all.
+_CPAI_REQUEST_ID_RE = re.compile(r"Request ID[ \t]*:?[ \t]*(\d+)", re.I)
+_CPAI_URL_RE = re.compile(r"(https?://[^\s>]*contract-snapshot/(\d+)/redirect[^\s>]*)", re.I)
+_CPAI_REASSIGN_SUBJECT_RE = re.compile(
+    r"Request Reassignment of Assignee\s*-\s*(?P<supplier>.+?)\s*-\s*Master Agreement\s*-\s*(?P<request_id>\d+)",
+    re.I,
+)
+_CPAI_REVIEW_REQUEST_RE = re.compile(
+    r"Hi\s+(?P<reviewer>[A-Za-z][\w' -]*?)\s*-\s*(?P<requester>.+?)\s*\([^)]+@[^)]+\)\s+is requesting your "
+    r"review of the following agreement:[ \t]*(?P<agreement>.+?)\.",
+    re.I,
+)
+_CPAI_SOURCING_LEAD_RE = re.compile(r"Sourcing Lead:[ \t]*(.*)")
+_CPAI_FUNCTIONAL_AREA_RE = re.compile(r"Functional Area:[ \t]*(.*)")
+_CPAI_S2P_ACTION_RE = re.compile(r"What do you want the S2P team to do:[ \t]*(.*)")
+_CPAI_SUPPLIER_NAME_RE = re.compile(r"Supplier Name:[ \t]*(.*)")
+_CPAI_PRIORITY_RE = re.compile(r"What is the Priority\?:[ \t]*(.*)")
+_CPAI_PRIMARY_ASSIGNEE_RE = re.compile(r"Primary Assignee:[ \t]*(.*)")
+_CPAI_ADDITIONAL_ASSIGNEES_RE = re.compile(r"Additional Assignees:[ \t]*(.*)")
+
+
+def extract_contractpodai_request_fields(subject: str, body: str) -> Optional[dict]:
+    """Real fields out of ANY of ContractPodAI's own notification templates -
+    see the module comment just above for how this was confirmed (real
+    sender, three distinct real templates, every field independently
+    optional). Returns None only when NO request id can be found anywhere
+    (the labeled field, its URL, or the reassignment subject's own trailing
+    number) - with no id there's no real key to store a row under."""
+    text = f"{subject or ''}\n{body or ''}"
+
+    reassign_m = _CPAI_REASSIGN_SUBJECT_RE.search(subject or "")
+    request_id = None
+    m = _CPAI_REQUEST_ID_RE.search(text)
+    if m:
+        request_id = m.group(1)
+    if request_id is None:
+        url_m = _CPAI_URL_RE.search(text)
+        if url_m:
+            request_id = url_m.group(2)
+    if request_id is None and reassign_m:
+        request_id = reassign_m.group("request_id")
+    if request_id is None:
+        return None
+
+    url_m = _CPAI_URL_RE.search(text)
+    review_m = _CPAI_REVIEW_REQUEST_RE.search(text)
+
+    def _field(pattern):
+        fm = pattern.search(text)
+        if not fm:
+            return None
+        value = fm.group(1).strip()
+        return value or None  # a real, observed case: the field is present but genuinely left blank
+
+    return {
+        "request_id": request_id,
+        "contractpod_url": url_m.group(1) if url_m else None,
+        "sourcing_lead": _field(_CPAI_SOURCING_LEAD_RE),
+        "functional_area": _field(_CPAI_FUNCTIONAL_AREA_RE),
+        "s2p_action": _field(_CPAI_S2P_ACTION_RE),
+        "supplier_name": _field(_CPAI_SUPPLIER_NAME_RE)
+                          or (reassign_m.group("supplier").strip() if reassign_m else None),
+        "priority": _field(_CPAI_PRIORITY_RE),
+        "primary_assignee": _field(_CPAI_PRIMARY_ASSIGNEE_RE),
+        "additional_assignees": _field(_CPAI_ADDITIONAL_ASSIGNEES_RE),
+        "reviewer": review_m.group("reviewer").strip() if review_m else None,
+        "requester": review_m.group("requester").strip() if review_m else None,
+        "agreement_title": review_m.group("agreement").strip() if review_m else None,
     }
 
 

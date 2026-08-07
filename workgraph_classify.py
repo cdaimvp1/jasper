@@ -400,6 +400,21 @@ def classify_item(*, subject: str, body_preview: str, from_actor: str,
     if not pr_number_base:
         pr_number_base = workgraph_signals.reference_base(pr_number)
 
+    # Task #265 (2026-08-07): a ContractPodAI request id is exactly the
+    # same kind of stable, deal-scoped reference PR/PO numbers already are
+    # (Marc's own criteria - a real permalink, consistent across every
+    # notification about the same request) - reusing the SAME pr_number/
+    # pr_number_base matching machinery this codebase already has, just
+    # namespaced (CPAI<id>) so it can never collide with a real Ariba
+    # PR/PO. Only fires when nothing already matched above - a genuine
+    # PR/PO mention (rare but possible even in a ContractPodAI thread,
+    # e.g. quoted from an earlier Ariba email) still wins.
+    if not pr_number and signal and (signal.get("signal_type") or "").startswith("contractpodai_"):
+        cpai_fields = workgraph_signals.extract_contractpodai_request_fields(subject, body_preview)
+        if cpai_fields:
+            pr_number = f"CPAI{cpai_fields['request_id']}"
+            pr_number_base = pr_number
+
     # Task #36: same full-text scan as pr_number above - a Jasper reference
     # tag most often shows up quoted back inside a reply's body (the
     # original draft's signature/subject line, echoed by the reply chain),
@@ -957,8 +972,10 @@ def _container_set_issue(item: dict, exact_key: Optional[str], issue_id: str) ->
 
 def cluster_and_link(limit: int = 500) -> dict:
     """For every classified-but-not-yet-linked item (issue_id IS NULL),
-    resolve via thread_map (an existing Issue's thread_key) or create a new
-    Issue. NOISE items are never promoted to an Issue - they're classified and
+    resolve via source_containers (an existing Issue's container identity -
+    see _container_lookup_issue above; thread_map, the older flat-string-key
+    model this replaced, was fully retired and removed 2026-08-07) or create
+    a new Issue. NOISE items are never promoted to an Issue - they're classified and
     left ungrouped (auditable, per the reference file's precision-favoring
     default), not silently dropped. FYI-EVIDENCE items get the same
     not-promoted treatment when there's no existing thread to attach to -
@@ -1213,6 +1230,19 @@ def cluster_and_link(limit: int = 500) -> dict:
             summary=summary,
             raw_item_id=item["id"],
         )
+        # Task #265 (2026-08-07): now that issue_id is finalized for this
+        # item, persist any real ContractPodAI request fields into their
+        # own system-scoped table (see workgraph_signals.
+        # extract_contractpodai_request_fields' own docstring for why this
+        # is a dedicated table, not generic personal vocabulary). Cheap
+        # (regex only, no LLM) - fine to attempt on every item, but only
+        # ContractPodAI-sourced ones will ever actually match.
+        if (item.get("signal_type") or "").startswith("contractpodai_"):
+            cpai_fields = workgraph_signals.extract_contractpodai_request_fields(
+                item.get("subject") or "", text_extract.resolve_item_text(item)
+            )
+            if cpai_fields:
+                ws.upsert_contractpodai_request(cpai_fields, raw_item_id=item["id"], issue_id=issue_id)
         linked += 1
         touched_issues.add(issue_id)
         if item["item_class"] == "ACTIONABLE-ASK":

@@ -1,5 +1,14 @@
 # Synthesis routine — curator's (Colleen's) wake checklist
 
+**Hybrid routing (task #247, 2026-08-07):** you are only woken at all when at least one stale entity
+carries genuinely new evidence AT OR ABOVE `workgraph_synthesis_light.LIGHT_PATH_MAX_BYTES` (100KB).
+Anything under that gets handled inline by `ingest/scheduled_refresh.py` itself before you're ever
+spawned — one non-agentic LLM call, no subprocess, deliberately narrower than this routine (no
+`repeat_signals`/`resolution_signals`/duration estimates — see `workgraph_synthesis_light.py`'s
+module docstring for why those are safely omittable there). By the time you run your own
+`--list-stale`, anything the light path already handled is simply no longer stale — you never need
+to know it happened, and there is nothing to exclude or skip on your end.
+
 **What this is for:** curator's synthesis job is real judgment — reading communications, extracting
 facts, and writing a narrative — never mechanical (that's `relay`'s job, see
 `GRAPH_INGEST_ROUTINE.md`), and never a wholesale re-read of an entity's whole history on every

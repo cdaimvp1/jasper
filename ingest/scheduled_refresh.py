@@ -34,6 +34,7 @@ import workgraph_classify
 import workgraph_nba
 import workgraph_alerts
 import workgraph_synthesis
+import workgraph_synthesis_light
 import workgraph_identity
 import workgraph_deepdive
 import outlook_com_ingest
@@ -231,11 +232,47 @@ def run_synthesis_oneshot() -> dict:
     materiality-filtered - see workgraph_synthesis.py - so a backlog after
     being offline a while can't turn this one subprocess into an unbounded
     session. `deferred`/`skipped_immaterial` below report what that gate did
-    this wake (never silently - just not acted on this cycle)."""
+    this wake (never silently - just not acted on this cycle).
+
+    Hybrid routing (task #247): before ever deciding whether to wake the
+    full curator subprocess, every stale entity this wake is routed by how
+    much genuinely NEW evidence it actually carries (workgraph_synthesis_
+    light.compute_new_evidence_bytes - the exact text a synthesis pass
+    would read, not an estimate). Anything under LIGHT_PATH_MAX_BYTES is
+    handled right here, inline, via one real (but non-agentic) LLM call -
+    no `claude -p` session startup, no Bash-tool curl round-trips for what
+    is usually a couple of short emails. That write updates the entity's
+    own synthesized_from_marker exactly as a curator write would, so it's
+    simply no longer stale by the time curator's OWN `--list-stale` call
+    (inside her own subprocess, if she gets woken at all) runs - no
+    separate exclusion list needs to be threaded through. The curator
+    subprocess is only spawned at all if genuinely heavy entities remain
+    after the light pass; an all-light wake never pays the subprocess cost."""
     stats: dict = {}
     stale = workgraph_synthesis.list_stale_entities(stats=stats)
     if not stale:
         return {"ok": True, "skipped": True, "reason": "no stale entities", **stats}
+
+    light_results = []
+    heavy_remaining = 0
+    for entity in stale:
+        size = workgraph_synthesis_light.compute_new_evidence_bytes(entity["entity_type"], entity["entity_id"])
+        if size < workgraph_synthesis_light.LIGHT_PATH_MAX_BYTES:
+            try:
+                light_results.append(workgraph_synthesis_light.run_light_synthesis(
+                    entity["entity_type"], entity["entity_id"]))
+            except Exception as e:
+                light_results.append({"entity_type": entity["entity_type"], "entity_id": entity["entity_id"],
+                                       "action": "error", "error": str(e)})
+        else:
+            heavy_remaining += 1
+
+    light_summary = {"light_path_count": len(light_results), "heavy_path_count": heavy_remaining,
+                      "light_results": light_results}
+
+    if heavy_remaining == 0:
+        return {"ok": True, "skipped": True, "reason": "handled entirely by light path",
+                "stale_count": len(stale), **stats, **light_summary}
 
     env_prefix = {
         "SYMPHONY_WORKER": "curator",
@@ -254,7 +291,7 @@ def run_synthesis_oneshot() -> dict:
             cwd=str(BODY), env=env, timeout=1500,
         )
         return {"ok": proc.returncode == 0, "returncode": proc.returncode,
-                "stale_count": len(stale), **stats,
+                "stale_count": len(stale), **stats, **light_summary,
                 "stdout_tail": proc.stdout[-1000:], "stderr_tail": proc.stderr[-1000:]}
     except Exception as e:
         return {"ok": False, "stale_count": len(stale), **stats, "error": str(e)}

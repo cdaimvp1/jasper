@@ -39,22 +39,30 @@ never its output.
 ## 2. What setup actually does
 
 1. **Mass ingestion + pattern analysis over the new installation's own real mail**
-   (a real window - Marc's own figure: 30 days, revising the earlier-noted 90-day
-   figure from the generalization notes; either is a parameter, not load-bearing to
-   the design). No categories assumed going in.
-2. **Optional role/org self-report as a soft prior, never a hard commitment.** The
-   user can say "I'm in Procurement" / "Marketing" / "Manufacturing" / etc. at
-   setup. That seeds the discovery pass with a starting set of *hypotheses* to
-   specifically test against this person's real mail - e.g. for "Procurement":
-   does this person actually receive Ariba-style approval notifications, DocuSign/
-   AdobeSign requests, common ERP vendor domains? For "Marketing": campaign-platform
-   notifications, agency names, creative-review threads? **Every hypothesis is
-   tested against real, recurring evidence in this person's own mail before it
-   becomes a candidate** - the role never forces a pattern into existence that
-   isn't actually there, and a Procurement user with no DocuSign mail simply gets no
-   DocuSign candidate. The role hint's only job is to make discovery faster and
-   more sample-efficient (useful especially with a short window and little history
-   yet), not to pre-determine the answer.
+   (a real window - locked in 2026-08-06: **90 days**, confirming the generalization
+   notes' original figure. An earlier draft of this doc mistakenly recorded 30 days
+   as a revision; that was wrong, corrected here. The window is a parameter, not
+   load-bearing to the design, but 90 days is the real default). No categories
+   assumed going in.
+2. **Optional role/org self-report as a soft prior, never a hard commitment.**
+   **Locked in (2026-08-06): freeform text, not a rigid picklist** - with a set of
+   clickable suggestions shown alongside the input (Procurement, Marketing & Sales,
+   Manufacturing, Research, Leadership, Finance, IT, Research and Development, Human
+   Resources, Learning and Development, ...) so a common case is one click, but
+   nothing forces a real answer like "supply chain analyst embedded with
+   manufacturing" into the nearest bucket. Whatever the user types or picks seeds
+   the discovery pass with a starting set of *hypotheses* to specifically test
+   against this person's real mail - a suggestion has a pre-built hypothesis set
+   ready to go (e.g. "Procurement" -> check for Ariba-style approval notifications,
+   DocuSign/AdobeSign requests, common ERP vendor domains; "Marketing" -> check for
+   campaign-platform notifications, agency names, creative-review threads); genuine
+   freeform text asks the discovery LLM to derive analogous hypotheses from the text
+   itself. **Every hypothesis is tested against real, recurring evidence in this
+   person's own mail before it becomes a candidate** - the role never forces a
+   pattern into existence that isn't actually there, and a Procurement user with no
+   DocuSign mail simply gets no DocuSign candidate. The role hint's only job is to
+   make discovery faster and more sample-efficient (useful especially with a short
+   window and little history yet), not to pre-determine the answer.
 3. **LLM-proposed candidate data points, each grounded in real recurrence.** For
    each candidate: a name, a description, the real evidence that surfaced it
    (example senders/subjects/labeled-field text actually seen), and a proposed
@@ -128,6 +136,20 @@ gradual drift, active staleness, and real discontinuity respectively:
 Same real, practical trigger for the monthly sweep either way: run it on a
 fixed cadence (monthly), not only reactively when something visibly breaks.
 
+**Vocabulary size cap - locked in 2026-08-06: 20 confirmed data points max per
+installation.** Marc's own number, sweet spot "somewhere between 10 and 20."
+Applies only to the discovered/human-confirmed vocabulary this system produces
+(the "Supplier name" / "Campaign ID" / "Batch number"-style fields) - NOT to
+sender identity/affiliation, attachments, or subject, which already exist as
+separate, always-on infrastructure (`parties` + `workgraph_parties.
+classify_affiliation()`, the `attachments` table, `raw_items.subject`) and were
+never proposed as `data_point_definitions` rows in the first place. When a new
+candidate would push a confirmed count past 20, the human-review surface (§214)
+must force a choice (retire/merge an existing one, or decline the new one) rather
+than silently growing past the cap - keeps the review UI and the matching
+signal set from drowning in low-value fields, the same failure mode a totally
+unbounded schema would eventually hit anyway.
+
 ## 4. Data model (sketch, not final)
 
 ```
@@ -135,12 +157,19 @@ data_point_definitions
   id                  TEXT PK
   name                TEXT            -- user-facing, e.g. "Supplier name", "Campaign ID"
   description         TEXT            -- what this represents, for the review UI
-  point_type          TEXT            -- structural role: 'entity' | 'reference' | 'amount' | 'person' | 'freetext'
-                                       -- (a small, genuinely universal STRUCTURAL taxonomy -
-                                       -- not a content taxonomy; used only to decide how a value
-                                       -- participates in matching/scoring, e.g. "reference"-typed
-                                       -- values can auto-merge, "entity"-typed contribute to the
-                                       -- 2+-point candidate gate, "freetext" never auto-merges)
+  point_type          TEXT            -- structural role: 'entity' | 'reference' | 'amount' | 'person'
+                                       -- | 'date' | 'freetext' (6 types, locked in 2026-08-06 after
+                                       -- checking the real live corpus - see §7.4). A small, genuinely
+                                       -- universal STRUCTURAL taxonomy - not a content taxonomy; used
+                                       -- only to decide how a value participates in matching/scoring:
+                                       -- "reference"-typed values can auto-merge alone, "entity"/"person"-
+                                       -- typed contribute to the 2+-point candidate gate, "date"-typed
+                                       -- get real temporal comparison/staleness handling (workgraph_
+                                       -- deadlines.py's existing hard/soft real-timestamp treatment,
+                                       -- generalized instead of hardcoded to issues.due/dates_mentioned),
+                                       -- "freetext" never auto-merges (product/service names, subject-
+                                       -- derived topics - real content, but not identity-backed the way
+                                       -- a tracked party or a unique reference number is)
   deterministic_rule  TEXT NULL       -- regex / labeled-field name, when one was found
   status              TEXT            -- 'proposed' | 'confirmed' | 'rejected'
   trust_score         REAL            -- same bump/penalty arithmetic as workgraph_lessons
@@ -164,6 +193,15 @@ candidate_pattern_observations       -- §3's continuous cheap tracker, pre-prop
   last_seen_ts        REAL
   promoted_to_definition_id TEXT NULL -- set once this crosses the bar and a real proposal is drafted
 ```
+
+**Two different refinement speeds, not one (Marc, 2026-08-06):** the discovered
+data points themselves (rows in `data_point_definitions`) are meant to keep
+changing continuously - trust-score drift, staleness, the monthly sweep. The
+6-type `point_type` taxonomy above is a slower, deliberate layer instead - a real
+schema decision (a migration, like the one `date` just required), made by a human
+looking at real evidence, not something inferred/auto-added by the discovery LLM.
+Unlimited auto-growth at the type level would recreate the same sprawl problem
+the 20-item vocabulary cap (§3) exists to prevent, one layer up.
 
 This replaces today's hardcoded shape (`compute_work_object_signature`'s
 `positive_vocabulary` dict with named fields `ariba_requester`/`ariba_descriptor`/
@@ -231,24 +269,37 @@ fix:
 
 ## 7. Open questions for Marc
 
-1. Setup window length - 30 days (Marc's latest figure) vs. the 90-day figure in
-   the earlier generalization notes. Pick one, or make it itself a setup-time
-   choice (more history = better discovery, but slower/costlier first run).
-2. Role/org self-report - a fixed picklist (Procurement/Marketing/Manufacturing/
-   Research/Leadership/...) or freeform text the discovery LLM interprets itself?
-   A picklist is easier to build a hypothesis library against; freeform is more
-   flexible but needs the LLM to map arbitrary text to useful search hypotheses.
-3. Migration for the existing live corpus (this installation, Marc's own): does
-   the current hardcoded procurement fields become this installation's *initial*
-   confirmed vocabulary (fast-tracked, since it's already proven correct on 90 days
-   of real use), or does it also go through a real discovery/confirm pass for
-   consistency? Recommend the former - re-discovering what's already known and
-   working would be pure cost with no signal.
-4. How opinionated should the point_type structural taxonomy (§4) be? Too few
-   types loses real distinctions (auto-merge-worthy vs. not); too many recreates
-   the original mistake in a different place (baking in structure that doesn't
-   generalize). Needs a few real cross-domain examples worked through by hand
-   before finalizing.
+All four resolved (2026-08-06):
+
+1. ~~Setup window length~~ - **90 days.** (An earlier draft of this doc had
+   mistakenly flipped this to 30; corrected in §2 above.)
+2. ~~Role/org self-report~~ - **freeform text with clickable suggestions**
+   (Procurement, Marketing & Sales, Manufacturing, Research, Leadership, Finance,
+   IT, Research and Development, Human Resources, Learning and Development, ...),
+   not a rigid picklist. See §2.2.
+3. ~~Migration for the existing live corpus~~ - **fast-track**: Marc's own
+   already-proven procurement fields become this installation's initial confirmed
+   vocabulary directly (task #217), not a re-discovery pass. Re-discovering what's
+   already known and working would be pure cost with no signal.
+4. ~~point_type taxonomy granularity~~ - **6 types: entity, reference, amount,
+   person, date, freetext.** Checked against this installation's real, live data
+   before finalizing (not just designed in the abstract, per Marc's own request):
+   the existing hardcoded content categories (`reference`/`supplier`/`stakeholder`/
+   `product_service`/`amount`/`document`/`subject_entity`) map cleanly onto 5 of the
+   6 - supplier->entity, stakeholder->person, product_service/subject_entity->
+   freetext (neither is identity-backed the way a tracked party or a reference
+   number is, so both should behave as soft/non-auto-merging), amount->amount,
+   reference->reference - except `dates_mentioned` (a field EVERY real extraction
+   row already carries, already given real hard/soft temporal classification and
+   comparison by `workgraph_deadlines.py`), which had no home in the original
+   5-type sketch and would have silently lost that real, already-built comparison/
+   staleness behavior if forced into `freetext`. Added `date` as the 6th type for
+   exactly that reason. `document` (shared attachment-hash lineage) deliberately
+   does NOT get a 7th type - it isn't a discovered "value" at all, it's a
+   structural fact already tracked separately via `artifact_lineages`, and forcing
+   it into this taxonomy would recreate the original hardcoding mistake in a new
+   place. Vocabulary SIZE (as opposed to type granularity) is capped separately
+   at 20 confirmed data points per installation - see §3.
 
 ## 8. Explicitly not designed here
 

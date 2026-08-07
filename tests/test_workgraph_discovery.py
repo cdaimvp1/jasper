@@ -174,3 +174,34 @@ def test_value_for_signature_labeled_field(monkeypatch):
     item = _item()
     assert wd.value_for_signature("labeled_field:batch number", item) == "BN99887"
     assert wd.value_for_signature("labeled_field:cost center", item) is None
+
+
+# --- _parse_proposal adversarial cases (found live 2026-08-06) -------------
+
+def test_parse_proposal_survives_a_literal_pipe_inside_the_description():
+    """A naive split("|") on the whole line breaks the moment the model's
+    own example text contains a pipe (e.g. quoting a value like
+    "BN-1234 | Lot 9") - real output seen live. maxsplit=3 fixes this by
+    only treating the first 3 pipes as field separators."""
+    stdout = ('PROPOSAL: Batch ID | entity | A batch value, e.g. "BN-1234 | Lot 9" | '
+              'Extract after Batch ID:')
+    parsed = wd._parse_proposal(stdout)
+    assert parsed is not None
+    assert parsed["name"] == "Batch ID"
+    assert parsed["point_type"] == "entity"
+
+
+def test_parse_proposal_skips_a_leading_none_line_instead_of_giving_up():
+    """A stray 'PROPOSAL: NONE' line before a real one used to make this
+    return None immediately (the for-loop returned on the FIRST PROPOSAL
+    line seen) - fixed to keep scanning past a NONE line."""
+    stdout = "PROPOSAL: NONE\nPROPOSAL: Second | amount | x | NONE"
+    parsed = wd._parse_proposal(stdout)
+    assert parsed is not None
+    assert parsed["name"] == "Second"
+
+
+def test_parse_proposal_returns_none_for_genuinely_all_none_output():
+    assert wd._parse_proposal("PROPOSAL: NONE") is None
+    assert wd._parse_proposal("") is None
+    assert wd._parse_proposal("some preamble with no PROPOSAL line at all") is None

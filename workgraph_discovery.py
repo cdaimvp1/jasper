@@ -218,20 +218,30 @@ def _format_examples(sample_raw_items: list[dict]) -> str:
 
 
 def _parse_proposal(stdout: str) -> Optional[dict]:
+    """Hardened 2026-08-06 against two real adversarial cases found while
+    testing this against deliberately malformed model output: (1) a
+    literal "|" inside the description or rule text (e.g. an example
+    value like "BN-1234 | Lot 9") used to break parsing entirely via a
+    plain split("|") expecting exactly 4 parts - fixed with maxsplit=3, so
+    only the first 3 pipes are treated as field separators and anything
+    after the 3rd stays intact as the rule text. (2) a stray "PROPOSAL:
+    NONE" line before a real one used to make this return None
+    prematurely - fixed by continuing the scan past a NONE line instead
+    of returning immediately, so a later real line still gets picked up."""
     for line in (stdout or "").splitlines():
         line = line.strip()
         if not line.upper().startswith("PROPOSAL:"):
             continue
         rest = line.split(":", 1)[1].strip()
         if rest.upper() == "NONE":
-            return None
-        parts = [p.strip() for p in rest.split("|")]
+            continue
+        parts = [p.strip() for p in rest.split("|", 3)]
         if len(parts) != 4:
-            return None
+            continue
         name, point_type, description, rule = parts
         point_type = point_type.lower()
         if point_type not in _POINT_TYPES or not name or not description:
-            return None
+            continue
         return {
             "name": name, "point_type": point_type, "description": description,
             "deterministic_rule": None if rule.upper() == "NONE" else rule,

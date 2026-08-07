@@ -1,12 +1,22 @@
 """
 workgraph_pipeline2.py - the NEW grouping-and-extraction pipeline
 (2026-08-05, Marc's own exhaustive spec, replacing the retired
-suggestion-queue/curator-reviewed model entirely). Deliberately self-
-contained: does not import ingest/scheduled_refresh.py, workgraph_
+suggestion-queue/curator-reviewed model entirely). Originally deliberately
+self-contained: did not import ingest/scheduled_refresh.py, workgraph_
 lessons.py, or use the pending_project_suggestions/identity_constraints
-tables for any decision. Marc's own words: "CURATOR OR ANY OTHER
-PREVIOUSLY BUILT MECHANISM SHOULD NOT TOUCH THIS. BUILD NEW MECHANISMS
-FOR IT. KEEP IT ENTIRELY SEPARATE."
+tables for any decision. Marc's own words at the time: "CURATOR OR ANY
+OTHER PREVIOUSLY BUILT MECHANISM SHOULD NOT TOUCH THIS. BUILD NEW
+MECHANISMS FOR IT. KEEP IT ENTIRELY SEPARATE."
+
+workgraph_lessons.py (Total Recall) revisited 2026-08-07 at Marc's own
+explicit later request, once #269's cleanup retired confirm_suggestion/
+reject_suggestion - the only writers record_confirmed_or_rejected ever
+had. See process_new_item's own docstring for exactly how the precedent
+fast-path is wired in (read-only skip of the LLM call on a strong prior,
+never itself writing a lesson) and how this pipeline's own genuine LLM
+verdicts now keep the lesson store current instead. This is the one,
+deliberate exception to "keep it entirely separate" - added by Marc's own
+direct request, not a drift back toward the old orchestration.
 
 Marc's exact spec, steps 3-6 (steps 1-2 already run live and were
 confirmed working this same day, not rebuilt here: outlook_com_ingest.py
@@ -53,6 +63,7 @@ import workgraph_store as ws
 import workgraph_projects as wp
 import workgraph_synthesis
 import workgraph_discovery
+import workgraph_lessons
 
 _JUDGE_TIMEOUT_SECONDS = 300
 _EXTRACTION_TIMEOUT_SECONDS = 600
@@ -217,6 +228,30 @@ def process_new_item(work_object_id: str) -> dict:
     this item becomes its own new project immediately - per Marc's own
     words, every item ends up in SOME project, never left dangling.
 
+    Total Recall precedent fast-path (2026-08-07, Marc's explicit later
+    request - this pipeline's original build deliberately did NOT use
+    workgraph_lessons.py at all, per Marc's own words at the time: "KEEP
+    IT ENTIRELY SEPARATE." Revisited now that #269's cleanup retires
+    confirm_suggestion/reject_suggestion, the only writers
+    record_confirmed_or_rejected ever had - without this, the lesson
+    store would only ever shrink in relevance, never learn from this
+    pipeline's own decisions). workgraph_lessons.precedent_prefilter is
+    read-only and keyed on the NEW item's own category+company situation
+    (not a specific pair) - a 'confirmed' verdict means this exact
+    situation has repeatedly turned out to be a real match with STRONG_
+    PRECEDENT_HITS+ confidence, so the first candidate is trusted without
+    spending an LLM call; 'rejected' means the opposite, so no candidate
+    here gets an LLM call either - go straight to a new project. Neither
+    skip path writes a lesson itself (mirrors the old group_issue()
+    behavior exactly - a precedent-driven skip must never re-validate and
+    inflate its OWN trust score, or it becomes a closed, self-reinforcing
+    loop nothing can ever correct). A genuine LLM judgment (the `else`
+    path below, precedent is None) DOES write the real outcome via
+    record_confirmed_or_rejected - confirmed on a merge, rejected once no
+    real candidate merged - keeping the lesson store current off this
+    pipeline's own judgment calls, the same way it used to stay current
+    off curator/Marc's suggestion-queue resolutions.
+
     Haiku backfill runs here, once, right before candidate search -
     between the deterministic extraction and the 2+-point matching gate.
     Genuinely PLURAL (design doc §5.2, task #215) - fills EVERY confirmed
@@ -243,22 +278,35 @@ def process_new_item(work_object_id: str) -> dict:
         ws.invalidate_work_object_signature(work_object_id)
 
     candidates = find_candidates(work_object_id, issue)
-    for candidate in candidates:
-        verdict = judge_candidate(work_object_id, candidate["candidate_id"], candidate["matched_signals"])
-        if verdict is not True:
-            continue
-        result = wp.merge_issues(
-            work_object_id, candidate["candidate_id"],
-            reason_label=f"pipeline2: LLM-confirmed match ({','.join(candidate['matched_signals'])})",
-        )
-        if result["status"] == "merged":
-            project_id = result["project_id"]
-            run_project_extraction(project_id)
-            return {"work_object_id": work_object_id, "action": "merged",
-                    "project_id": project_id, "candidate_id": candidate["candidate_id"]}
-        # "deferred" - a rare two-already-established-projects collision,
-        # merge_issues' own existing safety net. Try the next candidate
-        # rather than treat this as a final answer.
+    precedent = workgraph_lessons.precedent_prefilter(issue)
+    judged_any = False
+    if precedent != "rejected":
+        for candidate in candidates:
+            if precedent == "confirmed":
+                verdict = True  # trust the strong precedent - no LLM call, no re-write of the lesson itself
+            else:
+                verdict = judge_candidate(work_object_id, candidate["candidate_id"], candidate["matched_signals"])
+                judged_any = True
+            if verdict is not True:
+                continue
+            result = wp.merge_issues(
+                work_object_id, candidate["candidate_id"],
+                reason_label=f"pipeline2: {'precedent-confirmed' if precedent == 'confirmed' else 'LLM-confirmed'} "
+                             f"match ({','.join(candidate['matched_signals'])})",
+            )
+            if result["status"] == "merged":
+                project_id = result["project_id"]
+                if judged_any:
+                    workgraph_lessons.record_confirmed_or_rejected(issue_id_a=work_object_id, status="confirmed")
+                run_project_extraction(project_id)
+                return {"work_object_id": work_object_id, "action": "merged",
+                        "project_id": project_id, "candidate_id": candidate["candidate_id"]}
+            # "deferred" - a rare two-already-established-projects collision,
+            # merge_issues' own existing safety net. Try the next candidate
+            # rather than treat this as a final answer.
+
+    if judged_any:
+        workgraph_lessons.record_confirmed_or_rejected(issue_id_a=work_object_id, status="rejected")
 
     project_id = ws.create_project_with_new_id(
         name=issue.get("title") or "Untitled", category=issue.get("category"),

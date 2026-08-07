@@ -216,9 +216,72 @@ def test_approval_language_suppressed_when_raw_item_has_known_signal_type(tmp_pa
     # "Summarize the thread" as its suggested action - nonsensical for a
     # single-message automated notification Jasper already knows exactly
     # what to call by its real signal_type, not a free-text thread.
+    #
+    # Task #233 superseded the "no recommendation at all" half of this: a
+    # recognized ACTIONABLE signal_type now gets its own real, type-specific
+    # recommendation instead of silence - "Summarize the thread" is still
+    # correctly suppressed (that's the part this test still guards), but the
+    # replacement is a real action, not an empty list.
     monkeypatch.setattr(skills_registry, "REGISTRY_PATH", tmp_path / "no_such_registry.json")
     ev = {"type": "email", "summary": "Action required: Approve the Requisition",
           "signal_type": "ariba_pr_approval_needed"}
+    recs = wr.recommend_for_evidence(ev, has_attachment=False, now=0)
+    assert len(recs) == 1
+    assert recs[0]["kind"] == "approve_requisition"
+    assert "summarize" not in recs[0]["kind"]
+
+
+def test_ariba_approval_signal_quotes_real_requisition_fields():
+    ev = {"type": "email",
+          "summary": ("Action required: Approve the Requisition that THOMAS TURNER submitted  - "
+                       "PR1193376 - Workday HCM SaaS ($53,702,143.00 USD)"),
+          "signal_type": "ariba_pr_approval_needed"}
+    recs = wr.recommend_for_evidence(ev, has_attachment=False, now=0)
+    assert len(recs) == 1
+    rec = recs[0]
+    assert rec["kind"] == "approve_requisition"
+    assert rec["label"] == "Approve or reject in Ariba"
+    assert "THOMAS TURNER" in rec["rationale"]
+    assert "Workday HCM SaaS" in rec["rationale"]
+    assert "53,702,143.00" in rec["rationale"]
+
+
+def test_ariba_approval_signal_falls_back_to_generic_rationale_without_parseable_fields():
+    ev = {"type": "email", "summary": "Action required: Approve the Requisition",
+          "signal_type": "ariba_pr_approval_needed"}
+    recs = wr.recommend_for_evidence(ev, has_attachment=False, now=0)
+    assert len(recs) == 1
+    assert recs[0]["rationale"] == "This requisition is waiting on your approval in Ariba."
+
+
+def test_signature_requested_signal_gets_review_and_sign_action():
+    for signal_type in ("signature_requested", "signature_requested_docusign"):
+        ev = {"type": "email", "summary": "Signature requested on Amendment.pdf", "signal_type": signal_type}
+        recs = wr.recommend_for_evidence(ev, has_attachment=False, now=0)
+        assert len(recs) == 1
+        assert recs[0]["kind"] == "review_signature"
+        assert recs[0]["label"] == "Review and sign"
+
+
+def test_concur_expense_reminder_signal_gets_apply_expense_action():
+    ev = {"type": "email", "summary": "Action Required: Unapplied credit card transactions",
+          "signal_type": "concur_expense_reminder"}
+    recs = wr.recommend_for_evidence(ev, has_attachment=False, now=0)
+    assert len(recs) == 1
+    assert recs[0]["kind"] == "apply_expense"
+
+
+def test_unmapped_signal_type_still_correctly_gets_no_action():
+    # A recognized-but-non-actionable signal_type (e.g. a closure
+    # notification - "the requisition has been fully approved") isn't in
+    # SIGNAL_ACTION_BUILDERS at all (only genuinely ACTIONABLE signal types
+    # are), and pre-existing behavior already correctly suppresses the
+    # generic approval-language "summarize" guess for ANY known signal_type
+    # (not just the mapped ones) - a closure/fyi automated notification
+    # genuinely needs no action from Marc, so an empty list here is correct,
+    # not a gap this task needed to fill.
+    ev = {"type": "email", "summary": "please sign off on the attached amendment",
+          "signal_type": "ariba_pr_fully_approved"}
     recs = wr.recommend_for_evidence(ev, has_attachment=False, now=0)
     assert recs == []
 

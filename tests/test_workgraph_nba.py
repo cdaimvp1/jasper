@@ -954,6 +954,35 @@ def test_candidate_actions_waiting_state_maps_to_nudge():
     assert result[0]["label"] == "Nudge"
 
 
+def test_candidate_actions_nba_surface_is_type_aware_for_known_signal(monkeypatch):
+    # Task #233: the top-line "nba" candidate used to be blind to what kind
+    # of issue this actually is - always "Draft a reply" for an active
+    # issue, even one whose most recent evidence is a structured Ariba
+    # approval notification (nobody drafts an email reply to Ariba). The
+    # most recent evidence row's signal_type now wins over the generic
+    # state-based label when this system has a real action for it.
+    issue = {"nba_reason": "your move · $53,702,143.00", "state": "active", "priority_score": 0.7}
+    evidence = [{"signal_type": "ariba_pr_approval_needed", "ts": 200}]
+    result = nba.candidate_actions(issue, evidence)
+    nba_candidate = next(c for c in result if c["source_surface"] == "nba")
+    assert nba_candidate["kind"] == "approve_requisition"
+    assert nba_candidate["label"] == "Approve or reject in Ariba"
+    # rationale still comes from the issue's own real urgency reasoning,
+    # unchanged - only the kind/label were type-corrected.
+    assert nba_candidate["rationale"] == "your move · $53,702,143.00"
+
+
+def test_candidate_actions_nba_surface_ignores_unmapped_signal_type():
+    # A signal_type this system has no specific action for (or none at all)
+    # must fall back to the original state-based nudge/draft_reply behavior
+    # exactly as before - this is additive, not a replacement.
+    issue = {"nba_reason": "waiting on vendor", "state": "waiting", "priority_score": 0.4}
+    evidence = [{"signal_type": None, "ts": 200}]
+    result = nba.candidate_actions(issue, evidence)
+    nba_candidate = next(c for c in result if c["source_surface"] == "nba")
+    assert nba_candidate["kind"] == "nudge"
+
+
 def test_candidate_actions_includes_evidence_row_recommendation():
     issue = {"nba_reason": None, "state": "active", "priority_score": 0.5}
     evidence = [{"recommendations": [{"kind": "contract_review", "label": "Review the attached document",

@@ -53,6 +53,7 @@ import workgraph_store as ws
 import workgraph_confidence as confidence
 import workgraph_lessons
 import workgraph_aristotle
+import workgraph_recommend
 import text_extract
 
 DAY = 86400.0
@@ -777,9 +778,25 @@ def candidate_actions(
     _SYNTHESIS_BAND = 0.9
 
     if issue.get("nba_reason"):
-        kind = "nudge" if issue.get("state") == "waiting" else "draft_reply"
+        # Task #233: the issue's own top-line NBA card used to be blind to
+        # WHAT the issue actually is - "waiting" always got the same generic
+        # "Nudge," "active" always got the same generic "Draft a reply,"
+        # even when the most recent evidence is a structured, recognized
+        # signal (an Ariba approval, a signature request) that isn't
+        # nudge-able or reply-able at all - nobody drafts an email reply to
+        # Ariba. When the most recent evidence row (evidence is already
+        # ts DESC - see list_evidence) carries a signal_type this system
+        # has a real, specific action for, that wins; otherwise the
+        # original state-based nudge/draft_reply behavior is unchanged.
+        most_recent_signal_type = evidence[0].get("signal_type") if evidence else None
+        signal_kind_label = workgraph_recommend.SIGNAL_ACTION_KIND_LABEL.get(most_recent_signal_type)
+        if signal_kind_label:
+            kind, label = signal_kind_label
+        else:
+            kind = "nudge" if issue.get("state") == "waiting" else "draft_reply"
+            label = "Nudge" if kind == "nudge" else "Draft a reply"
         candidates.append({
-            "kind": kind, "label": "Nudge" if kind == "nudge" else "Draft a reply",
+            "kind": kind, "label": label,
             "rationale": issue["nba_reason"],
             "score": min(issue.get("priority_score") or 0.5, _GENERIC_CEILING),
             "source_surface": "nba",

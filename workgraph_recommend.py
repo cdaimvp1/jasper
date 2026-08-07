@@ -52,12 +52,31 @@ specific skill check runs independently and any/all that match are
 collected; the branch's generic fallback (contract_review / summarize) is
 only added when NONE of that branch's specific checks matched, so the
 generic case still degrades to exactly the old single-item behavior.
+
+Task #233 (2026-08-07): a raw_item recognized by workgraph_signals.classify_
+signal (Ariba/DocuSign/Concur/etc.) used to get NOTHING from this module for
+its actionable cases - the attachment branch never fires (these are single-
+message notifications, rarely carrying a real attachment) and the approval-
+regex branch is deliberately suppressed for any recognized signal_type (see
+its own 2026-08-02 comment above) precisely because a generic "Summarize the
+thread" reads as nonsensical for a structured system notification. That left
+a real, silent gap: Jasper already knows exactly what these are (via a real,
+narrow, confirmed-against-live-data classification, not a guess) and told
+Marc nothing useful about any of them. SIGNAL_ACTION_BUILDERS closes that gap
+with one deterministic, type-specific action per known ACTIONABLE signal_type
+(the fyi/closure/noise ones still correctly need no action from Marc, so they
+stay out of this map on purpose). Where a signal type's body already carries
+real structured fields (Ariba's requester/PR#/descriptor/amount, extracted by
+workgraph_signals.extract_ariba_requisition_fields), the rationale quotes
+them - the same "use what's really there before falling back to generic
+wording" discipline this module already applies to registered skills.
 """
 from __future__ import annotations
 
 import re
 
 import skills_registry
+import workgraph_signals
 
 DAY = 86400.0
 CALENDAR_LOOKAHEAD_DAYS = 14.0  # matches workgraph_nba.py's own due_urgency window
@@ -89,6 +108,54 @@ _MARKET_BENCHMARK_RE = re.compile(
 )
 
 
+def _ariba_pr_approval_action(ev: dict) -> dict:
+    fields = workgraph_signals.extract_ariba_requisition_fields(ev.get("summary") or "")
+    if fields and fields.get("descriptor"):
+        amount = fields.get("amount")
+        amount_part = f" (${amount:,.2f})" if amount else ""
+        who_part = f"{fields['requester']} submitted" if fields.get("requester") else "Someone submitted"
+        rationale = (f"{who_part} \"{fields['descriptor']}\"{amount_part} and it's waiting on your "
+                     f"approval in Ariba.")
+    else:
+        rationale = "This requisition is waiting on your approval in Ariba."
+    return {"kind": "approve_requisition", "label": "Approve or reject in Ariba", "rationale": rationale}
+
+
+def _signature_requested_action(ev: dict) -> dict:
+    return {
+        "kind": "review_signature", "label": "Review and sign",
+        "rationale": "A document is waiting for your signature before it can move forward.",
+    }
+
+
+def _concur_expense_action(ev: dict) -> dict:
+    return {
+        "kind": "apply_expense", "label": "Apply the unapplied transactions",
+        "rationale": "Concur is flagging unapplied credit-card transactions on your expense report.",
+    }
+
+
+# One deterministic builder per known ACTIONABLE signal_type (see this
+# module's own docstring, task #233) - deliberately does NOT cover fyi/
+# closure/noise signal types (workgraph_signals._RULES' own default
+# treatments), since those genuinely need no action from Marc. Exported as
+# SIGNAL_ACTION_KIND_LABEL (a plain {signal_type: (kind, label)} projection,
+# built from this same source below) so workgraph_nba.candidate_actions can
+# reuse the identical kind/label vocabulary for its own top-line "nba"
+# candidate instead of maintaining a second, driftable copy.
+SIGNAL_ACTION_BUILDERS = {
+    "ariba_pr_approval_needed": _ariba_pr_approval_action,
+    "signature_requested": _signature_requested_action,
+    "signature_requested_docusign": _signature_requested_action,
+    "concur_expense_reminder": _concur_expense_action,
+}
+
+SIGNAL_ACTION_KIND_LABEL = {
+    signal_type: (builder(ev={})["kind"], builder(ev={})["label"])
+    for signal_type, builder in SIGNAL_ACTION_BUILDERS.items()
+}
+
+
 def recommend_for_evidence(ev: dict, has_attachment: bool, now: float) -> list[dict]:
     """Returns a list of {"kind","label","rationale"} dicts, possibly empty.
     `ev` is one row shape from workgraph_store.list_evidence()
@@ -100,7 +167,18 @@ def recommend_for_evidence(ev: dict, has_attachment: bool, now: float) -> list[d
     A row can genuinely warrant more than one recommendation (task #15) — each
     branch below runs its specific checks independently and collects every
     one that matches, falling back to that branch's generic recommendation
-    only when none of its specific checks matched."""
+    only when none of its specific checks matched.
+
+    Task #233: a recognized ACTIONABLE signal_type wins outright, before any
+    of the generic checks below run — it's a real, specific determination
+    ("this is an Ariba approval, this is a signature request"), strictly
+    more useful than a keyword guess over free text, and the generic checks
+    would either fire wrongly (the old "Summarize the thread" bug) or not
+    fire at all for these single-message automated notifications anyway."""
+    signal_builder = SIGNAL_ACTION_BUILDERS.get(ev.get("signal_type"))
+    if signal_builder:
+        return [signal_builder(ev)]
+
     ev_type = ev.get("type")
     summary = ev.get("summary") or ""
     recs: list[dict] = []

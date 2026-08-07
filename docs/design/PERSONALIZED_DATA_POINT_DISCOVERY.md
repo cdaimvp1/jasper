@@ -1,6 +1,8 @@
 # Design: Personalized data-point discovery (setup-time vocabulary, not a hardcoded schema)
 
-**Status:** design only, not built. Written after a real, live investigation of a
+**Status:** built 2026-08-06 (workgraph_discovery.py + retrofit into
+workgraph_projects._matched_data_points/workgraph_pipeline2.process_new_item,
+tasks #213-217, all tests green). Written after a real, live investigation of a
 grouping bug (Kinaxis Maestro contract fragmented across 12+ projects, `docs/design/`
 sibling docs and this session's own transcript have the full forensics) surfaced a
 deeper architectural problem than the bug itself: Jasper's extraction logic

@@ -92,6 +92,7 @@ import workgraph_suppliers
 import workgraph_digest
 import workgraph_party_review
 import text_extract
+import workgraph_discovery
 
 
 PORT = int(os.environ.get("TEAM_PORT", "8700"))  # born-local default (Tia's live-review catch, 2026-07-23):
@@ -2124,6 +2125,112 @@ async def api_addin_focus_email(conversation_id: str):
     if card is None:
         return JSONResponse({"matched": False})
     return SafeJSONResponse({"matched": True, "card": card})
+
+
+_DISCOVERY_VOCABULARY_CAP = workgraph_discovery._VOCABULARY_CAP
+
+
+def _data_point_with_staleness(d: dict) -> dict:
+    now = time.time()
+    last = d.get("last_matched_ts")
+    reference_ts = last if last is not None else d.get("created_ts")
+    d = dict(d)
+    d["days_since_last_matched"] = round((now - reference_ts) / 86400, 1) if reference_ts else None
+    d["stale"] = bool(reference_ts and (now - reference_ts) > workgraph_discovery._STALENESS_SECONDS)
+    return d
+
+
+@app.get("/api/discovery/proposed")
+async def api_discovery_proposed():
+    """Task #214 - every data point discovery has drafted but a human
+    hasn't acted on yet. Never auto-activated (design doc §2.4) - this is
+    the one real surface where that human confirm/reject actually happens."""
+    return SafeJSONResponse({"proposed": wg.list_data_point_definitions(status="proposed")})
+
+
+@app.get("/api/discovery/confirmed")
+async def api_discovery_confirmed():
+    """This installation's real active vocabulary, annotated with
+    staleness (design doc §3's job-change signal) so the review surface
+    can show "hasn't come up in N months, still relevant?" without the
+    caller needing to re-derive that math itself."""
+    confirmed = [_data_point_with_staleness(d) for d in wg.list_data_point_definitions(status="confirmed")]
+    return SafeJSONResponse({"confirmed": confirmed, "cap": _DISCOVERY_VOCABULARY_CAP})
+
+
+class DiscoveryConfirmBody(BaseModel):
+    confirmed_by: str = "marc"
+    retire_definition_id: Optional[str] = None
+
+
+@app.post("/api/discovery/{definition_id}/confirm")
+async def api_discovery_confirm(definition_id: str, body: DiscoveryConfirmBody):
+    """Design doc §3's 20-item vocabulary cap is enforced HERE, not at
+    proposal-drafting time (a proposal can still be drafted and queued
+    past the cap) - confirming a NEW data point when already at cap fails
+    with 409 unless the caller also names an existing confirmed
+    definition to retire in the same call, forcing a real choice rather
+    than silently growing past 20."""
+    definition = wg.get_data_point_definition(definition_id)
+    if definition is None:
+        raise HTTPException(404, f"no such data point: {definition_id}")
+    if definition["status"] != "proposed":
+        raise HTTPException(400, f"data point {definition_id} is not pending review (status={definition['status']})")
+
+    confirmed = wg.list_data_point_definitions(status="confirmed")
+    if len(confirmed) >= _DISCOVERY_VOCABULARY_CAP:
+        if not body.retire_definition_id:
+            raise HTTPException(409, {
+                "error": f"already at the {_DISCOVERY_VOCABULARY_CAP}-item vocabulary cap - "
+                         "retire an existing confirmed data point to make room (pass retire_definition_id)",
+                "confirmed": confirmed,
+            })
+        retire = wg.get_data_point_definition(body.retire_definition_id)
+        if retire is None or retire["status"] != "confirmed":
+            raise HTTPException(400, f"no confirmed data point to retire: {body.retire_definition_id}")
+        wg.reject_data_point_definition(body.retire_definition_id)
+
+    wg.confirm_data_point_definition(definition_id, confirmed_by=body.confirmed_by)
+    return JSONResponse({"ok": True, "definition": wg.get_data_point_definition(definition_id)})
+
+
+@app.post("/api/discovery/{definition_id}/reject")
+async def api_discovery_reject(definition_id: str):
+    """Covers both real rejections of a fresh proposal AND retiring an
+    already-confirmed data point directly (e.g. from the staleness list,
+    without needing to go through the confirm route's retire-to-make-room
+    path) - same underlying status transition either way."""
+    if wg.get_data_point_definition(definition_id) is None:
+        raise HTTPException(404, f"no such data point: {definition_id}")
+    wg.reject_data_point_definition(definition_id)
+    return JSONResponse({"ok": True})
+
+
+class DiscoverySetupBody(BaseModel):
+    role_hint: Optional[str] = None
+    window_days: int = 90
+
+
+@app.post("/api/discovery/setup")
+async def api_discovery_setup(body: DiscoverySetupBody):
+    """Task #213's one-time bulk pass - real LLM calls happen inline here
+    (one per pattern that already crosses the significance bar in the
+    window), so this can take a while on a fresh corpus; called from a
+    real setup flow, not on every page load."""
+    result = await asyncio.to_thread(
+        workgraph_discovery.run_setup_discovery, role_hint=body.role_hint, window_days=body.window_days,
+    )
+    return JSONResponse({"ok": True, "result": result})
+
+
+@app.post("/api/discovery/sweep")
+async def api_discovery_sweep():
+    """Manual trigger for design doc §3's monthly sweep - real scheduling
+    (a cron-style periodic call) is deliberately out of scope here, same
+    as every other *_oneshot()-style routine in this codebase that a
+    scheduler calls into (see scheduled_refresh.py's own pattern)."""
+    result = await asyncio.to_thread(workgraph_discovery.run_monthly_sweep)
+    return JSONResponse({"ok": True, "result": result})
 
 
 @app.get("/api/addin/focus-project/{project_id}")

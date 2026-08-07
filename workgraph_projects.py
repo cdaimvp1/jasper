@@ -48,6 +48,7 @@ import workgraph_lessons
 import workgraph_signals
 import workgraph_nba
 import workgraph_parties
+import workgraph_discovery
 
 WEAK_SIGNAL_WINDOW_DAYS = 45
 
@@ -1017,6 +1018,16 @@ def _matched_data_points(a_id: str, a_sig: dict, a_topic_key: str,
     if (a_sig["accepted_lineages"] and b_sig["accepted_lineages"]
             and not set(a_sig["accepted_lineages"]).isdisjoint(b_sig["accepted_lineages"])):
         points.append("document")
+
+    # Personalized data-point discovery retrofit (#215/#216, 2026-08-06):
+    # purely additive - every hardcoded check above is completely
+    # unchanged. Contributes extra points for any CONFIRMED, genuinely
+    # discovered (non-fast-tracked) data point the two work objects share
+    # a real value for. A no-op today (no non-fast-track definitions are
+    # confirmed yet), real capability the moment Marc confirms his first
+    # genuine discovery - see workgraph_discovery.matched_discovered_
+    # points' own docstring for why this is safe to call unconditionally.
+    points.extend(workgraph_discovery.matched_discovered_points(a_id, b_id))
 
     return points
 

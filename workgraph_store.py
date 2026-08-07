@@ -1328,7 +1328,7 @@ def init_workgraph() -> None:
                     name                TEXT NOT NULL,
                     description         TEXT,
                     point_type          TEXT NOT NULL CHECK (point_type IN
-                                           ('entity','reference','amount','person','freetext')),
+                                           ('entity','reference','amount','person','date','freetext')),
                     deterministic_rule  TEXT,
                     status              TEXT NOT NULL DEFAULT 'proposed'
                                            CHECK (status IN ('proposed','confirmed','rejected')),
@@ -1374,6 +1374,25 @@ def init_workgraph() -> None:
                     first_seen_ts             REAL NOT NULL,
                     last_seen_ts              REAL NOT NULL,
                     promoted_to_definition_id TEXT REFERENCES data_point_definitions(id)
+                )
+            """)
+
+            # Implementation-level addition to the design doc's §4 sketch
+            # (2026-08-06, task #213): distinct_thread_count above is an
+            # aggregate counter, but correctly incrementing it needs to know
+            # WHICH thread_keys have already been counted for a given
+            # pattern_signature (Marc's own significance bar is "2+ genuinely
+            # DISTINCT threads," not just 2+ occurrences - 5 copies of the
+            # same forwarded email on one thread must not count). This table
+            # is that membership set - INSERT OR IGNORE on (signature,
+            # thread_key) is a real, cheap way to ask "have we already
+            # counted this thread for this pattern?" without rescanning
+            # every raw_item's text on every new occurrence.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS pattern_observation_threads (
+                    pattern_signature TEXT NOT NULL,
+                    thread_key        TEXT NOT NULL,
+                    PRIMARY KEY (pattern_signature, thread_key)
                 )
             """)
 
@@ -3391,6 +3410,26 @@ def get_raw_items_for_issue(issue_id: str) -> list[dict]:
         try:
             rows = conn.execute(
                 "SELECT * FROM raw_items WHERE issue_id = ? ORDER BY occurred_ts ASC", (issue_id,)
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def list_raw_items_since(cutoff_ts: float) -> list[dict]:
+    """Every raw_item (linked or not) occurring at/after cutoff_ts -
+    workgraph_discovery.py's setup/monthly-sweep window reader. No index
+    on occurred_ts - a real, deliberate call, not an oversight: at this
+    corpus's actual scale (thousands, not millions, of rows) a full-table
+    scan filtered by a single comparison is sub-millisecond in SQLite: the
+    index would be premature for a table that doesn't need it yet, and
+    every OTHER range-style read in this module (e.g. get_raw_items_for_
+    issue above) already accepts the same tradeoff."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM raw_items WHERE occurred_ts >= ? ORDER BY occurred_ts ASC", (cutoff_ts,)
             ).fetchall()
         finally:
             conn.close()
@@ -7203,6 +7242,26 @@ def observe_candidate_pattern(pattern_signature: str, *, is_new_thread: bool) ->
     return dict(row)
 
 
+def get_pattern_signature_for_definition(definition_id: str) -> Optional[str]:
+    """Reverse of mark_candidate_pattern_promoted - the retrofitted
+    pipeline (workgraph_discovery.matched_discovered_points, #216) needs
+    the ORIGINATING pattern signature back from a confirmed definition to
+    know what to actually re-check for a match (a sender domain, a
+    labeled-field name) - the LLM's own free-text deterministic_rule
+    description isn't mechanically executable, but the signature that
+    surfaced it always is."""
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT pattern_signature FROM candidate_pattern_observations WHERE promoted_to_definition_id = ?",
+                (definition_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+    return row["pattern_signature"] if row else None
+
+
 def mark_candidate_pattern_promoted(pattern_signature: str, definition_id: str) -> None:
     """Once a candidate pattern crosses the significance bar and a real
     proposal is drafted from it, tag the observation row so the same
@@ -7215,6 +7274,54 @@ def mark_candidate_pattern_promoted(pattern_signature: str, definition_id: str) 
                 "UPDATE candidate_pattern_observations SET promoted_to_definition_id = ? WHERE pattern_signature = ?",
                 (definition_id, pattern_signature),
             )
+        finally:
+            conn.close()
+
+
+def get_candidate_pattern_observation(pattern_signature: str) -> Optional[dict]:
+    """Pure read, no side effect - unlike observe_candidate_pattern (which
+    always increments), this is what a caller uses to check a signature's
+    CURRENT state (e.g. against crosses_significance_bar) without
+    incorrectly counting a second, phantom occurrence just for looking."""
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM candidate_pattern_observations WHERE pattern_signature = ?", (pattern_signature,)
+            ).fetchone()
+        finally:
+            conn.close()
+    return dict(row) if row else None
+
+
+def list_candidate_pattern_observations() -> list[dict]:
+    """Every tracked pattern observation - workgraph_discovery.run_
+    monthly_sweep's re-check pass over whatever the continuous per-item
+    hook has accumulated since the last sweep (or ever, for a pattern the
+    hook missed)."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute("SELECT * FROM candidate_pattern_observations").fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def record_pattern_observation_thread(pattern_signature: str, thread_key: str) -> bool:
+    """Returns True the FIRST time this (signature, thread_key) pair is seen,
+    False on every later repeat - the caller (workgraph_discovery.py) passes
+    that straight through as observe_candidate_pattern's is_new_thread, so
+    distinct_thread_count only grows on a genuinely new thread, never a
+    resend/forward of the same one."""
+    with _lock:
+        conn = _connect()
+        try:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO pattern_observation_threads (pattern_signature, thread_key) VALUES (?, ?)",
+                (pattern_signature, thread_key),
+            )
+            return cur.rowcount > 0
         finally:
             conn.close()
 

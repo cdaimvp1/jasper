@@ -41,7 +41,6 @@ chat_id, and a calendar seriesMasterId):
 """
 from __future__ import annotations
 
-import hashlib
 import os
 import subprocess
 from pathlib import Path
@@ -53,6 +52,7 @@ import text_extract
 import workgraph_store as ws
 import workgraph_projects as wp
 import workgraph_synthesis
+import workgraph_discovery
 
 _JUDGE_TIMEOUT_SECONDS = 300
 _EXTRACTION_TIMEOUT_SECONDS = 600
@@ -155,95 +155,6 @@ def find_candidates(work_object_id: str, issue: Optional[dict] = None) -> list[d
     return candidates
 
 
-_COMPANY_BACKFILL_TIMEOUT_SECONDS = 60
-_COMPANY_BACKFILL_MODEL = "haiku"
-
-_COMPANY_BACKFILL_PROMPT_TEMPLATE = """Read this real business communication.
-
-TEXT:
-{text}
-
-The deterministic extraction found no external company/organization for this item. Look for a real external company genuinely referenced in this text (not Marc Lane's own employer, not an internal team), together with the specific email address of a person at that company who is a sender or participant here.
-
-For each confident (email, company) pair you find, output one line in exactly this format:
-COMPANY_MATCH: <email> | <company name>
-
-If you cannot confidently identify any, output exactly:
-COMPANY_MATCH: NONE
-
-Output nothing else.
-"""
-
-
-def _parse_company_matches(stdout: str) -> list[dict]:
-    matches = []
-    for line in (stdout or "").splitlines():
-        line = line.strip()
-        if not line.upper().startswith("COMPANY_MATCH:"):
-            continue
-        rest = line.split(":", 1)[1].strip()
-        if rest.upper() == "NONE":
-            continue
-        parts = [p.strip() for p in rest.split("|", 1)]
-        if len(parts) == 2 and "@" in parts[0] and parts[1]:
-            matches.append({"email": parts[0].lower(), "company": parts[1]})
-    return matches
-
-
-def llm_backfill_company(work_object_id: str) -> list[dict]:
-    """Haiku mid-step (Marc's own design ask, 2026-08-06 Kinaxis
-    investigation): when the deterministic pass leaves external_orgs
-    empty, a cheap/fast model reads the SAME text (full_text_for_work_
-    object, which now also includes attachment text) once, targeted at
-    exactly the one missing field - not a full re-extraction, not the
-    judgment-call model tier judge_candidate uses.
-
-    Writes any confident finding as a REAL party record, tagged
-    affiliation_source='llm_backfill' so it stays auditable/reversible,
-    never indistinguishable from a regex-confirmed extraction. This is
-    what makes it flow into compute_work_object_signature's external_orgs
-    the same way any other party already does - no separate signature
-    concept to maintain.
-
-    Deliberately narrow: only creates a party where NONE exists yet for
-    that email (upsert_party's own existing-row path never touches
-    company - by design, so a real extraction is never silently
-    overwritten - which means this can't safely correct an existing
-    party's blank company field, only fill a genuine gap). A real live
-    example this narrower scope still covers: Jasmine Joseph
-    (jjoseph@kinaxis.com) and DocuSign's own notification address had NO
-    party record at all for the Kinaxis Maestro thread that motivated
-    this - confirmed live against the real DB, not assumed."""
-    issue = ws.get_issue_or_cluster(work_object_id)
-    if issue is None:
-        return []
-    sig = wp.get_or_compute_work_object_signature(work_object_id, issue)
-    if sig["external_orgs"]:
-        return []  # deterministic pass already found a real company - nothing to backfill
-    text = full_text_for_work_object(work_object_id)
-    if not text.strip():
-        return []
-    prompt = _COMPANY_BACKFILL_PROMPT_TEMPLATE.format(text=text[:_MAX_TEXT_CHARS])
-    try:
-        proc = _run_headless_claude(prompt, timeout=_COMPANY_BACKFILL_TIMEOUT_SECONDS, model=_COMPANY_BACKFILL_MODEL)
-    except subprocess.TimeoutExpired:
-        return []
-    applied = []
-    for match in _parse_company_matches(proc.stdout):
-        email = match["email"]
-        if ws.get_party_by_email(email) is not None:
-            continue  # a party already exists for this email - not this function's job to correct it
-        party_id = f"llm-{hashlib.sha256(email.encode()).hexdigest()[:12]}"
-        ws.upsert_party(
-            id=party_id, primary_email=email, display_name=None,
-            affiliation="external", affiliation_confidence="L", affiliation_source="llm_backfill",
-            company=match["company"],
-        )
-        ws.link_party_to_issue(work_object_id, party_id)
-        applied.append(match)
-    return applied
-
-
 _JUDGMENT_PROMPT_TEMPLATE = """You are judging whether two real pieces of business communication describe the SAME underlying deal/project, or two different ones.
 
 ITEM A (already tracked):
@@ -306,17 +217,21 @@ def process_new_item(work_object_id: str) -> dict:
     this item becomes its own new project immediately - per Marc's own
     words, every item ends up in SOME project, never left dangling.
 
-    Haiku company backfill (2026-08-06, Marc's own design ask) runs here,
-    once, right before candidate search - between the deterministic
-    extraction and the 2+-point matching gate, exactly the order Marc
-    asked to confirm. Only runs for THIS item, never for the existing
-    candidates it gets compared against below - each of those already
-    went through this same step when IT was the new item being
-    processed, so there's nothing to re-backfill. invalidate_work_object_
-    signature is required here, not optional: get_or_compute_work_object_
-    signature is cache-first, so without busting the cache, find_
-    candidates below would read the STALE pre-backfill signature and the
-    new party would never reach the point-matching gate at all this run."""
+    Haiku backfill runs here, once, right before candidate search -
+    between the deterministic extraction and the 2+-point matching gate.
+    Genuinely PLURAL (design doc §5.2, task #215) - fills EVERY confirmed
+    data point still missing a value for this item in one call, not just
+    company (the narrow single-field version built 2026-08-06 and
+    explicitly retired the same day per Marc's own direct correction:
+    "do not scope it ONLY to those fields, do the whole build"). Only
+    runs for THIS item, never for the existing candidates it gets
+    compared against below - each of those already went through this
+    same step when IT was the new item being processed, so there's
+    nothing to re-backfill. invalidate_work_object_signature is required
+    here, not optional: get_or_compute_work_object_signature is
+    cache-first, so without busting the cache, find_candidates below
+    would read the STALE pre-backfill signature and the new party would
+    never reach the point-matching gate at all this run."""
     issue = ws.get_issue_or_cluster(work_object_id)
     if issue is None:
         return {"work_object_id": work_object_id, "action": "not_found"}
@@ -324,7 +239,7 @@ def process_new_item(work_object_id: str) -> dict:
         return {"work_object_id": work_object_id, "action": "already_grouped",
                 "project_id": issue["project_id"]}
 
-    if llm_backfill_company(work_object_id):
+    if workgraph_discovery.llm_backfill_missing_values(work_object_id):
         ws.invalidate_work_object_signature(work_object_id)
 
     candidates = find_candidates(work_object_id, issue)

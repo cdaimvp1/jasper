@@ -36,6 +36,7 @@ import workgraph_parties
 import workgraph_projects
 import workgraph_signals
 import workgraph_sessionize
+import workgraph_discovery
 import text_extract
 
 # ===========================================================================
@@ -1051,6 +1052,7 @@ def cluster_and_link(limit: int = 500) -> dict:
     # see recompute_issue_state's own docstring for why this must be
     # per-issue, not "any historical item anywhere."
     newly_actionable_issues = set()
+    touched_pattern_signatures = set()
 
     for item in with_pending:
         if item["item_class"] == "NOISE":
@@ -1216,6 +1218,16 @@ def cluster_and_link(limit: int = 500) -> dict:
         if item["item_class"] == "ACTIONABLE-ASK":
             newly_actionable_issues.add(issue_id)
 
+        # Personalized data-point discovery (design doc, task #213): the
+        # continuous, no-LLM-cost half of the two-tier mechanism - pure
+        # counting into candidate_pattern_observations, cheap enough to run
+        # on every linked item without a second thought. The LLM-proposal
+        # half only fires once per BATCH below (touched_pattern_signatures),
+        # never per item - a real LLM call is not cheap enough to run on
+        # every single classified email.
+        for obs_row in workgraph_discovery.record_observations_for_item(item):
+            touched_pattern_signatures.add(obs_row["pattern_signature"])
+
         # Starter-task creation is deliberately NOT done here anymore - a
         # freshly-created work object from this path is always a cluster
         # now (never a real issue directly), and a cluster has no checklist
@@ -1245,6 +1257,16 @@ def cluster_and_link(limit: int = 500) -> dict:
     # exact shared reference) and get promoted into a real project - the
     # gap the whole corrected-ordering plan exists to close.
     project_result = workgraph_projects.run(list(touched_issues))
+
+    # Personalized data-point discovery (task #213), LLM half - only
+    # signatures actually touched THIS batch get checked, bounding real
+    # LLM cost to real new activity rather than a full-corpus rescan on
+    # every classify run (the monthly sweep, workgraph_discovery.run_
+    # monthly_sweep, is what catches anything this misses).
+    if touched_pattern_signatures:
+        workgraph_discovery.check_and_propose_for_signatures(
+            touched_pattern_signatures, raw_items_pool=with_pending,
+        )
 
     # Title generation runs AFTER parties/projects resolve for this batch -
     # it reads party affiliation/company, which a just-created issue doesn't

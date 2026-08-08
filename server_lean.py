@@ -1509,9 +1509,18 @@ async def api_assistant_message(body: AssistantMessageBody):
     starting fresh. reset=True explicitly starts a new one."""
     if not body.message or not body.message.strip():
         raise HTTPException(400, "message is required")
+    # Reset before, read after: whichever of jasper_focus_email/
+    # jasper_focus_party/jasper_focus_project this turn's tool calls hit
+    # (if any) will have called _record_referenced_project - reading the
+    # cursor back here is how "show me the Kinaxis drawer" link gets a
+    # real project_id instead of the client guessing one out of the reply
+    # text.
+    wg.set_cursor(*_REFERENCED_PROJECTS_CURSOR, "[]")
     result = await asyncio.to_thread(
         workgraph_assistant.ask, body.message.strip(), body.session_id, reset=body.reset,
     )
+    referenced_raw = wg.get_cursor(*_REFERENCED_PROJECTS_CURSOR)
+    result["related_projects"] = json.loads(referenced_raw) if referenced_raw else []
     return JSONResponse(result)
 
 
@@ -2347,6 +2356,25 @@ def _build_addin_focus_card(project_id: str) -> Optional[dict]:
     }
 
 
+_REFERENCED_PROJECTS_CURSOR = ("addin_chat", "last_referenced_projects")
+
+
+def _record_referenced_project(project_id: str, title: Optional[str]) -> None:
+    """Marc's own request: when Jasper's chat reply discusses a specific
+    project ("show me where we're at with Kinaxis"), the add-in should be
+    able to offer a real "open the drawer" link for it - not guessed from
+    the reply text. Every route that resolves a real project (focus-email/
+    focus-party/focus-project) records it here via the existing generic
+    ingest_cursors key-value primitive (no new table); /api/assistant/
+    message resets this before each turn and reads it back after, so a
+    stale reference from an earlier turn can never leak into this one."""
+    existing_raw = wg.get_cursor(*_REFERENCED_PROJECTS_CURSOR)
+    existing = json.loads(existing_raw) if existing_raw else []
+    if not any(p.get("id") == project_id for p in existing):
+        existing.append({"id": project_id, "title": title})
+    wg.set_cursor(*_REFERENCED_PROJECTS_CURSOR, json.dumps(existing))
+
+
 @app.get("/api/addin/focus-email")
 async def api_addin_focus_email(conversation_id: str):
     """Task #240: "focus on the email I have open" - Office.js's
@@ -2359,6 +2387,7 @@ async def api_addin_focus_email(conversation_id: str):
     card = _build_addin_focus_card(project_id)
     if card is None:
         return JSONResponse({"matched": False})
+    _record_referenced_project(project_id, card["project"]["title"])
     return SafeJSONResponse({"matched": True, "card": card})
 
 
@@ -2508,6 +2537,7 @@ async def api_addin_focus_project(project_id: str):
     card = _build_addin_focus_card(project_id)
     if card is None:
         raise HTTPException(404, f"no such project: {project_id}")
+    _record_referenced_project(project_id, card["project"]["title"])
     return SafeJSONResponse({"card": card})
 
 
@@ -2554,6 +2584,8 @@ async def api_addin_focus_party(q: str):
     project those parties touch, most-recently-active first."""
     project_ids = wg.project_ids_for_party_query(q)
     cards = [c for c in (_build_addin_focus_card(pid) for pid in project_ids) if c is not None]
+    for c in cards:
+        _record_referenced_project(c["project"]["id"], c["project"]["title"])
     return SafeJSONResponse({"matched": bool(cards), "cards": cards})
 
 
@@ -3468,6 +3500,17 @@ async def api_addin_output_badge():
 
 class ProactiveActionsSettingsBody(BaseModel):
     enabled: bool
+
+
+@app.get("/api/settings/user-name")
+async def api_settings_user_name():
+    """The add-in's chat labels use the real user's name instead of a
+    generic "You" (Marc's own request) - config.manager.id is the same
+    real identity value already used as the actor on every deterministic
+    action elsewhere in this codebase, not a second, separate name field.
+    Falls back to "You" only if this installation's config genuinely has
+    no manager id set."""
+    return JSONResponse({"name": config.get("manager", "id") or "You"})
 
 
 @app.get("/api/settings/proactive-actions")

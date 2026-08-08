@@ -2247,8 +2247,11 @@ def _build_addin_focus_card(project_id: str) -> Optional[dict]:
 
     raw_item_ids = {ev["raw_item_id"] for ev in all_evidence if ev.get("raw_item_id")}
     raw_items_by_id = wg.get_raw_items_by_ids(list(raw_item_ids)) if raw_item_ids else {}
+    open_claims_by_issue = wg.list_open_claims_for_issues(open_ids)
 
     issue_cards = []
+    hero = None  # first (highest-priority) issue's own top-scored action wins - open_issues is
+    # already priority_score-sorted below, so the loop's first non-empty actions list is it.
     for issue in sorted(open_issues, key=lambda i: i.get("priority_score") or 0, reverse=True):
         actions = workgraph_nba.candidate_actions(issue, evidence_by_issue.get(issue["id"], []), None, synthesis)
         for a in actions:
@@ -2276,6 +2279,57 @@ def _build_addin_focus_card(project_id: str) -> Optional[dict]:
                       for c in wg.list_open_claims_for_issue(issue["id"], claim_type="date")],
             "attachments": wg.list_attachments_for_issue(issue["id"]),
         })
+        # Drawer redesign (task #276/#293's own follow-on): the single "your
+        # move" spotlight, real not invented - the top-scored real
+        # candidate_actions() entry off the highest-priority open issue,
+        # same ranking this card already computed above, just surfaced
+        # once instead of buried per-issue. First issue with any action at
+        # all wins (open_issues is already sorted highest-priority-first).
+        if hero is None and actions:
+            top = max(actions, key=lambda a: a.get("score") or 0)
+            hero = {
+                "issue_id": issue["id"],
+                "issue_title": issue.get("display_title") or issue["title"],
+                "reference_ids": sorted(workgraph_projects.reference_ids_for_issue(issue["id"])),
+                "kind": top.get("kind"), "label": top.get("label"),
+                "rationale": top.get("rationale"),
+                "open_email": top.get("open_email"), "draft_reply": top.get("draft_reply"),
+                "draft_forward": top.get("draft_forward"),
+            }
+
+    # "Everything else": every other open ask/decision/commitment across
+    # ALL this project's open issues (not just the hero's issue - a project
+    # is the unit here, task #237), split into you/them by the claim's own
+    # real author field ('marc' vs 'counterparty'/'unknown' - never guessed
+    # from phrasing). "settled" is a bounded, real lookback (not the whole
+    # claims history) so a long-lived project doesn't dump its entire
+    # archive into one lane.
+    issue_title_by_id = {i["id"]: (i.get("display_title") or i["title"]) for i in open_issues}
+    lane_you: list = []
+    lane_them: list = []
+    lane_settled: list = []
+    for iid in open_ids:
+        for c in open_claims_by_issue.get(iid, []):
+            if c.get("claim_type") not in ("ask", "decision", "commitment"):
+                continue
+            item = {
+                "issue_id": iid, "issue_title": issue_title_by_id.get(iid),
+                "claim_type": c["claim_type"], "text": c.get("text"),
+                "raw_item_id": c.get("raw_item_id"),
+            }
+            (lane_you if c.get("author") == "marc" else lane_them).append(item)
+        recent_resolved = [
+            c for c in wg.list_claims_for_issue(iid)
+            if c.get("claim_type") in ("ask", "decision", "commitment")
+            and c.get("status") in ("done", "dismissed")
+            and (time.time() - (c.get("last_seen_ts") or 0)) < 14 * 86400
+        ]
+        recent_resolved.sort(key=lambda c: c.get("last_seen_ts") or 0, reverse=True)
+        for c in recent_resolved[:3]:
+            lane_settled.append({
+                "issue_id": iid, "issue_title": issue_title_by_id.get(iid),
+                "claim_type": c["claim_type"], "text": c.get("text"), "status": c.get("status"),
+            })
 
     # get_project() (singular) doesn't do list_projects()'s synthesis join -
     # derived_title lives on the synthesis row already fetched above, name
@@ -2285,6 +2339,8 @@ def _build_addin_focus_card(project_id: str) -> Optional[dict]:
         "project": {"id": project["id"], "title": project_title},
         "summary": (synthesis or {}).get("summary"),
         "issues": issue_cards,
+        "hero": hero,
+        "lanes": {"you": lane_you, "them": lane_them, "settled": lane_settled},
         "attachments": attachments,
         "parties": workgraph_projects.aggregate_parties_for_project(project_id),
         "pending_review": _pending_review_items_for_issues(open_ids),

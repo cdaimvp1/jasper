@@ -320,5 +320,43 @@ def jasper_draft_review_request(issue_id: str, to_emails: list[str], attachment_
     })
 
 
+@mcp.tool()
+def jasper_todo_list() -> dict:
+    """Task #281: real data for "what's my to-do list?"/"what do I need to
+    do" - three sections, all live-computed, zero invented numbers:
+    outputs_waiting (worker/skill outputs Marc hasn't reviewed - each has
+    an `id` for jasper_mark_output_reviewed), open_claims (total/issue_count/
+    by_type counts plus a capped, most-recently-active `items` sample - if
+    `truncated` is true, say the total count rather than implying the
+    sample is everything), and by_supplier (open issue count + value per
+    external company, each with its own open issues for a "go to project"
+    style pointer). Render this conversationally in roughly the same
+    section order as the data - don't just dump raw JSON at Marc."""
+    return _get("/api/workgraph/todo-summary")
+
+
+@mcp.tool()
+def jasper_focus_today() -> dict:
+    """Task #283: real data for "what should I focus on today"/"what's
+    urgent today" - three sections: top_actions (Marc's own highest-scored
+    open asks/commitments globally, same ranking as jasper_ranked_actions),
+    meetings_today (real calendar-sourced items in the next 24h, each with
+    an issue_id for prep context), and deliverables_due_soon (open issues
+    with a real hard due date within 7 days, `overdue` true if already
+    past). All three can be empty on a genuinely quiet day - say so rather
+    than padding the answer. Distinct from jasper_todo_list: this is
+    same-day urgency, that one is the full outstanding-work picture."""
+    return _get("/api/workgraph/focus-today")
+
+
+@mcp.tool()
+def jasper_mark_output_reviewed(attachment_id: int) -> dict:
+    """Task #280/#281: Marc's explicit "I've seen this" on one row from
+    jasper_todo_list's outputs_waiting list (or a card's own output badge) -
+    a direct action, safe to apply immediately. Never call this on a guess;
+    only after Marc references a specific output you already showed him."""
+    return _post(f"/api/attachments/{attachment_id}/reviewed", {})
+
+
 if __name__ == "__main__":
     mcp.run(transport="sse", host=MCP_HOST, port=MCP_PORT)

@@ -400,3 +400,158 @@ def test_merge_stray_clusters_is_idempotent(ws_db):
 
     assert first["clusters_absorbed"] == 1
     assert second["clusters_absorbed"] == 0  # already absorbed and dismissed - no longer an open group
+
+
+# --- merge_stray_signature_confirmation_clusters (task #284) ---------------
+# The real Bluefish case this was built from: an Adobe Sign "You signed"
+# confirmation (no pr_number_base of its own) landed in its own stray
+# cluster under a brand new project, while the real negotiation issue
+# shared both a human participant (Aryelle Player) and the underlying
+# document's filename with it.
+
+def _signature_confirmation(ws_db, cluster_id, key, *, participants, filenames):
+    rid = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key=key, thread_key=key, dedupe_key=key,
+        occurred_ts=time.time(), subject="You signed: something", from_actor="adobesign@adobesign.com",
+        participants_json=json.dumps(participants),
+    )
+    ws_db.link_raw_item_to_issue(rid, cluster_id)
+    ws_db.classify_raw_item(
+        rid, item_class="FYI-EVIDENCE", direction="inbound", direction_inferred=False,
+        topic="contract", topic_inferred=False, sentiment="neutral", sentiment_inferred=False,
+        anomaly_flag=False, signal_type="signature_signed_by_me", pr_number=None, pr_number_base=None,
+    )
+    for i, filename in enumerate(filenames):
+        ws_db.create_attachment(
+            entity_type="raw_item", entity_id=str(rid), kind="reference", filename=filename,
+            stored_path=f"{key}-{i}.pdf", content_type="application/pdf", size_bytes=10,
+            sha256_hex=f"hash-{key}-{i}", uploaded_by="outlook_ingest",
+        )
+    return rid
+
+
+def test_merge_signature_confirmation_absorbs_on_participant_and_filename_match(ws_db):
+    ws_db.upsert_party(id="p-aryelle", primary_email="aryelle.player@lilly.com",
+                        display_name="Aryelle L Player", affiliation="internal",
+                        affiliation_confidence="M", affiliation_source="domain_heuristic", company=None)
+    issue = _issue(ws_db, title="Bluefish AI Accuracy SOW Signature & PR Approval", state="active")
+    ws_db.link_party_to_issue(issue, "p-aryelle")
+    ws_db.create_attachment(
+        entity_type="issue", entity_id=issue, kind="reference",
+        filename="Bluefish_Eli Lilly_AI Accuracy SOW 7.14.26.pdf", stored_path="issue.pdf",
+        content_type="application/pdf", size_bytes=10, sha256_hex="issue-hash", uploaded_by="outlook_ingest",
+    )
+    cluster = ws_db.create_cluster_with_new_id(title='You signed: "Bluefish...SOW..."', category="contract")
+    _signature_confirmation(
+        ws_db, cluster, "sig1", participants=["adobesign@adobesign.com", "Aryelle L Player"],
+        filenames=["Bluefish_Eli+Lilly_AI+Accuracy+SOW+7.14.26 (part 1) - signed.pdf"],
+    )
+
+    result = wr.merge_stray_signature_confirmation_clusters()
+
+    assert result["clusters_absorbed"] == 1
+    assert ws_db.get_cluster(cluster)["state"] == "dismissed"
+
+
+def test_merge_signature_confirmation_skips_when_filename_does_not_match(ws_db):
+    """Shared participant alone isn't enough - Aryelle-type frequent
+    internal contacts sit on many unrelated issues in real data."""
+    ws_db.upsert_party(id="p-aryelle", primary_email="aryelle.player@lilly.com",
+                        display_name="Aryelle L Player", affiliation="internal",
+                        affiliation_confidence="M", affiliation_source="domain_heuristic", company=None)
+    issue = _issue(ws_db, title="Unrelated other issue", state="active")
+    ws_db.link_party_to_issue(issue, "p-aryelle")
+    ws_db.create_attachment(
+        entity_type="issue", entity_id=issue, kind="reference",
+        filename="Completely Different Document.pdf", stored_path="issue.pdf",
+        content_type="application/pdf", size_bytes=10, sha256_hex="issue-hash-2", uploaded_by="outlook_ingest",
+    )
+    cluster = ws_db.create_cluster_with_new_id(title='You signed: "Bluefish...SOW..."', category="contract")
+    _signature_confirmation(
+        ws_db, cluster, "sig2", participants=["adobesign@adobesign.com", "Aryelle L Player"],
+        filenames=["Bluefish_Eli+Lilly_AI+Accuracy+SOW+7.14.26 (part 1) - signed.pdf"],
+    )
+
+    result = wr.merge_stray_signature_confirmation_clusters()
+
+    assert result["clusters_absorbed"] == 0
+
+
+def test_merge_signature_confirmation_skips_when_no_shared_participant(ws_db):
+    """Filename overlap alone isn't enough either - both signals required."""
+    issue = _issue(ws_db, title="Bluefish AI Accuracy SOW Signature & PR Approval", state="active")
+    ws_db.create_attachment(
+        entity_type="issue", entity_id=issue, kind="reference",
+        filename="Bluefish_Eli Lilly_AI Accuracy SOW 7.14.26.pdf", stored_path="issue.pdf",
+        content_type="application/pdf", size_bytes=10, sha256_hex="issue-hash-3", uploaded_by="outlook_ingest",
+    )
+    cluster = ws_db.create_cluster_with_new_id(title='You signed: "Bluefish...SOW..."', category="contract")
+    _signature_confirmation(
+        ws_db, cluster, "sig3", participants=["adobesign@adobesign.com", "Nobody Jasper Knows"],
+        filenames=["Bluefish_Eli+Lilly_AI+Accuracy+SOW+7.14.26 (part 1) - signed.pdf"],
+    )
+
+    result = wr.merge_stray_signature_confirmation_clusters()
+
+    assert result["clusters_absorbed"] == 0
+
+
+def test_merge_signature_confirmation_skips_when_ambiguous_two_candidates(ws_db):
+    ws_db.upsert_party(id="p-aryelle", primary_email="aryelle.player@lilly.com",
+                        display_name="Aryelle L Player", affiliation="internal",
+                        affiliation_confidence="M", affiliation_source="domain_heuristic", company=None)
+    issue_a = _issue(ws_db, title="Bluefish SOW - copy A", state="active")
+    ws_db.link_party_to_issue(issue_a, "p-aryelle")
+    ws_db.create_attachment(
+        entity_type="issue", entity_id=issue_a, kind="reference",
+        filename="Bluefish_Eli Lilly_AI Accuracy SOW 7.14.26.pdf", stored_path="issue_a.pdf",
+        content_type="application/pdf", size_bytes=10, sha256_hex="issue-hash-a", uploaded_by="outlook_ingest",
+    )
+    issue_b = _issue(ws_db, title="Bluefish SOW - copy B", state="active")
+    ws_db.link_party_to_issue(issue_b, "p-aryelle")
+    ws_db.create_attachment(
+        entity_type="issue", entity_id=issue_b, kind="reference",
+        filename="Bluefish_Eli Lilly_AI Accuracy SOW 7.14.26.pdf", stored_path="issue_b.pdf",
+        content_type="application/pdf", size_bytes=10, sha256_hex="issue-hash-b", uploaded_by="outlook_ingest",
+    )
+    cluster = ws_db.create_cluster_with_new_id(title='You signed: "Bluefish...SOW..."', category="contract")
+    _signature_confirmation(
+        ws_db, cluster, "sig4", participants=["adobesign@adobesign.com", "Aryelle L Player"],
+        filenames=["Bluefish_Eli+Lilly_AI+Accuracy+SOW+7.14.26 (part 1) - signed.pdf"],
+    )
+
+    result = wr.merge_stray_signature_confirmation_clusters()
+
+    assert result["clusters_absorbed"] == 0
+    assert result["ambiguous_skipped"] == 1
+
+
+def test_merge_signature_confirmation_ignores_raw_item_with_its_own_reference(ws_db):
+    """Already covered by the pr_number_base sweep - not this one's job."""
+    ws_db.upsert_party(id="p-aryelle", primary_email="aryelle.player@lilly.com",
+                        display_name="Aryelle L Player", affiliation="internal",
+                        affiliation_confidence="M", affiliation_source="domain_heuristic", company=None)
+    issue = _issue(ws_db, title="Bluefish AI Accuracy SOW Signature & PR Approval", state="active")
+    ws_db.link_party_to_issue(issue, "p-aryelle")
+    ws_db.create_attachment(
+        entity_type="issue", entity_id=issue, kind="reference",
+        filename="Bluefish_Eli Lilly_AI Accuracy SOW 7.14.26.pdf", stored_path="issue.pdf",
+        content_type="application/pdf", size_bytes=10, sha256_hex="issue-hash-4", uploaded_by="outlook_ingest",
+    )
+    cluster = ws_db.create_cluster_with_new_id(title='You signed: "Bluefish...SOW..."', category="contract")
+    rid = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key="sig5", thread_key="sig5", dedupe_key="sig5",
+        occurred_ts=time.time(), subject="You signed", from_actor="adobesign@adobesign.com",
+        participants_json=json.dumps(["adobesign@adobesign.com", "Aryelle L Player"]),
+    )
+    ws_db.link_raw_item_to_issue(rid, cluster)
+    ws_db.classify_raw_item(
+        rid, item_class="FYI-EVIDENCE", direction="inbound", direction_inferred=False,
+        topic="contract", topic_inferred=False, sentiment="neutral", sentiment_inferred=False,
+        anomaly_flag=False, signal_type="signature_signed_by_me", pr_number="PR999", pr_number_base="PR999",
+    )
+
+    result = wr.merge_stray_signature_confirmation_clusters()
+
+    assert result["raw_items_checked"] == 0
+    assert result["clusters_absorbed"] == 0

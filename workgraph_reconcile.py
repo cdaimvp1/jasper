@@ -46,6 +46,8 @@ a claim already flagged.
 """
 from __future__ import annotations
 
+import json
+import re
 from typing import Optional
 
 import workgraph_classify
@@ -223,6 +225,133 @@ def merge_stray_same_reference_clusters() -> dict:
     return {
         "pr_number_base_groups_checked": groups_checked,
         "clusters_absorbed": clusters_absorbed,
+        "issues_recomputed": len(issues_recomputed),
+    }
+
+
+# --- signature-confirmation stray-cluster sweep (task #284) -----------------
+# Closes the specific gap merge_stray_same_reference_clusters' own docstring
+# flagged as unfixed: an Adobe Sign/DocuSign confirmation carries no
+# pr_number_base, so it needs a different identity signal entirely.
+
+_SIGNATURE_CONFIRMATION_SIGNAL_TYPES = (
+    "signature_requested", "signature_signed_by_me", "signature_fully_executed",
+    "signature_cc_notice", "signature_completed_docusign", "signature_requested_docusign",
+)
+
+# Words that vary between copies of the SAME document (a resend, an audit
+# trail, an envelope split into parts) without changing what it actually IS -
+# stripped before comparing, so "... - signed.pdf" and "... - audit.pdf"
+# both reduce to the same core token set as the plain negotiated draft.
+_FILENAME_NOISE_TOKENS = {"signed", "audit", "part", "copy", "draft", "final", "executed"}
+
+
+def _filename_core_tokens(filename: str) -> frozenset:
+    """Lowercase alnum tokens (splitting on any run of non-alnum characters),
+    minus _FILENAME_NOISE_TOKENS and bare single-digit tokens (the "1" in
+    "(part 1)"). Deliberately exact-set-equality matching, not a similarity
+    score - two genuinely different documents almost never share an exact
+    token set (different dates, different descriptive words), while real
+    copies of the same file (different export/signing pass) reliably do."""
+    stem = filename.rsplit(".", 1)[0] if "." in filename else filename
+    tokens = re.split(r"[^a-z0-9]+", stem.lower())
+    return frozenset(t for t in tokens if t and not (t.isdigit() and len(t) == 1) and t not in _FILENAME_NOISE_TOKENS)
+
+
+def _resolve_participant_to_party_id(participant: str) -> Optional[str]:
+    """raw_items.participants mixes a system sender's real email address
+    with bare display names for the humans CC'd on the same envelope (no
+    address captured for those) - try email first, fall back to an exact
+    display-name match. Returns None rather than guessing when neither
+    resolves (a name Jasper has never seen linked to a party before)."""
+    participant = (participant or "").strip()
+    if not participant:
+        return None
+    if "@" in participant:
+        party = ws.get_party_by_email(participant)
+    else:
+        party = ws.get_party_by_display_name(participant)
+    return party["id"] if party else None
+
+
+def merge_stray_signature_confirmation_clusters() -> dict:
+    """The harder identity-matching gap from merge_stray_same_reference_
+    clusters' docstring, closed: an e-signature confirmation has no
+    reference id, so instead it's matched on the SAME two signals a human
+    would actually use to recognize it - a real counterparty who's also on
+    the negotiation thread, AND a real overlapping attachment filename
+    (see _filename_core_tokens). Neither signal alone is safe (a frequent
+    internal contact like Aryelle Player sits on 15+ unrelated issues; two
+    different real documents can coincidentally share a word or two) - both
+    are required together, same "two independent signals, not one fuzzy
+    score" discipline as the rest of this module.
+
+    Confirmed against the real live case this was found from: raw_item
+    3024 (Adobe Sign "You signed: Bluefish...SOW...") sat in stray cluster
+    marc-1040 under its own new proj-1341, while the real negotiation issue
+    marc-4196 (proj-009) shares both the party (Aryelle Player) and the
+    normalized filename core ({bluefish, eli, lilly, ai, accuracy, sow, 7,
+    14, 26}) with raw_item 3024's own attachments.
+
+    Only acts when the participant+filename overlap resolves to EXACTLY ONE
+    real open issue - zero or 2+ candidates are skipped (reported, not
+    guessed at), same conservatism as the pr_number_base sweep above."""
+    candidates = ws.list_signature_confirmation_raw_items_in_open_clusters(
+        _SIGNATURE_CONFIRMATION_SIGNAL_TYPES
+    )
+    raw_items_checked = len(candidates)
+    clusters_absorbed = 0
+    ambiguous = 0
+    issues_recomputed = set()
+
+    for row in candidates:
+        cluster_id = row["cluster_id"]
+        raw_item_attachments = ws.list_attachments(entity_type="raw_item", entity_id=str(row["raw_item_id"]))
+        filename_tokens = [
+            _filename_core_tokens(a["filename"]) for a in raw_item_attachments if a.get("filename")
+        ]
+        filename_tokens = [t for t in filename_tokens if t]
+        if not filename_tokens:
+            continue
+
+        try:
+            participants = json.loads(row["participants"]) if row["participants"] else []
+        except (json.JSONDecodeError, TypeError):
+            participants = []
+
+        candidate_issue_ids: set = set()
+        for participant in participants:
+            party_id = _resolve_participant_to_party_id(participant)
+            if party_id is None:
+                continue
+            for issue_id in ws.list_issues_for_party(party_id):
+                if ws.get_issue(issue_id) is None:
+                    continue  # a cluster, not a real issue - get_issue() excludes those by definition
+                issue_attachments = ws.list_attachments_for_issue(issue_id)
+                issue_tokens = {
+                    _filename_core_tokens(a["filename"]) for a in issue_attachments if a.get("filename")
+                }
+                if any(ft in issue_tokens for ft in filename_tokens):
+                    candidate_issue_ids.add(issue_id)
+
+        if len(candidate_issue_ids) != 1:
+            if candidate_issue_ids:
+                ambiguous += 1
+            continue
+
+        issue_id = next(iter(candidate_issue_ids))
+        result = ws.absorb_stray_reference_cluster(cluster_id, issue_id, actor="system")
+        if result["status"] == "absorbed":
+            clusters_absorbed += 1
+            issues_recomputed.add(issue_id)
+
+    for issue_id in issues_recomputed:
+        workgraph_classify.recompute_issue_state(issue_id)
+
+    return {
+        "raw_items_checked": raw_items_checked,
+        "clusters_absorbed": clusters_absorbed,
+        "ambiguous_skipped": ambiguous,
         "issues_recomputed": len(issues_recomputed),
     }
 

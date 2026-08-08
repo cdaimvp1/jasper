@@ -58,6 +58,9 @@ _ALLOWED_TOOLS = [
     "mcp__jasper__jasper_check_mail_freshness",
     "mcp__jasper__jasper_refresh_mail_now",
     "mcp__jasper__jasper_draft_review_request",
+    "mcp__jasper__jasper_todo_list",
+    "mcp__jasper__jasper_mark_output_reviewed",
+    "mcp__jasper__jasper_focus_today",
     # the already-authorized M365 claude.ai connector - read/search only,
     # no send/write tool is exposed by it today (confirmed from the live
     # tool list); re-check this list if the connector's tool set changes.
@@ -124,7 +127,24 @@ _SYSTEM_PROMPT = (
     "on today's email specifically, so a stale answer here is a real "
     "miss, not a minor one - though not every question is time-scoped, so "
     "don't run this check for something like 'what's the status of the "
-    "Bluefish contract' that isn't asking about anything recent."
+    "Bluefish contract' that isn't asking about anything recent. "
+    "Task #281: when Marc asks something like 'what's my to-do list', "
+    "'what do I need to do', or 'what's outstanding', use jasper_todo_list "
+    "- render its three sections conversationally (outputs waiting on him, "
+    "open claims with type counts, active issues by supplier) rather than "
+    "dumping raw JSON; if open_claims.truncated is true, say the real total "
+    "rather than implying the sample shown is everything. Offer the same "
+    "action a card would for a claim you mention (e.g. 'approve in Ariba', "
+    "'draft a reply') using the tools you already have, and use "
+    "jasper_mark_output_reviewed when Marc says he's seen/reviewed a "
+    "specific output you just showed him. "
+    "Task #283: when Marc asks 'what should I focus on today', 'what's "
+    "urgent today', or similar same-day framing, use jasper_focus_today "
+    "instead of jasper_todo_list - it's scoped to today (top actions, "
+    "today's meetings, deliverables due within a week) rather than the "
+    "full outstanding picture. If a section is empty, say so plainly "
+    "(e.g. 'nothing on your calendar today') rather than padding the "
+    "answer or omitting the section silently."
 )
 
 

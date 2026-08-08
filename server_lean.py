@@ -89,6 +89,8 @@ import workgraph_key_facts
 import workgraph_repeat_signals
 import health_check
 import workgraph_suppliers
+import workgraph_todo
+import workgraph_focus
 import workgraph_digest
 import workgraph_party_review
 import text_extract
@@ -2740,6 +2742,26 @@ async def api_supplier_weekly_scorecard(company: str):
     return JSONResponse(sanitize_surrogates(draft))
 
 
+@app.get("/api/workgraph/todo-summary")
+async def api_workgraph_todo_summary():
+    """Task #281: real data behind "what's my to-do list?" - see
+    workgraph_todo.build_todo_summary's own docstring for the three
+    sections (outputs_waiting/open_claims/by_supplier). Raw structured
+    data, not prose - jasper_todo_list (jasper_mcp_server.py) hands this
+    straight to the assistant to render conversationally."""
+    return JSONResponse(sanitize_surrogates(workgraph_todo.build_todo_summary()))
+
+
+@app.get("/api/workgraph/focus-today")
+async def api_workgraph_focus_today():
+    """Task #283: real data behind "what should I focus on today?" - see
+    workgraph_focus.build_focus_today_summary's own docstring for the
+    three sections (top_actions/meetings_today/deliverables_due_soon).
+    Raw structured data - jasper_focus_today hands this to the assistant
+    to render conversationally."""
+    return JSONResponse(sanitize_surrogates(workgraph_focus.build_focus_today_summary()))
+
+
 @app.get("/api/workgraph/renewal-outreach-candidates")
 async def api_renewal_outreach_candidates():
     """Enhancement idea panel #18: every open issue with a real, curator-
@@ -3361,6 +3383,27 @@ async def api_attachment_delete(attachment_id: int):
     except OSError:
         pass
     return JSONResponse({"ok": True})
+
+
+@app.post("/api/attachments/{attachment_id}/reviewed")
+async def api_attachment_mark_reviewed(attachment_id: int):
+    """Task #280: the ✓ icon on an "Outputs waiting on you" row - a direct,
+    explicit human action, so it's safe to mutate immediately rather than
+    queue a suggestion (same reasoning as checklist done/dismiss)."""
+    if wg.get_attachment(attachment_id) is None:
+        raise HTTPException(404, "no such attachment")
+    wg.mark_attachment_reviewed(attachment_id)
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/addin/output-badge")
+async def api_addin_output_badge():
+    """Task #280: the add-in's persistent-header amber count chip - real
+    source per the locked mockup's own note ('count of skill/worker outputs
+    delivered since Marc last opened this project's card'), generalized here
+    to a global count since the header chrome is shown regardless of which
+    project (if any) is focused."""
+    return JSONResponse({"count": wg.count_unreviewed_worker_outputs()})
 
 
 # Design doc Section 12.4: long enough to catch a genuine double-click or a

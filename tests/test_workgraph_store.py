@@ -1302,6 +1302,55 @@ def test_absorb_stray_reference_cluster_not_found_when_cluster_id_is_actually_an
     assert result["status"] == "not_found"  # issue_a isn't a real is_raw_cluster=1 row
 
 
+# --- signature-confirmation stray-cluster sweep support (task #284) -------
+
+def test_get_party_by_display_name_matches_case_insensitively(ws_db):
+    ws_db.upsert_party(id="p1", primary_email="aryelle@example.com", display_name="Aryelle L Player",
+                        affiliation="internal", affiliation_confidence="H", affiliation_source="domain",
+                        company=None)
+
+    party = ws_db.get_party_by_display_name("aryelle l player")
+
+    assert party is not None
+    assert party["id"] == "p1"
+
+
+def test_get_party_by_display_name_none_when_no_match(ws_db):
+    assert ws_db.get_party_by_display_name("Nobody Here") is None
+
+
+def test_list_signature_confirmation_raw_items_in_open_clusters_finds_match(ws_db):
+    cluster = ws_db.create_cluster_with_new_id(title="Stray signature cluster", category="other")
+    rid = _seed_raw_item_with_reference(ws_db, key="sig1", issue_id=cluster, pr_number_base=None,
+                                          signal_type="signature_signed_by_me")
+
+    rows = ws_db.list_signature_confirmation_raw_items_in_open_clusters(("signature_signed_by_me",))
+
+    assert len(rows) == 1
+    assert rows[0]["raw_item_id"] == rid
+    assert rows[0]["cluster_id"] == cluster
+
+
+def test_list_signature_confirmation_raw_items_excludes_when_has_reference(ws_db):
+    cluster = ws_db.create_cluster_with_new_id(title="Has a PR already", category="other")
+    _seed_raw_item_with_reference(ws_db, key="sig2", issue_id=cluster, pr_number_base="PR555",
+                                    signal_type="signature_signed_by_me")
+
+    rows = ws_db.list_signature_confirmation_raw_items_in_open_clusters(("signature_signed_by_me",))
+
+    assert rows == []  # already covered by the pr_number_base sweep - not this one's job
+
+
+def test_list_signature_confirmation_raw_items_excludes_already_promoted_issue(ws_db):
+    issue = ws_db.create_issue_with_new_id(title="Already a real issue", state="active", category="other")
+    _seed_raw_item_with_reference(ws_db, key="sig3", issue_id=issue, pr_number_base=None,
+                                    signal_type="signature_signed_by_me")
+
+    rows = ws_db.list_signature_confirmation_raw_items_in_open_clusters(("signature_signed_by_me",))
+
+    assert rows == []  # is_raw_cluster=0 - nothing stray about it
+
+
 # --- get_cursor_updated_ts (task #274) ------------------------------------
 
 def test_get_cursor_updated_ts_returns_none_when_unset(ws_db):
@@ -1910,6 +1959,57 @@ def test_update_attachment_extracted_text_persists(ws_db):
     ws_db.update_attachment_extracted_text(aid, "real extracted text")
 
     assert ws_db.get_attachment(aid)["extracted_text"] == "real extracted text"
+
+
+# --- unreviewed worker outputs (task #280) ---------------------------------
+
+def test_count_unreviewed_worker_outputs_ignores_marc_uploads(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    ws_db.create_attachment(
+        entity_type="issue", entity_id=a, kind="upload", filename="marc_upload.pdf",
+        stored_path="p0.pdf", content_type=None, size_bytes=10, sha256_hex=None, uploaded_by="marc",
+    )
+    assert ws_db.count_unreviewed_worker_outputs() == 0
+
+
+def test_count_unreviewed_worker_outputs_counts_bridge_output(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    ws_db.create_attachment(
+        entity_type="issue", entity_id=a, kind="redline", filename="redline.docx",
+        stored_path="p1.docx", content_type=None, size_bytes=10, sha256_hex=None, uploaded_by="bridge",
+    )
+    assert ws_db.count_unreviewed_worker_outputs() == 1
+
+
+def test_mark_attachment_reviewed_drops_it_from_the_count(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    aid = ws_db.create_attachment(
+        entity_type="issue", entity_id=a, kind="redline", filename="redline.docx",
+        stored_path="p2.docx", content_type=None, size_bytes=10, sha256_hex=None, uploaded_by="bridge",
+    )
+    assert ws_db.count_unreviewed_worker_outputs() == 1
+
+    ws_db.mark_attachment_reviewed(aid)
+
+    assert ws_db.count_unreviewed_worker_outputs() == 0
+    assert ws_db.get_attachment(aid)["reviewed_ts"] is not None
+
+
+def test_list_unreviewed_worker_outputs_newest_first(ws_db):
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    aid1 = ws_db.create_attachment(
+        entity_type="issue", entity_id=a, kind="redline", filename="first.docx",
+        stored_path="p3.docx", content_type=None, size_bytes=10, sha256_hex=None, uploaded_by="curator",
+    )
+    time.sleep(0.01)
+    aid2 = ws_db.create_attachment(
+        entity_type="issue", entity_id=a, kind="scorecard", filename="second.docx",
+        stored_path="p4.docx", content_type=None, size_bytes=10, sha256_hex=None, uploaded_by="tia",
+    )
+
+    outputs = ws_db.list_unreviewed_worker_outputs()
+
+    assert [o["id"] for o in outputs] == [aid2, aid1]
 
 
 def test_work_object_id_for_attachment_resolves_via_raw_item(ws_db):

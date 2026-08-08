@@ -1536,6 +1536,14 @@ def init_workgraph() -> None:
                 )
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_attach_entity ON attachments(entity_type, entity_id)")
+            try:
+                # Task #280: add-in header badge ("N outputs waiting on
+                # you"). Set only by mark_attachment_reviewed() - an
+                # explicit human open/dismiss action - never at upload time,
+                # unlike every other column on this table.
+                conn.execute("ALTER TABLE attachments ADD COLUMN reviewed_ts REAL")
+            except sqlite3.OperationalError:
+                pass  # already added by a prior init_workgraph() call
 
             # --- Total Recall: a small, deterministic precedent store (see
             # workgraph_lessons.py). One row per (situation_key, outcome) -
@@ -3783,6 +3791,37 @@ def absorb_stray_reference_cluster(cluster_id: str, issue_id: str, *, actor: str
     return {"status": "absorbed", "issue_id": issue_id, "cluster_id": cluster_id, "raw_items_moved": raw_items_moved}
 
 
+def list_signature_confirmation_raw_items_in_open_clusters(signal_types: tuple) -> list[dict]:
+    """Task #284: the harder identity-matching gap merge_stray_same_
+    reference_clusters' own docstring explicitly flagged as unfixed - an
+    e-signature confirmation (Adobe Sign 'you signed', DocuSign 'completed')
+    carries no pr_number_base to match on, so it can land in its own stray
+    cluster with nothing to retroactively re-link it to the real negotiation
+    issue. Scoped to exactly the narrow, well-understood trigger case:
+    signal_type in the caller's known signature-tool family, no reference
+    id of its own (if it had one, the pr_number_base sweep already covers
+    it), still sitting in an OPEN, never-promoted cluster. Returns
+    {raw_item_id, cluster_id, participants} - participants is the raw
+    (unparsed) JSON string, same as raw_items.participants elsewhere;
+    caller does the json.loads and identity resolution."""
+    placeholders = ",".join("?" for _ in signal_types)
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(f"""
+                SELECT r.id AS raw_item_id, r.issue_id AS cluster_id, r.participants AS participants
+                FROM raw_items r
+                JOIN work_objects w ON w.id = r.issue_id
+                WHERE r.signal_type IN ({placeholders})
+                      AND (r.pr_number_base IS NULL OR r.pr_number_base = '')
+                      AND w.is_raw_cluster = 1
+                      AND w.status IN ('active','waiting','blocked')
+            """, signal_types).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
 def list_issues_for_reference_any_state(pr_number_base: str) -> list[dict]:
     """Same idx_raw_pr_number_base-indexed lookup as list_open_issue_ids_
     for_reference above, but across every state, not just active/waiting/
@@ -4312,6 +4351,24 @@ def get_party_by_email(email: str) -> Optional[dict]:
         try:
             row = conn.execute(
                 "SELECT * FROM parties WHERE primary_email = ?", (email.strip().lower(),)
+            ).fetchone()
+        finally:
+            conn.close()
+    return dict(row) if row else None
+
+
+def get_party_by_display_name(name: str) -> Optional[dict]:
+    """Task #284: raw_items.participants mixes emails (a signature-tool
+    system sender) and bare display names ("Aryelle L Player" - no address)
+    for the humans CC'd on the same envelope - get_party_by_email alone
+    can't resolve those. Case-insensitive exact match only, same
+    conservatism as the rest of this lookup - a fuzzy/partial match here
+    would risk resolving to the wrong person entirely, not just missing one."""
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM parties WHERE lower(display_name) = ?", (name.strip().lower(),)
             ).fetchone()
         finally:
             conn.close()
@@ -8583,6 +8640,64 @@ def list_attachments_for_project(project_id: str) -> list[dict]:
                 combined.append(a)
     combined.sort(key=lambda a: a["uploaded_ts"], reverse=True)
     return combined
+
+
+# Task #280: same worker roster taskpane.html's attachmentLinkHtml() already
+# uses to badge a "Jasper output" chip (uploaded_by, not kind - the registry's
+# per-skill output_kind varies, e.g. 'docx'/'redline', so it's not a stable
+# filter; who uploaded it is the one constant signal a worker-produced file
+# has). Kept as one named tuple so the two places can't silently drift apart.
+WORKER_UPLOADERS = ("relay", "curator", "tia", "bridge")
+
+
+def mark_attachment_reviewed(attachment_id: int, *, actor: Optional[str] = None) -> None:
+    """Explicit human 'I've seen this' action (the ✓ icon on an Outputs-
+    waiting-on-you row) - safe to mutate immediately, same as the other
+    direct-click resolutions in this module (mark_read, checklist done/
+    dismiss), not a suggest-only sweep."""
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute("UPDATE attachments SET reviewed_ts = ? WHERE id = ?", (time.time(), attachment_id))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def count_unreviewed_worker_outputs() -> int:
+    """Global count for the add-in's persistent header badge (task #280) -
+    every worker-produced attachment Marc hasn't yet clicked 'mark reviewed'
+    on, across all projects. Deliberately a plain COUNT rather than looping
+    list_attachments_for_project() per project - this one needs to be cheap
+    enough to poll on every pane render."""
+    placeholders = ",".join("?" for _ in WORKER_UPLOADERS)
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                f"SELECT COUNT(*) AS n FROM attachments WHERE reviewed_ts IS NULL AND uploaded_by IN ({placeholders})",
+                WORKER_UPLOADERS,
+            ).fetchone()
+            return row["n"] if row else 0
+        finally:
+            conn.close()
+
+
+def list_unreviewed_worker_outputs(limit: int = 50) -> list[dict]:
+    """Row-level detail for the to-do-list capability (task #281)'s "Outputs
+    waiting on you" section - newest first, matches the mockup's ordering."""
+    placeholders = ",".join("?" for _ in WORKER_UPLOADERS)
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                f"""SELECT * FROM attachments WHERE reviewed_ts IS NULL AND uploaded_by IN ({placeholders})
+                    ORDER BY uploaded_ts DESC LIMIT ?""",
+                WORKER_UPLOADERS + (limit,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
 
 
 def delete_attachment(attachment_id: int) -> bool:

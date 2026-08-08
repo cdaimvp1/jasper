@@ -57,6 +57,7 @@ _ALLOWED_TOOLS = [
     "mcp__jasper__jasper_teach_prerequisite_rule",
     "mcp__jasper__jasper_check_mail_freshness",
     "mcp__jasper__jasper_refresh_mail_now",
+    "mcp__jasper__jasper_draft_review_request",
     # the already-authorized M365 claude.ai connector - read/search only,
     # no send/write tool is exposed by it today (confirmed from the live
     # tool list); re-check this list if the connector's tool set changes.
@@ -106,6 +107,13 @@ _SYSTEM_PROMPT = (
     "rather than just answering conversationally, since only the tool call "
     "actually clears the in-progress state). Never call this for an "
     "ordinary question. "
+    "When Marc asks to share a document (e.g. a contract-review redline) "
+    "with named people and ask them to review, use jasper_draft_review_"
+    "request with a real attachment_id from that issue's own attachments "
+    "list - it drafts a real Outlook email with the file attached, never "
+    "sends it. Be explicit that this emails a COPY, not live shared "
+    "editing on one file (SharePoint/OneDrive-style co-authoring isn't "
+    "wired up yet) - never imply this does more than it does. "
     "Task #274: before answering anything scoped to 'today', 'this "
     "morning', 'just now', 'the latest', or similar - anything implying "
     "the freshest possible mailbox state - call jasper_check_mail_"

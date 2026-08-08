@@ -296,5 +296,29 @@ def jasper_request_contract_review(issue_id: str, instructions: str = "") -> dic
     })
 
 
+@mcp.tool()
+def jasper_draft_review_request(issue_id: str, to_emails: list[str], attachment_id: int,
+                                 message: str = "") -> dict:
+    """Task #35 follow-on: drafts a REAL Outlook email (via COM, same
+    never-Send()s-itself contract as every other Outlook action here) with
+    a real document attached, addressed to to_emails, asking them to
+    review it. attachment_id must be one of THIS issue's own attachments
+    (get it from jasper_get_issue's/jasper_focus_email's own attachments
+    list - never guess an id). Use when Marc says something like 'send
+    this to <people> and ask them to review' or 'share the redline with
+    my team'.
+
+    Be honest about what this is NOT: this is an emailed COPY of the file,
+    not live SharePoint/OneDrive co-authoring on one shared document - if
+    Marc specifically asks for native Share-button-style sharing (everyone
+    editing the same file), say plainly that isn't wired up yet (it needs
+    a new permission grant Jasper doesn't have) rather than implying this
+    call does that."""
+    return _post("/api/action/draft-review-request", {
+        "issue_id": issue_id, "to_emails": to_emails,
+        "attachment_id": attachment_id, "message": message,
+    })
+
+
 if __name__ == "__main__":
     mcp.run(transport="sse", host=MCP_HOST, port=MCP_PORT)

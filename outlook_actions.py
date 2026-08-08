@@ -118,7 +118,8 @@ def draft_forward(entry_id: str, ref_tag: str | None = None) -> dict:
     return _run_powershell(args)
 
 
-def compose_new(to_emails: list[str], subject: str) -> dict:
+def compose_new(to_emails: list[str], subject: str, body: str = "",
+                 attachment_paths: list[str] | None = None) -> dict:
     """Creates a REAL Outlook draft new-mail item addressed to `to_emails`
     via COM's own CreateItem(0)/Display() - task #35, replaces the interim
     client-only mailto: link the cockpit UI used while this wasn't built
@@ -127,9 +128,23 @@ def compose_new(to_emails: list[str], subject: str) -> dict:
     thread), so it's the one Outlook action here with no EntryID - the
     recipients themselves are the only real input. Never calls Send(): this
     only ever puts a draft on screen, the same as a person clicking New
-    Email themselves. Raises RuntimeError (with a real reason) on failure."""
+    Email themselves. Raises RuntimeError (with a real reason) on failure.
+
+    body/attachment_paths (2026-08-08 follow-on): the real answer to "can
+    Jasper share a skill's output with stakeholders and ask them to
+    review" without any new M365/Graph write permission - a real file
+    attached to a real draft via the same local COM path already used
+    throughout this module. Both optional and additive: with neither, this
+    behaves exactly as before. The returned dict's own "missing_
+    attachments" list (from the PowerShell script) must be checked by the
+    caller - a path that doesn't resolve on this machine is reported, not
+    silently dropped."""
     if not to_emails:
         raise ValueError("to_emails is required")
     to_field = ";".join(to_emails)
     args = ["powershell", "-NoProfile", "-File", str(_DRAFT_COMPOSE_SCRIPT), "-To", to_field, "-Subject", subject or ""]
+    if body:
+        args.extend(["-Body", body])
+    if attachment_paths:
+        args.extend(["-AttachmentPaths", ";".join(attachment_paths)])
     return _run_powershell(args)

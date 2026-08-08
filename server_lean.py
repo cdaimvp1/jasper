@@ -1551,6 +1551,8 @@ async def api_assistant_reset():
 class ComposeNewBody(BaseModel):
     issue_id: str
     to_emails: list[str]
+    body: str = ""
+    attachment_paths: list[str] = Field(default_factory=list)
 
 
 @app.post("/api/action/compose-new")
@@ -1577,7 +1579,57 @@ async def api_action_compose_new(body: ComposeNewBody):
     display_title = (synthesis or {}).get("derived_title") or issue.get("title") or ""
     subject = f"{display_title} - Ref: JW-{body.issue_id}"
     try:
-        result = await asyncio.to_thread(outlook_actions.compose_new, body.to_emails, subject)
+        result = await asyncio.to_thread(
+            outlook_actions.compose_new, body.to_emails, subject, body.body, body.attachment_paths,
+        )
+    except RuntimeError as e:
+        raise HTTPException(500, str(e))
+    return JSONResponse(result)
+
+
+class DraftReviewRequestBody(BaseModel):
+    issue_id: str
+    to_emails: list[str]
+    attachment_id: int
+    message: str = ""
+
+
+@app.post("/api/action/draft-review-request")
+async def api_action_draft_review_request(body: DraftReviewRequestBody):
+    """Task #35 follow-on (2026-08-08): the assistant-facing 'share this
+    output and ask them to review' action - real, but honestly scoped: a
+    real Outlook draft with the file ATTACHED (same COM path as compose-
+    new above, no new M365/Graph permission), not native SharePoint
+    co-authoring (see task #285 - that needs a real, separate permission
+    grant this route can't manufacture).
+
+    Takes attachment_id rather than a raw filesystem path on purpose - an
+    LLM-driven caller should never need to know or guess a real path on
+    this machine. Resolved and ownership-checked against the issue's own
+    attachments here, server-side, same discipline as every other route
+    that turns an id into a real action rather than trusting client input
+    directly."""
+    if wg.get_issue(body.issue_id) is None:
+        raise HTTPException(404, f"no such issue: {body.issue_id}")
+    if not body.to_emails:
+        raise HTTPException(400, "to_emails is required")
+    owned_ids = {a["id"] for a in wg.list_attachments_for_issue(body.issue_id)}
+    if body.attachment_id not in owned_ids:
+        raise HTTPException(404, f"attachment {body.attachment_id} is not attached to issue {body.issue_id}")
+    attachment = wg.get_attachment(body.attachment_id)
+    abs_path = paths.DATA_DIR / attachment["stored_path"]
+    if not abs_path.is_file():
+        raise HTTPException(404, f"attachment file missing on disk: {abs_path}")
+
+    synthesis = wg.get_synthesis("issue", body.issue_id)
+    issue = wg.get_issue(body.issue_id)
+    display_title = (synthesis or {}).get("derived_title") or issue.get("title") or ""
+    subject = f"Please review: {display_title} - Ref: JW-{body.issue_id}"
+    review_body = body.message or f"Hi,\n\nCould you take a look at the attached {attachment['filename']} and share your thoughts?\n\nThanks,\nMarc"
+    try:
+        result = await asyncio.to_thread(
+            outlook_actions.compose_new, body.to_emails, subject, review_body, [str(abs_path)],
+        )
     except RuntimeError as e:
         raise HTTPException(500, str(e))
     return JSONResponse(result)

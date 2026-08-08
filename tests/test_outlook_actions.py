@@ -305,3 +305,27 @@ def test_compose_new_timeout_raises_runtime_error_not_timeout_expired(monkeypatc
     monkeypatch.setattr(subprocess, "run", fake_run)
     with pytest.raises(RuntimeError, match="timed out"):
         oa.compose_new(["a@x.com"], "subject")
+
+
+def test_compose_new_body_and_attachment_paths_are_additive(monkeypatch):
+    """2026-08-08 follow-on (Marc's 'share this output and ask them to
+    review' ask): body/attachment_paths are optional and additive - with
+    neither, the args list must be identical to the pre-existing bare
+    to/subject call (no accidental -Body "" or -AttachmentPaths "" noise)."""
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        return _FakeCompletedProcess(returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    oa.compose_new(["a@x.com"], "subject")
+    assert "-Body" not in captured["args"]
+    assert "-AttachmentPaths" not in captured["args"]
+
+    oa.compose_new(["a@x.com"], "subject", body="Please review.",
+                    attachment_paths=[r"C:\docs\redline.docx", r"C:\docs\cover.pdf"])
+    assert "-Body" in captured["args"]
+    assert "Please review." in captured["args"]
+    assert "-AttachmentPaths" in captured["args"]
+    assert r"C:\docs\redline.docx;C:\docs\cover.pdf" in captured["args"]

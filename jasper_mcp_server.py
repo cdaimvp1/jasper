@@ -172,6 +172,30 @@ def jasper_worker_status() -> dict:
 
 
 @mcp.tool()
+def jasper_check_mail_freshness() -> dict:
+    """Task #274: call this FIRST whenever Marc asks something scoped to
+    "today", "this morning", "just now", "the latest", or anything else
+    implying the freshest possible mailbox state - never answer a
+    time-scoped question from Jasper's own tracked data without checking
+    this first. Cheap and read-only (no live Outlook call - just checks
+    when mail ingestion last actually ran). Returns {ok, minutes_since_
+    last_run}. If ok is False, call jasper_refresh_mail_now before
+    answering - more often than not Marc needs to act on today's email
+    first, so a stale answer here is a real miss, not a minor one."""
+    return _get("/api/mail/freshness")
+
+
+@mcp.tool()
+def jasper_refresh_mail_now() -> dict:
+    """Task #274: the "fill the gap" call once jasper_check_mail_freshness
+    says data is stale - a real, bounded mail pull (~15-75s, cold Outlook
+    start possible), not instant. Say so if Marc is waiting on the reply.
+    Only call this after checking freshness first, never speculatively -
+    it's a real, if modest, cost each time."""
+    return _post("/api/mail/refresh-now", {})
+
+
+@mcp.tool()
 def jasper_message_worker(worker: str, message: str) -> dict:
     """Send a REAL message into one background worker's own DM thread - the
     exact same mechanism as typing '@<worker> ...' into the cockpit's Back

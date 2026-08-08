@@ -558,6 +558,53 @@ def test_run_accepts_a_custom_timeout_value(ws_db, isolated_paths, monkeypatch):
     assert captured["timeout"] == 1800
 
 
+# --- freshness_status / refresh_now (task #274) ---------------------------
+
+def test_freshness_status_no_prior_run_is_not_ok(ws_db):
+    """Distinct from health_check.check_outlook_cache_freshness's own "no
+    prior run = ok" convention on purpose - THIS consumer (the assistant
+    deciding whether to trust a "today's email" answer) needs "never ran"
+    to read as a real gap worth filling, not a clean bill of health."""
+    result = oci.freshness_status()
+    assert result["ok"] is False
+    assert result["minutes_since_last_run"] is None
+
+
+def test_freshness_status_ok_on_a_recent_run(ws_db):
+    ws_db.set_cursor("outlook_mail", "last_scan_outlook_cold_started", "true")
+    result = oci.freshness_status()
+    assert result["ok"] is True
+    assert result["minutes_since_last_run"] < 1.0
+
+
+def test_freshness_status_not_ok_on_a_stale_run(ws_db):
+    ws_db.set_cursor("outlook_mail", "last_scan_outlook_cold_started", "true")
+    conn = ws_db._connect()
+    stale_ts = 1_700_000_000.0  # long before "now" in any real test run
+    conn.execute(
+        "UPDATE ingest_cursors SET updated_ts = ? WHERE source = 'outlook_mail' AND cursor_key = 'last_scan_outlook_cold_started'",
+        (stale_ts,),
+    )
+    conn.close()
+    result = oci.freshness_status(now=stale_ts + oci._FRESHNESS_STALE_MINUTES * 60 + 120)
+    assert result["ok"] is False
+    assert result["minutes_since_last_run"] > oci._FRESHNESS_STALE_MINUTES
+
+
+def test_refresh_now_calls_run_with_bounded_params(monkeypatch):
+    captured = {}
+
+    def fake_run(**kwargs):
+        captured.update(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr(oci, "run", fake_run)
+    oci.refresh_now()
+
+    assert captured["sync_wait_seconds"] == 15
+    assert captured["timeout"] == 75
+
+
 def test_schema_migration_entry_id_column_idempotent(ws_db):
     """init_workgraph()'s ALTER TABLE ADD COLUMN entry_id must be safe to run
     against an already-migrated DB (every real wake calls init_workgraph()

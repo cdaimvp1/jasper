@@ -342,6 +342,43 @@ def run(folder: str = "Careful", max_items: int = 500, timeout: int = 120, sync_
     return result
 
 
+_FRESHNESS_STALE_MINUTES = 360  # ~1.25x the 5x/day scheduled cadence's own ~288min gap - real slack, not a hair trigger
+
+
+def freshness_status(now: float | None = None) -> dict:
+    """Task #274 (2026-08-08): "is Jasper's data up to date with the newest
+    emails" as a real, checkable answer, not a guess - the assistant's own
+    first check before answering anything scoped to "today"/"this
+    morning"/"just now". Reads last_scan_outlook_cold_started's updated_ts
+    (see get_cursor_updated_ts's own docstring for why THAT cursor, not the
+    content-derived folder:<name> one, is the right freshness signal) -
+    when a scan last actually ran is answerable even on an honestly-quiet
+    inbox, unlike a cursor that only advances when something new shows up."""
+    if now is None:
+        now = time.time()
+    last_run_ts = ws.get_cursor_updated_ts(_SOURCE, "last_scan_outlook_cold_started")
+    if last_run_ts is None:
+        return {"ok": False, "detail": "no ingestion run recorded yet", "minutes_since_last_run": None}
+    minutes_since = (now - last_run_ts) / 60.0
+    return {
+        "ok": minutes_since <= _FRESHNESS_STALE_MINUTES,
+        "minutes_since_last_run": round(minutes_since, 1),
+        "last_run_ts": last_run_ts,
+    }
+
+
+def refresh_now() -> dict:
+    """Task #274: the assistant's on-demand "fill the gap" call - a real
+    mail pull, not another status check. Bounded well under the
+    assistant's own 120s per-turn budget (workgraph_assistant._TIMEOUT_
+    SECONDS) so a cold Outlook start still leaves headroom for the LLM to
+    read the result and answer, rather than racing the whole turn's own
+    timeout - deliberately shorter than the scheduled cadence's own
+    sync_wait_seconds=30/timeout=150 (scheduled_refresh.py has no such
+    competing deadline)."""
+    return run(sync_wait_seconds=15, timeout=75)
+
+
 def sweep_unread(folder: str = "Careful", max_items: int = 200) -> dict:
     """Backlog sweep (2026-07-29, Tia) — separate from run()/the cursor above
     on purpose. run()'s cursor is forward-marching-only: it structurally

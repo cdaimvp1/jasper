@@ -3407,6 +3407,28 @@ async def api_cockpit_action(body: CockpitActionBody):
                           "prepared_action_id": prepared_id})
 
 
+@app.get("/api/mail/freshness")
+async def api_mail_freshness():
+    """Task #274: the assistant's own first check before answering anything
+    scoped to "today"/"this morning"/"just now" - cheap and read-only
+    (outlook_com_ingest.freshness_status just reads a cursor's updated_ts,
+    no COM call), distinct from the heavier /api/cockpit/refresh below."""
+    return JSONResponse(outlook_com_ingest.freshness_status())
+
+
+@app.post("/api/mail/refresh-now")
+async def api_mail_refresh_now():
+    """Task #274: the assistant's on-demand "fill the gap" call, once
+    /api/mail/freshness says data is stale - a real but bounded mail pull
+    (outlook_com_ingest.refresh_now's own 75s cap, chosen to leave headroom
+    inside the assistant's 120s per-turn budget), NOT the full mail+
+    classify+nba+alerts cascade /api/cockpit/refresh runs - the assistant
+    needs fresh raw_items to search, not a full corpus re-score, and a
+    lighter call is less likely to blow the turn's own timeout."""
+    result = await asyncio.to_thread(outlook_com_ingest.refresh_now)
+    return JSONResponse({"refresh": result, "freshness": outlook_com_ingest.freshness_status()})
+
+
 _cockpit_refresh_in_flight = False
 
 

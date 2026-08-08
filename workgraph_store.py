@@ -3902,6 +3902,30 @@ def get_cursor(source: str, cursor_key: str) -> Optional[str]:
     return row["value"] if row else None
 
 
+def get_cursor_updated_ts(source: str, cursor_key: str) -> Optional[float]:
+    """Task #274: WHEN a cursor was last written, not its value - the real
+    signal for "did a scan actually run recently," distinct from a
+    content-derived cursor like outlook_mail's own folder:<name> SinceEpoch
+    value (outlook_com_ingest.run() only advances that to the latest ITEM's
+    own timestamp it saw, and deliberately does NOT bump it to "now" when a
+    scan finds nothing new - so an honestly-quiet inbox for two days would
+    make that cursor look stale even though the pipeline ran fine every
+    cadence tick in between). last_scan_outlook_cold_started, by contrast,
+    is written unconditionally on every real run regardless of outcome -
+    its updated_ts is the right thing to check for "when did ingestion
+    last actually run," which is what a freshness check needs."""
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT updated_ts FROM ingest_cursors WHERE source = ? AND cursor_key = ?",
+                (source, cursor_key),
+            ).fetchone()
+        finally:
+            conn.close()
+    return row["updated_ts"] if row else None
+
+
 def set_cursor(source: str, cursor_key: str, value: str) -> None:
     with _lock:
         conn = _connect()

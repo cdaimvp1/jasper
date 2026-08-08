@@ -55,6 +55,8 @@ _ALLOWED_TOOLS = [
     "mcp__jasper__jasper_worker_status",
     "mcp__jasper__jasper_message_worker",
     "mcp__jasper__jasper_teach_prerequisite_rule",
+    "mcp__jasper__jasper_check_mail_freshness",
+    "mcp__jasper__jasper_refresh_mail_now",
     # the already-authorized M365 claude.ai connector - read/search only,
     # no send/write tool is exposed by it today (confirmed from the live
     # tool list); re-check this list if the connector's tool set changes.
@@ -103,7 +105,18 @@ _SYSTEM_PROMPT = (
     "abandon it (still call the tool with his cancel/never-mind wording "
     "rather than just answering conversationally, since only the tool call "
     "actually clears the in-progress state). Never call this for an "
-    "ordinary question."
+    "ordinary question. "
+    "Task #274: before answering anything scoped to 'today', 'this "
+    "morning', 'just now', 'the latest', or similar - anything implying "
+    "the freshest possible mailbox state - call jasper_check_mail_"
+    "freshness first. If it says data is stale, call jasper_refresh_mail_"
+    "now before answering rather than answering from what Jasper already "
+    "has tracked; say plainly that you're checking for the latest mail "
+    "first if that takes a moment. More often than not Marc needs to act "
+    "on today's email specifically, so a stale answer here is a real "
+    "miss, not a minor one - though not every question is time-scoped, so "
+    "don't run this check for something like 'what's the status of the "
+    "Bluefish contract' that isn't asking about anything recent."
 )
 
 

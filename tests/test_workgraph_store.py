@@ -1302,6 +1302,20 @@ def test_absorb_stray_reference_cluster_not_found_when_cluster_id_is_actually_an
     assert result["status"] == "not_found"  # issue_a isn't a real is_raw_cluster=1 row
 
 
+# --- get_cursor_updated_ts (task #274) ------------------------------------
+
+def test_get_cursor_updated_ts_returns_none_when_unset(ws_db):
+    assert ws_db.get_cursor_updated_ts("outlook_mail", "no_such_cursor") is None
+
+
+def test_get_cursor_updated_ts_returns_write_time_not_value(ws_db):
+    before = time.time()
+    ws_db.set_cursor("outlook_mail", "some_cursor", "some_value_unrelated_to_time")
+    after = time.time()
+    updated_ts = ws_db.get_cursor_updated_ts("outlook_mail", "some_cursor")
+    assert before <= updated_ts <= after
+
+
 def test_list_distinct_signal_types_in_use(ws_db):
     ws_db.insert_raw_item(source="outlook_mail", stable_key="a", thread_key="a", dedupe_key="a",
                           occurred_ts=1.0, subject="s", from_actor="x@example.com", participants_json="[]")

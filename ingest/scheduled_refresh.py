@@ -46,6 +46,7 @@ import workgraph_aristotle
 import workgraph_pipeline2
 import workgraph_claims_backfill
 import workgraph_discovery
+import workgraph_proactive
 import config
 
 from paths import DATA_DIR
@@ -539,6 +540,18 @@ def run() -> dict:
     except Exception as e:
         discovery_monthly_result = {"error": str(e)}
 
+    # 17. Proactive-actions sweep (task #287) - checks newly-classified
+    # inbound raw_items for a contract-review or status-update request
+    # pattern and dispatches the matching narrow, no-external-effect action.
+    # No daily/monthly gate - runs every tick like classify itself, guarded
+    # instead by the master config toggle (off by default) and its own
+    # incrementing-id cursor, so a fast cadence just means faster pickup,
+    # never duplicate work.
+    try:
+        proactive_actions_result = workgraph_proactive.run_proactive_actions_sweep()
+    except Exception as e:
+        proactive_actions_result = {"error": str(e)}
+
     summary = {
         "mail": mail_result,
         "sent_mail": sent_mail_result,
@@ -561,6 +574,7 @@ def run() -> dict:
         "prepared_action_expiry": prepared_action_expiry_result,
         "claims_backfill": claims_backfill_result,
         "discovery_monthly": discovery_monthly_result,
+        "proactive_actions": proactive_actions_result,
     }
     _log(f"REFRESH ok mail_inserted={mail_result.get('inserted', '?')} "
         f"relay_ok={relay_result.get('ok')} relay_calendar_advanced={relay_result.get('cursor_advanced')} "

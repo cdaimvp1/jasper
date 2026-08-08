@@ -406,6 +406,17 @@ def jasper_mark_output_reviewed(attachment_id: int) -> dict:
     return _post(f"/api/attachments/{attachment_id}/reviewed", {})
 
 
+@mcp.tool()
+def jasper_acknowledge_proactive_action(prepared_action_id: int) -> dict:
+    """Task #287: Marc's explicit "I've seen this" on one row from
+    jasper_todo_list's proactive_actions_pending list (a contract-review
+    request or status-update draft Jasper dispatched on its own while
+    proactive actions were turned on) - a direct action, safe to apply
+    immediately. Never call this on a guess; only after Marc references a
+    specific one you already showed him."""
+    return _post(f"/api/prepared-actions/{prepared_action_id}/acknowledge", {})
+
+
 if __name__ == "__main__":
     threading.Thread(target=_restart_when_this_file_changes, daemon=True).start()
     mcp.run(transport="sse", host=MCP_HOST, port=MCP_PORT)

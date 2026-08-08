@@ -3398,12 +3398,46 @@ async def api_attachment_mark_reviewed(attachment_id: int):
 
 @app.get("/api/addin/output-badge")
 async def api_addin_output_badge():
-    """Task #280: the add-in's persistent-header amber count chip - real
-    source per the locked mockup's own note ('count of skill/worker outputs
-    delivered since Marc last opened this project's card'), generalized here
-    to a global count since the header chrome is shown regardless of which
-    project (if any) is focused."""
-    return JSONResponse({"count": wg.count_unreviewed_worker_outputs()})
+    """Task #280/#287: the add-in's persistent-header amber count chip -
+    real source per the locked mockup's own note ('count of skill/worker
+    outputs delivered since Marc last opened this project's card'),
+    generalized here to a global count since the header chrome is shown
+    regardless of which project (if any) is focused. Task #287 adds
+    proactively-dispatched actions Marc hasn't acknowledged yet to the same
+    count - both are "something Jasper did that's waiting on your eyes,"
+    the same underlying concept."""
+    count = wg.count_unreviewed_worker_outputs() + wg.count_unacknowledged_proactive_actions()
+    return JSONResponse({"count": count})
+
+
+class ProactiveActionsSettingsBody(BaseModel):
+    enabled: bool
+
+
+@app.get("/api/settings/proactive-actions")
+async def api_settings_proactive_actions_get():
+    """Task #287: the add-in header's settings toggle. Off by default, same
+    as every other autonomous-leaning capability in this codebase - turning
+    this on IS Marc's standing approval for the two narrow action types
+    workgraph_proactive.py handles (see its own module docstring for why
+    that's a real approval and not content self-approving)."""
+    return JSONResponse({"enabled": bool(config.get("proactive_actions", "enabled", default=False))})
+
+
+@app.post("/api/settings/proactive-actions")
+async def api_settings_proactive_actions_set(body: ProactiveActionsSettingsBody):
+    config.set_value(body.enabled, "proactive_actions", "enabled")
+    return JSONResponse({"ok": True, "enabled": body.enabled})
+
+
+@app.post("/api/prepared-actions/{prepared_action_id}/acknowledge")
+async def api_prepared_action_acknowledge(prepared_action_id: int):
+    """Task #287: Marc's explicit 'I've seen this' on a proactively-
+    dispatched action - drops it from the output-badge count."""
+    if wg.get_prepared_action(prepared_action_id) is None:
+        raise HTTPException(404, f"no such prepared action: {prepared_action_id}")
+    wg.mark_prepared_action_acknowledged(prepared_action_id)
+    return JSONResponse({"ok": True})
 
 
 # Design doc Section 12.4: long enough to catch a genuine double-click or a

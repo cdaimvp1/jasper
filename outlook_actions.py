@@ -80,7 +80,8 @@ def mark_read(entry_id: str) -> dict:
     return _run_powershell(["powershell", "-NoProfile", "-File", str(_MARK_READ_SCRIPT), "-EntryID", entry_id])
 
 
-def draft_reply(entry_id: str, reply_all: bool = False, ref_tag: str | None = None) -> dict:
+def draft_reply(entry_id: str, reply_all: bool = False, ref_tag: str | None = None,
+                 body: str | None = None, save_only: bool = False) -> dict:
     """Creates a REAL Outlook draft reply to the exact item (by EntryID) via
     COM's own Reply()/ReplyAll() - a new draft MailItem, already addressed
     and quoting the original thread - then Display()s it for review. Never
@@ -92,7 +93,17 @@ def draft_reply(entry_id: str, reply_all: bool = False, ref_tag: str | None = No
     the top of the draft body - "Ref: JW-<issue-id>" - a real, working
     fallback matching signal if this draft comes back on a reply (see
     workgraph_signals.JASPER_REF_RE / workgraph_classify.cluster_and_link).
-    Optional and additive: with no ref_tag, this behaves exactly as before."""
+    Optional and additive: with no ref_tag, this behaves exactly as before.
+
+    body/save_only (task #287, proactive drafting): body prepends real
+    drafted text above the quoted thread, same HTMLBody-prepend mechanism
+    as ref_tag. save_only calls MailItem.Save() instead of Display() - the
+    draft lands in the Drafts folder without popping a visible compose
+    window, which matters specifically for a PROACTIVE call (nothing
+    should be surprising Marc with an open window while he's away from his
+    machine). A human-triggered draft (the cockpit's own Draft Reply
+    button) never passes save_only - Display() staying the default there
+    is deliberate, not an oversight."""
     if not entry_id:
         raise ValueError("entry_id is required")
     args = ["powershell", "-NoProfile", "-File", str(_DRAFT_REPLY_SCRIPT), "-EntryID", entry_id]
@@ -100,6 +111,10 @@ def draft_reply(entry_id: str, reply_all: bool = False, ref_tag: str | None = No
         args.append("-ReplyAll")
     if ref_tag:
         args.extend(["-RefTag", ref_tag])
+    if body:
+        args.extend(["-Body", body])
+    if save_only:
+        args.append("-SaveOnly")
     return _run_powershell(args)
 
 

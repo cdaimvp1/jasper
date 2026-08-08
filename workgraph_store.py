@@ -1489,6 +1489,17 @@ def init_workgraph() -> None:
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_prepared_actions_claim ON prepared_actions(claim_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_prepared_actions_state ON prepared_actions(state, created_ts)")
+            try:
+                # Task #287: distinguishes "the action finished" (state/
+                # resolved_ts, already existed) from "Marc has actually seen
+                # it" - same reviewed_ts pattern as attachments (task #280).
+                # Only meaningful on proactively-triggered rows; a human-
+                # click-originated action already implies Marc knows about
+                # it (he's the one who clicked), so nothing here back-fills
+                # this for those.
+                conn.execute("ALTER TABLE prepared_actions ADD COLUMN acknowledged_ts REAL")
+            except sqlite3.OperationalError:
+                pass  # already added by a prior init_workgraph() call
 
             try:
                 # Bumped once per raw_item at claim-materialization time (i.e. in
@@ -4172,6 +4183,70 @@ def list_prepared_actions_for_claim(claim_id: int) -> list[dict]:
         finally:
             conn.close()
     return [dict(r) for r in rows]
+
+
+def mark_prepared_action_acknowledged(id: int) -> None:
+    """Task #287: Marc's explicit 'I've seen this' on a proactively-
+    dispatched action (contract review request, status-update draft) -
+    same direct-click-is-safe-to-mutate-immediately posture as
+    mark_attachment_reviewed."""
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute("UPDATE prepared_actions SET acknowledged_ts = ? WHERE id = ?", (time.time(), id))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def count_unacknowledged_proactive_actions() -> int:
+    """Global count for the add-in header badge (task #280/#287) - a
+    completed proactive action (state='succeeded') Marc hasn't acknowledged
+    yet. Deliberately does not count human-click-originated prepared_
+    actions (rationale doesn't start with 'Proactive:') - Marc already
+    knows about those, he's the one who clicked."""
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                """SELECT COUNT(*) AS n FROM prepared_actions
+                   WHERE state = 'succeeded' AND acknowledged_ts IS NULL AND rationale LIKE 'Proactive:%'"""
+            ).fetchone()
+            return row["n"] if row else 0
+        finally:
+            conn.close()
+
+
+def list_unacknowledged_proactive_actions(limit: int = 50) -> list[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                """SELECT * FROM prepared_actions
+                   WHERE state = 'succeeded' AND acknowledged_ts IS NULL AND rationale LIKE 'Proactive:%'
+                   ORDER BY resolved_ts DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+
+def list_classified_inbound_raw_items_after_id(after_id: int, limit: int = 200) -> list[dict]:
+    """Task #287: the candidate feed for the proactive-actions sweep - a
+    plain incrementing-id cursor (not time-windowed), so a slow/missed tick
+    never skips an item, it just catches up further on the next one."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                """SELECT * FROM raw_items WHERE id > ? AND classified = 1 AND direction = 'inbound'
+                   ORDER BY id ASC LIMIT ?""",
+                (after_id, limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
 
 
 def expire_stale_prepared_actions(max_age_seconds: float, *, now: Optional[float] = None) -> int:

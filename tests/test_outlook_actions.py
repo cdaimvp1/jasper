@@ -160,6 +160,26 @@ def test_draft_reply_omits_ref_tag_when_not_given(monkeypatch):
     assert "-RefTag" not in captured["args"]
 
 
+def test_draft_reply_body_and_save_only_are_additive(monkeypatch):
+    """task #287: with neither passed, behaves exactly as before (no
+    -Body/-SaveOnly noise); both are real, separate flags when given."""
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        return _FakeCompletedProcess(returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    oa.draft_reply("entryid-ABC")
+    assert "-Body" not in captured["args"]
+    assert "-SaveOnly" not in captured["args"]
+
+    oa.draft_reply("entryid-ABC", body="Still on track, will follow up Friday.", save_only=True)
+    assert "-Body" in captured["args"]
+    assert "Still on track, will follow up Friday." in captured["args"]
+    assert "-SaveOnly" in captured["args"]
+
+
 def test_draft_reply_raises_runtime_error_on_failure(monkeypatch):
     def fake_run(args, **kwargs):
         return _FakeCompletedProcess(returncode=2, stderr="stale entry id")

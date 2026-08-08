@@ -61,6 +61,7 @@ _ALLOWED_TOOLS = [
     "mcp__jasper__jasper_todo_list",
     "mcp__jasper__jasper_mark_output_reviewed",
     "mcp__jasper__jasper_focus_today",
+    "mcp__jasper__jasper_acknowledge_proactive_action",
     # the already-authorized M365 claude.ai connector - read/search only,
     # no send/write tool is exposed by it today (confirmed from the live
     # tool list); re-check this list if the connector's tool set changes.
@@ -130,14 +131,23 @@ _SYSTEM_PROMPT = (
     "Bluefish contract' that isn't asking about anything recent. "
     "Task #281: when Marc asks something like 'what's my to-do list', "
     "'what do I need to do', or 'what's outstanding', use jasper_todo_list "
-    "- render its three sections conversationally (outputs waiting on him, "
-    "open claims with type counts, active issues by supplier) rather than "
-    "dumping raw JSON; if open_claims.truncated is true, say the real total "
-    "rather than implying the sample shown is everything. Offer the same "
-    "action a card would for a claim you mention (e.g. 'approve in Ariba', "
-    "'draft a reply') using the tools you already have, and use "
+    "- render its sections conversationally (outputs waiting on him, "
+    "proactive actions pending his review, open claims with type counts, "
+    "active issues by supplier) rather than dumping raw JSON; if "
+    "open_claims.truncated is true, say the real total rather than "
+    "implying the sample shown is everything. Offer the same action a card "
+    "would for a claim you mention (e.g. 'approve in Ariba', 'draft a "
+    "reply') using the tools you already have, and use "
     "jasper_mark_output_reviewed when Marc says he's seen/reviewed a "
-    "specific output you just showed him. "
+    "specific output you just showed him. Task #287: proactive_actions_"
+    "pending items are things Jasper did on its own while the proactive-"
+    "actions setting was on (a contract review it dispatched, a status-"
+    "update reply it drafted and saved to Drafts) - describe what it did "
+    "and why (its rationale field), and use "
+    "jasper_acknowledge_proactive_action once Marc says he's seen it. "
+    "Never claim a draft_status_update action sent anything - it only "
+    "saved a draft to the Drafts folder, same never-Send()s-itself "
+    "contract as every other draft in this system. "
     "Task #283: when Marc asks 'what should I focus on today', 'what's "
     "urgent today', or similar same-day framing, use jasper_focus_today "
     "instead of jasper_todo_list - it's scoped to today (top actions, "

@@ -1365,6 +1365,74 @@ def test_get_cursor_updated_ts_returns_write_time_not_value(ws_db):
     assert before <= updated_ts <= after
 
 
+# --- proactive-actions acknowledgment (task #287) --------------------------
+
+def _proactive_prepared_action(ws_db, action_type="review_contract", rationale_prefix="Proactive:"):
+    """Mirrors workgraph_proactive.py's own real state transitions (create
+    as 'approved', then advance to 'succeeded') rather than creating
+    directly in a terminal state - resolved_ts is only ever stamped by
+    update_prepared_action_state, not by create_prepared_action itself."""
+    pid = ws_db.create_prepared_action(
+        claim_id=None, action_type=action_type, proposed_parameters_json="{}",
+        evidence_refs_json="[]", rationale=f"{rationale_prefix} test", risk_class="low",
+        idempotency_key=f"test-{action_type}-{time.time()}", state="approved",
+    )
+    ws_db.update_prepared_action_state(pid, "succeeded")
+    return pid
+
+
+def test_count_unacknowledged_proactive_actions_counts_succeeded_proactive_rows(ws_db):
+    _proactive_prepared_action(ws_db)
+    assert ws_db.count_unacknowledged_proactive_actions() == 1
+
+
+def test_count_unacknowledged_proactive_actions_ignores_human_click_actions(ws_db):
+    """A human-click-originated prepared_action's rationale never starts
+    with 'Proactive:' - Marc already knows about those, he clicked."""
+    ws_db.create_prepared_action(
+        claim_id=None, action_type="review_contract", proposed_parameters_json="{}",
+        evidence_refs_json="[]", rationale="cockpit action: review_contract", risk_class="low",
+        idempotency_key="test-human-click", state="succeeded",
+    )
+    assert ws_db.count_unacknowledged_proactive_actions() == 0
+
+
+def test_mark_prepared_action_acknowledged_drops_it_from_the_count(ws_db):
+    pid = _proactive_prepared_action(ws_db)
+    assert ws_db.count_unacknowledged_proactive_actions() == 1
+
+    ws_db.mark_prepared_action_acknowledged(pid)
+
+    assert ws_db.count_unacknowledged_proactive_actions() == 0
+    assert ws_db.get_prepared_action(pid)["acknowledged_ts"] is not None
+
+
+def test_list_unacknowledged_proactive_actions_newest_first(ws_db):
+    first = _proactive_prepared_action(ws_db, action_type="review_contract")
+    time.sleep(0.01)
+    second = _proactive_prepared_action(ws_db, action_type="draft_status_update")
+
+    items = ws_db.list_unacknowledged_proactive_actions()
+
+    assert [i["id"] for i in items] == [second, first]
+
+
+def test_list_classified_inbound_raw_items_after_id(ws_db):
+    a = ws_db.insert_raw_item(source="outlook_mail", stable_key="a", thread_key="a", dedupe_key="a",
+                               occurred_ts=1.0, subject="s", from_actor="x@example.com", participants_json="[]")
+    ws_db.classify_raw_item(a, item_class="FYI-EVIDENCE", direction="inbound", direction_inferred=False,
+                             topic="other", topic_inferred=False, sentiment="neutral", sentiment_inferred=False,
+                             anomaly_flag=False, signal_type=None, pr_number=None, pr_number_base=None)
+    b = ws_db.insert_raw_item(source="outlook_mail", stable_key="b", thread_key="b", dedupe_key="b",
+                               occurred_ts=2.0, subject="s", from_actor="x@example.com", participants_json="[]")
+    # b left unclassified - should never be returned regardless of id ordering
+
+    rows = ws_db.list_classified_inbound_raw_items_after_id(0)
+
+    assert [r["id"] for r in rows] == [a]
+    assert ws_db.list_classified_inbound_raw_items_after_id(a) == []
+
+
 def test_list_distinct_signal_types_in_use(ws_db):
     ws_db.insert_raw_item(source="outlook_mail", stable_key="a", thread_key="a", dedupe_key="a",
                           occurred_ts=1.0, subject="s", from_actor="x@example.com", participants_json="[]")

@@ -27,6 +27,11 @@ _MAX_CLAIM_ITEMS = 40
 
 def build_todo_summary() -> dict:
     outputs = ws.list_unreviewed_worker_outputs()
+    # Task #287: proactively-dispatched actions (contract-review requests,
+    # status-update drafts) Marc hasn't acknowledged yet - a different
+    # SHAPE than an attachment (no filename/kind), so a separate key rather
+    # than folding into outputs_waiting.
+    proactive_actions_pending = ws.list_unacknowledged_proactive_actions()
 
     open_issues = ws.list_issues(states=list(_OPEN_STATES), limit=5000)
     issues_by_id = {i["id"]: i for i in open_issues}
@@ -70,6 +75,7 @@ def build_todo_summary() -> dict:
 
     return {
         "outputs_waiting": outputs,
+        "proactive_actions_pending": proactive_actions_pending,
         "open_claims": {
             "total": len(all_claims),
             "issue_count": len(issues_with_open_claims),

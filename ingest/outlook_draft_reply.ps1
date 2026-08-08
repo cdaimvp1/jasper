@@ -12,12 +12,20 @@
 # workgraph_signals.JASPER_REF_RE picks it back up as a real fallback
 # matching signal (workgraph_classify.cluster_and_link).
 #
+# -Body/-SaveOnly (task #287, proactive drafting): -Body prepends real
+# drafted text above the quoted thread, same HTMLBody-prepend mechanism as
+# -RefTag. -SaveOnly calls MailItem.Save() instead of Display() - the draft
+# lands in the Drafts folder without a visible window popping up, for a
+# proactive (unattended) call specifically.
+#
 # Usage:
-#   powershell -File outlook_draft_reply.ps1 -EntryID "<entry id>" [-ReplyAll] [-RefTag "JW-marc-308"]
+#   powershell -File outlook_draft_reply.ps1 -EntryID "<entry id>" [-ReplyAll] [-RefTag "JW-marc-308"] [-Body "..."] [-SaveOnly]
 param(
     [Parameter(Mandatory=$true)][string]$EntryID,
     [switch]$ReplyAll,
-    [string]$RefTag
+    [string]$RefTag,
+    [string]$Body,
+    [switch]$SaveOnly
 )
 
 try {
@@ -36,7 +44,15 @@ try {
         $escapedTag = [System.Net.WebUtility]::HtmlEncode("Ref: $RefTag")
         $draft.HTMLBody = "<div style='font-size:11px;color:#888888'>$escapedTag</div>" + $draft.HTMLBody
     }
-    $draft.Display()
+    if ($Body) {
+        $escapedBody = [System.Net.WebUtility]::HtmlEncode($Body) -replace "`n", "<br/>"
+        $draft.HTMLBody = "<div>$escapedBody</div><br/>" + $draft.HTMLBody
+    }
+    if ($SaveOnly) {
+        $draft.Save()
+    } else {
+        $draft.Display()
+    }
     Write-Output '{"ok":true}'
 } catch {
     Write-Error "ERROR: $($_.Exception.Message)"

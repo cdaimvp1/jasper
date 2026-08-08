@@ -1614,6 +1614,27 @@ def _closing_evidence_warning(issue_id: str, new_state: str) -> Optional[str]:
     return None
 
 
+def _mark_issue_emails_read_best_effort(issue_id: str) -> None:
+    """Task #275 - fires only on a genuine 'done' close (not noise-archived/
+    dismissed, which don't mean the work actually got resolved), and only
+    from the manual close routes below, deliberately NOT from the
+    automatic recompute_issue_state path that runs on every classify pass -
+    that runs 2x per scheduled_refresh cycle across the whole corpus, and
+    piling more live Outlook COM calls onto an already-fragile automated
+    path is exactly the kind of thing that contributed to a real stuck-
+    pipeline incident (task #278). Best-effort and silent on failure - a
+    missing/stale entry_id or a COM error here must never block or fail
+    the actual state-change response; the issue is closed either way."""
+    for item in wg.get_raw_items_for_issue(issue_id):
+        entry_id = item.get("entry_id")
+        if not entry_id:
+            continue
+        try:
+            outlook_actions.mark_read(entry_id)
+        except Exception:
+            pass
+
+
 @app.post("/api/workgraph/issues/{issue_id}/status")
 async def api_workgraph_issue_status(issue_id: str, body: WorkgraphIssueStatusBody):
     """Deterministic actions (mark done, snooze, reprioritize, archive) — applied
@@ -1649,6 +1670,11 @@ async def api_workgraph_issue_status(issue_id: str, body: WorkgraphIssueStatusBo
         offered_kinds = {c.get("kind") for c in offered if isinstance(c, dict)}
         if body.state in offered_kinds:
             wg.mark_choice_log_chosen(open_log["id"], chosen_action_kind=body.state)
+    if body.state == "done":
+        # Fire-and-forget (task #275) - never awaited, so a slow/cold-start
+        # Outlook COM call can't delay this response or risk timing the
+        # route out, same reasoning as the automatic-path exclusion above.
+        asyncio.create_task(asyncio.to_thread(_mark_issue_emails_read_best_effort, issue_id))
     result = {"ok": True, "issue": sanitize_surrogates(wg.get_issue(issue_id))}
     if warning:
         result["warning"] = warning
@@ -1746,6 +1772,8 @@ async def api_workgraph_issues_bulk_status(body: BulkIssueStatusBody):
             warnings[issue_id] = warning
         wg.update_issue(issue_id, state=body.state, actor=actor)
         updated.append(issue_id)
+        if body.state == "done":
+            asyncio.create_task(asyncio.to_thread(_mark_issue_emails_read_best_effort, issue_id))
     result = {"ok": True, "updated": updated, "missing": missing}
     if warnings:
         result["warnings"] = warnings
@@ -2380,6 +2408,11 @@ async def api_workgraph_project_status(project_id: str, body: WorkgraphProjectSt
         wg.set_project_status(project_id, body.status)
     except ValueError as e:
         raise HTTPException(400, str(e))
+    if body.status == "done":
+        # Task #275 - cascades to every member issue's own raw_items, same
+        # fire-and-forget discipline as the issue-level route above.
+        for member in wg.list_issues_for_project(project_id):
+            asyncio.create_task(asyncio.to_thread(_mark_issue_emails_read_best_effort, member["id"]))
     return JSONResponse({"ok": True, "project": sanitize_surrogates(wg.get_project(project_id))})
 
 

@@ -1068,6 +1068,33 @@ def init_workgraph() -> None:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_claim_suggestions_status ON pending_claim_suggestions(status)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_claim_suggestions_claim ON pending_claim_suggestions(claim_id, evidence_type)")
 
+            # pending_issue_state_suggestions (task #273, 2026-08-08) - the
+            # mirror of pending_claim_suggestions' issue_closed_with_open_
+            # claims direction: an issue whose claims are ALL resolved but
+            # which was never itself moved to a closed state - the real
+            # Kinaxis bug (project synthesis narrative already said the
+            # deal closed; the issue/claim layer never got updated to
+            # match, and nothing reconciled the mismatch). Kept as its own
+            # table rather than a third pending_claim_suggestions.
+            # evidence_type value - that CHECK constraint doesn't already
+            # permit a value for this, and this signal is genuinely issue-
+            # scoped, not claim-scoped, same distinction the two tables
+            # already draw. Suggest-only, same discipline as everywhere
+            # else in this design - confirming one is a real human
+            # decision to close the issue, never automatic.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS pending_issue_state_suggestions (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    issue_id      TEXT NOT NULL REFERENCES issues(id),
+                    evidence_note TEXT,
+                    status        TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','confirmed','rejected','expired')),
+                    created_ts    REAL NOT NULL,
+                    resolved_ts   REAL
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_issue_state_suggestions_status ON pending_issue_state_suggestions(status)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_issue_state_suggestions_issue ON pending_issue_state_suggestions(issue_id)")
+
             # identity_constraints (design doc Section 12.6): extends
             # pending_project_suggestions' pairwise dedupe - today PENDING-only,
             # forgotten the moment a suggestion is rejected/expires - into a
@@ -7580,6 +7607,31 @@ def list_open_claims_for_issues(issue_ids: list[str], claim_type: Optional[str] 
     return out
 
 
+def list_claims_for_issues(issue_ids: list[str]) -> dict[str, list[dict]]:
+    """Batched counterpart to list_open_claims_for_issues (task #273) - ALL
+    claims regardless of status, for the mirror-direction reconciliation
+    sweep: an issue whose claims are all resolved but was never itself
+    marked closed. Same batched-query discipline as every other sweep
+    here (list_open_claims_for_issues, get_raw_items_for_issues) - never
+    an N+1 loop over list_claims_for_issue per issue."""
+    if not issue_ids:
+        return {}
+    with _lock:
+        conn = _connect()
+        try:
+            placeholders = ",".join("?" * len(issue_ids))
+            rows = conn.execute(
+                f"SELECT * FROM claims WHERE issue_id IN ({placeholders}) ORDER BY last_seen_ts DESC",
+                issue_ids,
+            ).fetchall()
+        finally:
+            conn.close()
+    out: dict[str, list[dict]] = {iid: [] for iid in issue_ids}
+    for r in rows:
+        out.setdefault(r["issue_id"], []).append(dict(r))
+    return out
+
+
 def list_issue_ids_by_state(states: list[str]) -> list[str]:
     """Lightweight id-only counterpart to list_issues (which joins
     synthesis/parties for display and defaults to limit=200) - for a
@@ -7705,6 +7757,62 @@ def resolve_claim_suggestion(suggestion_id: int, status: str) -> None:
         try:
             conn.execute(
                 "UPDATE pending_claim_suggestions SET status = ?, resolved_ts = ? WHERE id = ?",
+                (status, time.time(), suggestion_id),
+            )
+        finally:
+            conn.close()
+
+
+# --- pending_issue_state_suggestions (task #273) ----------------------------
+
+def create_issue_state_suggestion(*, issue_id: str, evidence_note: Optional[str] = None) -> int:
+    """Dedupe-then-insert, same shape as create_claim_suggestion - a
+    PENDING suggestion already on record for this issue is reused (its id
+    returned) rather than duplicated, so re-running the daily sweep never
+    grows a second pending row for the same issue."""
+    now = time.time()
+    with _lock:
+        conn = _connect()
+        try:
+            existing = conn.execute(
+                "SELECT id FROM pending_issue_state_suggestions WHERE status = 'pending' AND issue_id = ?",
+                (issue_id,),
+            ).fetchone()
+            if existing:
+                return existing["id"]
+            cur = conn.execute(
+                """INSERT INTO pending_issue_state_suggestions (issue_id, evidence_note, created_ts)
+                   VALUES (?, ?, ?)""",
+                (issue_id, evidence_note, now),
+            )
+            return cur.lastrowid
+        finally:
+            conn.close()
+
+
+def list_issue_state_suggestions(status: Optional[str] = None) -> list[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            if status:
+                rows = conn.execute(
+                    "SELECT * FROM pending_issue_state_suggestions WHERE status = ? ORDER BY created_ts", (status,)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM pending_issue_state_suggestions ORDER BY created_ts"
+                ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def resolve_issue_state_suggestion(suggestion_id: int, status: str) -> None:
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                "UPDATE pending_issue_state_suggestions SET status = ?, resolved_ts = ? WHERE id = ?",
                 (status, time.time(), suggestion_id),
             )
         finally:

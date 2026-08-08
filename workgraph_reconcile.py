@@ -122,6 +122,45 @@ def detect_issue_closed_with_open_claims_contradictions() -> dict:
     return {"issues_scanned": len(closed_issue_ids), "suggestions_created": flagged}
 
 
+_ISSUE_OPEN_STATES = ("active", "waiting")
+
+
+def detect_issues_appear_resolved_but_still_open() -> dict:
+    """Task #273 (the real Kinaxis bug) - the mirror direction of
+    detect_issue_closed_with_open_claims_contradictions above: an issue
+    still sitting in an OPEN state (active/waiting) whose own claims are
+    ALL resolved (none left with status='open') - the structural signal
+    that a project's synthesis narrative can say "closed" while the
+    issue/claim layer never got updated to match, with nothing
+    reconciling the mismatch. Requires at least one claim to exist at all
+    (an issue with zero claims yet isn't "resolved," it's simply
+    unprocessed - a materially different, unrelated case this sweep must
+    not flag). Deliberately never touches issue.state itself - suggest-
+    only, same discipline as every other mechanism in this module; a
+    human confirms the actual close via the normal /status route.
+
+    Batched, same discipline as its sibling above: one query for open
+    issue ids, one batched query for ALL their claims (list_claims_for_
+    issues), never a per-issue loop. Safe to re-run: create_issue_state_
+    suggestion dedupes on (issue_id, status='pending')."""
+    open_issue_ids = ws.list_issue_ids_by_state(list(_ISSUE_OPEN_STATES))
+    if not open_issue_ids:
+        return {"issues_scanned": 0, "suggestions_created": 0}
+    claims_by_issue = ws.list_claims_for_issues(open_issue_ids)
+    flagged = 0
+    for issue_id, claims in claims_by_issue.items():
+        if not claims:
+            continue
+        if any(c["status"] == "open" for c in claims):
+            continue
+        ws.create_issue_state_suggestion(
+            issue_id=issue_id,
+            evidence_note=f"issue {issue_id} is still open but all {len(claims)} of its claims are resolved",
+        )
+        flagged += 1
+    return {"issues_scanned": len(open_issue_ids), "suggestions_created": flagged}
+
+
 def list_pending_claim_suggestions_for_issue(issue_id: str) -> list[dict]:
     return ws.list_pending_claim_suggestions(issue_id=issue_id)
 

@@ -581,9 +581,27 @@ def run_monthly_sweep() -> dict:
     (b) flag confirmed data points that have gone stale - no real match
     in _STALENESS_SECONDS - for human review. Proposes/flags only, never
     auto-commits or auto-removes anything, same as everywhere else in
-    this design."""
+    this design.
+
+    Real bug fixed the first time this ever ran live (2026-08-08, task
+    #249's own first scheduled fire): without passing raw_items_pool,
+    every sender_domain signature's system-table check (task #266,
+    check_and_propose_system_table) fell back to its own fresh 180-day
+    _raw_items_matching_signature scan - TWICE per domain (once for
+    _labels_cooccurring_with_domain, once for the actual sample-gathering)
+    - turning what should be one corpus scan into O(domains x corpus).
+    Against a real installation's accumulated signature history, that's
+    the exact shape of a long, subprocess-silent hang (most domains never
+    cross the label-count bar, so most of that time spends no LLM call
+    at all - nothing to see in a process list, nothing in the log until
+    it finally finishes). Building the pool ONCE here and passing it
+    through is exactly what raw_items_pool's own docstring already says
+    it's for - this sweep just never actually took the discount before
+    today, and #266 made not taking it far more expensive."""
     all_signatures = [row["pattern_signature"] for row in ws.list_candidate_pattern_observations()]
-    proposals = check_and_propose_for_signatures(all_signatures)
+    cutoff = time.time() - (180 * 86400)  # same window _raw_items_matching_signature's fallback path used
+    raw_items_pool = ws.list_raw_items_since(cutoff)
+    proposals = check_and_propose_for_signatures(all_signatures, raw_items_pool=raw_items_pool)
 
     now = time.time()
     stale = [

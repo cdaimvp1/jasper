@@ -59,6 +59,46 @@ def test_open_email_raises_with_exit_code_when_stderr_empty(monkeypatch):
         oa.open_email("some-entry-id")
 
 
+def test_mark_read_requires_entry_id():
+    with pytest.raises(ValueError):
+        oa.mark_read("")
+    with pytest.raises(ValueError):
+        oa.mark_read(None)
+
+
+def test_mark_read_success_calls_script_with_entry_id(monkeypatch):
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        return _FakeCompletedProcess(returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = oa.mark_read("entryid-ABC123")
+
+    assert result == {"ok": True}
+    assert "entryid-ABC123" in captured["args"]
+    assert str(oa._MARK_READ_SCRIPT) in captured["args"]
+
+
+def test_mark_read_raises_runtime_error_on_failure(monkeypatch):
+    def fake_run(args, **kwargs):
+        return _FakeCompletedProcess(returncode=2, stderr="No item found for that EntryID")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match="No item found"):
+        oa.mark_read("stale-entry-id")
+
+
+def test_mark_read_timeout_raises_runtime_error_not_timeout_expired(monkeypatch):
+    def fake_run(args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=args, timeout=kwargs.get("timeout", 20))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match="timed out"):
+        oa.mark_read("some-entry-id")
+
+
 def test_draft_reply_requires_entry_id():
     with pytest.raises(ValueError):
         oa.draft_reply("")

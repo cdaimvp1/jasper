@@ -227,3 +227,77 @@ def test_issue_closed_with_a_resolved_claim_creates_no_contradiction(ws_db):
     wr.detect_issue_closed_with_open_claims_contradictions()
 
     assert ws_db.list_pending_claim_suggestions(issue_id=iid) == []
+
+
+# --- issues_appear_resolved_but_still_open (task #273, the Kinaxis mirror) --
+
+def test_issue_with_all_claims_resolved_but_still_open_creates_a_suggestion(ws_db):
+    iid = _issue(ws_db, state="active")
+    rid = _raw_item(ws_db, iid, "kinaxis1", {"asks": ["please send the SOW"]}, direction="outbound")
+    wc.materialize_claims_for_raw_item(rid)
+    claim = wc.list_open_claims_for_issue(iid, claim_type="ask")[0]
+    ws_db.update_claim_status(claim["id"], "done", actor="marc")
+
+    result = wr.detect_issues_appear_resolved_but_still_open()
+
+    assert result["suggestions_created"] == 1
+    suggestions = ws_db.list_issue_state_suggestions(status="pending")
+    assert len(suggestions) == 1
+    assert suggestions[0]["issue_id"] == iid
+
+
+def test_issue_with_an_open_claim_creates_no_suggestion(ws_db):
+    iid = _issue(ws_db, state="active")
+    rid = _raw_item(ws_db, iid, "kinaxis2", {"asks": ["please send the SOW"]}, direction="outbound")
+    wc.materialize_claims_for_raw_item(rid)
+
+    result = wr.detect_issues_appear_resolved_but_still_open()
+
+    assert result["suggestions_created"] == 0
+    assert ws_db.list_issue_state_suggestions(status="pending") == []
+
+
+def test_issue_with_zero_claims_creates_no_suggestion(ws_db):
+    _issue(ws_db, state="active")
+
+    result = wr.detect_issues_appear_resolved_but_still_open()
+
+    assert result["suggestions_created"] == 0
+
+
+def test_already_closed_issue_with_resolved_claims_creates_no_suggestion(ws_db):
+    iid = _issue(ws_db, state="active")
+    rid = _raw_item(ws_db, iid, "kinaxis3", {"asks": ["please send the SOW"]}, direction="outbound")
+    wc.materialize_claims_for_raw_item(rid)
+    claim = wc.list_open_claims_for_issue(iid, claim_type="ask")[0]
+    ws_db.update_claim_status(claim["id"], "done", actor="marc")
+    _set_issue_state(ws_db, iid, "done")  # already closed - not the bug this catches
+
+    result = wr.detect_issues_appear_resolved_but_still_open()
+
+    assert result["suggestions_created"] == 0
+
+
+def test_appears_resolved_sweep_is_idempotent_no_duplicate_suggestions(ws_db):
+    iid = _issue(ws_db, state="active")
+    rid = _raw_item(ws_db, iid, "kinaxis4", {"asks": ["please send the SOW"]}, direction="outbound")
+    wc.materialize_claims_for_raw_item(rid)
+    claim = wc.list_open_claims_for_issue(iid, claim_type="ask")[0]
+    ws_db.update_claim_status(claim["id"], "done", actor="marc")
+
+    wr.detect_issues_appear_resolved_but_still_open()
+    wr.detect_issues_appear_resolved_but_still_open()
+
+    assert len(ws_db.list_issue_state_suggestions(status="pending")) == 1
+
+
+def test_resolve_issue_state_suggestion_updates_status(ws_db):
+    iid = _issue(ws_db, state="active")
+    suggestion_id = ws_db.create_issue_state_suggestion(issue_id=iid, evidence_note="test")
+
+    ws_db.resolve_issue_state_suggestion(suggestion_id, "confirmed")
+
+    resolved = ws_db.list_issue_state_suggestions(status="confirmed")
+    assert len(resolved) == 1
+    assert resolved[0]["id"] == suggestion_id
+    assert resolved[0]["resolved_ts"] is not None

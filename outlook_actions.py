@@ -19,6 +19,7 @@ _OPEN_ITEM_SCRIPT = _SCRIPT_DIR / "outlook_open_item.ps1"
 _DRAFT_REPLY_SCRIPT = _SCRIPT_DIR / "outlook_draft_reply.ps1"
 _DRAFT_FORWARD_SCRIPT = _SCRIPT_DIR / "outlook_draft_forward.ps1"
 _DRAFT_COMPOSE_SCRIPT = _SCRIPT_DIR / "outlook_draft_compose.ps1"
+_MARK_READ_SCRIPT = _SCRIPT_DIR / "outlook_mark_read.ps1"
 _TIMEOUT_SECONDS = 120
 # Raised from 20 (2026-08-06, Marc's direct report: these actions "take 2-3
 # minutes" or appear to silently fail). Root cause: `New-Object -ComObject
@@ -64,6 +65,19 @@ def open_email(entry_id: str) -> dict:
     if not entry_id:
         raise ValueError("entry_id is required")
     return _run_powershell(["powershell", "-NoProfile", "-File", str(_OPEN_ITEM_SCRIPT), "-EntryID", entry_id])
+
+
+def mark_read(entry_id: str) -> dict:
+    """Task #275 - marks the exact Outlook item (by EntryID) read via COM's
+    UnRead=$false + Save(). Never deletes, moves, or archives anything -
+    that's the whole scope Marc asked for. Closure-triggered (a claim/
+    issue/project actually closing), never on ingest - see workgraph_
+    store's closure call sites for where this gets invoked. Raises
+    RuntimeError (with a real reason) on failure, same contract as every
+    other action here."""
+    if not entry_id:
+        raise ValueError("entry_id is required")
+    return _run_powershell(["powershell", "-NoProfile", "-File", str(_MARK_READ_SCRIPT), "-EntryID", entry_id])
 
 
 def draft_reply(entry_id: str, reply_all: bool = False, ref_tag: str | None = None) -> dict:

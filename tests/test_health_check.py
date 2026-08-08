@@ -201,14 +201,21 @@ def test_outlook_cache_freshness_ok_on_a_single_cold_start(ws_db):
     assert result["consecutive_cold_starts"] == 1
 
 
-def test_outlook_cache_freshness_flags_a_real_streak(ws_db):
+def test_outlook_cache_freshness_stays_ok_at_a_high_streak(ws_db):
+    """Task #278 (2026-08-08): a high streak used to flip ok to False -
+    investigation found that premise wrong, since every real scheduled
+    scan cold-starts Outlook by design (a fresh subprocess each of the
+    5x/day ticks, nothing keeps a COM host warm between them) - the
+    streak is guaranteed to climb forever and was never a real anomaly
+    signal. Now purely informational: still reported, never the reason
+    this check goes unhealthy."""
     ws_db.set_cursor("outlook_mail", "last_scan_outlook_cold_started", "true")
-    ws_db.set_cursor("outlook_mail", "consecutive_cold_starts", "3")
+    ws_db.set_cursor("outlook_mail", "consecutive_cold_starts", "7")
 
     result = hc.check_outlook_cache_freshness()
 
-    assert result["ok"] is False
-    assert result["consecutive_cold_starts"] == 3
+    assert result["ok"] is True
+    assert result["consecutive_cold_starts"] == 7
 
 
 def test_outlook_cache_freshness_ok_when_already_running(ws_db):

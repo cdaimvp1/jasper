@@ -360,8 +360,23 @@ def run() -> dict:
     ws.init_workgraph()
 
     # 1. Mail - pure deterministic, no agent needed.
+    #
+    # sync_wait_seconds (task #278, 2026-08-08): every real invocation of
+    # outlook_com_ingest.run() - this one included - cold-starts Outlook in
+    # a fresh subprocess that fully quits again on exit (see that
+    # function's own docstring), so Cached Exchange Mode never gets a
+    # chance to catch up between this cadence's 5x/day ticks. Left at the
+    # default 0 here, outlook_scan.ps1 still requests a real sync
+    # (SendAndReceive) but reads the folder immediately after, racing
+    # ahead of that sync on a cold start - a live known-real risk for
+    # exactly Marc's "why does 'today's email' skip recent mail" complaint.
+    # 30s is a reasonable, unmeasured default (not a benchmarked number):
+    # negligible added cost at 5 runs/day, comfortably more than a quick
+    # sync needs. timeout bumped to keep headroom for that wait stacked on
+    # top of a slow cold start, rather than risk this racing its own
+    # subprocess timeout.
     try:
-        mail_result = outlook_com_ingest.run()
+        mail_result = outlook_com_ingest.run(sync_wait_seconds=30, timeout=150)
     except Exception as e:
         mail_result = {"ok": False, "error": str(e)}
 

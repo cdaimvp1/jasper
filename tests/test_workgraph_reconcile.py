@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import time
 
+import workgraph_classify as wc_classify
 import workgraph_claims as wc
 import workgraph_reconcile as wr
 
@@ -301,3 +302,101 @@ def test_resolve_issue_state_suggestion_updates_status(ws_db):
     assert len(resolved) == 1
     assert resolved[0]["id"] == suggestion_id
     assert resolved[0]["resolved_ts"] is not None
+
+
+# --- merge_stray_same_reference_clusters (2026-08-08, task #278
+# investigation: the concrete Bluefish drift root cause) --------------------
+
+def _classified_raw_item(ws_db, issue_id, key, *, pr_number_base, signal_type=None, item_class="FYI-EVIDENCE"):
+    rid = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key=key, thread_key=key, dedupe_key=key,
+        occurred_ts=time.time(), subject="s", from_actor="a@example.com", participants_json="[]",
+    )
+    ws_db.link_raw_item_to_issue(rid, issue_id)
+    ws_db.classify_raw_item(
+        rid, item_class=item_class, direction="inbound", direction_inferred=False,
+        topic="other", topic_inferred=False, sentiment="neutral", sentiment_inferred=False,
+        anomaly_flag=False, signal_type=signal_type, pr_number=pr_number_base, pr_number_base=pr_number_base,
+    )
+    return rid
+
+
+def test_merge_stray_clusters_absorbs_a_cluster_sharing_reference_with_a_real_issue(ws_db):
+    issue = _issue(ws_db, state="active")
+    cluster = ws_db.create_cluster_with_new_id(title="Stray cluster", category="other")
+    _classified_raw_item(ws_db, issue, "k1", pr_number_base="PR1189827",
+                          signal_type="ariba_pr_approval_needed", item_class="ACTIONABLE-ASK")
+    stray_rid = _classified_raw_item(ws_db, cluster, "k2", pr_number_base="PR1189827",
+                                      signal_type="ariba_pr_fully_approved")
+
+    result = wr.merge_stray_same_reference_clusters()
+
+    assert result["clusters_absorbed"] == 1
+    conn = ws_db._connect()
+    assert conn.execute("SELECT issue_id FROM raw_items WHERE id = ?", (stray_rid,)).fetchone()[0] == issue
+    conn.close()
+    assert ws_db.get_cluster(cluster)["state"] == "dismissed"  # get_cluster aliases status AS state
+
+
+def test_merge_stray_clusters_recomputes_issue_state_after_absorbing(ws_db):
+    """The real Bluefish shape: an issue with an open ACTIONABLE-ASK whose
+    matching closure signal was sitting unseen in a stray cluster. Once
+    absorbed, recompute_issue_state should see both signal_types together
+    and no longer treat this specific request/closure pair as still open -
+    confirms the sweep doesn't just move data, it makes the fix actually
+    take effect."""
+    issue = _issue(ws_db, state="active")
+    cluster = ws_db.create_cluster_with_new_id(title="Stray cluster", category="other")
+    _classified_raw_item(ws_db, issue, "k1", pr_number_base="PR1189827",
+                          signal_type="ariba_pr_approval_needed", item_class="FYI-EVIDENCE")
+    _classified_raw_item(ws_db, cluster, "k2", pr_number_base="PR1189827",
+                          signal_type="ariba_pr_fully_approved")
+
+    wr.merge_stray_same_reference_clusters()
+
+    # No other ACTIONABLE-ASK/WAITING-ON-OTHERS item exists on the issue,
+    # and the one request/closure pair is now complete - derive_target_state
+    # falls through to "done".
+    assert wc_classify.derive_target_state(issue) == "done"
+
+
+def test_merge_stray_clusters_skips_ambiguous_groups_with_two_real_issues(ws_db):
+    """Two real issues sharing a pr_number_base is a different, riskier
+    case (a duplicate-issue problem, not a stray-cluster problem) - this
+    sweep must not guess which one is "right" and silently absorb into
+    either."""
+    issue_a = _issue(ws_db, state="active")
+    issue_b = _issue(ws_db, state="active")
+    _classified_raw_item(ws_db, issue_a, "k1", pr_number_base="PR777")
+    _classified_raw_item(ws_db, issue_b, "k2", pr_number_base="PR777")
+
+    result = wr.merge_stray_same_reference_clusters()
+
+    assert result["clusters_absorbed"] == 0
+
+
+def test_merge_stray_clusters_skips_groups_with_only_clusters(ws_db):
+    """Two clusters sharing a reference with no promoted issue yet is
+    normal pre-promotion state, not this sweep's job - leave it for
+    curator's own extraction pass."""
+    cluster_a = ws_db.create_cluster_with_new_id(title="A", category="other")
+    cluster_b = ws_db.create_cluster_with_new_id(title="B", category="other")
+    _classified_raw_item(ws_db, cluster_a, "k1", pr_number_base="PR888")
+    _classified_raw_item(ws_db, cluster_b, "k2", pr_number_base="PR888")
+
+    result = wr.merge_stray_same_reference_clusters()
+
+    assert result["clusters_absorbed"] == 0
+
+
+def test_merge_stray_clusters_is_idempotent(ws_db):
+    issue = _issue(ws_db, state="active")
+    cluster = ws_db.create_cluster_with_new_id(title="Stray cluster", category="other")
+    _classified_raw_item(ws_db, issue, "k1", pr_number_base="PR555")
+    _classified_raw_item(ws_db, cluster, "k2", pr_number_base="PR555")
+
+    first = wr.merge_stray_same_reference_clusters()
+    second = wr.merge_stray_same_reference_clusters()
+
+    assert first["clusters_absorbed"] == 1
+    assert second["clusters_absorbed"] == 0  # already absorbed and dismissed - no longer an open group

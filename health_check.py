@@ -239,26 +239,48 @@ def check_classify_link_progressing(now: float) -> dict:
     return {"ok": age_hours <= STALE_LINK_HOURS, "oldest_unlinked_age_hours": round(age_hours, 1)}
 
 
-COLD_START_STREAK_THRESHOLD = 3  # 3 scheduled scans in a row cold-starting Outlook is the real signal
-
-
 def check_outlook_cache_freshness() -> dict:
-    """Task #149: outlook_com_ingest.run() persists (via the same generic
-    ingest_cursors store the forward cursor itself uses) whether its OWN
-    COM connection had to cold-start Outlook, plus a running streak of
-    consecutive cold starts. A single cold start is normal (Outlook closed
-    overnight, the first scan of the day launches it, and outlook_scan.ps1
-    now also forces a real SendAndReceive before scanning) - the real
-    signal worth flagging is Outlook essentially NEVER staying open
-    between scheduled scans, past COLD_START_STREAK_THRESHOLD in a row,
-    since every one of those scans ran against a freshly-launched, not-yet-
-    synced local cache with no time to catch up before the read."""
+    """Task #149, revised task #278 (2026-08-08): outlook_com_ingest.run()
+    persists (via the same generic ingest_cursors store the forward cursor
+    itself uses) whether its OWN COM connection had to cold-start Outlook,
+    plus a running streak of consecutive cold starts.
+
+    This used to gate ok=False once that streak passed a fixed threshold
+    (3), on the theory that Outlook essentially NEVER staying open between
+    scheduled scans was itself the anomaly worth flagging. Investigating a
+    live streak of 7 (2026-08-08) found that premise wrong: outlook_com_
+    ingest.run()'s OWN docstring already documents that every real
+    invocation - including the live scheduled cadence - runs in a fresh
+    subprocess that cold-starts Outlook and lets it fully quit again on
+    exit, since nothing keeps a persistent COM host alive BETWEEN separate
+    scheduled_refresh.py ticks. Given that architecture, the streak is
+    GUARANTEED to climb past any fixed threshold and stay there forever -
+    not a signal of degradation, just the inevitable shape of a "spin up a
+    fresh subprocess 5x/day" design. A check that can never be un-tripped
+    again isn't a health signal, it's permanent noise.
+
+    The actual risk the streak was a proxy for - a cold-started scan
+    reading a local cache that hasn't had time to sync down brand-new mail
+    yet - is now handled directly: scheduled_refresh.py passes a real
+    sync_wait_seconds on every live call (see its own comment), so
+    outlook_scan.ps1's SendAndReceive has time to land before the folder
+    read happens, cold start or not. Genuine schedule/cursor staleness -
+    the job not firing at all, or the cursor not advancing - is already
+    covered by the sibling check_scheduled_refresh_ran and
+    check_cursors_advancing checks above, which is the right place for a
+    real "mail ingestion is stuck" alarm to live.
+
+    So this check stays purely informational now: the streak is still
+    reported (useful to see at a glance that cold-starting is happening
+    every time, exactly as expected), but no longer flips ok to False on
+    its own - there is no longer a threshold at which "cold start" itself
+    means something is actually wrong."""
     last_cold_started = ws.get_cursor("outlook_mail", "last_scan_outlook_cold_started")
     if last_cold_started is None:
         return {"ok": True, "detail": "no ingestion run recorded yet"}
     streak = int(ws.get_cursor("outlook_mail", "consecutive_cold_starts") or "0")
     return {
-        "ok": streak < COLD_START_STREAK_THRESHOLD,
+        "ok": True,
         "last_scan_cold_started": last_cold_started == "true",
         "consecutive_cold_starts": streak,
     }

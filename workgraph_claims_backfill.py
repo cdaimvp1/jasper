@@ -271,6 +271,7 @@ def run_backfill_daily_if_due(now: float | None = None) -> dict | None:
         "resolution_signal_suggestions": backfill_resolution_signal_suggestions(),
         "issue_closed_contradictions": workgraph_reconcile.detect_issue_closed_with_open_claims_contradictions(),
         "issues_appear_resolved": workgraph_reconcile.detect_issues_appear_resolved_but_still_open(),
+        "stray_reference_clusters_merged": workgraph_reconcile.merge_stray_same_reference_clusters(),
     }
 
 

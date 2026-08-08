@@ -48,6 +48,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+import workgraph_classify
 import workgraph_store as ws
 
 _RESOLUTION_SIGNAL_CLAIM_TYPES = ("ask", "decision", "commitment")
@@ -159,6 +160,71 @@ def detect_issues_appear_resolved_but_still_open() -> dict:
         )
         flagged += 1
     return {"issues_scanned": len(open_issue_ids), "suggestions_created": flagged}
+
+
+def merge_stray_same_reference_clusters() -> dict:
+    """Found root-causing a real live drift (2026-08-08, proj-009/Bluefish):
+    curator's project synthesis said the SOW was "fully signed" and the PO
+    "fully approved," but the underlying issue (marc-4196) stayed active
+    with "your move - 3 open asks," untouched since a day before. Traced
+    to a concrete data-linking gap, not a missing reconciliation layer: the
+    Ariba "fully approved" notification for PR1189827 (a raw_item with the
+    same deterministic pr_number_base as the issue's own "approval needed"
+    request) had landed in its OWN separate, never-promoted raw cluster -
+    formed hours before curator's later issue-extraction pass created the
+    real issue from a sibling cluster, with nothing ever re-checking for
+    that stray sibling afterward. The synthesis routine's own broader
+    evidence read picked up the real approval and wrote an accurate
+    narrative; the issue/claims layer, scoped to only the raw_items
+    actually linked to it, never saw it.
+
+    Unlike every other function in this module, this one ACTS directly
+    rather than creating a suggestion - a shared pr_number_base across
+    open work objects is exactly the deterministic, already-trusted
+    category cluster_and_link's own ingest-time reference auto-attach
+    treats as safe to merge on sight (task #13's split of "safe reference
+    match" from "risky scored-model match"); this sweep is that same
+    trust applied retroactively instead of only at ingest time. Still
+    conservative: a pr_number_base group is only acted on when it resolves
+    to EXACTLY ONE real issue among its members - zero real issues (only
+    clusters, left for normal promotion) or two-or-more real issues
+    (a different, riskier duplicate-ISSUE case, not this sweep's job) are
+    both skipped rather than guessed at.
+
+    After absorbing each stray cluster, re-derives the issue's state
+    (workgraph_classify.recompute_issue_state) so a newly-visible closure
+    signal (like ariba_pr_fully_approved) can actually take effect instead
+    of sitting there unread until the next unrelated state change happens
+    to trigger a recompute.
+
+    Does NOT fix every version of this drift - the Bluefish SOW's own
+    Adobe Sign "you signed" confirmation lives in a THIRD, still-separate,
+    unmerged project with no pr_number_base of its own to match on (an
+    Adobe Sign notification, not an Ariba one) - a harder, different
+    identity-matching gap this sweep doesn't touch. Flagging that
+    separately rather than overclaiming this closes the whole story."""
+    groups = ws.list_pr_number_base_groups_spanning_multiple_open_work_objects()
+    groups_checked = len(groups)
+    clusters_absorbed = 0
+    issues_recomputed = set()
+    for pr_number_base, members in groups.items():
+        real_issues = [m["id"] for m in members if not m["is_raw_cluster"]]
+        clusters = [m["id"] for m in members if m["is_raw_cluster"]]
+        if len(real_issues) != 1 or not clusters:
+            continue
+        issue_id = real_issues[0]
+        for cluster_id in clusters:
+            result = ws.absorb_stray_reference_cluster(cluster_id, issue_id, actor="system")
+            if result["status"] == "absorbed":
+                clusters_absorbed += 1
+                issues_recomputed.add(issue_id)
+    for issue_id in issues_recomputed:
+        workgraph_classify.recompute_issue_state(issue_id)
+    return {
+        "pr_number_base_groups_checked": groups_checked,
+        "clusters_absorbed": clusters_absorbed,
+        "issues_recomputed": len(issues_recomputed),
+    }
 
 
 def list_pending_claim_suggestions_for_issue(issue_id: str) -> list[dict]:

@@ -3675,6 +3675,114 @@ def list_open_work_objects_for_reference(pr_number_base: str) -> list[str]:
     return [r["id"] for r in rows]
 
 
+def list_pr_number_base_groups_spanning_multiple_open_work_objects() -> dict[str, list[dict]]:
+    """Found root-causing the Bluefish/proj-009 synthesis-vs-checklist drift
+    (2026-08-08): list_open_work_objects_for_reference above is correct but
+    only ever runs at INGEST time, comparing one fresh incoming item
+    against work objects that are ALREADY open - it has no way to notice
+    two work objects that each independently formed their OWN cluster
+    before either had a chance to see the other (the exact real case: a
+    PR1189827 "fully approved" notification landed in its own cluster
+    hours before curator's later issue-extraction pass promoted a
+    DIFFERENT cluster sharing the same PR number into a real issue, and
+    nothing ever re-checked for the sibling afterward). This is the read
+    side of the sweep that catches that retroactively: every pr_number_
+    base with more than one distinct OPEN work object behind it, each
+    tagged with whether it's a real issue or still a raw cluster - see
+    merge_stray_same_reference_clusters (workgraph_reconcile.py) for what
+    acts on this."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute("""
+                SELECT r.pr_number_base AS pr_number_base, w.id AS id, w.is_raw_cluster AS is_raw_cluster
+                FROM raw_items r
+                JOIN work_objects w ON w.id = r.issue_id
+                WHERE r.pr_number_base IS NOT NULL AND r.pr_number_base != ''
+                      AND w.object_type = 'request' AND w.status IN ('active','waiting','blocked')
+                GROUP BY r.pr_number_base, w.id
+            """).fetchall()
+        finally:
+            conn.close()
+    groups: dict[str, list[dict]] = {}
+    for row in rows:
+        groups.setdefault(row["pr_number_base"], []).append(
+            {"id": row["id"], "is_raw_cluster": bool(row["is_raw_cluster"])}
+        )
+    return {k: v for k, v in groups.items() if len(v) > 1}
+
+
+def absorb_stray_reference_cluster(cluster_id: str, issue_id: str, *, actor: str) -> dict:
+    """The action side of the sweep above: moves a stray raw CLUSTER's
+    raw_items/evidence onto an already-promoted real ISSUE it shares a
+    deterministic pr_number_base with. Deliberately NOT a call to merge_
+    issue_into (below) - that function resolves both ids through the
+    `issues` view, which excludes clusters by definition (is_raw_cluster=1
+    rows never appear there), so it would return not_found for cluster_id
+    every time. Narrower than merge_issue_into for a real reason, not
+    laziness: a raw cluster has no parties/identity_anchors/checklist_
+    dismissals of its own yet (those are only ever written once curator
+    extracts a real issue from a confirmed project - see Phase D, task
+    #196) - there is nothing there to move. Same never-delete discipline
+    as merge_issue_into: the cluster row is marked status='dismissed', not
+    removed, so nothing is lost and a wrong call is a data-preserving
+    mistake, not a destructive one.
+
+    Returns {"status": "absorbed", "issue_id", "cluster_id",
+    "raw_items_moved"} or {"status": "not_found"} if issue_id doesn't
+    resolve through the `issues` view or cluster_id isn't a real
+    is_raw_cluster=1 work object."""
+    now = time.time()
+    with _lock:
+        conn = _connect()
+        try:
+            issue = conn.execute("SELECT id FROM issues WHERE id = ?", (issue_id,)).fetchone()
+            cluster = conn.execute(
+                "SELECT id FROM work_objects WHERE id = ? AND is_raw_cluster = 1", (cluster_id,)
+            ).fetchone()
+            if issue is None or cluster is None:
+                return {"status": "not_found"}
+
+            for attempt in range(5):
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    break
+                except sqlite3.OperationalError:
+                    if attempt == 4:
+                        raise
+                    time.sleep(random.uniform(0, 0.02) * (attempt + 1))
+            try:
+                raw_items_moved = conn.execute(
+                    "UPDATE raw_items SET issue_id = ? WHERE issue_id = ?", (issue_id, cluster_id)
+                ).rowcount
+                conn.execute("UPDATE evidence SET issue_id = ? WHERE issue_id = ?", (issue_id, cluster_id))
+                conn.execute(
+                    "UPDATE work_objects SET status = 'dismissed', updated_at = ? WHERE id = ?",
+                    (now, cluster_id),
+                )
+                conn.execute(
+                    "INSERT INTO evidence (issue_id, raw_item_id, type, summary, ts) VALUES (?, NULL, 'worker_action', ?, ?)",
+                    (issue_id, f"Absorbed stray same-reference cluster {cluster_id} (actor={actor})", now),
+                )
+                conn.execute(
+                    """INSERT INTO audit_log (entity_type, entity_id, field, old_value, new_value, changed_ts, reason)
+                       VALUES ('issue', ?, 'absorbed_cluster', ?, ?, ?, ?)""",
+                    (cluster_id, cluster_id, issue_id, now, f"same pr_number_base, actor={actor}"),
+                )
+                conn.execute("COMMIT")
+            except Exception:
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.OperationalError:
+                    pass
+                raise
+        finally:
+            conn.close()
+    invalidate_work_object_signature(issue_id)
+    invalidate_work_object_signature(cluster_id)
+    return {"status": "absorbed", "issue_id": issue_id, "cluster_id": cluster_id, "raw_items_moved": raw_items_moved}
+
+
 def list_issues_for_reference_any_state(pr_number_base: str) -> list[dict]:
     """Same idx_raw_pr_number_base-indexed lookup as list_open_issue_ids_
     for_reference above, but across every state, not just active/waiting/

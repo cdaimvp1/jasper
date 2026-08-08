@@ -1218,6 +1218,90 @@ def test_merge_issue_into_is_crash_safe(ws_db):
     assert ws_db.get_issue(loser)["state"] == "active"  # NOT dismissed
 
 
+# --- list_pr_number_base_groups_spanning_multiple_open_work_objects /
+# absorb_stray_reference_cluster (2026-08-08, task #278 investigation:
+# the concrete Bluefish drift root cause) ------------------------------
+
+def _seed_raw_item_with_reference(ws_db, *, key, issue_id, pr_number_base, signal_type=None):
+    rid = ws_db.insert_raw_item(source="outlook_mail", stable_key=key, thread_key=key, dedupe_key=key,
+                                 occurred_ts=time.time(), subject="s", from_actor="a@example.com",
+                                 participants_json="[]")
+    ws_db.link_raw_item_to_issue(rid, issue_id)
+    ws_db.classify_raw_item(
+        rid, item_class="FYI-EVIDENCE", direction="inbound", direction_inferred=False,
+        topic="other", topic_inferred=False, sentiment="neutral", sentiment_inferred=False,
+        anomaly_flag=False, signal_type=signal_type, pr_number=pr_number_base, pr_number_base=pr_number_base,
+    )
+    return rid
+
+
+def test_list_pr_number_base_groups_finds_cluster_and_issue_sharing_a_reference(ws_db):
+    issue = ws_db.create_issue_with_new_id(title="Real issue", state="active", category="other")
+    cluster = ws_db.create_cluster_with_new_id(title="Stray cluster", category="other")
+    _seed_raw_item_with_reference(ws_db, key="k1", issue_id=issue, pr_number_base="PR999")
+    _seed_raw_item_with_reference(ws_db, key="k2", issue_id=cluster, pr_number_base="PR999")
+
+    groups = ws_db.list_pr_number_base_groups_spanning_multiple_open_work_objects()
+
+    assert "PR999" in groups
+    members = {m["id"]: m["is_raw_cluster"] for m in groups["PR999"]}
+    assert members == {issue: False, cluster: True}
+
+
+def test_list_pr_number_base_groups_excludes_single_member_references(ws_db):
+    issue = ws_db.create_issue_with_new_id(title="Solo issue", state="active", category="other")
+    _seed_raw_item_with_reference(ws_db, key="k1", issue_id=issue, pr_number_base="PR111")
+
+    groups = ws_db.list_pr_number_base_groups_spanning_multiple_open_work_objects()
+
+    assert "PR111" not in groups
+
+
+def test_list_pr_number_base_groups_excludes_closed_work_objects(ws_db):
+    issue = ws_db.create_issue_with_new_id(title="Real issue", state="active", category="other")
+    cluster = ws_db.create_cluster_with_new_id(title="Done cluster", category="other")
+    conn = ws_db._connect()
+    conn.execute("UPDATE work_objects SET status = 'dismissed' WHERE id = ?", (cluster,))
+    conn.close()
+    _seed_raw_item_with_reference(ws_db, key="k1", issue_id=issue, pr_number_base="PR222")
+    _seed_raw_item_with_reference(ws_db, key="k2", issue_id=cluster, pr_number_base="PR222")
+
+    groups = ws_db.list_pr_number_base_groups_spanning_multiple_open_work_objects()
+
+    assert "PR222" not in groups  # the cluster is no longer open, so this isn't a live split anymore
+
+
+def test_absorb_stray_reference_cluster_moves_raw_items_and_dismisses_cluster(ws_db):
+    issue = ws_db.create_issue_with_new_id(title="Real issue", state="active", category="other")
+    cluster = ws_db.create_cluster_with_new_id(title="Stray cluster", category="other")
+    rid = _seed_raw_item_with_reference(ws_db, key="k1", issue_id=cluster, pr_number_base="PR333",
+                                          signal_type="ariba_pr_fully_approved")
+
+    result = ws_db.absorb_stray_reference_cluster(cluster, issue, actor="system")
+
+    assert result["status"] == "absorbed"
+    assert result["raw_items_moved"] == 1
+    conn = ws_db._connect()
+    assert conn.execute("SELECT issue_id FROM raw_items WHERE id = ?", (rid,)).fetchone()[0] == issue
+    cluster_row = conn.execute("SELECT status FROM work_objects WHERE id = ?", (cluster,)).fetchone()
+    conn.close()
+    assert cluster_row["status"] == "dismissed"  # never deleted, matching merge_issue_into's own discipline
+
+
+def test_absorb_stray_reference_cluster_not_found_when_issue_id_is_actually_a_cluster(ws_db):
+    cluster_a = ws_db.create_cluster_with_new_id(title="A", category="other")
+    cluster_b = ws_db.create_cluster_with_new_id(title="B", category="other")
+    result = ws_db.absorb_stray_reference_cluster(cluster_a, cluster_b, actor="system")
+    assert result["status"] == "not_found"  # cluster_b isn't a real issue through the `issues` view
+
+
+def test_absorb_stray_reference_cluster_not_found_when_cluster_id_is_actually_an_issue(ws_db):
+    issue_a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    issue_b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
+    result = ws_db.absorb_stray_reference_cluster(issue_a, issue_b, actor="system")
+    assert result["status"] == "not_found"  # issue_a isn't a real is_raw_cluster=1 row
+
+
 def test_list_distinct_signal_types_in_use(ws_db):
     ws_db.insert_raw_item(source="outlook_mail", stable_key="a", thread_key="a", dedupe_key="a",
                           occurred_ts=1.0, subject="s", from_actor="x@example.com", participants_json="[]")

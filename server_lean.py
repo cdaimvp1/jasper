@@ -2126,6 +2126,46 @@ async def api_project_extract_issue(project_id: str, body: ProjectExtractIssueBo
     return JSONResponse({"ok": True, "result": result})
 
 
+def _pending_review_items_for_issues(issue_ids: list[str]) -> list[dict]:
+    """Task #272: pending claim-resolution/issue-state suggestions scoped
+    to THIS project's own open issues, surfaced directly inside the
+    add-in's project card - the real fix for the "queue" Marc explicitly
+    rejected ("there is no current queue for me to view this shit...if a
+    user MUST take an action then it needs to ask the user in the card").
+    Same underlying suggest-only rows the cockpit/chat paths already
+    resolve (workgraph_reconcile.confirm_claim_suggestion,
+    /api/workgraph/issue-state-suggestions/{id}/resolve) - this is a new
+    SURFACE for them, not a new mechanism, and definitely not a second
+    place to go looking. Deliberately excludes prerequisite-rule
+    suggestions - those are a Settings-level new-gating-RULE proposal, not
+    tied to one issue's own checklist, so they don't belong in a project
+    card the way a claim/issue-state suggestion does."""
+    if not issue_ids:
+        return []
+    issue_id_set = set(issue_ids)
+    items: list[dict] = []
+    for s in wg.list_pending_claim_suggestions():
+        claim = wg.get_claim(s["claim_id"])
+        if not claim or claim.get("issue_id") not in issue_id_set:
+            continue
+        verb = "Mark resolved" if s["suggestion_kind"] == "resolve" else "Contradiction on"
+        description = f'{verb}: "{claim.get("text") or "(claim text unavailable)"}"'
+        if s.get("evidence_note"):
+            description += f" — {s['evidence_note']}"
+        items.append({
+            "kind": "claim_suggestion", "id": s["id"], "issue_id": claim.get("issue_id"),
+            "description": description,
+        })
+    for s in wg.list_issue_state_suggestions(status="pending"):
+        if s.get("issue_id") not in issue_id_set:
+            continue
+        items.append({
+            "kind": "issue_state_suggestion", "id": s["id"], "issue_id": s.get("issue_id"),
+            "description": s.get("evidence_note") or "This issue looks resolved to Jasper - close it?",
+        })
+    return items
+
+
 def _build_addin_focus_card(project_id: str) -> Optional[dict]:
     """Lean, single-project card for the Outlook/Teams add-in (tasks #240-
     243): "focus on this email/supplier/person" - reuses the exact same
@@ -2193,6 +2233,7 @@ def _build_addin_focus_card(project_id: str) -> Optional[dict]:
         "issues": issue_cards,
         "attachments": attachments,
         "parties": workgraph_projects.aggregate_parties_for_project(project_id),
+        "pending_review": _pending_review_items_for_issues(open_ids),
     }
 
 
@@ -2535,6 +2576,40 @@ async def api_claim_suggestion_resolve(suggestion_id: int, body: ClaimSuggestion
         ok = workgraph_reconcile.reject_claim_suggestion(suggestion_id, actor=body.actor)
     if not ok:
         raise HTTPException(409, "suggestion already resolved")
+    return JSONResponse({"ok": True})
+
+
+class IssueStateSuggestionResolveBody(BaseModel):
+    action: str  # "confirm" | "reject"
+    actor: str = "marc"
+
+
+@app.post("/api/workgraph/issue-state-suggestions/{suggestion_id}/resolve")
+async def api_issue_state_suggestion_resolve(suggestion_id: int, body: IssueStateSuggestionResolveBody):
+    """Task #272: the real action side of detect_issues_appear_resolved_
+    but_still_open (task #273) - that sweep only ever creates a suggestion,
+    never touches the issue itself (suggest-only discipline). Confirming
+    here is the human call it's designed to wait for: marks the issue
+    'done' through the SAME path (wg.update_issue + the closure-triggered
+    mark-as-read fire-and-forget) the normal status route already uses,
+    rather than a second, narrower state-flip that would skip those side
+    effects. Rejecting just acknowledges the mismatch, same as rejecting a
+    claim-resolution suggestion never touches the claim."""
+    if body.action not in ("confirm", "reject"):
+        raise HTTPException(400, "action must be 'confirm' or 'reject'")
+    suggestions = wg.list_issue_state_suggestions(status="pending")
+    suggestion = next((s for s in suggestions if s["id"] == suggestion_id), None)
+    if suggestion is None:
+        raise HTTPException(404, f"no such pending suggestion: {suggestion_id}")
+    if body.action == "confirm":
+        issue_id = suggestion["issue_id"]
+        if wg.get_issue(issue_id) is None:
+            raise HTTPException(404, f"no such issue: {issue_id}")
+        wg.update_issue(issue_id, actor=body.actor, state="done")
+        asyncio.create_task(asyncio.to_thread(_mark_issue_emails_read_best_effort, issue_id))
+        wg.resolve_issue_state_suggestion(suggestion_id, "confirmed")
+    else:
+        wg.resolve_issue_state_suggestion(suggestion_id, "rejected")
     return JSONResponse({"ok": True})
 
 

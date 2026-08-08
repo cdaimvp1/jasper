@@ -65,6 +65,7 @@ import workgraph_store as wg
 import workgraph_classify
 import workgraph_nba
 import workgraph_recommend
+import workgraph_proactive
 import skills_registry
 import deep_links
 import outlook_actions
@@ -1463,6 +1464,41 @@ async def api_action_draft_reply(body: DraftReplyBody):
     return JSONResponse(result)
 
 
+class HeroDraftReplyBody(BaseModel):
+    raw_item_id: int
+
+
+@app.post("/api/addin/hero-draft-reply")
+async def api_addin_hero_draft_reply(body: HeroDraftReplyBody):
+    """Marc's own request: the drawer hero's "draft a reply" button should
+    open a REAL, review-ready draft, not a blank one - reuses workgraph_
+    proactive's already-deterministic _draft_status_update_body (curator's
+    own synthesis summary + this issue's own open asks - the same body-
+    drafting logic task #287's automatic proactive path already uses,
+    just triggered on demand here instead). reply_all=True is Marc's own
+    framing ("include those who the user should reply to") - the whole
+    original thread's recipients, not just whoever happened to send this
+    one email."""
+    raw_item = wg.get_raw_item(body.raw_item_id)
+    if raw_item is None:
+        raise HTTPException(404, f"no such raw_item: {body.raw_item_id}")
+    entry_id = raw_item.get("entry_id")
+    if not entry_id:
+        raise HTTPException(400, "this item has no stored EntryID (ingested before task #43, or not a mail item)")
+    issue_id = raw_item.get("issue_id")
+    if issue_id is None:
+        raise HTTPException(400, "this item isn't linked to a tracked issue yet")
+    ref_tag = f"JW-{issue_id}"
+    draft_body = workgraph_proactive._draft_status_update_body(issue_id)
+    try:
+        result = await asyncio.to_thread(
+            outlook_actions.draft_reply, entry_id, True, ref_tag, draft_body, False,
+        )
+    except RuntimeError as e:
+        raise HTTPException(500, str(e))
+    return JSONResponse(result)
+
+
 class DraftForwardBody(BaseModel):
     raw_item_id: int
 
@@ -2257,6 +2293,17 @@ def _build_addin_focus_card(project_id: str) -> Optional[dict]:
     raw_item_ids = {ev["raw_item_id"] for ev in all_evidence if ev.get("raw_item_id")}
     raw_items_by_id = wg.get_raw_items_by_ids(list(raw_item_ids)) if raw_item_ids else {}
     open_claims_by_issue = wg.list_open_claims_for_issues(open_ids)
+    # Drawer redesign follow-on (Marc's own request): "Everything else"
+    # lane items should DO something, not just show text. Each evidence
+    # row already carries real deep_links (deep_links.attach_deep_links -
+    # a vendor URL like "Open in Ariba"/"Open in DocuSign" when the
+    # underlying email is a live signature/approval request) and real
+    # recommendations (workgraph_recommend.attach_recommendations - e.g.
+    # a contract_review offer). Indexed by raw_item_id here so a lane
+    # item (built from claims, not evidence) can look up whichever real
+    # action its own raw_item_id already has, rather than a second
+    # invented action-detection pass.
+    evidence_by_raw_item_id = {ev["raw_item_id"]: ev for ev in all_evidence if ev.get("raw_item_id")}
 
     issue_cards = []
     hero = None  # first (highest-priority) issue's own top-scored action wins - open_issues is
@@ -2326,6 +2373,15 @@ def _build_addin_focus_card(project_id: str) -> Optional[dict]:
                 "claim_type": c["claim_type"], "text": c.get("text"),
                 "raw_item_id": c.get("raw_item_id"),
             }
+            ev = evidence_by_raw_item_id.get(c.get("raw_item_id"))
+            if ev:
+                vendor_link = next((d for d in ev.get("deep_links", []) if d.get("kind") == "url"), None)
+                if vendor_link:
+                    item["action_label"] = vendor_link["label"]
+                    item["action_url"] = vendor_link["url"]
+                elif any(r.get("kind") == "contract_review" for r in ev.get("recommendations", [])):
+                    item["action_label"] = "Run Contract Review Skill"
+                    item["action_kind"] = "contract_review"
             (lane_you if c.get("author") == "marc" else lane_them).append(item)
         recent_resolved = [
             c for c in wg.list_claims_for_issue(iid)
@@ -3430,6 +3486,20 @@ async def api_issue_timeline(issue_id: str, tier: str = "milestone"):
         entries = wg.list_milestone_timeline_for_issue(issue_id)
     else:
         raise HTTPException(400, f"unknown tier: {tier} (expected complete|milestone|activity)")
+    # Task #9 follow-through (Marc's own request): "who sent/requested
+    # this" per timeline entry - claim_events.actor is usually just
+    # 'curator'/'system' (the pipeline that wrote the event), never a
+    # real person, so the real signal is the underlying raw_item's own
+    # sender/direction, resolved here in one batched lookup rather than
+    # guessed from actor.
+    raw_item_ids = [e["raw_item_id"] for e in entries if e.get("raw_item_id")]
+    if raw_item_ids:
+        raw_items_by_id = wg.get_raw_items_by_ids(raw_item_ids)
+        for e in entries:
+            raw_item = raw_items_by_id.get(e.get("raw_item_id"))
+            if raw_item:
+                e["sender"] = raw_item.get("from_actor")
+                e["direction"] = raw_item.get("direction")
     return JSONResponse({"tier": tier, "entries": sanitize_surrogates(entries)})
 
 

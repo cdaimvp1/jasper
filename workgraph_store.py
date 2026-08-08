@@ -7869,6 +7869,13 @@ def list_milestone_timeline_for_issue(issue_id: str) -> list[dict]:
                 entries.append({
                     "ts": ev["ts"], "kind": f"{c['claim_type']}_{ev['event_type']}", "detail": c["text"],
                     "claim_id": c["id"], "actor": ev["actor"],
+                    # Task #9 follow-through (Marc's own request): the
+                    # claim's own raw_item_id, so a caller can resolve WHO
+                    # actually sent/requested this (the message's real
+                    # sender) - actor above is often just 'curator'/
+                    # 'system' (the automated pipeline that wrote the
+                    # event), not a real person, so it's not a substitute.
+                    "raw_item_id": c.get("raw_item_id"),
                 })
     with _lock:
         conn = _connect()

@@ -186,9 +186,21 @@ def ask(message: str, session_id: Optional[str] = None, *, timeout: int = _TIMEO
     underlying Claude Code session log expired or was never written, e.g.
     right after this feature first shipped) - that failure is handled
     here by falling back to ONE fresh-session retry rather than surfacing
-    a confusing error for something the caller had no way to avoid."""
+    a confusing error for something the caller had no way to avoid.
+
+    Task #271: also appends both sides of the turn to the visible chat
+    log (workgraph_store.append_assistant_chat_turn) - separate from the
+    --resume session_id above, which only keeps Claude's own reasoning
+    context alive, not what the task pane can redraw after a reload. The
+    user's own message is logged unconditionally (even on a failed/timed-
+    out turn - Marc did say that, whether or not Jasper answered), the
+    reply only on success (a failure's own error text isn't a real
+    Jasper reply worth replaying into a restored transcript)."""
     if reset:
         ws.clear_assistant_session_id()
+        ws.clear_assistant_chat_turns()
+
+    ws.append_assistant_chat_turn("you", message)
 
     explicit = session_id is not None
     sid = session_id or ws.get_assistant_session_id()
@@ -206,4 +218,5 @@ def ask(message: str, session_id: Optional[str] = None, *, timeout: int = _TIMEO
 
     if result["ok"]:
         ws.set_assistant_session_id(result["session_id"])
+        ws.append_assistant_chat_turn("jasper", result["reply"])
     return result

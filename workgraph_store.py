@@ -1388,6 +1388,24 @@ def init_workgraph() -> None:
                 )
             """)
 
+            # Task #271 - the visible chat transcript, separate from
+            # assistant_sessions above (that table only tracks WHICH
+            # claude -p --resume session is live, never the rendered
+            # bubbles themselves). See append_assistant_chat_turn's own
+            # docstring for why this needs to exist at all.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS assistant_chat_turns (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_key  TEXT NOT NULL,
+                    sender       TEXT NOT NULL,
+                    text         TEXT NOT NULL,
+                    ts           REAL NOT NULL
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_assistant_chat_turns_session ON assistant_chat_turns(session_key, id)"
+            )
+
             # artifact_lineages/artifact_versions (design doc Section 12.5):
             # the real answer to attachment-hashing's open question - sha256
             # was already computed on every attachment (task #29) but never
@@ -7307,6 +7325,59 @@ def clear_assistant_session_id() -> None:
         conn = _connect()
         try:
             conn.execute("DELETE FROM assistant_sessions WHERE id = ?", (_ASSISTANT_SESSION_ID,))
+        finally:
+            conn.close()
+
+
+def append_assistant_chat_turn(sender: str, text: str) -> None:
+    """Task #271 - the real gap #232 left open: --resume keeps Claude's
+    own REASONING context alive server-side, but the task pane's visible
+    chat bubbles lived only in that page's DOM. New Outlook is documented
+    to restart the whole add-in process (wiping all in-memory JS/DOM
+    state) on an account/security-context change - unrelated to whether
+    the underlying conversation is still fine, this wipes what Marc can
+    SEE of it. This table is the fix: every turn (both sides) gets logged
+    here too, so a reloaded pane can re-render the visible transcript
+    instead of silently going blank while the real conversation continues
+    unseen underneath it. Table piggybacks on the same single-row
+    'default' scoping as assistant_sessions (see _ASSISTANT_SESSION_ID) -
+    same single-user assumption, same future per-user key path if that
+    changes."""
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                "INSERT INTO assistant_chat_turns (session_key, sender, text, ts) VALUES (?, ?, ?, ?)",
+                (_ASSISTANT_SESSION_ID, sender, text, time.time()),
+            )
+        finally:
+            conn.close()
+
+
+def list_assistant_chat_turns() -> list[dict]:
+    """Chronological (oldest first, matching how a chat log renders) -
+    the caller appends these as-is into the scroll area top to bottom."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT sender, text, ts FROM assistant_chat_turns WHERE session_key = ? ORDER BY id ASC",
+                (_ASSISTANT_SESSION_ID,),
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def clear_assistant_chat_turns() -> None:
+    """Companion to clear_assistant_session_id - always called alongside
+    it (see workgraph_assistant.ask's reset path and the /api/assistant/
+    reset route) so a 'New conversation' action clears the visible
+    transcript, not just the underlying --resume pointer."""
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute("DELETE FROM assistant_chat_turns WHERE session_key = ?", (_ASSISTANT_SESSION_ID,))
         finally:
             conn.close()
 

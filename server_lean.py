@@ -1517,8 +1517,21 @@ async def api_assistant_message(body: AssistantMessageBody):
 async def api_assistant_session():
     """Task #232 - lets the task pane check whether an ongoing persisted
     conversation exists (e.g. right after a reload) without needing to
-    send a throwaway message just to find out."""
-    return JSONResponse({"session_id": wg.get_assistant_session_id()})
+    send a throwaway message just to find out.
+
+    Task #271: also returns the visible chat turns logged so far
+    (workgraph_store.list_assistant_chat_turns) - the actual fix for the
+    New Outlook pane-reload bug. A --resume'd session_id alone only kept
+    Claude's own reasoning context alive; the task pane's rendered
+    bubbles lived in that page's DOM and vanished on the process restart
+    New Outlook does on a security-context change. On load, the client
+    calls this route and, if turns exist, re-renders them instead of
+    silently falling back to the default view with no sign a
+    conversation was ever in progress."""
+    return JSONResponse({
+        "session_id": wg.get_assistant_session_id(),
+        "turns": wg.list_assistant_chat_turns(),
+    })
 
 
 @app.post("/api/assistant/reset")
@@ -1527,8 +1540,11 @@ async def api_assistant_reset():
     store-layer state clear, no claude -p subprocess spawned (the
     message-route's own reset=True field also does this, but only as a
     side effect of an actual paid turn; this is the free, direct path for
-    a UI "New conversation" control)."""
+    a UI "New conversation" control). Clears the visible chat log too
+    (task #271) - a "new conversation" that still showed the old
+    transcript on the next reload would defeat the point of resetting."""
     wg.clear_assistant_session_id()
+    wg.clear_assistant_chat_turns()
     return JSONResponse({"ok": True})
 
 

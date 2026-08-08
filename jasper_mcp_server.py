@@ -43,6 +43,8 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
+import time
 
 import requests
 from mcp.server.mcpserver import MCPServer
@@ -53,6 +55,52 @@ MCP_HOST = os.environ.get("JASPER_MCP_HOST", "127.0.0.1")
 MCP_PORT = int(os.environ.get("JASPER_MCP_PORT", "8701"))
 
 mcp = MCPServer("jasper")
+
+# Real incident (2026-08-08): this file gained 3 new tools mid-session but
+# the already-running process (started the PREVIOUS day) never picked them
+# up - every assistant turn silently used a stale toolset until someone
+# noticed the assistant itself say "that tool isn't wired up" and manually
+# found+killed+relaunched the process. Task #231's persistence win (skip
+# the per-turn respawn cost) created exactly this staleness risk as its
+# flip side, and nothing closed the loop. Fixed here rather than via an
+# external supervisor - self-contained, works no matter how this process
+# was launched (nohup, a scheduler, by hand), no new dependency, no second
+# file to keep in sync with a separate watcher script.
+_SELF_PATH = os.path.abspath(__file__)
+_SELF_CHECK_INTERVAL_SECONDS = 30
+
+
+def _check_for_code_change_and_restart_if_needed(last_mtime: float) -> float:
+    """One poll tick, split out from the loop below so it's unit-testable
+    without threads/sleep/an actual process replacement: returns the mtime
+    to compare against next tick (unchanged input on no change or a
+    transient stat error), and calls os.execv - which never returns - the
+    moment a real change is seen."""
+    try:
+        current_mtime = os.path.getmtime(_SELF_PATH)
+    except OSError:
+        return last_mtime  # mid-write (editor save in progress) - try again next tick, never crash the loop over this
+    if current_mtime != last_mtime:
+        print(f"[jasper_mcp_server] {_SELF_PATH} changed on disk - restarting to pick up new tools", flush=True)
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+    return current_mtime
+
+
+def _restart_when_this_file_changes() -> None:
+    """Daemon thread: polls this file's own mtime every interval, so a real
+    edit lands within one tick instead of silently forever like the
+    incident above. On change, execv's a fresh Python process in place
+    (same PID, same stdout/stderr redirection if launched via
+    `> log 2>&1 &` - execv keeps open file descriptors) - reloads the whole
+    module fresh, so newly added tools are live on the very next turn with
+    no manual intervention."""
+    try:
+        last_mtime = os.path.getmtime(_SELF_PATH)
+    except OSError:
+        return
+    while True:
+        time.sleep(_SELF_CHECK_INTERVAL_SECONDS)
+        last_mtime = _check_for_code_change_and_restart_if_needed(last_mtime)
 
 
 def _get(path: str, params: dict | None = None) -> dict:
@@ -359,4 +407,5 @@ def jasper_mark_output_reviewed(attachment_id: int) -> dict:
 
 
 if __name__ == "__main__":
+    threading.Thread(target=_restart_when_this_file_changes, daemon=True).start()
     mcp.run(transport="sse", host=MCP_HOST, port=MCP_PORT)

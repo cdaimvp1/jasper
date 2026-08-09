@@ -43,7 +43,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import workgraph_store as ws
 import paths
 import config
-from outlook_com_ingest import _dedupe_key, _absorb_attachments, _absorb_body, _parse_body_capture_failures
+from outlook_com_ingest import _dedupe_key, _absorb_attachments, _absorb_body, _parse_body_capture_failures, _coerce_participants
 
 _SCRIPT = Path(__file__).resolve().parent / "outlook_scan_sent.ps1"
 _SOURCE = "outlook_mail"
@@ -100,7 +100,7 @@ def run(max_items: int = 500, timeout: int = 120, sync_wait_seconds: int = 0) ->
         if occurred_ts > max_seen_ts:
             max_seen_ts = occurred_ts
 
-        participants = item.get("participants") or []
+        participants = _coerce_participants(item.get("participants"))
         stable_key = item.get("conversation_id") or item.get("entry_id") or ""
         source_ref = item.get("entry_id") or stable_key
         dedupe_key = _dedupe_key(occurred_ts, participants, source_ref)
@@ -190,7 +190,7 @@ def backfill(days_back: int = 90, max_items: int = 3000, timeout: int = 600, syn
             continue
 
         occurred_ts = float(item.get("sent_epoch") or 0)
-        participants = item.get("participants") or []
+        participants = _coerce_participants(item.get("participants"))
         stable_key = item.get("conversation_id") or item.get("entry_id") or ""
         source_ref = item.get("entry_id") or stable_key
         dedupe_key = _dedupe_key(occurred_ts, participants, source_ref)

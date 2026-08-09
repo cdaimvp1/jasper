@@ -327,8 +327,23 @@ def run_pipeline_for_ungrouped_items(limit: int = 500) -> dict:
     ]
     ungrouped.sort(key=lambda w: w.get("opened_at") or w.get("created_ts") or 0)
     results = []
+    # Found live 2026-08-08: one bad item (e.g. the participants_json-as-
+    # bare-string bug fixed in outlook_com_ingest.py the same day) used to
+    # raise out of process_new_item() with no per-item guard, aborting this
+    # WHOLE function - scheduled_refresh.py's own try/except around the
+    # pipeline2 call then turned an entire cycle's grouping into "0 items
+    # processed," not just "1 item skipped." Confirmed via the live corpus:
+    # a permanent backlog of ~70 ungrouped items sitting behind whichever
+    # bad row was oldest, since the same crash recurs every cycle until the
+    # oldest item is fixed or removed. Isolated per item instead, same
+    # never-let-one-failure-block-the-rest discipline as every other sweep
+    # in scheduled_refresh.py - a failed item is reported, not silent, and
+    # every item after it still gets its real chance this cycle.
     for work_object in ungrouped[:limit]:
-        results.append(process_new_item(work_object["id"]))
+        try:
+            results.append(process_new_item(work_object["id"]))
+        except Exception as e:
+            results.append({"work_object_id": work_object["id"], "action": "error", "error": str(e)})
     return {"checked": len(results), "results": results}
 
 

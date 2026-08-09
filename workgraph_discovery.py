@@ -863,7 +863,22 @@ def _known_participants_text(raw_items: list[dict]) -> str:
     seen = set()
     lines = []
     for item in raw_items:
-        for raw in [item.get("from_actor")] + _json.loads(item.get("participants") or "[]"):
+        try:
+            participants = _json.loads(item.get("participants") or "[]")
+        except (TypeError, ValueError):
+            participants = []
+        # Found live 2026-08-08 (229 real raw_items rows): a single-
+        # participant PowerShell array can serialize as a bare JSON
+        # string rather than a 1-element array (ConvertTo-Json's own
+        # single-item-array collapsing behavior) - this was crashing
+        # workgraph_pipeline2's whole grouping batch on `list + str`
+        # whenever any item in it carried one of these rows, not just
+        # skipping the bad row.
+        if isinstance(participants, str):
+            participants = [participants]
+        elif not isinstance(participants, list):
+            participants = []
+        for raw in [item.get("from_actor")] + participants:
             raw = (raw or "").strip()
             if raw and raw not in seen:
                 seen.add(raw)

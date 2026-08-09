@@ -40,6 +40,23 @@ _SCRIPT = Path(__file__).resolve().parent / "outlook_scan.ps1"
 _SOURCE = "outlook_mail"
 
 
+def _coerce_participants(value) -> list[str]:
+    """Found live 2026-08-08: 229 real raw_items rows ended up with
+    participants_json storing a bare JSON string instead of a 1-element
+    array - PowerShell's ConvertTo-Json silently collapses a single-item
+    array to a scalar unless told otherwise, so outlook_scan.ps1 can hand
+    back a plain string for a single-participant item. That string then
+    crashed workgraph_pipeline2's whole grouping batch downstream
+    (list + str) whenever it appeared, not just that one item. Coerced
+    here, at the one place every participants value enters this pipeline,
+    rather than trusting every future reader to defend against it."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return value
+    return []
+
+
 def _dedupe_key(occurred_ts: float, participants: list[str], source_ref: str) -> str:
     """sha256(date|sorted-participants|sourceRef), truncated - same shape as the
     reference commsDedupeKey. Date-granular (not full timestamp) so the same
@@ -293,7 +310,7 @@ def run(folder: str = "Careful", max_items: int = 500, timeout: int = 120, sync_
         if occurred_ts > max_seen_ts:
             max_seen_ts = occurred_ts
 
-        participants = item.get("participants") or []
+        participants = _coerce_participants(item.get("participants"))
         stable_key = item.get("conversation_id") or item.get("entry_id") or ""
         source_ref = item.get("entry_id") or stable_key
         dedupe_key = _dedupe_key(occurred_ts, participants, source_ref)
@@ -430,7 +447,7 @@ def sweep_unread(folder: str = "Careful", max_items: int = 200) -> dict:
         unread_seen += 1
 
         occurred_ts = float(item.get("received_epoch") or 0)
-        participants = item.get("participants") or []
+        participants = _coerce_participants(item.get("participants"))
         stable_key = item.get("conversation_id") or item.get("entry_id") or ""
         source_ref = item.get("entry_id") or stable_key
         dedupe_key = _dedupe_key(occurred_ts, participants, source_ref)

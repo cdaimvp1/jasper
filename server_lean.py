@@ -2343,14 +2343,37 @@ def _build_addin_focus_card(project_id: str) -> Optional[dict]:
         # all wins (open_issues is already sorted highest-priority-first).
         if hero is None and actions:
             top = max(actions, key=lambda a: a.get("score") or 0)
+            open_email_act = top.get("open_email")
+            draft_reply_act = top.get("draft_reply")
+            draft_forward_act = top.get("draft_forward")
+            # Marc's report ("I do not know what to click on"): the
+            # top-scored action can be synthesis-derived with no
+            # raw_item_id of its own, or point at a raw_item that isn't a
+            # real outlook_mail entry - either way the label says "Draft a
+            # reply" but no button renders. Fall back to this issue's own
+            # most recent real outlook_mail evidence (evidence_by_issue is
+            # already ts DESC, see list_evidence_for_issues) so the hero
+            # always has something real to anchor a button to when one of
+            # these three is missing.
+            if not (open_email_act or draft_reply_act or draft_forward_act):
+                for ev in evidence_by_issue.get(issue["id"], []):
+                    rid = ev.get("raw_item_id")
+                    raw_item = raw_items_by_id.get(rid) if rid else None
+                    if raw_item is None and rid:
+                        raw_item = wg.get_raw_item(rid)
+                    if raw_item and raw_item.get("source") == "outlook_mail" and raw_item.get("entry_id"):
+                        open_email_act = deep_links.open_email_action(raw_item)
+                        draft_reply_act = deep_links.draft_reply_action(raw_item)
+                        draft_forward_act = deep_links.draft_forward_action(raw_item)
+                        break
             hero = {
                 "issue_id": issue["id"],
                 "issue_title": issue.get("display_title") or issue["title"],
                 "reference_ids": sorted(workgraph_projects.reference_ids_for_issue(issue["id"])),
                 "kind": top.get("kind"), "label": top.get("label"),
                 "rationale": top.get("rationale"),
-                "open_email": top.get("open_email"), "draft_reply": top.get("draft_reply"),
-                "draft_forward": top.get("draft_forward"),
+                "open_email": open_email_act, "draft_reply": draft_reply_act,
+                "draft_forward": draft_forward_act,
             }
 
     # "Everything else": every other open ask/decision/commitment across

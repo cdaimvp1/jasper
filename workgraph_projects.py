@@ -826,6 +826,16 @@ def aggregate_parties_for_project(project_id: str) -> list[dict]:
     by_party: dict = {}
     for issue in issues:
         for p in ws.list_parties_for_issue(issue["id"]):
+            # Task #9 follow-through (Marc's own live catch, 2026-08-08 -
+            # no-reply@ansmtp.ariba.com showing up as a "stakeholder"): the
+            # mockup's own "Remove" note already flagged this exact gap -
+            # affiliation_source='system_sender' (workgraph_signals.
+            # is_automated_sender, set at party-creation time) is the real,
+            # persisted signal that this is a machine relay, not a person -
+            # filtered out here so it never reaches the stakeholder list at
+            # all, not hidden client-side after the fact.
+            if p.get("affiliation_source") == "system_sender":
+                continue
             pid = p["id"]
             if pid not in by_party:
                 entry = dict(p)

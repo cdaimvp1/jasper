@@ -129,12 +129,20 @@ def jasper_search(query: str, limit: int = 15) -> dict:
 
 @mcp.tool()
 def jasper_get_project(project_id: str) -> dict:
-    """Full detail for one tracked project: name, category, status, and
-    every real tracked issue under it (each with title, state, priority,
-    parties). Use after jasper_search or jasper_ranked_actions surfaces a
-    project_id, to get the full picture before answering or drafting
-    anything about it."""
-    return _get(f"/api/workgraph/projects/{project_id}")
+    """Full detail for one tracked project - the SAME rich card shape
+    jasper_focus_email/jasper_focus_party return (summary, every open
+    issue with real suggested actions, attachments, parties). Use after
+    jasper_search or jasper_ranked_actions surfaces a project_id, to get
+    the full picture before answering or drafting anything about it.
+    Calling this (like the other two focus tools) is how "the drawer" for
+    this project gets shown - it registers the project so the task pane
+    can surface a real "Open X drawer" link, same as those tools do.
+    Found live 2026-08-10: this used to call the plain /api/workgraph/
+    projects/{id} route, which has no such registration - any chat turn
+    that resolved a project via jasper_get_project alone (a very common
+    path: search/ranked_actions -> get_project) never produced a working
+    drawer link, no matter what the system prompt told the model to say."""
+    return _get(f"/api/addin/focus-project/{project_id}")
 
 
 @mcp.tool()

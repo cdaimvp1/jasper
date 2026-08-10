@@ -38,6 +38,7 @@ import workgraph_signals
 import workgraph_sessionize
 import workgraph_discovery
 import text_extract
+import link_extraction
 
 # ===========================================================================
 # Cue regexes — adapted from supplier-communication-log.service.ts. The
@@ -487,6 +488,15 @@ def run_classification(limit: int = 500) -> dict:
             confidence=result["confidence"],
         )
         counts[result["item_class"]] = counts.get(result["item_class"], 0) + 1
+        # Task #303: queue any SharePoint/OneDrive document link this
+        # message's body carries, regardless of signal_type - relay picks
+        # these up on its own next wake and fetches the real content.
+        # Never fails the classify batch over one bad link scan.
+        try:
+            for link in link_extraction.extract_cloud_doc_links_for_raw_item(item):
+                ws.create_pending_link_fetch(item["id"], link["url"], link.get("label"))
+        except Exception:
+            pass
     return {"classified": len(items), "by_class": counts}
 
 

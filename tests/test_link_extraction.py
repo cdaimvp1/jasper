@@ -106,3 +106,68 @@ def test_extract_link_for_raw_item_full_path(isolated_paths):
         "url": "https://demo.docusign.net/Signing/StartInSession.aspx?envelopeId=xyz",
         "label": "Open in DocuSign",
     }
+
+
+# --- extract_cloud_doc_links_for_raw_item (task #303) -----------------------
+
+SHARED_DOC_HTML = """
+<html><body>
+<p>Hi Marc, sharing the redline for your review.</p>
+<a href="https://lillyco.sharepoint.com/:w:/r/sites/Legal/Shared%20Documents/MSA_redline.docx">MSA_redline.docx</a>
+<a href="https://na1.adobesign.com/public/esignWidget?wid=abc123">Also please sign here</a>
+</body></html>
+"""
+
+MULTI_DOC_HTML = """
+<html><body>
+<a href="https://contoso-my.sharepoint.com/personal/jane/Documents/Pricing.xlsx"></a>
+<a href="https://1drv.ms/w/s!AbCdEf12345">Timeline.docx</a>
+<a href="https://www.google.com/search?q=unrelated">unrelated link</a>
+</body></html>
+"""
+
+
+def test_extract_cloud_doc_links_finds_sharepoint_link_regardless_of_signal_type(isolated_paths):
+    dest_dir = isolated_paths.DOCUMENTS_DIR / "raw_items" / "77"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    (dest_dir / "body.html").write_text(SHARED_DOC_HTML, encoding="utf-8")
+    raw_item = {
+        "signal_type": None,  # ordinary mail - not a recognized vendor signal at all
+        "raw_ref": json.dumps({"body_html": "raw_items/77/body.html"}),
+    }
+
+    links = le.extract_cloud_doc_links_for_raw_item(raw_item)
+
+    assert links == [{
+        "url": "https://lillyco.sharepoint.com/:w:/r/sites/Legal/Shared%20Documents/MSA_redline.docx",
+        "label": "MSA_redline.docx",
+    }]
+
+
+def test_extract_cloud_doc_links_finds_multiple_and_ignores_non_cloud_links(isolated_paths):
+    dest_dir = isolated_paths.DOCUMENTS_DIR / "raw_items" / "78"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    (dest_dir / "body.html").write_text(MULTI_DOC_HTML, encoding="utf-8")
+    raw_item = {"signal_type": None, "raw_ref": json.dumps({"body_html": "raw_items/78/body.html"})}
+
+    links = le.extract_cloud_doc_links_for_raw_item(raw_item)
+
+    urls = [l["url"] for l in links]
+    assert "https://contoso-my.sharepoint.com/personal/jane/Documents/Pricing.xlsx" in urls
+    assert "https://1drv.ms/w/s!AbCdEf12345" in urls
+    assert not any("google.com" in u for u in urls)
+    # a cloud link with no visible text still gets a generic fallback label
+    no_text = next(l for l in links if l["url"].endswith("Pricing.xlsx"))
+    assert no_text["label"] == "Shared document"
+
+
+def test_extract_cloud_doc_links_empty_when_no_html_body():
+    assert le.extract_cloud_doc_links_for_raw_item({"signal_type": None, "raw_ref": None}) == []
+
+
+def test_extract_cloud_doc_links_malformed_html_does_not_crash(isolated_paths):
+    dest_dir = isolated_paths.DOCUMENTS_DIR / "raw_items" / "79"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    (dest_dir / "body.html").write_text("<a href='unterminated", encoding="utf-8")
+    raw_item = {"signal_type": None, "raw_ref": json.dumps({"body_html": "raw_items/79/body.html"})}
+    assert le.extract_cloud_doc_links_for_raw_item(raw_item) == []

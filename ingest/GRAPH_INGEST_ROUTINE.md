@@ -180,13 +180,37 @@ relay's only output is raw, provenanced JSON on disk.
    bus.emit_event(source="relay", kind="ingest.raw_batch_ready", actor="relay")
    ```
 
-8. **Report your status** (per the cockpit's worker_status mechanism):
+8. **Fetch queued SharePoint/OneDrive document links (task #303).** Separate from step 4's
+   own proactive search — this is a specific, already-known link that
+   `workgraph_classify.run_classification()` found in an ordinary message's body (a real
+   colleague shared a real document; not a search result).
+   - `GET /api/workgraph/pending-link-fetches` — every link still waiting, oldest first.
+     Empty is normal and expected most wakes; nothing else in this step runs if it's empty.
+   - For each one, use `read_resource` (or `sharepoint_search` if you need to resolve the
+     link to a real driveId/itemId first) to open the actual file and get its real text
+     content. **Never fabricate content for a link you couldn't actually open** — if it 404s,
+     you don't have access, or the file type can't be read, that's `status: "failed"`, not a
+     guess at what the document probably says.
+   - Report back what you found:
+     ```
+     POST /api/workgraph/pending-link-fetches/{id}/resolve
+     {"status": "fetched", "filename": "<the real file's name>", "extracted_text": "<the real text you read>"}
+     ```
+     or, if you couldn't open it:
+     ```
+     POST /api/workgraph/pending-link-fetches/{id}/resolve
+     {"status": "failed", "note": "<plainly, what actually went wrong>"}
+     ```
+   - A resolved "fetched" link becomes a real attachment on the same message it came from —
+     the drawer/synthesis/claims pick it up automatically, no separate step needed here.
+
+9. **Report your status** (per the cockpit's worker_status mechanism):
    ```python
    ws.set_worker_status("relay", state="idle", current_task=None, detail="ingest wake complete")
    ```
 
-9. **Stop.** Nothing else this wake. Do not triage, classify, or read what you just ingested
-   for meaning — that's out of scope for this archetype (see `relay_role.md`).
+10. **Stop.** Nothing else this wake. Do not triage, classify, or read what you just ingested
+    for meaning — that's out of scope for this archetype (see `relay_role.md`).
 
 ## Safety net
 

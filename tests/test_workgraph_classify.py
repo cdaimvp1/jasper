@@ -251,6 +251,40 @@ def test_backfill_reclassify_updates_pr_number_only_change(ws_db):
     assert row["pr_number"] == "PO4200703817"
 
 
+def test_run_classification_queues_sharepoint_link_from_message_body(ws_db, isolated_paths):
+    """Task #303: run_classification() should notice a SharePoint link in
+    an ORDINARY message's body (no recognized signal_type at all here)
+    and queue it for relay to fetch - this is the real hook point the
+    detection mechanism relies on."""
+    rid = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key="sp1", thread_key="sp1", dedupe_key="sp1",
+        occurred_ts=0.0, subject="Sharing the redline", from_actor="counterparty@example.com",
+        participants_json="[]",
+    )
+    # raw_ref names this row's own real id, so it has to be written after
+    # insert_raw_item hands the id back.
+    conn = ws_db._connect()
+    conn.execute(
+        "UPDATE raw_items SET raw_ref = ? WHERE id = ?",
+        (json.dumps({"body_html": f"raw_items/{rid}/body.html"}), rid),
+    )
+    conn.commit()
+    conn.close()
+    dest_dir = isolated_paths.DOCUMENTS_DIR / "raw_items" / str(rid)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    (dest_dir / "body.html").write_text(
+        '<a href="https://lillyco.sharepoint.com/sites/Legal/redline.docx">redline.docx</a>',
+        encoding="utf-8",
+    )
+
+    wc.run_classification()
+
+    pending = ws_db.list_pending_link_fetches()
+    assert len(pending) == 1
+    assert pending[0]["raw_item_id"] == rid
+    assert pending[0]["url"] == "https://lillyco.sharepoint.com/sites/Legal/redline.docx"
+
+
 # --- Part C (2026-07-30): raw-item-to-issue linking via reference ID -----
 
 def _pending_item(ws_db, thread_key, subject, pr_number=None, item_class="ACTIONABLE-ASK", from_actor="a@example.com",

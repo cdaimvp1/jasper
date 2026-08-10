@@ -3483,6 +3483,60 @@ async def api_attachment_list(entity_type: str, entity_id: str):
     return JSONResponse({"attachments": sanitize_surrogates(wg.list_attachments(entity_type, entity_id))})
 
 
+# --- Task #303: SharePoint/OneDrive link fetch queue - relay's own
+# worklist for links workgraph_classify.run_classification() found in an
+# ordinary message's body and can't fetch itself (that pass is
+# deterministic, no live SharePoint access). Resolving one writes a real
+# attachments row the exact same way a native email attachment does
+# (entity_type='raw_item'), so the drawer/synthesis/claims never need to
+# know this queue exists. ---------------------------------------------
+@app.get("/api/workgraph/pending-link-fetches")
+async def api_pending_link_fetches():
+    return JSONResponse({"fetches": sanitize_surrogates(wg.list_pending_link_fetches())})
+
+
+class ResolveLinkFetchBody(BaseModel):
+    status: str  # 'fetched' | 'failed'
+    filename: Optional[str] = None
+    extracted_text: Optional[str] = None
+    note: Optional[str] = None
+
+
+@app.post("/api/workgraph/pending-link-fetches/{fetch_id}/resolve")
+async def api_resolve_link_fetch(fetch_id: int, body: ResolveLinkFetchBody):
+    if body.status not in ("fetched", "failed"):
+        raise HTTPException(400, "status must be 'fetched' or 'failed'")
+    pending = [f for f in wg.list_pending_link_fetches() if f["id"] == fetch_id]
+    if not pending:
+        raise HTTPException(404, f"no pending fetch with id {fetch_id}")
+    fetch = pending[0]
+
+    attachment = None
+    if body.status == "fetched":
+        if not body.extracted_text:
+            raise HTTPException(400, "extracted_text is required when status is 'fetched'")
+        raw_item_id = fetch["raw_item_id"]
+        sub_dir = DOCUMENTS_RAW_ITEMS_DIR / str(raw_item_id)
+        sub_dir.mkdir(parents=True, exist_ok=True)
+        safe_name = _safe_filename(body.filename or "shared_document.txt")
+        text_bytes = body.extracted_text.encode("utf-8")
+        digest = hashlib.sha256(text_bytes).hexdigest()
+        dest = sub_dir / f"{digest[:16]}_{safe_name}"
+        dest.write_bytes(text_bytes)
+        attachment_id = wg.create_attachment(
+            entity_type="raw_item", entity_id=str(raw_item_id), kind="reference",
+            filename=body.filename or safe_name, stored_path=str(dest.relative_to(DOCUMENTS_DIR)),
+            content_type="text/plain", size_bytes=len(text_bytes),
+            sha256_hex=digest, uploaded_by="relay", extracted_text=body.extracted_text,
+        )
+        attachment = wg.get_attachment(attachment_id)
+
+    ok = wg.resolve_pending_link_fetch(fetch_id, status=body.status, note=body.note)
+    if not ok:
+        raise HTTPException(409, f"fetch {fetch_id} was already resolved")
+    return JSONResponse({"ok": True, "attachment": sanitize_surrogates(attachment)})
+
+
 @app.get("/api/workgraph/issues/{issue_id}/attachments")
 async def api_issue_attachments(issue_id: str):
     """Direct issue attachments + email attachments inherited from any raw_item

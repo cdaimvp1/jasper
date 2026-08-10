@@ -55,6 +55,15 @@ _LIVE_SIGNAL_LINK_SPEC: dict[str, tuple[tuple[str, ...], str, str]] = {
 
 _ACTION_TEXT_RE = re.compile(r"\b(review|sign|approve|click here|view document|open)\b", re.IGNORECASE)
 
+# Task #303: SharePoint/OneDrive document links, unlike the vendor CTAs
+# above, can appear in ANY ordinary message regardless of signal_type -
+# nobody classifies "someone shared a file" as its own signal today, and
+# it isn't gated the same way (a shared document is never closure/fyi-only
+# the way a "you already signed this" notice is). Domain-matched only,
+# same _AnchorCollector this module already builds - a genuinely reusable
+# piece, not a new parser.
+_CLOUD_DOC_DOMAINS = ("sharepoint.com", "1drv.ms", "onedrive.live.com")
+
 
 class _AnchorCollector(HTMLParser):
     """Collects (href, visible_text) for every <a href=...> - a real parser,
@@ -107,14 +116,9 @@ def best_link(html_text: str, domains: tuple[str, ...]) -> Optional[str]:
     return candidates[0][0]
 
 
-def extract_link_for_raw_item(raw_item: dict) -> Optional[dict]:
-    """Returns {"link_type","url","label"} or None. `raw_item` is a
-    workgraph_store.get_raw_item(s)-shaped row (needs signal_type + raw_ref)."""
-    spec = _LIVE_SIGNAL_LINK_SPEC.get(raw_item.get("signal_type"))
-    if not spec:
-        return None
-    domains, link_type, label = spec
-
+def _staged_html_body(raw_item: dict) -> Optional[str]:
+    """Shared by extract_link_for_raw_item and extract_cloud_doc_links_for_
+    raw_item - both need the same staged HTML body, resolved the same way."""
     raw_ref = raw_item.get("raw_ref")
     if not raw_ref:
         return None
@@ -130,11 +134,54 @@ def extract_link_for_raw_item(raw_item: dict) -> Optional[dict]:
     if not html_path.is_file():
         return None
     try:
-        html_text = html_path.read_text(encoding="utf-8")
+        return html_path.read_text(encoding="utf-8")
     except OSError:
+        return None
+
+
+def extract_link_for_raw_item(raw_item: dict) -> Optional[dict]:
+    """Returns {"link_type","url","label"} or None. `raw_item` is a
+    workgraph_store.get_raw_item(s)-shaped row (needs signal_type + raw_ref)."""
+    spec = _LIVE_SIGNAL_LINK_SPEC.get(raw_item.get("signal_type"))
+    if not spec:
+        return None
+    domains, link_type, label = spec
+
+    html_text = _staged_html_body(raw_item)
+    if html_text is None:
         return None
 
     url = best_link(html_text, domains)
     if not url:
         return None
     return {"link_type": link_type, "url": url, "label": label}
+
+
+def extract_cloud_doc_links_for_raw_item(raw_item: dict) -> list[dict]:
+    """Task #303: every SharePoint/OneDrive document link in this message's
+    body, regardless of signal_type - unlike extract_link_for_raw_item
+    above, this isn't gated to already-classified vendor signals, since a
+    shared document can show up in any ordinary email. Returns every
+    matching anchor (a message can share more than one file), not just
+    one "best" link - there's no single primary call-to-action the way a
+    vendor signature request has. Each item: {"url", "label"} - label is
+    the link's real visible text if it has one, else a generic fallback
+    (never invented content, just what the anchor tag actually said)."""
+    html_text = _staged_html_body(raw_item)
+    if html_text is None:
+        return []
+    try:
+        collector = _AnchorCollector()
+        collector.feed(html_text)
+    except Exception:
+        return []
+    seen_urls: set[str] = set()
+    links: list[dict] = []
+    for href, text in collector.anchors:
+        if not any(d in href.lower() for d in _CLOUD_DOC_DOMAINS):
+            continue
+        if href in seen_urls:
+            continue
+        seen_urls.add(href)
+        links.append({"url": href, "label": text.strip() or "Shared document"})
+    return links

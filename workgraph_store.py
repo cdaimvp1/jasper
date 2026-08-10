@@ -1556,6 +1556,29 @@ def init_workgraph() -> None:
             except sqlite3.OperationalError:
                 pass  # already added by a prior init_workgraph() call
 
+            # --- Task #303: SharePoint/OneDrive links found in an ingested
+            # message's body, queued for relay (the one worker with live
+            # SharePoint access) to actually fetch. A pending row is pure
+            # queue bookkeeping, not evidence itself - the real evidence
+            # lands as a normal `attachments` row (entity_type='raw_item',
+            # same as a native email attachment) once relay resolves it,
+            # so the drawer/synthesis/claims never need to know this
+            # queue exists at all. ------------------------------------
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS pending_link_fetches (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    raw_item_id  INTEGER NOT NULL,
+                    url          TEXT NOT NULL,
+                    label        TEXT,
+                    status       TEXT NOT NULL DEFAULT 'pending',  -- 'pending' | 'fetched' | 'failed'
+                    note         TEXT,
+                    created_ts   REAL NOT NULL,
+                    resolved_ts  REAL,
+                    UNIQUE(raw_item_id, url)
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_plf_status ON pending_link_fetches(status)")
+
             # --- Total Recall: a small, deterministic precedent store (see
             # workgraph_lessons.py). One row per (situation_key, outcome) -
             # repeats bump trust_score/hit_count on the SAME row rather than
@@ -8692,6 +8715,68 @@ def list_attachments_for_issue(issue_id: str) -> list[dict]:
                 (issue_id, issue_id),
             ).fetchall()
             return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+
+def create_pending_link_fetch(raw_item_id: int, url: str, label: Optional[str]) -> Optional[int]:
+    """Task #303: queue one SharePoint/OneDrive link found in a message's
+    body for relay to actually fetch. UNIQUE(raw_item_id, url) means a
+    re-scan of the same message (e.g. a later classify pass re-touching
+    it) never queues a duplicate - INSERT OR IGNORE, returns None on the
+    ignored-duplicate path rather than raising, same "never fail the
+    caller's batch over one already-queued row" discipline as
+    _absorb_attachments' own hash-dedup check."""
+    now = time.time()
+    with _lock:
+        conn = _connect()
+        try:
+            cur = conn.execute(
+                """INSERT OR IGNORE INTO pending_link_fetches (raw_item_id, url, label, status, created_ts)
+                   VALUES (?, ?, ?, 'pending', ?)""",
+                (raw_item_id, url, label, now),
+            )
+            conn.commit()
+            return cur.lastrowid if cur.rowcount else None
+        finally:
+            conn.close()
+
+
+def list_pending_link_fetches(status: str = "pending") -> list[dict]:
+    """Relay's own worklist - every queued link still waiting to be
+    fetched, oldest first (same fairness convention as every other
+    picker in this file)."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM pending_link_fetches WHERE status = ? ORDER BY created_ts ASC",
+                (status,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+
+def resolve_pending_link_fetch(fetch_id: int, *, status: str, note: Optional[str] = None) -> bool:
+    """Marks one queued fetch 'fetched' or 'failed' - never silently
+    re-queues on failure (that would let one permanently-broken link spin
+    relay forever); a failed row just stays failed, visible for a human
+    to look at if it matters. Returns False if fetch_id doesn't resolve
+    to a real row, same lookup-then-act discipline as this file's other
+    resolve-style functions."""
+    if status not in ("fetched", "failed"):
+        raise ValueError(f"invalid status: {status!r}")
+    now = time.time()
+    with _lock:
+        conn = _connect()
+        try:
+            cur = conn.execute(
+                "UPDATE pending_link_fetches SET status = ?, note = ?, resolved_ts = ? WHERE id = ? AND status = 'pending'",
+                (status, note, now, fetch_id),
+            )
+            conn.commit()
+            return cur.rowcount > 0
         finally:
             conn.close()
 

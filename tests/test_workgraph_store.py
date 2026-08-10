@@ -968,6 +968,61 @@ def test_force_merge_projects_moves_members_and_archives_loser(ws_db):
     assert ws_db.get_project(proj_b)["status"] == "archived"
 
 
+# --- pending_link_fetches (task #303) ---------------------------------------
+
+def test_create_pending_link_fetch_and_list_pending(ws_db):
+    fetch_id = ws_db.create_pending_link_fetch(101, "https://lillyco.sharepoint.com/doc1", "doc1.docx")
+
+    assert fetch_id is not None
+    pending = ws_db.list_pending_link_fetches()
+    assert len(pending) == 1
+    assert pending[0]["id"] == fetch_id
+    assert pending[0]["raw_item_id"] == 101
+    assert pending[0]["url"] == "https://lillyco.sharepoint.com/doc1"
+    assert pending[0]["status"] == "pending"
+
+
+def test_create_pending_link_fetch_dedupes_same_raw_item_and_url(ws_db):
+    first = ws_db.create_pending_link_fetch(101, "https://lillyco.sharepoint.com/doc1", "doc1.docx")
+    second = ws_db.create_pending_link_fetch(101, "https://lillyco.sharepoint.com/doc1", "doc1.docx")
+
+    assert first is not None
+    assert second is None  # already-queued duplicate, not a new row
+    assert len(ws_db.list_pending_link_fetches()) == 1
+
+
+def test_resolve_pending_link_fetch_fetched_removes_from_pending_list(ws_db):
+    fetch_id = ws_db.create_pending_link_fetch(101, "https://lillyco.sharepoint.com/doc1", "doc1.docx")
+
+    ok = ws_db.resolve_pending_link_fetch(fetch_id, status="fetched")
+
+    assert ok is True
+    assert ws_db.list_pending_link_fetches() == []
+
+
+def test_resolve_pending_link_fetch_failed_records_note(ws_db):
+    fetch_id = ws_db.create_pending_link_fetch(101, "https://lillyco.sharepoint.com/doc1", "doc1.docx")
+
+    ok = ws_db.resolve_pending_link_fetch(fetch_id, status="failed", note="access denied")
+
+    assert ok is True
+    assert ws_db.list_pending_link_fetches() == []
+
+
+def test_resolve_pending_link_fetch_returns_false_when_already_resolved(ws_db):
+    fetch_id = ws_db.create_pending_link_fetch(101, "https://lillyco.sharepoint.com/doc1", "doc1.docx")
+    ws_db.resolve_pending_link_fetch(fetch_id, status="fetched")
+
+    assert ws_db.resolve_pending_link_fetch(fetch_id, status="fetched") is False
+
+
+def test_resolve_pending_link_fetch_rejects_invalid_status(ws_db):
+    fetch_id = ws_db.create_pending_link_fetch(101, "https://lillyco.sharepoint.com/doc1", "doc1.docx")
+
+    with pytest.raises(ValueError):
+        ws_db.resolve_pending_link_fetch(fetch_id, status="bogus")
+
+
 def test_merge_issues_txn_is_crash_safe(ws_db):
     """The real bug this fixes: merge_issues() used to run as several
     independent autocommit connections - a crash partway through left the

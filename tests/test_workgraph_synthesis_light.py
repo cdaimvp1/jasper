@@ -95,7 +95,7 @@ def test_run_light_synthesis_writes_extraction_and_synthesis(ws_db, monkeypatch)
         "asks": [], "decisions": ["pricing is final"], "dates_mentioned": [],
         "commitments": [], "key_facts": ["$40,000 confirmed"],
     }
-    monkeypatch.setattr(wsl, "_run_headless_claude", lambda prompt, timeout: _FakeProc(json.dumps(reply)))
+    monkeypatch.setattr(wsl, "_run_headless_claude", lambda prompt, timeout, model=None: _FakeProc(json.dumps(reply)))
 
     result = wsl.run_light_synthesis("issue", iid)
 
@@ -120,7 +120,7 @@ def test_run_light_synthesis_writes_extraction_and_synthesis(ws_db, monkeypatch)
 def test_run_light_synthesis_unparseable_output_makes_no_writes(ws_db, monkeypatch):
     iid = _issue(ws_db)
     rid = _raw_item(ws_db, iid, "k1", "some new content")
-    monkeypatch.setattr(wsl, "_run_headless_claude", lambda prompt, timeout: _FakeProc("not json at all"))
+    monkeypatch.setattr(wsl, "_run_headless_claude", lambda prompt, timeout, model=None: _FakeProc("not json at all"))
 
     result = wsl.run_light_synthesis("issue", iid)
 
@@ -136,7 +136,7 @@ def test_run_light_synthesis_skips_extraction_entry_missing_for_a_raw_item(ws_db
     iid = _issue(ws_db)
     _raw_item(ws_db, iid, "k1", "some new content")
     reply = json.loads(_LIGHT_REPLY)  # extractions left empty
-    monkeypatch.setattr(wsl, "_run_headless_claude", lambda prompt, timeout: _FakeProc(json.dumps(reply)))
+    monkeypatch.setattr(wsl, "_run_headless_claude", lambda prompt, timeout, model=None: _FakeProc(json.dumps(reply)))
 
     result = wsl.run_light_synthesis("issue", iid)
 

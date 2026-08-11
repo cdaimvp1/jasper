@@ -58,13 +58,20 @@ _PROMPT_MAX_CHARS = 90_000  # defensive cap on what actually goes in the prompt,
 _TIMEOUT_SECONDS = 240
 
 
-def _run_headless_claude(prompt: str, *, timeout: int) -> subprocess.CompletedProcess:
+def _run_headless_claude(prompt: str, *, timeout: int, model: str | None = None) -> subprocess.CompletedProcess:
     """Self-contained tree-kill subprocess primitive, deliberately NOT
     imported from workgraph_pipeline2.py or ingest/scheduled_refresh.py -
     same reasoning workgraph_pipeline2.py's own copy documents: each
     mechanism gets its own copy of this real safety technique rather than
     a shared import, so no future change to one path can silently affect
     another's timeout/tree-kill behavior.
+
+    model (2026-08-11, backfill cost investigation): optional override,
+    e.g. "haiku" - unset stays on this account's default model (opus, per
+    ~/.claude/settings.json), which is what the live scheduled-refresh
+    forward path keeps using. Only the one-time stale-marker backfill
+    script passes an override, so this cost question stays scoped to that
+    backfill and never silently changes the live path's quality bar.
 
     Prompt goes over STDIN, never as a command-line argument (task #304
     backfill-sizing investigation, 2026-08-11, real bug reproduced live):
@@ -87,8 +94,11 @@ def _run_headless_claude(prompt: str, *, timeout: int) -> subprocess.CompletedPr
     that, not a substitute for it - one character Python still can't
     round-trip should never crash a whole backfill pass over it."""
     env = os.environ.copy()
+    args = ["claude", "-p", "--allowedTools", ""]
+    if model:
+        args += ["--model", model]
     proc = subprocess.Popen(
-        ["claude", "-p", "--allowedTools", ""],
+        args,
         cwd=str(Path(__file__).resolve().parent), env=env,
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, encoding="utf-8", errors="replace",
@@ -211,13 +221,15 @@ def _parse_light_output(stdout: str) -> Optional[dict]:
     return parsed
 
 
-def run_light_synthesis(entity_type: str, entity_id: str) -> dict:
+def run_light_synthesis(entity_type: str, entity_id: str, *, model: str | None = None) -> dict:
     """The light path itself - one real LLM call, no subprocess-per-item,
     no agentic session. Writes through the same primitives the heavy
     curator path uses (create_extraction + its full live-wiring side
     effects, upsert_synthesis), so a light-path write is indistinguishable
     downstream from a curator-written one except in richness (see module
-    docstring for the deliberately-omitted fields)."""
+    docstring for the deliberately-omitted fields).
+
+    model: optional cheap-model override, see _run_headless_claude."""
     if entity_type == "issue":
         entity = ws.get_issue(entity_id)
     elif entity_type == "project":
@@ -244,7 +256,7 @@ def run_light_synthesis(entity_type: str, entity_id: str) -> dict:
         new_evidence=full_text[:_PROMPT_MAX_CHARS],
     )
     try:
-        proc = _run_headless_claude(prompt, timeout=_TIMEOUT_SECONDS)
+        proc = _run_headless_claude(prompt, timeout=_TIMEOUT_SECONDS, model=model)
     except subprocess.TimeoutExpired:
         return {"entity_type": entity_type, "entity_id": entity_id, "action": "timeout"}
 

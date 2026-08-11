@@ -4,6 +4,7 @@ including a real bug found while testing against production: teams_chat's
 cursor is stored as an ISO8601 string (Microsoft Graph's own
 lastUpdatedDateTime format), not a Unix epoch like the other three cursors -
 a bare float() parse silently skipped it entirely instead of checking it."""
+import sqlite3
 import time
 import unittest.mock as mock
 
@@ -315,3 +316,60 @@ def test_get_last_result_does_not_change_when_gated(ws_db):
 def test_get_last_result_survives_malformed_stored_value(ws_db):
     ws_db.set_cursor("health_check", "last_result", "not valid json")
     assert hc.get_last_result() is None
+
+
+# --- task #332: db integrity check (Section 18, "Harden persistence gradually") ---
+
+def test_db_integrity_ok_on_healthy_db(ws_db):
+    result = hc.check_db_integrity()
+    assert result["ok"] is True
+    assert result["messages"] == ["ok"]
+
+
+def test_db_integrity_flags_real_corruption(tmp_path, monkeypatch):
+    """Real corruption, not a mock: build a genuine SQLite file, then flip
+    bytes past the header so PRAGMA quick_check actually detects damage -
+    proves this wires to a real, falsifiable signal rather than a check
+    that can only ever return 'ok'."""
+    import workgraph_store as ws
+
+    db_path = tmp_path / "corrupt.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)")
+    for i in range(200):
+        conn.execute("INSERT INTO t (val) VALUES (?)", (f"row{i}" * 50,))
+    conn.commit()
+    conn.close()
+
+    # Truncate the file well short of what the header's own page count
+    # promises - a reliable, real "database disk image is malformed" rather
+    # than hoping a byte-flip happens to land inside a load-bearing page.
+    full_size = db_path.stat().st_size
+    assert full_size > 4096, "test fixture db must span multiple pages for this to be meaningful"
+    db_path.write_bytes(db_path.read_bytes()[: full_size // 2])
+
+    monkeypatch.setattr(ws, "WORKGRAPH_DB", db_path)
+    result = hc.check_db_integrity()
+
+    # A truncated file can surface either as quick_check RETURNING a
+    # non-"ok" row, or as sqlite3 raising a DatabaseError ("disk image is
+    # malformed") while trying to run the pragma at all - both are a real,
+    # detected-corruption outcome for this check; either shape must flip ok.
+    assert result["ok"] is False
+    assert result.get("messages", ["not-ok"]) != ["ok"]
+
+
+def test_db_integrity_reports_failure_instead_of_raising(tmp_path, monkeypatch):
+    """A missing/unopenable DB file must be reported as ok=False, never an
+    unhandled exception that would take down the rest of run()."""
+    import workgraph_store as ws
+
+    monkeypatch.setattr(ws, "WORKGRAPH_DB", tmp_path / "does_not_exist" / "nested" / "workgraph.db")
+    result = hc.check_db_integrity()
+    assert result["ok"] is False
+
+
+def test_db_integrity_wired_into_run(ws_db):
+    full = hc.run(now=time.time())
+    assert "db_integrity" in full["checks"]
+    assert full["checks"]["db_integrity"]["ok"] is True

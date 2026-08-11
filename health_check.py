@@ -39,12 +39,20 @@ Checks:
       logic and each metric's honest scope/caveats. Always ok=True - an
       observability check, not a pass/fail gate; nothing here fails the
       overall health-check status.
+  11. DB integrity (task #332, engineering-direction doc Section 18,
+      2026-08-11) - PRAGMA quick_check against the live workgraph.db, the
+      cheap complement to check_backup_recent above: that check confirms a
+      recent snapshot EXISTS, this one confirms the LIVE file it snapshots
+      isn't already corrupt. Report-only, same as every other check here -
+      it never blocks scheduled_refresh.py's cycle, it just surfaces a
+      finding.
 
 Each check returns {"ok": bool, "detail": str, ...check-specific fields}.
 """
 from __future__ import annotations
 
 import json
+import sqlite3
 import subprocess
 import sys
 import time
@@ -341,6 +349,50 @@ def check_accuracy_telemetry(now: float) -> dict:
     return {"ok": True, "window_days": 7, **metrics}
 
 
+def check_db_integrity() -> dict:
+    """Task #332 (Marc's engineering-direction doc, Section 18 - "Harden
+    persistence gradually"). Lightweight, deterministic corruption check
+    against the LIVE workgraph.db - the missing complement to
+    check_backup_recent above: that check only confirms a recent snapshot
+    exists, never whether the thing it's snapshotting is actually sound.
+
+    Uses PRAGMA quick_check rather than the full PRAGMA integrity_check.
+    quick_check skips the (expensive, O(db size)) cross-verification of
+    every index entry against its table row and just walks the b-tree
+    structure itself - the right cost/thoroughness tradeoff for a check
+    that runs once a day forever against a DB that only grows, matching
+    this module's own "layer 1: bounded, falsifiable, zero-token-cost"
+    design (see module docstring). A full integrity_check remains available
+    as a manual, one-off deep verification if this ever does flag
+    something real.
+
+    Goes through workgraph_store._connect() - the same busy_timeout(5000)
+    + WAL-aware connection every write in this codebase already uses -
+    rather than a bare sqlite3.connect() against paths.WORKGRAPH_DB
+    directly, for two reasons: (1) it's the safe way to query a live,
+    possibly concurrently-open database without a raw file-level read
+    racing a writer, and (2) it's what makes this check honor the same
+    ws_db test fixture every other check in this module relies on - that
+    fixture monkeypatches workgraph_store.WORKGRAPH_DB, not
+    paths.WORKGRAPH_DB, so reading the path constant directly here would
+    silently check the wrong file under test.
+
+    Report-only, same discipline as every other check here: a corrupt
+    result flips ok to False (visible in the daily report and in run()'s
+    all_ok rollup) but takes no corrective action and never blocks
+    anything else in scheduled_refresh.py's cycle."""
+    try:
+        conn = ws._connect()
+        try:
+            rows = conn.execute("PRAGMA quick_check").fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as e:
+        return {"ok": False, "detail": f"integrity check failed to run: {e!r}"}
+    messages = [row[0] for row in rows]
+    return {"ok": messages == ["ok"], "messages": messages}
+
+
 def run(now: float | None = None) -> dict:
     if now is None:
         now = time.time()
@@ -355,6 +407,7 @@ def run(now: float | None = None) -> dict:
         "outlook_cache_freshness": check_outlook_cache_freshness(),
         "body_capture_healthy": check_body_capture_healthy(),
         "accuracy_telemetry": check_accuracy_telemetry(now),
+        "db_integrity": check_db_integrity(),
     }
     # persist today's disk snapshot for TOMORROW's growth comparison
     ws.set_cursor(_SNAPSHOT_CURSOR_SOURCE, _SNAPSHOT_CURSOR_KEY, json.dumps(retention.disk_usage_report()))

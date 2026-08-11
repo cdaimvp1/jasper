@@ -556,47 +556,34 @@ def test_automated_sender_identity_is_excluded_even_when_it_would_otherwise_supp
 
 
 # ===========================================================================
-# 9. Suspected bug found while building this corpus - NOT fixed here.
+# 9. Real bug found while building this corpus - fixed (task #334, 2026-08-11).
 # ===========================================================================
 
-@pytest.mark.xfail(
-    reason="SUSPECTED REAL BUG (task #333 regression-corpus build, not fixed here): "
-           "workgraph_pipeline2.process_new_item's final fallback "
-           "(`if judged: workgraph_lessons.record_confirmed_or_rejected(status='rejected')`) "
-           "fires whenever `judged` is non-empty, without checking that any verdict in it "
-           "is a REAL 'unrelated' read - a candidate set where every judge_candidate call "
-           "returned None (timeout/unparseable) still gets recorded as a genuine rejected "
-           "Total Recall precedent. Needs a human triage decision (e.g. only record when "
-           "at least one verdict is an actual 'unrelated', not just 'no same_project match "
-           "found'), not a test-file fix.",
-    strict=True,
-)
 def test_all_candidates_timing_out_should_not_write_a_false_rejected_precedent(ws_db, isolated_paths, monkeypatch):
-    """SUSPECTED BUG (found while building this corpus, not fixed - see
-    task #333's own instructions): process_new_item's final fallback,
+    """Real bug found while building this corpus, fixed as task #334:
+    process_new_item's final fallback used to be
 
         if judged:
             workgraph_lessons.record_confirmed_or_rejected(issue_id_a=work_object_id, status="rejected")
 
-    fires whenever `judged` is non-empty - but `judged` collects EVERY
-    (candidate, verdict) pair regardless of what judge_candidate actually
-    returned, including None (a timeout or an unparseable reply - see
-    judge_candidate's own docstring: 'the caller treats it exactly like
+    which fired whenever `judged` was non-empty - but `judged` collects
+    EVERY (candidate, verdict) pair regardless of what judge_candidate
+    actually returned, including None (a timeout or an unparseable reply -
+    see judge_candidate's own docstring: 'the caller treats it exactly like
     unrelated'). That equivalence is fine for the immediate grouping
-    decision (no match either way), but it is NOT fine for Total Recall:
+    decision (no match either way), but it was NOT fine for Total Recall:
     a None verdict means the LLM was never successfully consulted at all,
-    yet this writes a genuine 'rejected' lesson for this item's category+
+    yet this wrote a genuine 'rejected' lesson for this item's category+
     company situation_key exactly as if a real, deliberate 'unrelated'
-    read had happened. That false negative precedent then flows into every
+    read had happened. That false negative precedent then flowed into every
     FUTURE judge_candidate call for the same situation via _precedent_
     context_line's 'previously turned out NOT to match' framing - a
     self-inflicted bias seeded by nothing more than a subprocess timeout.
 
-    Expected/correct behavior (asserted here, and currently failing):
-    a candidate set where EVERY verdict is None should be treated the same
-    as "no real judgment happened," matching test_process_new_item_no_
-    candidates_never_touches_lessons's existing guarantee for the
-    zero-candidates case - no lesson should be written either way."""
+    Fixed: process_new_item now only records "rejected" when at least one
+    verdict in `judged` is a real "unrelated" read - matching test_process_
+    new_item_no_candidates_never_touches_lessons's existing guarantee for
+    the zero-candidates case, extended to the all-None case too."""
     a = _issue(ws_db, "Requested approval for a services renewal", category="contract")
     _link_party(ws_db, a, "shared_party", "rep@driftglass-vendor.example", company="Driftglass Vendor Inc")
     b = _issue(ws_db, "REVIEW REQUESTED: services renewal quote", category="contract")

@@ -403,7 +403,16 @@ def process_new_item(work_object_id: str, *, model: Optional[str] = "sonnet") ->
             # merge_issues' own existing safety net. Try the next candidate
             # for this same target rather than treat this as a final answer.
 
-    if judged:
+    # Task #334 fix (2026-08-11, found while building the regression corpus
+    # for #333): only a real "unrelated" verdict counts as grounds to write
+    # a "rejected" Total Recall precedent. `judged` also holds None entries
+    # (judge_candidate's own timeout/unparseable case) and
+    # "related_different_project" entries (a distinct outcome, already
+    # captured above via the relationship signal) - neither is a genuine
+    # LLM read confirming this situation doesn't match, so neither should
+    # seed a false precedent that then biases every future judgment for the
+    # same category+company situation_key via _precedent_context_line.
+    if any(verdict == "unrelated" for _, verdict in judged):
         workgraph_lessons.record_confirmed_or_rejected(issue_id_a=work_object_id, status="rejected")
 
     project_id = ws.create_project_with_new_id(

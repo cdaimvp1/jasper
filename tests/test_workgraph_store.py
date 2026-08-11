@@ -3454,3 +3454,100 @@ def test_list_work_object_ids_for_lineage_ids_returns_owning_work_objects(ws_db)
 
 def test_list_work_object_ids_for_lineage_ids_empty_input_returns_empty(ws_db):
     assert ws_db.list_work_object_ids_for_lineage_ids([]) == []
+
+
+# --- self-healing repair for a rename-corrupted view/trigger (2026-08-11) --
+# Real live bug: SQLite auto-rewrites an EXISTING trigger/view body to
+# follow a table rename. A `RENAME work_objects TO work_objects_pre_fix4`
+# elsewhere in this file silently corrupted the already-created `projects`
+# view and its 3 triggers on any install that predated that migration -
+# `CREATE VIEW/TRIGGER IF NOT EXISTS` never re-applies since they still
+# "exist," just with the wrong body. list_projects/get_project raised
+# `OperationalError: no such table: main.work_objects_pre_fix4` on every
+# call in production until a targeted, gated repair (this test) was added.
+
+def test_init_workgraph_self_heals_a_rename_corrupted_projects_view(ws_db):
+    """Simulates exactly what a real rename-based rebuild does to an
+    EXISTING view/trigger, then confirms the next init_workgraph() call
+    detects and repairs it - without needing another full rebuild."""
+    conn = ws_db._connect()
+    try:
+        # Forge the exact END STATE a real rename-based rebuild leaves
+        # behind (a view/trigger body pointing at a table name that no
+        # longer exists) directly, rather than replaying the full rename -
+        # doing a REAL rename against a live `work_objects` here would also
+        # corrupt the `issues` view (it references work_objects too), which
+        # is NOT what happened in production (confirmed live: only the
+        # `projects` view/triggers were affected there, because `issues`'
+        # own view - unlike `projects`' - already had an unconditional
+        # self-heal step that ran later in the SAME init_workgraph() call
+        # that introduced the corruption). Forging just the `projects` side
+        # keeps this test scoped to the real, narrower incident.
+        conn.execute("DROP VIEW IF EXISTS projects")
+        conn.execute("""
+            CREATE VIEW projects AS
+            SELECT id, title AS name, category, status, opened_at, updated_at,
+                   last_deep_dive_ts, last_deep_dive_note
+            FROM work_objects_pre_test WHERE object_type = 'project'
+        """)
+        corrupted = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='view' AND name='projects'"
+        ).fetchone()["sql"]
+        assert "work_objects_pre_test" in corrupted, "the simulated corruption didn't take"
+    finally:
+        conn.close()
+
+    ws_db.init_workgraph()
+
+    conn = ws_db._connect()
+    try:
+        healed = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='view' AND name='projects'"
+        ).fetchone()["sql"]
+        assert "work_objects_pre_test" not in healed
+        assert "FROM work_objects" in healed
+        stale = conn.execute(
+            """SELECT name FROM sqlite_master
+               WHERE (type='view' OR type='trigger') AND sql LIKE '%work_objects_pre_%'"""
+        ).fetchall()
+        assert stale == []
+    finally:
+        conn.close()
+
+    # And the repaired view is actually usable again, not just textually correct.
+    pid = ws_db.create_project_with_new_id(name="Repaired Project", category="other")
+    assert ws_db.get_project(pid)["name"] == "Repaired Project"
+    assert any(p["id"] == pid for p in ws_db.list_projects())
+
+
+def test_init_workgraph_repair_is_a_noop_when_nothing_is_stale(ws_db):
+    """The gate itself: a healthy install must never pay the DROP+CREATE
+    cost - this is what keeps the repair path from ever running during
+    test_multiprocess_concurrency.py's fresh-DB stress test (a real
+    regression an earlier, unconditional version of this fix caused)."""
+    conn = ws_db._connect()
+    try:
+        before = conn.execute(
+            "SELECT name, sql FROM sqlite_master WHERE name IN "
+            "('projects', 'trg_projects_insert', 'trg_projects_update', 'trg_projects_delete')"
+        ).fetchall()
+        before_by_name = {r["name"]: r["sql"] for r in before}
+    finally:
+        conn.close()
+
+    ws_db.init_workgraph()
+
+    conn = ws_db._connect()
+    try:
+        after = conn.execute(
+            "SELECT name, sql FROM sqlite_master WHERE name IN "
+            "('projects', 'trg_projects_insert', 'trg_projects_update', 'trg_projects_delete')"
+        ).fetchall()
+        after_by_name = {r["name"]: r["sql"] for r in after}
+    finally:
+        conn.close()
+
+    # Same definitions - the point isn't that they can't be dropped/recreated
+    # (a byte-identical recreation would look the same either way), it's
+    # that nothing raised and the healthy state stayed healthy.
+    assert before_by_name == after_by_name

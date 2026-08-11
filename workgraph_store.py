@@ -2251,6 +2251,152 @@ def init_workgraph() -> None:
                 END
             """)
 
+            # Real live bug found and fixed 2026-08-11, task #310 investigation:
+            # `CREATE TRIGGER/VIEW IF NOT EXISTS` looks idempotent, but it is
+            # NOT self-healing against a rename-based table rebuild elsewhere
+            # in this same function. SQLite (3.25+) auto-rewrites any
+            # EXISTING trigger/view body that references a table when that
+            # table is renamed - so the Fix 4 migration above's own `ALTER
+            # TABLE work_objects RENAME TO work_objects_pre_fix4` silently
+            # rewrote the ALREADY-EXISTING `projects` view and its 3 triggers
+            # (created on this install before Fix 4 ever shipped) to
+            # reference `work_objects_pre_fix4` - and since `IF NOT EXISTS`
+            # then saw them as "already there," they were never regenerated
+            # once that temp table was dropped at the end of that same
+            # migration. Confirmed live: `list_projects`/`get_project` (plain
+            # reads through the view, no trigger involved) were raising
+            # `OperationalError: no such table: main.work_objects_pre_fix4`
+            # on every call for the entire time between Fix 4 landing and
+            # this fix - hundreds of real occurrences in the live server log
+            # and the #310 backfill log alike.
+            #
+            # First attempt at a fix unconditionally DROP+CREATEd every view/
+            # trigger above on every single init_workgraph() call - caught,
+            # live, by this file's OWN test_multiprocess_concurrency.py
+            # stress test (16 processes racing a fresh DB): one process's
+            # DROP could remove `issues` for the split second before its
+            # CREATE, right as ANOTHER process's earlier backfill step
+            # (`INSERT INTO issue_state_history ... SELECT ... FROM issues`,
+            # far above in this same function) tried to read through it -
+            # "no such table: issues", a real regression, not a hypothetical
+            # one. The fix belongs behind a cheap gate instead: only repair
+            # when something is ACTUALLY stale (checked once, via
+            # sqlite_master, essentially free), never as an unconditional
+            # per-call cost every process pays regardless. This repair path
+            # is provably never reached by the concurrency stress test above
+            # (a fresh DB has nothing stale to find), so it can't reintroduce
+            # that race - it only ever fires in the rare, real aftermath of
+            # a rename-based rebuild, at which point a brief, single-item
+            # DROP+CREATE race is the same, already-accepted tolerance the
+            # `issues` view's own historical self-healing step always had.
+            # Repaired as whole GROUPS (view + all 3 of its own triggers),
+            # never as individually-stale items: SQLite auto-drops every
+            # trigger defined "ON" a view/table the instant that view/table
+            # itself is dropped. Repairing just the view (leaving its 3
+            # triggers alone because they weren't individually flagged
+            # stale) would silently destroy them the moment the view's own
+            # DROP+CREATE ran, turning "cannot INSERT" into a NEW bug this
+            # fix itself introduced - caught live by this repair's own test
+            # (test_init_workgraph_self_heals_a_rename_corrupted_projects_
+            # view) before it ever shipped. So: if ANYTHING in a group is
+            # stale, the whole group (view first, then its triggers - order
+            # matters, a trigger created before its view exists would fail)
+            # gets recreated together, drop-cascades and all.
+            _stale_names = {
+                r["name"]
+                for r in conn.execute(
+                    """SELECT name FROM sqlite_master
+                       WHERE (type='view' OR type='trigger') AND sql LIKE '%work_objects_pre_%'"""
+                ).fetchall()
+            }
+            _issues_group = {"issues", "trg_issues_insert", "trg_issues_update", "trg_issues_delete"}
+            _projects_group = {"projects", "trg_projects_insert", "trg_projects_update", "trg_projects_delete"}
+            for _group_names, _group_repair_sql in (
+                (_issues_group, [
+                    ("DROP VIEW IF EXISTS issues", "view"),
+                    ("""CREATE VIEW issues AS
+                        SELECT id, title, category, status AS state, priority, priority_score,
+                               nba_action_kind, nba_reason, owner, due, opened_at, updated_at,
+                               confidence_tier, parent_id AS project_id, lesson_id_cited,
+                               has_unmet_prerequisite, claims_revision
+                        FROM work_objects WHERE object_type = 'request' AND is_raw_cluster = 0""", "view"),
+                    ("DROP TRIGGER IF EXISTS trg_issues_insert", "trigger"),
+                    ("""CREATE TRIGGER trg_issues_insert INSTEAD OF INSERT ON issues
+                        BEGIN
+                            INSERT INTO work_objects
+                                (id, object_type, parent_id, title, category, status, priority,
+                                 priority_score, nba_action_kind, nba_reason, owner, due,
+                                 opened_at, updated_at, confidence_tier, lesson_id_cited,
+                                 has_unmet_prerequisite, claims_revision)
+                            VALUES
+                                (NEW.id, 'request', NEW.project_id, NEW.title, NEW.category, NEW.state,
+                                 NEW.priority, NEW.priority_score, NEW.nba_action_kind, NEW.nba_reason,
+                                 NEW.owner, NEW.due, NEW.opened_at, NEW.updated_at, NEW.confidence_tier,
+                                 NEW.lesson_id_cited, COALESCE(NEW.has_unmet_prerequisite, 0),
+                                 COALESCE(NEW.claims_revision, 0));
+                        END""", "trigger"),
+                    ("DROP TRIGGER IF EXISTS trg_issues_update", "trigger"),
+                    ("""CREATE TRIGGER trg_issues_update INSTEAD OF UPDATE ON issues
+                        BEGIN
+                            UPDATE work_objects SET
+                                title = NEW.title, category = NEW.category, status = NEW.state,
+                                priority = NEW.priority, priority_score = NEW.priority_score,
+                                nba_action_kind = NEW.nba_action_kind, nba_reason = NEW.nba_reason,
+                                owner = NEW.owner, due = NEW.due,
+                                opened_at = NEW.opened_at, updated_at = NEW.updated_at,
+                                confidence_tier = NEW.confidence_tier, parent_id = NEW.project_id,
+                                lesson_id_cited = NEW.lesson_id_cited,
+                                has_unmet_prerequisite = NEW.has_unmet_prerequisite,
+                                claims_revision = NEW.claims_revision
+                            WHERE id = OLD.id;
+                        END""", "trigger"),
+                    ("DROP TRIGGER IF EXISTS trg_issues_delete", "trigger"),
+                    ("""CREATE TRIGGER trg_issues_delete INSTEAD OF DELETE ON issues
+                        BEGIN
+                            DELETE FROM work_objects WHERE id = OLD.id;
+                        END""", "trigger"),
+                ]),
+                (_projects_group, [
+                    ("DROP VIEW IF EXISTS projects", "view"),
+                    ("""CREATE VIEW projects AS
+                        SELECT id, title AS name, category, status, opened_at, updated_at,
+                               last_deep_dive_ts, last_deep_dive_note
+                        FROM work_objects WHERE object_type = 'project'""", "view"),
+                    ("DROP TRIGGER IF EXISTS trg_projects_insert", "trigger"),
+                    ("""CREATE TRIGGER trg_projects_insert INSTEAD OF INSERT ON projects
+                        BEGIN
+                            INSERT INTO work_objects
+                                (id, object_type, parent_id, title, category, status, owner,
+                                 opened_at, updated_at, last_deep_dive_ts, last_deep_dive_note)
+                            VALUES
+                                (NEW.id, 'project', NULL, NEW.name, NEW.category, NEW.status, 'marc',
+                                 NEW.opened_at, NEW.updated_at, NEW.last_deep_dive_ts, NEW.last_deep_dive_note);
+                        END""", "trigger"),
+                    ("DROP TRIGGER IF EXISTS trg_projects_update", "trigger"),
+                    ("""CREATE TRIGGER trg_projects_update INSTEAD OF UPDATE ON projects
+                        BEGIN
+                            UPDATE work_objects SET
+                                title = NEW.name, category = NEW.category, status = NEW.status,
+                                opened_at = NEW.opened_at, updated_at = NEW.updated_at,
+                                last_deep_dive_ts = NEW.last_deep_dive_ts,
+                                last_deep_dive_note = NEW.last_deep_dive_note
+                            WHERE id = OLD.id;
+                        END""", "trigger"),
+                    ("DROP TRIGGER IF EXISTS trg_projects_delete", "trigger"),
+                    ("""CREATE TRIGGER trg_projects_delete INSTEAD OF DELETE ON projects
+                        BEGIN
+                            DELETE FROM work_objects WHERE id = OLD.id;
+                        END""", "trigger"),
+                ]),
+            ):
+                if not (_stale_names & _group_names):
+                    continue
+                try:
+                    for _stmt, _kind in _group_repair_sql:
+                        conn.execute(_stmt)
+                except sqlite3.OperationalError:
+                    pass
+
             # --- evidence_units (design doc Section 12.2, 2026-08-03): removes
             # the exact structural constraint confirmed in evidence's own
             # schema - issue_id was a MANDATORY single FK, so one raw_item's

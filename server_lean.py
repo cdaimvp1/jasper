@@ -2783,11 +2783,13 @@ class ClaimSuggestionResolveBody(BaseModel):
 @app.post("/api/workgraph/claim-suggestions/{suggestion_id}/resolve")
 async def api_claim_suggestion_resolve(suggestion_id: int, body: ClaimSuggestionResolveBody):
     """Confirming a 'resolve' suggestion marks the named claim done;
-    confirming a 'contradiction' suggestion only acknowledges the
-    mismatch and never touches the claim (see workgraph_reconcile's
-    module docstring - an issue closing is not evidence a claim was
-    fulfilled). Either way, nothing here ever auto-closes anything
-    without this explicit human call."""
+    confirming a 'reopen' suggestion (task #304, item #5) sets the named
+    RESOLVED claim back to open - the same topic reoccurred; confirming a
+    'contradiction' suggestion only acknowledges the mismatch and never
+    touches the claim (see workgraph_reconcile's module docstring - an
+    issue closing is not evidence a claim was fulfilled). Either way,
+    nothing here ever auto-closes/reopens anything without this explicit
+    human call."""
     if body.status not in ("confirmed", "rejected"):
         raise HTTPException(400, "status must be 'confirmed' or 'rejected'")
     if wg.get_claim_suggestion(suggestion_id) is None:
@@ -2851,10 +2853,11 @@ async def api_review_queue():
     claim_suggestions = wg.list_pending_claim_suggestions()
     prereq_suggestions = wg.list_prerequisite_suggestions("pending")
     items = []
+    _CLAIM_SUGGESTION_VERBS = {"resolve": "Resolve", "reopen": "Reopen"}
     for s in claim_suggestions:
         claim = wg.get_claim(s["claim_id"])
         claim_text = (claim or {}).get("text") or "(claim text unavailable)"
-        verb = "Resolve" if s["suggestion_kind"] == "resolve" else "Contradiction on"
+        verb = _CLAIM_SUGGESTION_VERBS.get(s["suggestion_kind"], "Contradiction on")
         description = f'{verb} claim "{claim_text}"'
         if s.get("evidence_note"):
             description += f": {s['evidence_note']}"

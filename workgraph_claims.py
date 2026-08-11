@@ -231,6 +231,32 @@ def _claim_specs_from_blob(blob: dict, author: str, reference_base: Optional[str
     return specs
 
 
+def _suggest_reopen_if_matches_a_resolved_claim(issue_id: str, claim_type: str, text: str,
+                                                 canonical_key: Optional[str], raw_item_id: int) -> None:
+    """Task #304, item #5 (2026-08-11) - the 'reopen' claim suggestion.
+    find_open_claim_by_text/find_open_claim_by_canonical_key have only
+    ever searched OPEN claims, so a topic that comes back up again after
+    its claim was already resolved (done/superseded/dismissed) always
+    created a brand-new, disconnected claim with nothing linking it back
+    to the fact this exact ask/decision/commitment was already marked
+    closed once. Suggest-only, same discipline as every other mechanism
+    in workgraph_reconcile.py: the fresh claim still gets inserted as
+    usual (real new content is never silently withheld) - this only ADDS
+    a suggestion for a human to review, never touches the resolved claim
+    itself unless and until that suggestion is explicitly confirmed."""
+    resolved = ws.find_resolved_claim_by_text(issue_id, claim_type, text)
+    if resolved is None and canonical_key is not None:
+        resolved = ws.find_resolved_claim_by_canonical_key(issue_id, claim_type, canonical_key)
+    if resolved is None:
+        return
+    ws.create_claim_suggestion(
+        claim_id=resolved["id"], suggestion_kind="reopen",
+        evidence_type="resolved_claim_reoccurred",
+        evidence_note=f"same {claim_type} text reoccurred after being marked {resolved['status']}: {text}",
+        raw_item_id=raw_item_id,
+    )
+
+
 def _materialize_fresh(issue_id: str, raw_item_id: int, blob: dict, ts: Optional[float],
                         author: str, author_basis: str, reference_base: Optional[str]) -> int:
     """The FIRST-EVER materialization for a raw_item - no prior claims to
@@ -259,6 +285,8 @@ def _materialize_fresh(issue_id: str, raw_item_id: int, blob: dict, ts: Optional
         # one didn't already find something.
         if existing is None and canonical_key is not None:
             existing = ws.find_open_claim_by_canonical_key(issue_id, claim_type, canonical_key)
+        if existing is None:
+            _suggest_reopen_if_matches_a_resolved_claim(issue_id, claim_type, text, canonical_key, raw_item_id)
         if existing is not None:
             # Only apply escalation state when repeat_signals actually
             # said something about it - escalated=None on touch_claim

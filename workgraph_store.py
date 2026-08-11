@@ -1023,7 +1023,6 @@ def init_workgraph() -> None:
                     note       TEXT
                 )
             """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_claim_events_claim ON claim_events(claim_id, ts)")
 
             try:
                 # Provenance fix (2026-08-04, architecture-review follow-up
@@ -1038,6 +1037,48 @@ def init_workgraph() -> None:
                 conn.execute("ALTER TABLE claim_events ADD COLUMN raw_item_id INTEGER REFERENCES raw_items(id)")
             except sqlite3.OperationalError:
                 pass
+
+            # Task #304, item #5 (2026-08-11): 'reopen' is the real, demand-
+            # driven 6th event type this table's own docstring above invited
+            # ("revisit if a real case shows these 5 aren't enough") - a
+            # human confirming a 'reopen' claim suggestion (see pending_
+            # claim_suggestions' own widening below) sets a resolved claim
+            # back to status='open', and this is that action's real trace.
+            # Same rebuild-and-copy pattern as every other CHECK-constraint
+            # widening in this file - runs AFTER the raw_item_id ALTER COLUMN
+            # just above so a rebuild always finds that column already
+            # present on the table being copied from, fresh DB or not.
+            existing_sql = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='claim_events'"
+            ).fetchone()
+            if existing_sql and "'reopen'" not in (existing_sql["sql"] or ""):
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    conn.execute("ALTER TABLE claim_events RENAME TO claim_events_pre_t304")
+                    conn.execute("""
+                        CREATE TABLE claim_events (
+                            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                            claim_id    INTEGER NOT NULL REFERENCES claims(id),
+                            event_type  TEXT NOT NULL CHECK (event_type IN
+                                          ('create','escalate','acknowledge','complete','dismiss','reopen')),
+                            ts          REAL NOT NULL,
+                            actor       TEXT NOT NULL,
+                            note        TEXT,
+                            raw_item_id INTEGER REFERENCES raw_items(id)
+                        )
+                    """)
+                    conn.execute("""
+                        INSERT INTO claim_events (id, claim_id, event_type, ts, actor, note, raw_item_id)
+                        SELECT id, claim_id, event_type, ts, actor, note, raw_item_id FROM claim_events_pre_t304
+                    """)
+                    conn.execute("DROP TABLE claim_events_pre_t304")
+                    conn.execute("COMMIT")
+                except sqlite3.OperationalError:
+                    try:
+                        conn.execute("ROLLBACK")
+                    except sqlite3.OperationalError:
+                        pass
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_claim_events_claim ON claim_events(claim_id, ts)")
 
             # pending_claim_suggestions (2026-08-04, architecture-review
             # follow-up P1, task #155): same review-then-confirm shape as
@@ -1066,6 +1107,59 @@ def init_workgraph() -> None:
                     resolved_ts     REAL
                 )
             """)
+
+            # Task #304, item #5 (2026-08-11, Marc's own build authorization:
+            # "claim reconciliation richness"): a real, concretely-demanded
+            # third suggestion_kind - 'reopen'. Both find_open_claim_by_text
+            # and find_open_claim_by_canonical_key have only ever searched
+            # OPEN claims, so a topic that comes back up again after its
+            # claim was already resolved (done/superseded/dismissed) always
+            # created a brand-new, disconnected claim, with nothing ever
+            # linking it back to the fact this exact ask/decision/commitment
+            # had already been marked closed once. evidence_type=
+            # 'resolved_claim_reoccurred' names that real, deterministic
+            # exact-match signal (see workgraph_claims.py's new detection at
+            # materialize time) - never a fuzzy "this seems related" guess,
+            # same text/canonical_key exact-match discipline the resolve
+            # path already uses. Same rebuild-and-copy pattern as the alerts
+            # table's own CHECK-constraint widenings above - CREATE TABLE IF
+            # NOT EXISTS is a no-op against a table that predates this.
+            existing_sql = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='pending_claim_suggestions'"
+            ).fetchone()
+            if existing_sql and "'reopen'" not in (existing_sql["sql"] or ""):
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    conn.execute("ALTER TABLE pending_claim_suggestions RENAME TO pending_claim_suggestions_pre_t304")
+                    conn.execute("""
+                        CREATE TABLE pending_claim_suggestions (
+                            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                            claim_id        INTEGER NOT NULL REFERENCES claims(id),
+                            suggestion_kind TEXT NOT NULL CHECK (suggestion_kind IN ('resolve','contradiction','reopen')),
+                            evidence_type   TEXT NOT NULL CHECK (evidence_type IN
+                                               ('explicit_resolution_signal','issue_closed_with_open_claims',
+                                                'resolved_claim_reoccurred')),
+                            evidence_note   TEXT,
+                            raw_item_id     INTEGER REFERENCES raw_items(id),
+                            status          TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','confirmed','rejected','expired')),
+                            created_ts      REAL NOT NULL,
+                            resolved_ts     REAL
+                        )
+                    """)
+                    conn.execute("""
+                        INSERT INTO pending_claim_suggestions (id, claim_id, suggestion_kind, evidence_type,
+                                                                evidence_note, raw_item_id, status, created_ts, resolved_ts)
+                        SELECT id, claim_id, suggestion_kind, evidence_type,
+                               evidence_note, raw_item_id, status, created_ts, resolved_ts
+                        FROM pending_claim_suggestions_pre_t304
+                    """)
+                    conn.execute("DROP TABLE pending_claim_suggestions_pre_t304")
+                    conn.execute("COMMIT")
+                except sqlite3.OperationalError:
+                    try:
+                        conn.execute("ROLLBACK")
+                    except sqlite3.OperationalError:
+                        pass
             conn.execute("CREATE INDEX IF NOT EXISTS idx_claim_suggestions_status ON pending_claim_suggestions(status)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_claim_suggestions_claim ON pending_claim_suggestions(claim_id, evidence_type)")
 
@@ -7000,6 +7094,48 @@ def find_open_claim_by_canonical_key(issue_id: str, claim_type: str, canonical_k
                 """SELECT * FROM claims WHERE issue_id = ? AND claim_type = ?
                    AND status = 'open' AND canonical_key = ? ORDER BY id DESC LIMIT 1""",
                 (issue_id, claim_type, canonical_key),
+            ).fetchone()
+        finally:
+            conn.close()
+    return dict(row) if row else None
+
+
+_RESOLVED_CLAIM_STATUSES = ("done", "superseded", "dismissed")
+
+
+def find_resolved_claim_by_text(issue_id: str, claim_type: str, text: str) -> Optional[dict]:
+    """Task #304, item #5 (2026-08-11) - the mirror of find_open_claim_by_
+    text, searching among this issue's RESOLVED claims (done/superseded/
+    dismissed) instead of open ones. The real signal a 'reopen' claim
+    suggestion is built on: a topic that already got marked closed once,
+    now reappearing byte-for-byte. Exact match only, same discipline as
+    every other claim-matching function here - never a fuzzy guess."""
+    with _lock:
+        conn = _connect()
+        try:
+            placeholders = ",".join("?" * len(_RESOLVED_CLAIM_STATUSES))
+            row = conn.execute(
+                f"""SELECT * FROM claims WHERE issue_id = ? AND claim_type = ?
+                    AND status IN ({placeholders}) AND text = ? ORDER BY id DESC LIMIT 1""",
+                (issue_id, claim_type, *_RESOLVED_CLAIM_STATUSES, text),
+            ).fetchone()
+        finally:
+            conn.close()
+    return dict(row) if row else None
+
+
+def find_resolved_claim_by_canonical_key(issue_id: str, claim_type: str, canonical_key: str) -> Optional[dict]:
+    """Fallback for find_resolved_claim_by_text above, same canonical_key-
+    keyed shape as find_open_claim_by_canonical_key. Called only when the
+    byte-exact text match already failed."""
+    with _lock:
+        conn = _connect()
+        try:
+            placeholders = ",".join("?" * len(_RESOLVED_CLAIM_STATUSES))
+            row = conn.execute(
+                f"""SELECT * FROM claims WHERE issue_id = ? AND claim_type = ?
+                    AND status IN ({placeholders}) AND canonical_key = ? ORDER BY id DESC LIMIT 1""",
+                (issue_id, claim_type, *_RESOLVED_CLAIM_STATUSES, canonical_key),
             ).fetchone()
         finally:
             conn.close()

@@ -194,6 +194,44 @@ def test_confirming_a_contradiction_suggestion_never_touches_the_claim(ws_db):
     assert ws_db.get_claim_suggestion(suggestion["id"])["status"] == "confirmed"
 
 
+# --- resolved_claim_reoccurred (reopen) - task #304, item #5 ---------------
+
+def test_confirming_a_reopen_suggestion_sets_the_claim_back_to_open(ws_db):
+    iid = _issue(ws_db)
+    rid1 = _raw_item(ws_db, iid, "reo1", {"asks": ["please send the SOW"]}, direction="outbound")
+    wc.materialize_claims_for_raw_item(rid1)
+    original = wc.list_open_claims_for_issue(iid, claim_type="ask")[0]
+    ws_db.update_claim_status(original["id"], "done", actor="marc")
+    rid2 = _raw_item(ws_db, iid, "reo2", {"asks": ["please send the SOW"]}, direction="outbound")
+    wc.materialize_claims_for_raw_item(rid2)
+    suggestion = next(s for s in ws_db.list_pending_claim_suggestions(iid) if s["suggestion_kind"] == "reopen")
+
+    ok = wr.confirm_claim_suggestion(suggestion["id"], actor="marc")
+
+    assert ok is True
+    assert ws_db.get_claim(original["id"])["status"] == "open"
+    assert ws_db.get_claim_suggestion(suggestion["id"])["status"] == "confirmed"
+    events = ws_db.list_claim_events_for_claim(original["id"])
+    assert any(e["event_type"] == "reopen" for e in events)
+
+
+def test_rejecting_a_reopen_suggestion_never_touches_the_claim(ws_db):
+    iid = _issue(ws_db)
+    rid1 = _raw_item(ws_db, iid, "reo3", {"asks": ["please send the SOW"]}, direction="outbound")
+    wc.materialize_claims_for_raw_item(rid1)
+    original = wc.list_open_claims_for_issue(iid, claim_type="ask")[0]
+    ws_db.update_claim_status(original["id"], "done", actor="marc")
+    rid2 = _raw_item(ws_db, iid, "reo4", {"asks": ["please send the SOW"]}, direction="outbound")
+    wc.materialize_claims_for_raw_item(rid2)
+    suggestion = next(s for s in ws_db.list_pending_claim_suggestions(iid) if s["suggestion_kind"] == "reopen")
+
+    ok = wr.reject_claim_suggestion(suggestion["id"], actor="marc")
+
+    assert ok is True
+    assert ws_db.get_claim(original["id"])["status"] == "done"
+    assert ws_db.get_claim_suggestion(suggestion["id"])["status"] == "rejected"
+
+
 def test_open_issue_with_open_claims_creates_no_contradiction(ws_db):
     iid = _issue(ws_db, state="active")
     rid = _raw_item(ws_db, iid, "open1", {"asks": ["please send the SOW"]}, direction="outbound")

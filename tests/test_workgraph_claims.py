@@ -695,3 +695,52 @@ def test_single_issue_with_only_one_open_claim_not_flagged(ws_db):
     wc.materialize_claims_for_raw_item(rid)
 
     assert wc.find_duplicate_or_conflicting_asks_across_project() == []
+
+
+# --- reopen suggestion on a resolved-claim reoccurrence (task #304, item #5)
+
+def test_reoccurring_ask_after_resolution_creates_a_reopen_suggestion(ws_db):
+    iid = _issue(ws_db)
+    rid1 = _raw_item(ws_db, iid, "reopen1", {"asks": ["please send the SOW"]}, direction="outbound")
+    wc.materialize_claims_for_raw_item(rid1)
+    original = wc.list_open_claims_for_issue(iid, claim_type="ask")[0]
+    ws_db.update_claim_status(original["id"], "done", actor="marc")
+
+    rid2 = _raw_item(ws_db, iid, "reopen2", {"asks": ["please send the SOW"]}, direction="outbound")
+    inserted = wc.materialize_claims_for_raw_item(rid2)
+
+    assert inserted == 1  # the fresh claim still gets created, real new content
+    suggestions = ws_db.list_pending_claim_suggestions(iid)
+    reopen_suggestions = [s for s in suggestions if s["suggestion_kind"] == "reopen"]
+    assert len(reopen_suggestions) == 1
+    assert reopen_suggestions[0]["claim_id"] == original["id"]
+    assert reopen_suggestions[0]["evidence_type"] == "resolved_claim_reoccurred"
+
+
+def test_reoccurring_ask_while_still_open_creates_no_reopen_suggestion(ws_db):
+    iid = _issue(ws_db)
+    rid1 = _raw_item(ws_db, iid, "stillopen1", {"asks": ["please send the SOW"]}, direction="outbound")
+    wc.materialize_claims_for_raw_item(rid1)
+
+    rid2 = _raw_item(ws_db, iid, "stillopen2", {"asks": ["please send the SOW"]}, direction="outbound")
+    wc.materialize_claims_for_raw_item(rid2)
+
+    suggestions = ws_db.list_pending_claim_suggestions(iid)
+    assert [s for s in suggestions if s["suggestion_kind"] == "reopen"] == []
+
+
+def test_reopen_suggestion_dedupes_against_a_second_reoccurrence(ws_db):
+    iid = _issue(ws_db)
+    rid1 = _raw_item(ws_db, iid, "dedup1", {"asks": ["please send the SOW"]}, direction="outbound")
+    wc.materialize_claims_for_raw_item(rid1)
+    original = wc.list_open_claims_for_issue(iid, claim_type="ask")[0]
+    ws_db.update_claim_status(original["id"], "done", actor="marc")
+
+    rid2 = _raw_item(ws_db, iid, "dedup2", {"asks": ["please send the SOW"]}, direction="outbound")
+    wc.materialize_claims_for_raw_item(rid2)
+    rid3 = _raw_item(ws_db, iid, "dedup3", {"asks": ["please send the SOW"]}, direction="outbound")
+    wc.materialize_claims_for_raw_item(rid3)
+
+    suggestions = ws_db.list_pending_claim_suggestions(iid)
+    reopen_suggestions = [s for s in suggestions if s["suggestion_kind"] == "reopen"]
+    assert len(reopen_suggestions) == 1

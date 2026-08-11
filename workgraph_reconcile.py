@@ -11,9 +11,10 @@ EXPLICIT human confirm (confirm_claim_suggestion) - every suggestion sits
 in pending_claim_suggestions until reviewed, same shape as
 pending_project_suggestions' merge/link queue.
 
-Deliberately exactly two evidence types, both a closed enum on the
-pending_claim_suggestions.evidence_type CHECK constraint - no fuzzy/
-heuristic "this claim is probably done" scoring of any kind:
+Three evidence types now (task #304, item #5, 2026-08-11 added the third),
+all a closed enum on the pending_claim_suggestions.evidence_type CHECK
+constraint - no fuzzy/heuristic "this claim is probably done" scoring of
+any kind:
 
   explicit_resolution_signal (suggestion_kind='resolve') - the SAME
     curator-extraction step that already produces repeat_signals
@@ -39,10 +40,24 @@ heuristic "this claim is probably done" scoring of any kind:
     this kind of suggestion only acknowledges the mismatch; it never
     touches the claim.
 
-Both paths dedupe against any existing PENDING suggestion for the same
-(claim_id, evidence_type) pair (workgraph_store.create_claim_suggestion) -
-re-running either sweep never produces a duplicate pending suggestion for
-a claim already flagged.
+  resolved_claim_reoccurred (suggestion_kind='reopen') - a real, exact-
+    match signal find_open_claim_by_text/find_open_claim_by_canonical_key
+    could never see (both only ever search OPEN claims): a topic that
+    comes back up again after its claim was already marked done/
+    superseded/dismissed. Detected inline at materialize time (see
+    workgraph_claims._suggest_reopen_if_matches_a_resolved_claim) - the
+    fresh claim the reoccurrence's own extraction produces still gets
+    inserted as usual; this only ADDS a suggestion to reopen the OLD
+    resolved claim too, since the same real ask/decision/commitment is
+    now demonstrably still outstanding. Confirming sets that old claim
+    back to status='open' - see confirm_claim_suggestion for why it
+    deliberately does not also touch the newly-inserted claim.
+
+All three paths dedupe against any existing PENDING suggestion for the
+same (claim_id, evidence_type) pair (workgraph_store.
+create_claim_suggestion) - re-running any sweep, or re-materializing the
+same raw_item, never produces a duplicate pending suggestion for a claim
+already flagged.
 """
 from __future__ import annotations
 
@@ -362,13 +377,21 @@ def list_pending_claim_suggestions_for_issue(issue_id: str) -> list[dict]:
 
 def confirm_claim_suggestion(suggestion_id: int, *, actor: str) -> bool:
     """The ONLY path in this module that changes a claim's status, and
-    only on an explicit human confirm of a 'resolve' suggestion.
-    Confirming a 'contradiction' suggestion just acknowledges the
-    mismatch - it deliberately never marks the claim done, since an
+    only on an explicit human confirm of a 'resolve' or 'reopen'
+    suggestion. Confirming a 'contradiction' suggestion just acknowledges
+    the mismatch - it deliberately never marks the claim done, since an
     issue closing is not evidence the claim was actually fulfilled (see
     module docstring); a human who wants that claim closed does so
-    through the normal checklist action instead. Returns False if the
-    suggestion doesn't exist or was already resolved."""
+    through the normal checklist action instead. Confirming a 'reopen'
+    suggestion (task #304, item #5, 2026-08-11) sets the cited RESOLVED
+    claim back to status='open' - the same topic reoccurred, so it's
+    still real, outstanding work; deliberately does NOT touch whatever
+    fresh claim the reoccurrence's own extraction already created (no
+    reliable 1:1 pairing to guess, same discipline reconcile_extraction_
+    claims' own supersede path already established - a human sees both
+    and can merge/dismiss the duplicate by hand if that's what happened).
+    Returns False if the suggestion doesn't exist or was already
+    resolved."""
     suggestion = ws.get_claim_suggestion(suggestion_id)
     if suggestion is None or suggestion["status"] != "pending":
         return False
@@ -378,6 +401,13 @@ def confirm_claim_suggestion(suggestion_id: int, *, actor: str) -> bool:
         ws.log_claim_event(
             suggestion["claim_id"], "complete", actor=actor,
             note="confirmed via claim-resolution suggestion",
+            raw_item_id=suggestion.get("raw_item_id"),
+        )
+    elif suggestion["suggestion_kind"] == "reopen":
+        ws.update_claim_status(suggestion["claim_id"], "open", actor=actor)
+        ws.log_claim_event(
+            suggestion["claim_id"], "reopen", actor=actor,
+            note="confirmed via claim-reopen suggestion - same topic reoccurred",
             raw_item_id=suggestion.get("raw_item_id"),
         )
     return True

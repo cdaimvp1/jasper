@@ -37,6 +37,19 @@ ws.create_extraction / ws.upsert_synthesis primitives the real curator
 routine (via server_lean.py's own routes) and workgraph_pipeline2.py's
 run_project_extraction already use - never a new, parallel synthesis
 representation.
+
+Party (vendor/stakeholder) linking (task #323, 2026-08-11): run_light_
+synthesis also calls workgraph_parties.run over this entity's own
+members on every invocation - the same deterministic, no-LLM domain-
+heuristic mechanism workgraph_classify.cluster_and_link already calls
+for the live ingest path. Before this fix, a light-synthesized project/
+issue could get real claims materialized with zero party ever linked
+underneath (confirmed live: 25 of 39 rows, 64%, on the Workload Status
+Update Report had no vendor shown), since cluster_and_link's own party
+pass is scoped to the raw_items a CLASSIFY batch touches, not to
+whatever this module later synthesizes - most visibly for backfill_
+stale_marker_projects.py, which calls run_light_synthesis directly and
+deliberately bypasses cluster_and_link/list_stale_entities entirely.
 """
 from __future__ import annotations
 
@@ -50,6 +63,7 @@ from typing import Optional
 import text_extract
 import workgraph_store as ws
 import workgraph_claims
+import workgraph_parties
 import workgraph_reconcile
 import workgraph_synthesis
 
@@ -239,12 +253,35 @@ def run_light_synthesis(entity_type: str, entity_id: str, *, model: str | None =
     if entity is None:
         return {"entity_type": entity_type, "entity_id": entity_id, "action": "not_found"}
 
+    # Task #323 fix (2026-08-11, real bug confirmed by Marc's direct report
+    # review of the Workload Status Update Report - 25 of 39 rows, 64%, had
+    # no vendor/party shown): party (vendor/stakeholder) linking used to
+    # happen ONLY via workgraph_classify.cluster_and_link's own call to
+    # workgraph_parties.run(touched_issues) during live ingest - this light-
+    # synthesis path never called it, so any project/issue synthesized here
+    # (including via backfill_stale_marker_projects.py, which calls this
+    # function directly and deliberately bypasses cluster_and_link/list_
+    # stale_entities entirely) could get real claims materialized with zero
+    # party ever linked underneath. workgraph_parties.run is the exact same
+    # deterministic, no-LLM domain-heuristic mechanism the curator/classify
+    # path already uses for this - reused here verbatim rather than
+    # re-derived, and it is exactly the "cheap, already-available signal"
+    # this path's own design principle calls for (see module docstring).
+    # It is also safe/idempotent to call on every light-synthesis run
+    # regardless of whether THIS run finds new evidence (upsert_party/
+    # link_party_to_issue are both no-ops on a repeat) - a party's presence
+    # is a fact about who's actually on the thread, not something scoped to
+    # this run's own newly-extracted claims.
+    member_ids = _member_ids_for_entity(entity_type, entity_id)
+    party_result = workgraph_parties.run(member_ids)
+
     new_items, full_text = _gather_new_evidence(entity_type, entity_id)
     if not new_items:
         # Shouldn't happen given list_stale_entities' own staleness gate
         # (a revision bump implies at least one new material claim), but
         # never crash a scheduled run over a race against that gate.
-        return {"entity_type": entity_type, "entity_id": entity_id, "action": "no_new_evidence"}
+        return {"entity_type": entity_type, "entity_id": entity_id, "action": "no_new_evidence",
+                "parties": party_result}
 
     existing = ws.get_synthesis(entity_type, entity_id)
     previous_summary = (existing or {}).get("summary") or "(none yet - first synthesis)"
@@ -258,11 +295,13 @@ def run_light_synthesis(entity_type: str, entity_id: str, *, model: str | None =
     try:
         proc = _run_headless_claude(prompt, timeout=_TIMEOUT_SECONDS, model=model)
     except subprocess.TimeoutExpired:
-        return {"entity_type": entity_type, "entity_id": entity_id, "action": "timeout"}
+        return {"entity_type": entity_type, "entity_id": entity_id, "action": "timeout",
+                "parties": party_result}
 
     parsed = _parse_light_output(proc.stdout)
     if parsed is None:
-        return {"entity_type": entity_type, "entity_id": entity_id, "action": "unparseable"}
+        return {"entity_type": entity_type, "entity_id": entity_id, "action": "unparseable",
+                "parties": party_result}
 
     extractions = parsed.get("extractions") or {}
     extracted_count = 0
@@ -296,4 +335,4 @@ def run_light_synthesis(entity_type: str, entity_id: str, *, model: str | None =
         synthesized_from_marker=marker,
     )
     return {"entity_type": entity_type, "entity_id": entity_id, "action": "synthesized_light",
-            "new_raw_items": len(new_items), "extracted": extracted_count}
+            "new_raw_items": len(new_items), "extracted": extracted_count, "parties": party_result}

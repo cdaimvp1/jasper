@@ -143,3 +143,131 @@ def test_run_light_synthesis_skips_extraction_entry_missing_for_a_raw_item(ws_db
     assert result["action"] == "synthesized_light"
     assert result["extracted"] == 0
     assert ws_db.get_synthesis("issue", iid) is not None
+
+
+# --- party linking (task #323 - light path used to never link a party) -----
+
+def _raw_item_from(ws_db, issue_id, key, from_actor, body="body"):
+    """Like _raw_item above, but with a caller-controlled from_actor - the
+    field workgraph_parties' domain heuristic actually keys off."""
+    rid = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key=key, thread_key=key, dedupe_key=key,
+        occurred_ts=time.time(), subject="s", from_actor=from_actor,
+        participants_json="[]", body_preview=body,
+    )
+    ws_db.link_raw_item_to_issue(rid, issue_id)
+    return rid
+
+
+def test_run_light_synthesis_links_external_vendor_party(ws_db, monkeypatch):
+    """A light-synthesized issue whose new evidence carries a real,
+    non-machine external sender domain must come out of run_light_synthesis
+    with that party linked and a real company guessed from the domain -
+    the exact real-world gap Marc found (25 of 39 status-report rows with
+    no vendor shown, because the light path never called workgraph_parties
+    at all)."""
+    iid = _issue(ws_db, "Acme pricing thread")
+    rid = _raw_item_from(ws_db, iid, "k1", "rep@acmesupplier.com", "We confirm pricing.")
+
+    reply = json.loads(_LIGHT_REPLY)
+    reply["extractions"][str(rid)] = {
+        "asks": [], "decisions": ["pricing confirmed"], "dates_mentioned": [],
+        "commitments": [], "key_facts": [],
+    }
+    monkeypatch.setattr(wsl, "_run_headless_claude", lambda prompt, timeout, model=None: _FakeProc(json.dumps(reply)))
+
+    result = wsl.run_light_synthesis("issue", iid)
+
+    assert result["action"] == "synthesized_light"
+    assert result["parties"]["parties_linked"] == 1
+
+    parties = ws_db.list_parties_for_issue(iid)
+    assert len(parties) == 1
+    assert parties[0]["affiliation"] == "external"
+    assert parties[0]["company"] == "Acmesupplier"
+
+
+def test_run_light_synthesis_does_not_fabricate_vendor_for_internal_sender(ws_db, monkeypatch):
+    """An internal (lilly.com) sender is a real party (a real colleague), but
+    must never get a guessed company - there is no real vendor signal on an
+    internal address, and this is a correctness-over-completeness fix, not
+    an 'always fill the field' one."""
+    iid = _issue(ws_db, "Internal thread")
+    rid = _raw_item_from(ws_db, iid, "k1", "colleague@lilly.com", "Just an FYI.")
+
+    reply = json.loads(_LIGHT_REPLY)
+    reply["extractions"][str(rid)] = {
+        "asks": [], "decisions": [], "dates_mentioned": [], "commitments": [], "key_facts": [],
+    }
+    monkeypatch.setattr(wsl, "_run_headless_claude", lambda prompt, timeout, model=None: _FakeProc(json.dumps(reply)))
+
+    result = wsl.run_light_synthesis("issue", iid)
+
+    assert result["action"] == "synthesized_light"
+    parties = ws_db.list_parties_for_issue(iid)
+    assert len(parties) == 1
+    assert parties[0]["affiliation"] == "internal"
+    assert parties[0]["company"] is None
+
+
+def test_run_light_synthesis_does_not_fabricate_vendor_for_automated_sender(ws_db, monkeypatch):
+    """A known machine-relay sender (e.g. an Ariba/Concur notification) gets
+    no guessed company either - its domain label ('ansmtp') is not a real
+    supplier name (see workgraph_parties.classify_affiliation's own
+    system_sender branch)."""
+    iid = _issue(ws_db, "Automated notification thread")
+    rid = _raw_item_from(ws_db, iid, "k1", "no-reply@ansmtp.ariba.com", "Auto notice.")
+
+    reply = json.loads(_LIGHT_REPLY)
+    reply["extractions"][str(rid)] = {
+        "asks": [], "decisions": [], "dates_mentioned": [], "commitments": [], "key_facts": [],
+    }
+    monkeypatch.setattr(wsl, "_run_headless_claude", lambda prompt, timeout, model=None: _FakeProc(json.dumps(reply)))
+
+    result = wsl.run_light_synthesis("issue", iid)
+
+    assert result["action"] == "synthesized_light"
+    parties = ws_db.list_parties_for_issue(iid)
+    assert len(parties) == 1
+    assert parties[0]["company"] is None
+    assert parties[0]["affiliation_source"] == "system_sender"
+
+
+def test_run_light_synthesis_links_parties_across_project_members(ws_db, monkeypatch):
+    """entity_type='project' must link parties from every member (clusters
+    AND real issues), same member set _gather_new_evidence itself reads -
+    not just a standalone issue's own single member list."""
+    pid = ws_db.create_project_with_new_id(name="Proj", category="other")
+    iid = _issue(ws_db, "Member issue")
+    ws_db.assign_issue_to_project(iid, pid, reason="test")
+    cid = _cluster(ws_db, "Member cluster")
+    ws_db.assign_issue_to_project(cid, pid, reason="test")
+    rid_issue = _raw_item_from(ws_db, iid, "k1", "rep@acmesupplier.com", "issue body")
+    rid_cluster = _raw_item_from(ws_db, cid, "k2", "other@othervendor.com", "cluster body")
+
+    reply = json.loads(_LIGHT_REPLY)
+    reply["extractions"][str(rid_issue)] = {"asks": [], "decisions": [], "dates_mentioned": [], "commitments": [], "key_facts": []}
+    reply["extractions"][str(rid_cluster)] = {"asks": [], "decisions": [], "dates_mentioned": [], "commitments": [], "key_facts": []}
+    monkeypatch.setattr(wsl, "_run_headless_claude", lambda prompt, timeout, model=None: _FakeProc(json.dumps(reply)))
+
+    result = wsl.run_light_synthesis("project", pid)
+
+    assert result["action"] == "synthesized_light"
+    assert result["parties"]["parties_linked"] == 2
+    assert {p["company"] for p in ws_db.list_parties_for_issue(iid)} == {"Acmesupplier"}
+    assert {p["company"] for p in ws_db.list_parties_for_issue(cid)} == {"Othervendor"}
+
+
+def test_run_light_synthesis_no_new_evidence_still_reports_parties_key(ws_db):
+    """Even the early no_new_evidence return still runs (and reports) the
+    party pass, since it's cheap/idempotent and independent of whether
+    THIS run finds new evidence."""
+    iid = _issue(ws_db)
+    _raw_item_from(ws_db, iid, "k1", "rep@acmesupplier.com")
+    ws_db.create_extraction(
+        ws_db.get_raw_items_for_issue(iid)[0]["id"], json.dumps({"asks": []}),
+    )
+    result = wsl.run_light_synthesis("issue", iid)
+    assert result["action"] == "no_new_evidence"
+    assert "parties" in result
+    assert ws_db.list_parties_for_issue(iid)[0]["company"] == "Acmesupplier"

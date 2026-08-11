@@ -591,6 +591,19 @@ def run() -> dict:
     except Exception as e:
         dormant_sweep_result = {"error": str(e)}
 
+    # Task #318 - same once/day gate as choice_log_expiry above. Tries to
+    # correlate each pending hero-draft-reply's captured suggested_text
+    # against a real, later Sent Items row on the same issue (only shows up
+    # after sent_mail_result above has actually run at least once since the
+    # draft) and classifies rewrite severity; gives up honestly (marks
+    # abandoned, never guesses) once a row ages past the correlation
+    # window with nothing found. See workgraph_nba's own module docstring
+    # on this block for the two real, disclosed limitations.
+    try:
+        nba_rewrite_judgment_result = workgraph_nba.run_rewrite_judgment_daily_if_due()
+    except Exception as e:
+        nba_rewrite_judgment_result = {"error": str(e)}
+
     summary = {
         "mail": mail_result,
         "sent_mail": sent_mail_result,
@@ -617,6 +630,7 @@ def run() -> dict:
         "relationship_sweep": relationship_sweep_result,
         "noise_sweep": noise_sweep_result,
         "dormant_sweep": dormant_sweep_result,
+        "nba_rewrite_judgment": nba_rewrite_judgment_result,
     }
     _log(f"REFRESH ok mail_inserted={mail_result.get('inserted', '?')} "
         f"relay_ok={relay_result.get('ok')} relay_calendar_advanced={relay_result.get('cursor_advanced')} "

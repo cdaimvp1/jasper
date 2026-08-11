@@ -256,6 +256,57 @@ def check_prerequisites(issue_id: str, raw_items: list[dict]) -> Optional[dict]:
     return all_checks[0] if all_checks else None
 
 
+# Task #319: a second, real source of gating signal alongside this module's
+# own taught-rule check above - real object-to-object project_links
+# dependencies (workgraph_store.py) rather than a signal-type-based rule.
+# Deliberately returns the SAME {"warning", ...} shape, using the SAME
+# WARNING_PREFIX, as check_prerequisites above - workgraph_nba.recompute_
+# all's has_unmet_prerequisite persistence (task #55) already keys off
+# that fixed prefix, so this plugs into that exact mechanism unchanged
+# rather than needing its own separate gating flag.
+_LINK_RESOLVED_PROJECT_STATUSES = ("done", "archived", "dismissed")
+
+
+def check_project_link_prerequisite(issue_id: str) -> Optional[dict]:
+    """Real, structured project_links dependency check: if this issue's own
+    project has a `depends_on` link TO another project, or a `blocks` link
+    FROM another project (i.e. this project is the blocked side), and that
+    other project hasn't reached a resolved status yet, flag it - same
+    "no confirmation seen yet" honesty as check_prerequisites above (a
+    project sitting at 'dormant' or 'waiting' is not proof the dependency
+    is unresolved forever, only that it isn't resolved yet).
+
+    Issue-level, resolved through the issue's OWN project_id - an issue not
+    yet grouped into a real project (project_id is None) has no project-
+    level relationship to check and returns None, same as check_
+    prerequisites returning None for an issue with no triggering signal
+    type. Returns the FIRST unresolved link found (a project blocked on
+    two things at once is still just "blocked" - Marc needs to resolve one
+    dependency before the next matters), never every one at once (that's
+    what a future per-row Gate-Board-style view would be for, not this
+    NBA-scoped check)."""
+    issue = ws.get_issue_or_cluster(issue_id)
+    project_id = issue.get("project_id") if issue else None
+    if not project_id:
+        return None
+    for link in ws.list_project_links_for_project(project_id):
+        if link["link_type"] == "depends_on" and link["from_project_id"] == project_id:
+            other_id = link["to_project_id"]
+        elif link["link_type"] == "blocks" and link["to_project_id"] == project_id:
+            other_id = link["from_project_id"]
+        else:
+            continue
+        other = ws.get_project(other_id)
+        if other and other.get("status") in _LINK_RESOLVED_PROJECT_STATUSES:
+            continue
+        other_name = other["name"] if other else other_id
+        return {
+            "warning": f'{WARNING_PREFIX}"{other_name}" completing — this project depends on it',
+            "link_id": link["id"],
+        }
+    return None
+
+
 def gate_board() -> dict:
     """Task #67 (Gate Board): a portfolio view of every prerequisite rule -
     active rules, each annotated with how many currently-open issues it is

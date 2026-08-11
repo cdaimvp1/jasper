@@ -416,6 +416,14 @@ def get_or_compute_work_object_signature(work_object_id: str, issue: Optional[di
             "negative_vocabulary": json.loads(cached["negative_vocabulary"]) if cached["negative_vocabulary"] else None,
             "cannot_link_ids": json.loads(cached["cannot_link_ids"]),
         }
+    if issue is None:
+        # Task #331: needed below by _sync_fasttrack_data_point_index (the
+        # topic_key/subject_entity dimension reads the issue's own title) -
+        # compute_work_object_signature already does this same fallback
+        # fetch internally, but that resolved copy stays local to it and
+        # never reaches back to this caller, so this is a genuine second
+        # small read on a cache MISS only, not a new per-candidate cost.
+        issue = ws.get_issue_or_cluster(work_object_id)
     sig = compute_work_object_signature(work_object_id, issue)
     ws.upsert_work_object_signature(
         work_object_id,
@@ -431,6 +439,8 @@ def get_or_compute_work_object_signature(work_object_id: str, issue: Optional[di
         cannot_link_ids_json=json.dumps(sig["cannot_link_ids"]),
         schema_version=_SIGNATURE_SCHEMA_VERSION,
     )
+    if issue is not None:
+        _sync_fasttrack_data_point_index(work_object_id, issue, sig)
     return sig
 
 
@@ -445,6 +455,243 @@ def _topic_key_for_signature(issue: dict, sig: dict) -> str:
         return ""
     key = ws.normalize_topic_key(issue.get("title") or "")
     return key if len(key) >= MIN_TOPIC_KEY_LEN else ""
+
+
+# --- Task #331: datapoint_value -> work_object_ids index --------------------
+#
+# Marc's own engineering-direction doc, Section 16's confirmed gap:
+# find_candidates (workgraph_pipeline2.py) used to scan EVERY existing
+# issue/cluster (ws.list_issues(limit=10000) + ws.list_clusters(limit=10000))
+# and run the full _matched_data_points computation against each one, on
+# EVERY new ungrouped item, every cycle - a real, current O(20k) cost at
+# ~1500+ projects, not a future concern.
+#
+# The fix reuses data_point_values exactly as it already exists (same
+# columns, one new (definition_id, value) index - see its own CREATE INDEX
+# comment in workgraph_store.init_workgraph) rather than a new denormalized
+# table: every work object's own value for each of the 6 fast-tracked
+# dimensions (workgraph_discovery._FASTTRACK_DEFINITIONS - Marc's own
+# already-proven procurement vocabulary, task #217) gets a real row here,
+# kept current by _sync_fasttrack_data_point_index below, called every time
+# get_or_compute_work_object_signature computes a FRESH signature (a cache
+# miss - the exact same "the underlying data changed" trigger
+# invalidate_work_object_signature's own callers already fire on, see that
+# function's docstring). candidate_pool_via_data_point_index then queries
+# this index directly for "which OTHER work objects share one of MY exact
+# values," instead of iterating every work object in the database.
+#
+# Correctness (the constraint that matters most - this must be a pure
+# retrieval-performance fix, IDENTICAL candidate results, never a change to
+# matching semantics): _matched_data_points' 7 point types split cleanly:
+#   - reference/supplier/stakeholder/document are already plain value
+#     EQUALITY (set intersection, or an exact normalized string compare) -
+#     an exact-value index lookup is a 1:1 replacement, no semantics change.
+#   - amount is a 1%-TOLERANCE range compare, not equality - handled by
+#     pulling every dp-fasttrack-amount row (only work objects with a real
+#     dollar figure ever have one) and re-running the SAME tolerance check
+#     in Python, unchanged.
+#   - subject_entity/product_service are genuinely FUZZY (substring)
+#     compares - no value-equality index can serve these without silently
+#     dropping a true fuzzy match. Handled by PRESENCE only: every other
+#     work object with ANY recorded value for that dimension is pulled into
+#     the pool (a safe superset), and the unchanged fuzzy comparison inside
+#     _matched_data_points still decides which of them, if any, really
+#     match. Skipped when MY OWN side has no value for that dimension
+#     either, since _matched_data_points can never award that point
+#     without both sides non-empty.
+#
+# Honest scoping note on that last bullet: presence-only narrowing is only
+# as tight as "how many work objects have a non-empty value for that ONE
+# dimension." subject_entity's own gate (_topic_key_for_signature) is
+# has_external (ANY external party) plus a merely-long-enough title - both
+# common in a procurement/vendor-communication corpus - so this dimension
+# alone may not narrow the pool much past "everything with an external
+# party." product_service is much tighter in practice (only a genuinely
+# Ariba-formatted subject line ever populates it). This is still always
+# CORRECT (never drops a true candidate) - it just means the guaranteed,
+# large win lives in the other 5 dimensions above, not here. Tightening
+# this further (e.g. per-token indexing) was considered and deliberately
+# NOT done: it would only be a safe superset if a shared 15+-char substring
+# always contained a shared whole token, which isn't something this
+# codebase's own normalize_topic_key output guarantees - not a risk worth
+# taking against this task's own "identical candidate results" constraint.
+# The union of all of the above is a provable SUPERSET of the true
+# candidate set: any pair reaching the 2+-point threshold must share value
+# on at least one of these dimensions (or be caught by the discovered-
+# points fallback below), so re-running the real, unchanged
+# _matched_data_points over this pool always yields the identical final
+# result the full scan would have. See
+# workgraph_discovery.has_confirmed_non_fasttrack_definitions for the one
+# case (a genuinely discovered, non-fast-track data point actually
+# confirmed) this index can't yet safely serve, and the full-scan fallback
+# find_candidates takes for it.
+
+_FASTTRACK_INDEX_DEFINITION_IDS = [
+    workgraph_discovery.FASTTRACK_REFERENCE_ID,
+    workgraph_discovery.FASTTRACK_SUPPLIER_ID,
+    workgraph_discovery.FASTTRACK_STAKEHOLDER_ID,
+    workgraph_discovery.FASTTRACK_AMOUNT_ID,
+    workgraph_discovery.FASTTRACK_PRODUCT_SERVICE_ID,
+    workgraph_discovery.FASTTRACK_SUBJECT_ENTITY_ID,
+]
+
+
+def _fasttrack_index_values(sig: dict, topic_key: str) -> dict[str, list[str]]:
+    """The real values one work object carries for each fast-track
+    dimension today, in the exact same shape/normalization
+    _matched_data_points itself already compares - never a second,
+    independent notion of "the value." definition_id -> [] (an absent key
+    entirely) means "no value at all," exactly mirroring the falsy-guard
+    each point type already uses in _matched_data_points (an empty side
+    can never contribute that point)."""
+    values: dict[str, list[str]] = {}
+    if sig["definitive_ids"]:
+        values[workgraph_discovery.FASTTRACK_REFERENCE_ID] = list(sig["definitive_ids"])
+
+    vocab = sig.get("positive_vocabulary") or {}
+    suppliers = {workgraph_signals.normalize_company_name(o) for o in sig["external_orgs"]}
+    suppliers.add(workgraph_signals.normalize_company_name(vocab.get("system_party")))
+    suppliers.discard("")
+    if suppliers:
+        values[workgraph_discovery.FASTTRACK_SUPPLIER_ID] = sorted(suppliers)
+
+    # Stakeholder mixes two independent value spaces (a tracked external
+    # party's id, or a bare Ariba requester NAME) that _matched_data_points
+    # already ORs together as "one shared stakeholder point" - prefixed
+    # here only so the two spaces can never collide on the same literal
+    # string, not to change which pairs match.
+    stakeholders = [
+        f"party:{p['party_id']}" for p in sig["participant_roles"] if p.get("affiliation") == "external"
+    ]
+    requester = vocab.get("ariba_requester")
+    if requester:
+        stakeholders.append(f"name:{requester.lower().strip()}")
+    if stakeholders:
+        values[workgraph_discovery.FASTTRACK_STAKEHOLDER_ID] = stakeholders
+
+    amount = vocab.get("value_amount")
+    if amount:
+        values[workgraph_discovery.FASTTRACK_AMOUNT_ID] = [repr(float(amount))]
+
+    descriptor = vocab.get("ariba_descriptor")
+    if descriptor:
+        norm_descriptor = descriptor.lower().strip()
+        if norm_descriptor:
+            values[workgraph_discovery.FASTTRACK_PRODUCT_SERVICE_ID] = [norm_descriptor]
+
+    if topic_key:
+        values[workgraph_discovery.FASTTRACK_SUBJECT_ENTITY_ID] = [topic_key]
+
+    return values
+
+
+def _sync_fasttrack_data_point_index(work_object_id: str, issue: dict, sig: dict) -> None:
+    """Called from get_or_compute_work_object_signature's own cache-miss
+    branch - the index stays exactly as current as the signature cache
+    itself, with no separate invalidation mechanism needed."""
+    topic_key = _topic_key_for_signature(issue, sig)
+    values = _fasttrack_index_values(sig, topic_key)
+    ws.replace_data_point_values_for_work_object(work_object_id, _FASTTRACK_INDEX_DEFINITION_IDS, values)
+
+
+def backfill_fasttrack_data_point_index(limit: int = 10000) -> int:
+    """One-time bootstrap for the index above (task #331): the ongoing
+    sync hook only fires on a signature cache MISS, so any work object
+    whose signature was already cached before this index existed needs
+    one explicit pass to get its first fast-track rows written - without
+    this, candidate_pool_via_data_point_index would silently treat an
+    already-cached, never-yet-indexed work object as having no data
+    points at all, which is exactly the correctness regression this whole
+    feature must not introduce.
+
+    Idempotent and safe to re-run (replace_data_point_values_for_work_
+    object_id is a full delete+insert of just the fast-track ids each
+    time) - find_candidates' own caller (workgraph_pipeline2.
+    run_pipeline_for_ungrouped_items via process_new_item) never needs to
+    call this itself: see ensure_fasttrack_index_backfilled's own
+    docstring for the real one-time-ever self-heal wired into that path,
+    using the same ws.claim_daily_run atomic-claim gate every other
+    once-only sweep in this codebase already relies on. This function is
+    the actual work that gate runs; it's exposed directly too for a
+    one-time manual/backfill-script invocation (matching this repo's own
+    backfill_stale_marker_projects.py precedent) if Marc ever wants to
+    force a re-sync without waiting for the lazy gate."""
+    count = 0
+    for w in ws.list_issues(states=None, limit=limit) + ws.list_clusters(limit=limit):
+        sig = get_or_compute_work_object_signature(w["id"], w)
+        _sync_fasttrack_data_point_index(w["id"], w, sig)
+        count += 1
+    return count
+
+
+def ensure_fasttrack_index_backfilled() -> None:
+    """Self-healing one-time gate (task #331) - called from
+    workgraph_pipeline2.find_candidates before it ever trusts the index in
+    place of the old full scan, so this optimization is safe by
+    construction even if nobody ever remembers to run
+    backfill_fasttrack_data_point_index by hand first. ws.claim_daily_run
+    is reused here as a plain one-time-ever claim (a fixed 'v1' value that
+    never changes, rather than an actual date) - the exact same atomic
+    UPSERT gate workgraph_discovery.run_monthly_sweep_if_due already
+    trusts for its own once-per-period claim, just keyed for "once,
+    ever" instead of "once this month." Cheap on every call after the
+    first - claim_daily_run's own WHERE clause makes the no-op branch a
+    single indexed UPSERT, not a second backfill."""
+    if ws.claim_daily_run("fasttrack_data_point_index_backfill", "v1"):
+        backfill_fasttrack_data_point_index()
+
+
+def candidate_pool_via_data_point_index(work_object_id: str, sig: dict, topic_key: str) -> set:
+    """Task #331 - find_candidates' real replacement for iterating every
+    issue/cluster in the database. Returns every OTHER work_object_id that
+    could possibly share 2+ real data points with work_object_id - see
+    this module's own "datapoint_value -> work_object_ids index" section
+    comment above for why this is a provable superset of the true
+    candidate set, not an approximation. work_object_id itself may appear
+    in the result (a value can trivially equal itself); find_candidates'
+    own loop already skips self-matches, same as it always has."""
+    pool: set = set()
+
+    for ref in sig["definitive_ids"]:
+        pool.update(ws.list_work_object_ids_for_data_point_value(workgraph_discovery.FASTTRACK_REFERENCE_ID, ref))
+
+    vocab = sig.get("positive_vocabulary") or {}
+    suppliers = {workgraph_signals.normalize_company_name(o) for o in sig["external_orgs"]}
+    suppliers.add(workgraph_signals.normalize_company_name(vocab.get("system_party")))
+    suppliers.discard("")
+    for supplier in suppliers:
+        pool.update(ws.list_work_object_ids_for_data_point_value(workgraph_discovery.FASTTRACK_SUPPLIER_ID, supplier))
+
+    for p in sig["participant_roles"]:
+        if p.get("affiliation") == "external":
+            pool.update(ws.list_work_object_ids_for_data_point_value(
+                workgraph_discovery.FASTTRACK_STAKEHOLDER_ID, f"party:{p['party_id']}"))
+    requester = vocab.get("ariba_requester")
+    if requester:
+        pool.update(ws.list_work_object_ids_for_data_point_value(
+            workgraph_discovery.FASTTRACK_STAKEHOLDER_ID, f"name:{requester.lower().strip()}"))
+
+    amount = vocab.get("value_amount")
+    if amount:
+        for row in ws.list_data_point_values_for_definition(workgraph_discovery.FASTTRACK_AMOUNT_ID):
+            try:
+                other_amount = float(row["value"])
+            except (TypeError, ValueError):
+                continue
+            if abs(amount - other_amount) <= max(amount, other_amount) * 0.01:
+                pool.add(row["work_object_id"])
+
+    if sig["accepted_lineages"]:
+        pool.update(ws.list_work_object_ids_for_lineage_ids(sig["accepted_lineages"]))
+
+    if topic_key:
+        pool.update(row["work_object_id"]
+                    for row in ws.list_data_point_values_for_definition(workgraph_discovery.FASTTRACK_SUBJECT_ENTITY_ID))
+    if vocab.get("ariba_descriptor"):
+        pool.update(row["work_object_id"]
+                    for row in ws.list_data_point_values_for_definition(workgraph_discovery.FASTTRACK_PRODUCT_SERVICE_ID))
+
+    return pool
 
 
 def _matched_data_points(a_id: str, a_sig: dict, a_topic_key: str,

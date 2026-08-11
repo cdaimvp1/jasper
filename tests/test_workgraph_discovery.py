@@ -112,6 +112,38 @@ def test_seed_fasttrack_vocabulary_is_idempotent(ws_db):
     assert len(ws_db.list_data_point_definitions(status="confirmed")) == 7
 
 
+# --- has_confirmed_non_fasttrack_definitions (task #331) --------------------
+
+def test_has_confirmed_non_fasttrack_definitions_false_by_default(ws_db):
+    """Today's real, live state on every installation - the fast-track
+    index workgraph_projects.candidate_pool_via_data_point_index relies on
+    for its full-scan-avoidance is only trusted while this stays False."""
+    assert wd.has_confirmed_non_fasttrack_definitions() is False
+
+
+def test_has_confirmed_non_fasttrack_definitions_false_with_only_fasttrack_confirmed(ws_db):
+    wd.seed_fasttrack_vocabulary(confirmed_by="marc")
+    assert wd.has_confirmed_non_fasttrack_definitions() is False
+
+
+def test_has_confirmed_non_fasttrack_definitions_false_when_proposed_not_confirmed(ws_db):
+    ws_db.create_data_point_definition(
+        id="dp-real-discovery", name="Real discovery", description="test", point_type="entity",
+        deterministic_rule=None, discovered_from="test", status="proposed",
+    )
+    assert wd.has_confirmed_non_fasttrack_definitions() is False
+
+
+def test_has_confirmed_non_fasttrack_definitions_true_once_a_real_discovery_is_confirmed(ws_db):
+    ws_db.create_data_point_definition(
+        id="dp-real-discovery", name="Real discovery", description="test", point_type="entity",
+        deterministic_rule=None, discovered_from="test", status="confirmed",
+    )
+    ws_db.confirm_data_point_definition("dp-real-discovery", confirmed_by="marc")
+
+    assert wd.has_confirmed_non_fasttrack_definitions() is True
+
+
 # --- matched_discovered_points retrofit (#215/#216) -------------------------
 
 def test_matched_discovered_points_is_a_noop_with_only_fasttrack_definitions(ws_db):

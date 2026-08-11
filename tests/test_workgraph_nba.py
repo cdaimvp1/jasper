@@ -484,6 +484,56 @@ def test_recompute_all_persists_has_unmet_prerequisite(ws_db):
     assert issue["has_unmet_prerequisite"] == 1
 
 
+# --- project_links prerequisite gating (task #319) -------------------------
+# Same real "your move" gating mechanism as Aristotle's own taught rules
+# above, driven by a real project_links depends_on/blocks row instead of a
+# signal-type rule - see workgraph_aristotle.check_project_link_prerequisite.
+
+def test_score_issue_prepends_project_link_warning_when_target_unresolved(ws_db):
+    proj_a = ws_db.create_project_with_new_id(name="New H1 Deal")
+    proj_b = ws_db.create_project_with_new_id(name="Old H1 Exit")
+    issue_id = ws_db.create_issue_with_new_id(title="Sign the new deal", state="active", category="other")
+    ws_db.update_issue(issue_id, project_id=proj_a)
+    ws_db.create_project_link(from_project_id=proj_a, to_project_id=proj_b,
+                               link_type="depends_on", reason="needs the old contract exited first")
+
+    issue = ws_db.get_issue(issue_id)
+    score, reason, lesson_id = nba.score_issue(issue, time.time())
+
+    assert reason.startswith("No confirmation seen yet")
+    assert "Old H1 Exit" in reason
+    assert "your move" in reason  # still appended after the warning, not replaced
+
+
+def test_recompute_all_persists_has_unmet_prerequisite_from_project_link(ws_db):
+    proj_a = ws_db.create_project_with_new_id(name="New H1 Deal")
+    proj_b = ws_db.create_project_with_new_id(name="Old H1 Exit")
+    issue_id = ws_db.create_issue_with_new_id(title="Sign the new deal", state="active", category="other")
+    ws_db.update_issue(issue_id, project_id=proj_a)
+    ws_db.create_project_link(from_project_id=proj_a, to_project_id=proj_b,
+                               link_type="depends_on", reason="needs the old contract exited first")
+
+    nba.recompute_all()
+
+    issue = ws_db.get_issue(issue_id)
+    assert issue["has_unmet_prerequisite"] == 1
+
+
+def test_score_issue_no_project_link_warning_when_target_project_done(ws_db):
+    proj_a = ws_db.create_project_with_new_id(name="New H1 Deal")
+    proj_b = ws_db.create_project_with_new_id(name="Old H1 Exit")
+    issue_id = ws_db.create_issue_with_new_id(title="Sign the new deal", state="active", category="other")
+    ws_db.update_issue(issue_id, project_id=proj_a)
+    ws_db.create_project_link(from_project_id=proj_a, to_project_id=proj_b,
+                               link_type="depends_on", reason="needs the old contract exited first")
+    ws_db.set_project_status(proj_b, "done")
+
+    issue = ws_db.get_issue(issue_id)
+    score, reason, lesson_id = nba.score_issue(issue, time.time())
+
+    assert not reason.startswith("No confirmation seen yet")
+
+
 # --- Phase 0 fix (D11, 2026-08-03): lessons cross-engine leakage gate ------
 
 def _issue_with_matchable_lesson(ws_db):

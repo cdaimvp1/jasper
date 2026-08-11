@@ -1787,6 +1787,160 @@ def test_expire_stale_nba_choice_logs_leaves_recent_offered(ws_db):
 
 
 
+# --- nba_outcome_log (task #318) ------------------------------------------
+
+def test_create_nba_outcome_event_basic_roundtrip(ws_db):
+    iid = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    event_id = ws_db.create_nba_outcome_event(
+        issue_id=iid, action_kind="draft_reply", outcome="accepted_as_is",
+        source_surface="sidebar", raw_item_id=7,
+    )
+    row = ws_db.get_nba_outcome_event(event_id)
+    assert row["issue_id"] == iid
+    assert row["action_kind"] == "draft_reply"
+    assert row["outcome"] == "accepted_as_is"
+    assert row["source_surface"] == "sidebar"
+    assert row["raw_item_id"] == 7
+    assert row["suggested_text"] is None
+    assert row["sent_text"] is None
+    assert row["detected_ts"] is not None
+
+
+def test_create_nba_outcome_event_captures_suggested_text_for_hero_draft(ws_db):
+    iid = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    event_id = ws_db.create_nba_outcome_event(
+        issue_id=iid, action_kind="hero_draft_reply", outcome="accepted_as_is",
+        source_surface="hero", raw_item_id=3, suggested_text="Here is a status update.",
+    )
+    row = ws_db.get_nba_outcome_event(event_id)
+    assert row["suggested_text"] == "Here is a status update."
+
+
+def test_create_nba_outcome_event_rejects_rewritten_at_creation(ws_db):
+    """'rewritten' can only ever be reached via record_rewrite_judgment,
+    once a real sent-text comparison has actually happened - never at the
+    moment a suggestion is first accepted (nothing to compare yet)."""
+    iid = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    with pytest.raises(ValueError):
+        ws_db.create_nba_outcome_event(issue_id=iid, action_kind="hero_draft_reply", outcome="rewritten")
+
+
+def test_list_nba_outcomes_pending_rewrite_judgment_only_real_candidates(ws_db):
+    iid = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    # Plain draft_reply - no suggested_text at all, never a candidate.
+    ws_db.create_nba_outcome_event(issue_id=iid, action_kind="draft_reply", outcome="accepted_as_is")
+    # Dismissed - wrong outcome, never a candidate regardless of text.
+    ws_db.create_nba_outcome_event(issue_id=iid, action_kind="hero_draft_reply", outcome="dismissed")
+    # Hero draft with suggested_text, no sent_text yet - the real candidate.
+    pending_id = ws_db.create_nba_outcome_event(
+        issue_id=iid, action_kind="hero_draft_reply", outcome="accepted_as_is",
+        suggested_text="Draft body",
+    )
+    # Hero draft already resolved (sent_text set) - no longer pending.
+    resolved_id = ws_db.create_nba_outcome_event(
+        issue_id=iid, action_kind="hero_draft_reply", outcome="accepted_as_is",
+        suggested_text="Draft body 2",
+    )
+    ws_db.record_rewrite_judgment(resolved_id, sent_text="Draft body 2", rewrite_severity=0.0, rewritten=False)
+
+    pending = ws_db.list_nba_outcomes_pending_rewrite_judgment()
+    pending_ids = {r["id"] for r in pending}
+    assert pending_ids == {pending_id}
+
+
+def test_record_rewrite_judgment_flips_outcome_when_rewritten_true(ws_db):
+    iid = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    event_id = ws_db.create_nba_outcome_event(
+        issue_id=iid, action_kind="hero_draft_reply", outcome="accepted_as_is",
+        suggested_text="Original draft text",
+    )
+    ws_db.record_rewrite_judgment(event_id, sent_text="Completely different final text",
+                                   rewrite_severity=0.8, rewrite_note="heavily reworded", rewritten=True)
+    row = ws_db.get_nba_outcome_event(event_id)
+    assert row["outcome"] == "rewritten"
+    assert row["sent_text"] == "Completely different final text"
+    assert row["rewrite_severity"] == 0.8
+    assert row["rewrite_note"] == "heavily reworded"
+
+
+def test_record_rewrite_judgment_keeps_accepted_as_is_when_rewritten_false(ws_db):
+    iid = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    event_id = ws_db.create_nba_outcome_event(
+        issue_id=iid, action_kind="hero_draft_reply", outcome="accepted_as_is",
+        suggested_text="Original draft text",
+    )
+    ws_db.record_rewrite_judgment(event_id, sent_text="Original draft text", rewrite_severity=0.02,
+                                   rewrite_note="near-identical", rewritten=False)
+    row = ws_db.get_nba_outcome_event(event_id)
+    assert row["outcome"] == "accepted_as_is"
+    assert row["rewrite_severity"] == 0.02
+
+
+def test_mark_nba_outcome_correlation_abandoned_leaves_outcome_untouched(ws_db):
+    iid = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    event_id = ws_db.create_nba_outcome_event(
+        issue_id=iid, action_kind="hero_draft_reply", outcome="accepted_as_is",
+        suggested_text="Original draft text",
+    )
+    ws_db.mark_nba_outcome_correlation_abandoned(event_id, "no outbound item found in window")
+    row = ws_db.get_nba_outcome_event(event_id)
+    assert row["outcome"] == "accepted_as_is"
+    assert row["sent_text"] == ""
+    assert row["rewrite_severity"] is None
+    assert row["rewrite_note"] == "no outbound item found in window"
+    # And it must drop out of the pending pool now that sent_text is set.
+    assert event_id not in {r["id"] for r in ws_db.list_nba_outcomes_pending_rewrite_judgment()}
+
+
+def test_list_nba_outcomes_filters_by_action_kind_and_outcome_and_since_ts(ws_db):
+    iid = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    ws_db.create_nba_outcome_event(issue_id=iid, action_kind="draft_reply", outcome="accepted_as_is")
+    ws_db.create_nba_outcome_event(issue_id=iid, action_kind="draft_forward", outcome="dismissed")
+
+    by_kind = ws_db.list_nba_outcomes(action_kind="draft_reply")
+    assert len(by_kind) == 1 and by_kind[0]["action_kind"] == "draft_reply"
+
+    by_outcome = ws_db.list_nba_outcomes(outcome="dismissed")
+    assert len(by_outcome) == 1 and by_outcome[0]["outcome"] == "dismissed"
+
+    future_cutoff = time.time() + 3600
+    assert ws_db.list_nba_outcomes(since_ts=future_cutoff) == []
+
+
+def test_nba_outcome_summary_by_action_kind_computes_real_ratios(ws_db):
+    iid = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    ws_db.create_nba_outcome_event(issue_id=iid, action_kind="draft_reply", outcome="accepted_as_is")
+    ws_db.create_nba_outcome_event(issue_id=iid, action_kind="draft_reply", outcome="accepted_as_is")
+    ws_db.create_nba_outcome_event(issue_id=iid, action_kind="draft_reply", outcome="dismissed")
+    rewritten_id = ws_db.create_nba_outcome_event(
+        issue_id=iid, action_kind="draft_reply", outcome="accepted_as_is", suggested_text="x")
+    ws_db.record_rewrite_judgment(rewritten_id, sent_text="y", rewrite_severity=0.9, rewritten=True)
+
+    summary = ws_db.nba_outcome_summary(group_by="action_kind")
+    row = next(r for r in summary if r["key"] == "draft_reply")
+    assert row["total"] == 4
+    assert row["accepted_as_is"] == 2
+    assert row["dismissed"] == 1
+    assert row["rewritten"] == 1
+    assert row["accepted_rate"] == pytest.approx(2 / 4)
+    assert row["used_rate"] == pytest.approx(3 / 4)
+
+
+def test_nba_outcome_summary_by_category_joins_issue_category(ws_db):
+    iid = ws_db.create_issue_with_new_id(title="A", state="active", category="rfp-sourcing")
+    ws_db.create_nba_outcome_event(issue_id=iid, action_kind="draft_reply", outcome="accepted_as_is")
+
+    summary = ws_db.nba_outcome_summary(group_by="category")
+    row = next(r for r in summary if r["key"] == "rfp-sourcing")
+    assert row["total"] == 1
+    assert row["accepted_as_is"] == 1
+
+
+def test_nba_outcome_summary_rejects_bad_group_by(ws_db):
+    with pytest.raises(ValueError):
+        ws_db.nba_outcome_summary(group_by="bogus")
+
+
 def test_create_and_find_identity_constraint_either_ordering(ws_db):
     a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
     b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
@@ -2241,8 +2395,53 @@ def test_create_and_get_prepared_action(ws_db):
     row = ws_db.get_prepared_action(pid)
     assert row["action_type"] == "draft_reply"
     assert row["state"] == "proposed"  # default
-    assert row["required_approval"] == 1  # default
+    # Task #317: no longer a bare hardcoded 1 - computed via
+    # resolve_required_approval("draft_reply"), which the dispatch table
+    # maps to 0 (a Drafts-folder-only draft has no effect outside Jasper).
+    assert row["required_approval"] == 0
     assert row["resolved_ts"] is None
+
+
+def test_create_prepared_action_explicit_required_approval_overrides_the_table(ws_db):
+    """An explicit required_approval still wins over the table - the table
+    is only the DEFAULT a caller gets for free, never a value it can't
+    override for a real, deliberate reason."""
+    pid = ws_db.create_prepared_action(
+        claim_id=None, action_type="draft_reply", proposed_parameters_json="{}",
+        evidence_refs_json="[]", rationale="test", risk_class="low", idempotency_key="key-override",
+        required_approval=1,
+    )
+
+    assert ws_db.get_prepared_action(pid)["required_approval"] == 1
+
+
+# --- resolve_required_approval / PREPARED_ACTION_APPROVAL_TABLE (task #317) -
+
+def test_resolve_required_approval_is_false_for_every_contained_action_kind(ws_db):
+    """Every real action_kind whose own effect stays inside Jasper (a
+    Drafts-folder draft, a contract-review write-up, a summary) until Marc
+    separately acts on it - grep-confirmed against server_lean.py's
+    CockpitActionBody comment, ingest/ACTION_BRIDGE_ROUTINE.md, and
+    workgraph_proactive.py's two triggers."""
+    for action_kind in ("draft_reply", "review_contract", "contract_review",
+                        "summarize", "draft_status_update"):
+        assert ws_db.resolve_required_approval(action_kind) == 0, action_kind
+
+
+def test_resolve_required_approval_is_true_for_custom_and_unknown_action_kinds(ws_db):
+    """'custom' is unbounded ("follow instructions literally") - and any
+    action_kind this table has never seen (no real producer creates one
+    today) conservatively defaults True rather than guessing it's safe."""
+    assert ws_db.resolve_required_approval("custom") == 1
+    assert ws_db.resolve_required_approval("some_future_action_kind_nobody_built_yet") == 1
+
+
+def test_resolve_required_approval_table_is_a_plain_dict_not_a_score(ws_db):
+    """Constraint check: the dispatch table must be a plain, inspectable,
+    deterministic mapping a human could read and edit - not a black-box
+    score. Every value is exactly 0 or 1."""
+    assert isinstance(ws_db.PREPARED_ACTION_APPROVAL_TABLE, dict)
+    assert set(ws_db.PREPARED_ACTION_APPROVAL_TABLE.values()) <= {0, 1}
 
 
 def test_create_prepared_action_rejects_invalid_risk_class(ws_db):
@@ -3131,3 +3330,127 @@ def test_list_raw_items_since_exclude_sensitive_filters_flagged_rows(ws_db):
     ids = [r["id"] for r in ws_db.list_raw_items_since(0.0, exclude_sensitive=True)]
     assert normal_id in ids
     assert sensitive_id not in ids
+
+
+# --- task #331: data_point_values datapoint_value -> work_object_ids index -
+
+def test_data_point_values_def_value_index_exists(ws_db):
+    """Purely additive migration (no new table, no ALTER TABLE) - just a
+    new index on the existing data_point_values table, see its own
+    CREATE INDEX comment in init_workgraph. Confirms it actually landed,
+    not just that init_workgraph() ran without error."""
+    conn = ws_db._connect()
+    try:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_data_point_values_def_value'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+
+
+def test_list_work_object_ids_for_data_point_value_exact_lookup(ws_db):
+    ws_db.record_data_point_value(
+        definition_id="dp-fasttrack-reference", work_object_id="wo-a", value="PR12345",
+        extraction_source="deterministic",
+    )
+    ws_db.record_data_point_value(
+        definition_id="dp-fasttrack-reference", work_object_id="wo-b", value="PR12345",
+        extraction_source="deterministic",
+    )
+    ws_db.record_data_point_value(
+        definition_id="dp-fasttrack-reference", work_object_id="wo-c", value="PR99999",
+        extraction_source="deterministic",
+    )
+
+    hits = ws_db.list_work_object_ids_for_data_point_value("dp-fasttrack-reference", "PR12345")
+
+    assert set(hits) == {"wo-a", "wo-b"}
+
+
+def test_list_work_object_ids_for_data_point_value_no_hits_returns_empty(ws_db):
+    assert ws_db.list_work_object_ids_for_data_point_value("dp-fasttrack-reference", "PR00000") == []
+
+
+def test_list_data_point_values_for_definition_returns_every_row(ws_db):
+    ws_db.record_data_point_value(
+        definition_id="dp-fasttrack-amount", work_object_id="wo-a", value="1000.0",
+        extraction_source="deterministic",
+    )
+    ws_db.record_data_point_value(
+        definition_id="dp-fasttrack-amount", work_object_id="wo-b", value="5000.0",
+        extraction_source="deterministic",
+    )
+
+    rows = ws_db.list_data_point_values_for_definition("dp-fasttrack-amount")
+
+    assert {(r["work_object_id"], r["value"]) for r in rows} == {("wo-a", "1000.0"), ("wo-b", "5000.0")}
+
+
+def test_replace_data_point_values_for_work_object_supersedes_prior_values(ws_db):
+    ws_db.record_data_point_value(
+        definition_id="dp-fasttrack-reference", work_object_id="wo-a", value="PR-OLD",
+        extraction_source="deterministic",
+    )
+
+    ws_db.replace_data_point_values_for_work_object(
+        "wo-a", ["dp-fasttrack-reference", "dp-fasttrack-supplier"],
+        {"dp-fasttrack-reference": ["PR-NEW"], "dp-fasttrack-supplier": ["acme"]},
+    )
+
+    values = {v["definition_id"]: v["value"] for v in ws_db.list_data_point_values_for_work_object("wo-a")}
+    assert values == {"dp-fasttrack-reference": "PR-NEW", "dp-fasttrack-supplier": "acme"}
+    assert ws_db.list_work_object_ids_for_data_point_value("dp-fasttrack-reference", "PR-OLD") == []
+
+
+def test_replace_data_point_values_for_work_object_never_touches_other_definitions(ws_db):
+    """Scoped delete: only the given definition_ids get cleared for this
+    work object - a genuinely-discovered (non-fast-track) row written by
+    workgraph_discovery.matched_discovered_points must survive untouched."""
+    ws_db.record_data_point_value(
+        definition_id="dp-discovered-1", work_object_id="wo-a", value="something",
+        extraction_source="deterministic",
+    )
+
+    ws_db.replace_data_point_values_for_work_object(
+        "wo-a", ["dp-fasttrack-reference"], {"dp-fasttrack-reference": ["PR1"]},
+    )
+
+    values = ws_db.list_data_point_values_for_work_object("wo-a")
+    assert any(v["definition_id"] == "dp-discovered-1" and v["value"] == "something" for v in values)
+    assert any(v["definition_id"] == "dp-fasttrack-reference" and v["value"] == "PR1" for v in values)
+
+
+def test_replace_data_point_values_for_work_object_empty_clears_all_given_definitions(ws_db):
+    ws_db.record_data_point_value(
+        definition_id="dp-fasttrack-reference", work_object_id="wo-a", value="PR1",
+        extraction_source="deterministic",
+    )
+
+    ws_db.replace_data_point_values_for_work_object("wo-a", ["dp-fasttrack-reference"], {})
+
+    assert ws_db.list_data_point_values_for_work_object("wo-a") == []
+
+
+def test_list_work_object_ids_for_lineage_ids_returns_owning_work_objects(ws_db):
+    ws_db.create_issue_with_new_id(title="A", category="other", state="active")
+    conn = ws_db._connect()
+    try:
+        conn.execute(
+            "INSERT INTO artifact_lineages (id, work_object_id, title, created_ts) VALUES (?, ?, ?, ?)",
+            ("lineage-1", "wo-a", "Doc", time.time()),
+        )
+        conn.execute(
+            "INSERT INTO artifact_lineages (id, work_object_id, title, created_ts) VALUES (?, ?, ?, ?)",
+            ("lineage-2", "wo-b", "Doc2", time.time()),
+        )
+    finally:
+        conn.close()
+
+    hits = ws_db.list_work_object_ids_for_lineage_ids(["lineage-1", "lineage-2", "lineage-does-not-exist"])
+
+    assert set(hits) == {"wo-a", "wo-b"}
+
+
+def test_list_work_object_ids_for_lineage_ids_empty_input_returns_empty(ws_db):
+    assert ws_db.list_work_object_ids_for_lineage_ids([]) == []

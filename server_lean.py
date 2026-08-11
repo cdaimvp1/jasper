@@ -88,6 +88,7 @@ import workgraph_commitments
 import workgraph_asks_decisions
 import workgraph_key_facts
 import workgraph_repeat_signals
+import workgraph_sequences
 import health_check
 import workgraph_suppliers
 import workgraph_todo
@@ -1469,6 +1470,20 @@ async def api_action_draft_reply(body: DraftReplyBody):
         result = await asyncio.to_thread(outlook_actions.draft_reply, entry_id, body.reply_all, ref_tag)
     except RuntimeError as e:
         raise HTTPException(500, str(e))
+    # Task #318: a real, deterministic "suggestion accepted as-is" event -
+    # Marc clicking this button IS accepting the suggested ACT of replying.
+    # No suggested_text is logged here (and never will be for this route):
+    # Outlook's own Reply()/ReplyAll() supplies the quoted-thread body with
+    # zero Jasper-authored wording, so there is nothing to compare a later
+    # sent version against - "rewrite severity" simply doesn't apply to
+    # this action, unlike hero-draft-reply below. Only logged when this
+    # raw_item is actually linked to a tracked issue - an unlinked item has
+    # no issue to tie the outcome to, same honest-skip as ref_tag above.
+    if raw_item.get("issue_id"):
+        wg.create_nba_outcome_event(
+            issue_id=raw_item["issue_id"], action_kind="draft_reply", outcome="accepted_as_is",
+            source_surface="sidebar", raw_item_id=body.raw_item_id,
+        )
     return JSONResponse(result)
 
 
@@ -1504,6 +1519,18 @@ async def api_addin_hero_draft_reply(body: HeroDraftReplyBody):
         )
     except RuntimeError as e:
         raise HTTPException(500, str(e))
+    # Task #318: unlike the plain draft-reply route above, this one DOES
+    # author real suggested text (draft_body, just computed) - the one
+    # action_kind where "how much did Marc rewrite this before sending"
+    # is a real, meaningful question. Captured here so workgraph_nba's
+    # rewrite-judgment pass has something real to diff against later, once
+    # (if) a matching Sent Items row shows up for this issue - see
+    # workgraph_nba.attempt_rewrite_judgment for the best-effort correlation
+    # and its own documented limitations.
+    wg.create_nba_outcome_event(
+        issue_id=issue_id, action_kind="hero_draft_reply", outcome="accepted_as_is",
+        source_surface="hero", raw_item_id=body.raw_item_id, suggested_text=draft_body,
+    )
     return JSONResponse(result)
 
 
@@ -1528,6 +1555,13 @@ async def api_action_draft_forward(body: DraftForwardBody):
         result = await asyncio.to_thread(outlook_actions.draft_forward, entry_id, ref_tag)
     except RuntimeError as e:
         raise HTTPException(500, str(e))
+    # Task #318: same reasoning as draft-reply above - a real accepted-as-is
+    # event, no suggested_text (Forward() supplies the body, not Jasper).
+    if raw_item.get("issue_id"):
+        wg.create_nba_outcome_event(
+            issue_id=raw_item["issue_id"], action_kind="draft_forward", outcome="accepted_as_is",
+            source_surface="sidebar", raw_item_id=body.raw_item_id,
+        )
     return JSONResponse(result)
 
 
@@ -1762,7 +1796,8 @@ def _mark_issue_emails_read_best_effort(issue_id: str) -> None:
 async def api_workgraph_issue_status(issue_id: str, body: WorkgraphIssueStatusBody):
     """Deterministic actions (mark done, snooze, reprioritize, archive) — applied
     immediately, no worker wake, per the cockpit's deterministic/generative action split."""
-    if wg.get_issue(issue_id) is None:
+    issue_before = wg.get_issue(issue_id)
+    if issue_before is None:
         raise HTTPException(404, f"no such issue: {issue_id}")
     fields = {}
     if body.state is not None:
@@ -1793,6 +1828,22 @@ async def api_workgraph_issue_status(issue_id: str, body: WorkgraphIssueStatusBo
         offered_kinds = {c.get("kind") for c in offered if isinstance(c, dict)}
         if body.state in offered_kinds:
             wg.mark_choice_log_chosen(open_log["id"], chosen_action_kind=body.state)
+    # Task #318: the issue-level Dismiss/Archive-as-noise buttons are the
+    # real, existing "nudge this away" UI action for whatever NBA
+    # suggestion was standing on this issue (issues.nba_action_kind -
+    # 'review'/'wait', set by workgraph_nba.recompute_all's last pass) -
+    # only logged when there actually WAS a live suggestion to dismiss
+    # (nba_action_kind not None; a never-scored or already-closed issue has
+    # nothing being dismissed here). Deliberately excludes "waiting"
+    # (snoozing defers, it doesn't reject) and "done" (a real resolution,
+    # not a dismissal) - only dismissed/noise-archived count as "Marc
+    # nudged this suggestion away without acting on it."
+    if body.state in ("dismissed", "noise-archived") and issue_before.get("nba_action_kind"):
+        wg.create_nba_outcome_event(
+            issue_id=issue_id, action_kind=issue_before["nba_action_kind"], outcome="dismissed",
+            source_surface="issue_status",
+            detail_json=json.dumps({"new_state": body.state, "nba_reason": issue_before.get("nba_reason")}, default=str),
+        )
     if body.state == "done":
         # Fire-and-forget (task #275) - never awaited, so a slow/cold-start
         # Outlook COM call can't delay this response or risk timing the
@@ -2186,6 +2237,16 @@ async def api_project_detail(project_id: str):
         thread_feed.extend(rows)
     deep_links.attach_deep_links(thread_feed)
     thread_feed.sort(key=lambda ev: ev.get("ts") or 0, reverse=True)
+    # Task #322: the strongest recurring multi-step signal_type sequence
+    # seen across other CLOSED projects in this same category, if any -
+    # purely informational predictive context (never a gate/rule; see
+    # workgraph_sequences.py's own module docstring for the boundary with
+    # workgraph_aristotle.py). exclude_project_id keeps a just-closed
+    # project from citing itself as its own historical precedent. None
+    # (omitted from the note, not a placeholder) when there isn't enough
+    # closed-project history yet for this category.
+    predictive_pattern = workgraph_sequences.top_pattern_for_category(
+        project.get("category"), exclude_project_id=project_id)
     return JSONResponse({"project": sanitize_surrogates(project), "issues": sanitize_surrogates(issues),
                         "clusters": sanitize_surrogates(clusters),
                         "has_confirmed_grouping": has_confirmed_grouping,
@@ -2200,6 +2261,7 @@ async def api_project_detail(project_id: str):
                         "value_found": sum(value_by_issue.values()),
                         "gated_open_issue_count": sum(1 for i in open_issues if i.get("has_unmet_prerequisite")),
                         "hard_deadline_open_issue_count": sum(1 for i in open_issues if i.get("has_hard_deadline")),
+                        "predictive_pattern": sanitize_surrogates(predictive_pattern),
                         "top_action": sanitize_surrogates({
                             "issue_id": top_issue["id"], "title": top_issue.get("display_title") or top_issue["title"],
                             "reason": top_issue.get("nba_reason"),
@@ -3746,6 +3808,48 @@ def _cockpit_action_idempotency_key(issue_id: str, action_kind: str, instruction
     return hashlib.sha256(f"{issue_id}|{action_kind}|{instructions or ''}".encode("utf-8")).hexdigest()
 
 
+def _dispatch_approved_cockpit_action(prepared_id: int, *, issue_id: str, action_kind: str,
+                                       worker: str, instructions: Optional[str]) -> dict:
+    """Task #317: the actual team_room dispatch, factored out of
+    api_cockpit_action so a prepared_action that started life
+    'ready_for_approval' (required_approval=True per wg.resolve_required_
+    approval) dispatches through this exact same path once
+    api_prepared_action_approve moves it to 'approved' - one real dispatch
+    mechanism, two entry points (immediate auto-approval, deferred human
+    approval), not two mechanisms. Caller's own responsibility to have
+    already set the row's state to 'approved' before calling this -
+    this function only ever moves it forward from there (approved ->
+    executing -> {uncertain-via-pending_action, failed})."""
+    sender = config.get("manager", "id") or "marc"
+    envelope = "@{worker} [COCKPIT-ACTION] {payload}".format(
+        worker=worker,
+        payload=json.dumps({"type": action_kind, "issue_id": issue_id,
+                           "instructions": instructions}, ensure_ascii=False),
+    )
+    wg.update_prepared_action_state(prepared_id, "executing")
+    try:
+        result = team_room.post_message(sender=sender, body=envelope)
+    except ValueError as e:
+        wg.update_prepared_action_state(prepared_id, "failed", policy_result=str(e))
+        raise HTTPException(400, str(e))
+    pending_id = wg.create_pending_action(
+        issue_id=issue_id, action_kind=action_kind, worker=worker,
+        instructions=instructions, message_id=result.get("message_id"),
+    )
+    # Design doc Section 12.8: a real action was just dispatched for this
+    # issue - the strongest of the three exposure states (highest rank).
+    wg.advance_work_object_exposure_state(issue_id, "used_for_action")
+    # Part E2 (2026-07-30): a real generative action was just requested -
+    # resolve whichever candidate list was most recently offered, if any,
+    # and link it to the real pending_action this produced.
+    open_log = wg.get_most_recent_open_choice_log(issue_id)
+    if open_log is not None:
+        wg.mark_choice_log_chosen(open_log["id"], chosen_action_kind=action_kind,
+                                   resulting_pending_action_id=pending_id)
+    return {"ok": True, "pending_action_id": pending_id, "message_id": result.get("message_id"),
+            "prepared_action_id": prepared_id}
+
+
 @app.get("/api/skills")
 async def api_skills_list():
     """Every real, runnable skill (task #112) - the UI's 'Run a skill' picker
@@ -3776,7 +3880,19 @@ async def api_cockpit_action(body: CockpitActionBody):
     - prepared_actions is the real execution-safety layer wired in here, an
     idempotency_key blocking an actual double-dispatch (a double-click, a
     browser retry) rather than sending a second team_room message and
-    creating a second pending_action for the identical request."""
+    creating a second pending_action for the identical request.
+
+    Task #317: required_approval/the initial state now come from
+    wg.resolve_required_approval(body.action_kind) - the real Actor x
+    Action x Object x Consequence dispatch table - instead of a hardcoded
+    'approved' applied to every action_kind regardless of what it was.
+    draft_reply/review_contract/summarize all resolve False (each produces
+    only a contained, internal artifact) so the human click that reached
+    this route still IS the approval for those, same behavior as before;
+    'custom' resolves True (unbounded instructions) and now actually stops
+    at 'ready_for_approval' - dispatch is deferred until a real approval
+    step (POST /api/prepared-actions/{id}/approve) moves it forward,
+    instead of auto-approving sight-unseen."""
     if wg.get_issue(body.issue_id) is None:
         raise HTTPException(404, f"no such issue: {body.issue_id}")
 
@@ -3787,6 +3903,7 @@ async def api_cockpit_action(body: CockpitActionBody):
         return JSONResponse({"ok": True, "duplicate": True, "prepared_action_id": existing["id"],
                               "state": existing["state"]})
 
+    required_approval = wg.resolve_required_approval(body.action_kind)
     prepared_id = wg.create_prepared_action(
         claim_id=None,  # an issue-level cockpit action isn't tied to one specific claim - honest, not guessed
         action_type=body.action_kind,
@@ -3797,37 +3914,60 @@ async def api_cockpit_action(body: CockpitActionBody):
         rationale=body.instructions or f"cockpit action: {body.action_kind}",
         risk_class="low",  # every current action_kind requires a further human step before any real-world effect
         idempotency_key=idempotency_key,
-        state="approved",  # the human click that reached this route IS the approval - no separate policy gate exists yet
+        required_approval=required_approval,
+        state="ready_for_approval" if required_approval else "approved",
     )
+    if required_approval:
+        return JSONResponse({"ok": True, "prepared_action_id": prepared_id, "state": "ready_for_approval",
+                              "message": f"{body.action_kind} requires approval before dispatch - "
+                                         f"POST /api/prepared-actions/{prepared_id}/approve to proceed."})
 
-    sender = config.get("manager", "id") or "marc"
-    envelope = "@{worker} [COCKPIT-ACTION] {payload}".format(
-        worker=body.worker,
-        payload=json.dumps({"type": body.action_kind, "issue_id": body.issue_id,
-                           "instructions": body.instructions}, ensure_ascii=False),
+    result = _dispatch_approved_cockpit_action(
+        prepared_id, issue_id=body.issue_id, action_kind=body.action_kind,
+        worker=body.worker, instructions=body.instructions,
     )
-    wg.update_prepared_action_state(prepared_id, "executing")
-    try:
-        result = team_room.post_message(sender=sender, body=envelope)
-    except ValueError as e:
-        wg.update_prepared_action_state(prepared_id, "failed", policy_result=str(e))
-        raise HTTPException(400, str(e))
-    pending_id = wg.create_pending_action(
-        issue_id=body.issue_id, action_kind=body.action_kind, worker=body.worker,
-        instructions=body.instructions, message_id=result.get("message_id"),
+    return JSONResponse(result)
+
+
+@app.post("/api/prepared-actions/{prepared_action_id}/approve")
+async def api_prepared_action_approve(prepared_action_id: int):
+    """Task #317: the real approval step required_approval's own gate
+    exists for - a prepared_action that api_cockpit_action marked
+    'ready_for_approval' (today, only a cockpit 'custom' action_kind - see
+    PREPARED_ACTION_APPROVAL_TABLE) sits here until Marc explicitly moves
+    it forward. Not reachable for a row already 'approved' or terminal -
+    honest 409, not a silent no-op, since re-approving an already-dispatched
+    (or already-rejected/expired) action would either double-dispatch or
+    paper over a real state it shouldn't be in."""
+    row = wg.get_prepared_action(prepared_action_id)
+    if row is None:
+        raise HTTPException(404, f"no such prepared action: {prepared_action_id}")
+    if row["state"] != "ready_for_approval":
+        raise HTTPException(409, f"prepared action {prepared_action_id} is '{row['state']}', "
+                                  f"not 'ready_for_approval' - nothing to approve")
+    params = json.loads(row["proposed_parameters"])
+    wg.update_prepared_action_state(prepared_action_id, "approved")
+    result = _dispatch_approved_cockpit_action(
+        prepared_action_id, issue_id=params["issue_id"], action_kind=params["action_kind"],
+        worker=params.get("worker", "bridge"), instructions=params.get("instructions"),
     )
-    # Design doc Section 12.8: a real action was just dispatched for this
-    # issue - the strongest of the three exposure states (highest rank).
-    wg.advance_work_object_exposure_state(body.issue_id, "used_for_action")
-    # Part E2 (2026-07-30): a real generative action was just requested -
-    # resolve whichever candidate list was most recently offered, if any,
-    # and link it to the real pending_action this produced.
-    open_log = wg.get_most_recent_open_choice_log(body.issue_id)
-    if open_log is not None:
-        wg.mark_choice_log_chosen(open_log["id"], chosen_action_kind=body.action_kind,
-                                   resulting_pending_action_id=pending_id)
-    return JSONResponse({"ok": True, "pending_action_id": pending_id, "message_id": result.get("message_id"),
-                          "prepared_action_id": prepared_id})
+    return JSONResponse(result)
+
+
+@app.post("/api/prepared-actions/{prepared_action_id}/reject")
+async def api_prepared_action_reject(prepared_action_id: int):
+    """The other real outcome of a 'ready_for_approval' gate - Marc looked
+    at what was proposed and declined it. 'rejected' is already a valid
+    terminal prepared_actions state (design doc Section 12.4's own CHECK
+    constraint) with no producer before this - this is that producer."""
+    row = wg.get_prepared_action(prepared_action_id)
+    if row is None:
+        raise HTTPException(404, f"no such prepared action: {prepared_action_id}")
+    if row["state"] != "ready_for_approval":
+        raise HTTPException(409, f"prepared action {prepared_action_id} is '{row['state']}', "
+                                  f"not 'ready_for_approval' - nothing to reject")
+    wg.update_prepared_action_state(prepared_action_id, "rejected")
+    return JSONResponse({"ok": True, "prepared_action_id": prepared_action_id, "state": "rejected"})
 
 
 @app.get("/api/mail/freshness")

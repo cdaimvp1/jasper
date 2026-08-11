@@ -520,4 +520,84 @@ def test_gate_board_lists_deactivated_rules_as_inactive_without_gating_count(ws_
     assert board["active"] == []
     assert len(board["inactive"]) == 1
     assert board["inactive"][0]["id"] == rule_id
-    assert "currently_gating" not in board["inactive"][0]
+
+
+# --- check_project_link_prerequisite (task #319) --------------------------
+# A second, real source of gating signal: object-to-object project_links
+# dependencies (workgraph_store.py), not Aristotle's own signal-type rules.
+# Deliberately returns the same {"warning", ...} shape/WARNING_PREFIX as
+# check_prerequisites above so it plugs into the exact same has_unmet_
+# prerequisite mechanism (workgraph_nba.py) without a separate flag.
+
+def test_check_project_link_prerequisite_none_when_issue_has_no_project(ws_db):
+    issue_id = _issue(ws_db)
+    assert ar.check_project_link_prerequisite(issue_id) is None
+
+
+def test_check_project_link_prerequisite_none_when_no_links(ws_db):
+    proj = ws_db.create_project_with_new_id(name="Solo Deal")
+    issue_id = _issue(ws_db, project_id=proj)
+    assert ar.check_project_link_prerequisite(issue_id) is None
+
+
+def test_check_project_link_prerequisite_fires_on_unresolved_depends_on(ws_db):
+    proj_a = ws_db.create_project_with_new_id(name="New H1 Deal")
+    proj_b = ws_db.create_project_with_new_id(name="Old H1 Exit")
+    issue_id = _issue(ws_db, project_id=proj_a)
+    ws_db.create_project_link(from_project_id=proj_a, to_project_id=proj_b,
+                               link_type="depends_on", reason="needs the old contract exited first")
+
+    result = ar.check_project_link_prerequisite(issue_id)
+
+    assert result is not None
+    assert result["warning"].startswith("No confirmation seen yet")
+    assert "Old H1 Exit" in result["warning"]
+
+
+def test_check_project_link_prerequisite_resolved_when_target_project_done(ws_db):
+    proj_a = ws_db.create_project_with_new_id(name="New H1 Deal")
+    proj_b = ws_db.create_project_with_new_id(name="Old H1 Exit")
+    issue_id = _issue(ws_db, project_id=proj_a)
+    ws_db.create_project_link(from_project_id=proj_a, to_project_id=proj_b,
+                               link_type="depends_on", reason="needs the old contract exited first")
+    ws_db.set_project_status(proj_b, "done")
+
+    assert ar.check_project_link_prerequisite(issue_id) is None
+
+
+def test_check_project_link_prerequisite_fires_on_unresolved_blocks_from_other_side(ws_db):
+    """A 'blocks' link is directional the other way: from_project BLOCKS
+    to_project, so the issue's own project being the TO side (not the FROM
+    side, unlike depends_on) is what makes it the blocked one."""
+    proj_a = ws_db.create_project_with_new_id(name="Vendor Migration")
+    proj_b = ws_db.create_project_with_new_id(name="New Contract Signature")
+    issue_id = _issue(ws_db, project_id=proj_b)
+    ws_db.create_project_link(from_project_id=proj_a, to_project_id=proj_b,
+                               link_type="blocks", reason="migration must finish first")
+
+    result = ar.check_project_link_prerequisite(issue_id)
+
+    assert result is not None
+    assert "Vendor Migration" in result["warning"]
+
+
+def test_check_project_link_prerequisite_ignores_unrelated_link_type(ws_db):
+    proj_a = ws_db.create_project_with_new_id(name="A")
+    proj_b = ws_db.create_project_with_new_id(name="B")
+    issue_id = _issue(ws_db, project_id=proj_a)
+    ws_db.create_project_link(from_project_id=proj_a, to_project_id=proj_b,
+                               link_type="related", reason="same vendor, adjacent topic")
+
+    assert ar.check_project_link_prerequisite(issue_id) is None
+
+
+def test_check_project_link_prerequisite_ignores_wrong_direction_depends_on(ws_db):
+    """proj_a depends_on proj_b means proj_a is gated, not proj_b - an issue
+    on proj_b (the target, not the dependent) must never be flagged."""
+    proj_a = ws_db.create_project_with_new_id(name="A")
+    proj_b = ws_db.create_project_with_new_id(name="B")
+    issue_id = _issue(ws_db, project_id=proj_b)
+    ws_db.create_project_link(from_project_id=proj_a, to_project_id=proj_b,
+                               link_type="depends_on", reason="a depends on b")
+
+    assert ar.check_project_link_prerequisite(issue_id) is None

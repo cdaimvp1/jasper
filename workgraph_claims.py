@@ -496,6 +496,15 @@ def materialize_claims_for_raw_item(raw_item_id: int) -> int:
     # was dormant, wake it back up now. Dormant is never a permanent state.
     workgraph_lifecycle.revert_dormant_if_needed(issue_id)
 
+    # Task #319: two more real, structured signals this same curator-
+    # extraction step can carry, resolved/written exactly once per distinct
+    # extraction content (same "already reconciled" guard above covers
+    # both, since they read from this same already-fetched `blob`) - see
+    # _resolve_explicit_completions and _write_project_link_signals for why
+    # neither needs its own separate re-materialization guard.
+    _resolve_explicit_completions(blob, issue_id, raw_item_id, reference_base)
+    _write_project_link_signals(blob, issue_id, raw_item_id)
+
     if materialized_hash is None:
         inserted = _materialize_fresh(issue_id, raw_item_id, blob, ts, author, author_basis, reference_base)
         _bump_for_key_facts(blob, issue_id)
@@ -504,6 +513,160 @@ def materialize_claims_for_raw_item(raw_item_id: int) -> int:
 
     return _reconcile_extraction_correction(issue_id, raw_item_id, blob, author, author_basis,
                                              reference_base, content_hash)
+
+
+# --- completion + cross-project dependency detection (task #319) -----------
+# Two real gaps confirmed before building either: (1) resolution_signals
+# (task #155, SYNTHESIS_ROUTINE.md) already carries curator's judgment that
+# THIS raw_item's content directly and unambiguously states a SPECIFIC
+# earlier open claim was fulfilled, but the only existing consumer of that
+# signal (workgraph_reconcile.generate_resolution_signal_suggestions) only
+# ever matched it by byte-exact claim text - a resolution phrased
+# differently than the original ask (but sharing a real structured
+# reference) was invisible to it. _resolve_explicit_completions closes that
+# specific gap with a wider match (see _find_claim_for_resolution_signal),
+# staying suggest-only like every other claim-closing path in this module -
+# see that function's own docstring for why an earlier auto-resolving
+# version of this was scoped back after review. (2) project_links
+# (workgraph_store.py) already has the right shape (from/to project id + a
+# link_type enum covering depends_on/blocks/enables among others) but had
+# zero writer anywhere - confirmed via grep before writing a line of this.
+
+_COMPLETION_CLAIM_TYPES = ("ask", "decision", "commitment")
+
+
+def _find_claim_for_resolution_signal(issue_id: str, claim_type: str, claim_text: str,
+                                       reference_base: Optional[str]) -> Optional[dict]:
+    """Same two-tier structural match this module's own dedup already
+    trusts (see canonical_key_for_claim's docstring), applied to resolution
+    matching instead of dedup - deliberately no fuzzy text comparison
+    anywhere in this function:
+
+    (1) Byte-exact text match among this issue's OPEN claims of the same
+    type (find_open_claim_by_text) - the same "thread continuity" match
+    resolution_signals has always used (curator is asked to reproduce the
+    EARLIER claim's own text verbatim, per SYNTHESIS_ROUTINE.md).
+
+    (2) Only when THIS raw_item carries a real structured reference
+    (reference_base, e.g. a PR number) - a reference+action-family
+    structural match (find_open_claim_by_canonical_key_prefix), owner-
+    agnostic on purpose: the message that resolves an earlier ask
+    ("PR1161567 approved") rarely carries the same author/owner framing
+    the original ask did, so requiring an exact owner match too would
+    silently miss genuine matches a real shared reference id already
+    proves."""
+    claim = ws.find_open_claim_by_text(issue_id, claim_type, claim_text)
+    if claim is not None:
+        return claim
+    if not reference_base:
+        return None
+    action_family = _action_family_for_text(claim_text) or "generic"
+    prefix = f"{claim_type}|{action_family}|{reference_base}|"
+    return ws.find_open_claim_by_canonical_key_prefix(issue_id, claim_type, prefix)
+
+
+def _resolve_explicit_completions(blob: dict, issue_id: str, raw_item_id: int,
+                                   reference_base: Optional[str]) -> int:
+    """Task #319 built this to auto-resolve directly (update_claim_status
+    straight to 'done'), and Marc's own explicit call afterward
+    (2026-08-11) was to scope it back to suggest-only: every OTHER
+    claim-closing path in this codebase requires a human confirm first
+    (see workgraph_reconcile.py's module docstring, repeated three times
+    over - "no fuzzy/heuristic scoring," "never treated as evidence,"
+    suggest-only discipline), and this was a real, deliberate departure
+    from that, not just a gap-fill. Real business risk: a rare false
+    structural match would have silently closed a genuine open
+    commitment with no human ever seeing it happen.
+
+    Still real, still worth keeping: the broader match this function's
+    own _find_claim_for_resolution_signal added over what workgraph_
+    reconcile.generate_resolution_signal_suggestions already does alone
+    (byte-exact text only) - a reference/canonical-key fallback match for
+    a resolution phrased differently than the original ask. That widened
+    match now feeds ws.create_claim_suggestion the exact same way the
+    existing byte-exact path does, so it's a suggestion a human confirms
+    through the normal checklist action, never an automatic status change.
+
+    create_claim_suggestion's own dedupe-then-insert (pending + same
+    claim_id + evidence_type) means this is safe to call even when the
+    byte-exact tier ALSO matches and generate_resolution_signal_
+    suggestions (called separately, elsewhere in the pipeline) creates
+    the identical suggestion first or second - whichever runs first wins,
+    the other is a no-op reuse of the same pending row, never a
+    duplicate. Returns the count of signals that produced a suggestion
+    (new or already-pending)."""
+    signals = blob.get("resolution_signals")
+    if not isinstance(signals, list):
+        return 0
+    suggested = 0
+    for signal in signals:
+        if not isinstance(signal, dict):
+            continue
+        claim_type = signal.get("claim_type")
+        claim_text = signal.get("claim_text")
+        if claim_type not in _COMPLETION_CLAIM_TYPES or not claim_text:
+            continue
+        claim = _find_claim_for_resolution_signal(issue_id, claim_type, claim_text, reference_base)
+        if claim is None:
+            continue
+        ws.create_claim_suggestion(
+            claim_id=claim["id"], suggestion_kind="resolve",
+            evidence_type="explicit_resolution_signal",
+            evidence_note=(signal.get("resolution_note") or "").strip()[:160] or None,
+            raw_item_id=raw_item_id,
+        )
+        suggested += 1
+    return suggested
+
+
+_PROJECT_LINK_RELATIONSHIP_TYPES = ("depends_on", "blocks", "enables")
+
+
+def _write_project_link_signals(blob: dict, issue_id: str, raw_item_id: int) -> int:
+    """project_links already has the right shape (see workgraph_store.py's
+    own CREATE TABLE comment) but, confirmed via grep before this was
+    written, had zero writer anywhere. `dependency_signals` is a new
+    curator-extraction field (SYNTHESIS_ROUTINE.md) - populated ONLY when a
+    raw_item's content explicitly names a real, SPECIFIC other project
+    curator has already confirmed exists (from her own already-fetched
+    project list - never a topical-similarity guess) as depending on/
+    blocking/enabling the CURRENT issue's own project.
+
+    Project-scoped, same reasoning project_links' own CREATE TABLE comment
+    gives for why this is project-level, not issue-level - skipped entirely
+    (never queued, never guessed at) when this issue isn't grouped into a
+    real project yet, or when the named target isn't a real, existing
+    project row. Idempotent via create_project_link's own dedupe-then-
+    insert (same (from, to, link_type) triple never gets a second row), so
+    safe to call on every materialization pass, including a resend of the
+    identical raw_item content. Returns the count of links written or
+    already on record."""
+    signals = blob.get("dependency_signals")
+    if not isinstance(signals, list):
+        return 0
+    issue = ws.get_issue_or_cluster(issue_id)
+    from_project_id = issue.get("project_id") if issue else None
+    if not from_project_id:
+        return 0
+    written = 0
+    for signal in signals:
+        if not isinstance(signal, dict):
+            continue
+        relationship = signal.get("relationship")
+        target_project_id = signal.get("target_project_id")
+        if relationship not in _PROJECT_LINK_RELATIONSHIP_TYPES or not target_project_id:
+            continue
+        if target_project_id == from_project_id:
+            continue
+        if ws.get_project(target_project_id) is None:
+            continue  # never link to a project curator merely named, not a confirmed real one
+        ws.create_project_link(
+            from_project_id=from_project_id, to_project_id=target_project_id,
+            link_type=relationship, reason=(signal.get("reason") or f"detected via raw_item {raw_item_id}"),
+            created_by="claims_dependency_signal",
+        )
+        written += 1
+    return written
 
 
 def _matching_repeat_signal(blob: dict, ask_text: str) -> Optional[dict]:

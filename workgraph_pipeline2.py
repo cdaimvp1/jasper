@@ -163,14 +163,42 @@ def find_candidates(work_object_id: str, issue: Optional[dict] = None) -> list[d
     same 2+-point count here (via _matched_data_points' own "reference"
     point type), never a silent bypass of the LLM read in step 4 - Marc's
     own spec names only thread/message/meeting-series identity as
-    exempt from LLM review, not a shared business reference number."""
+    exempt from LLM review, not a shared business reference number.
+
+    Rewired 2026-08-11 (task #331, Marc's own engineering-direction doc,
+    Section 16): used to unconditionally scan EVERY issue/cluster in the
+    database (ws.list_issues(limit=10000) + ws.list_clusters(limit=10000))
+    and run the real matching computation against each one - a genuine,
+    already-live O(20k) cost on every new ungrouped item, every cycle, at
+    ~1500+ projects. `others` is now sourced from workgraph_projects.
+    candidate_pool_via_data_point_index - a real datapoint_value ->
+    work_object_ids lookup (workgraph_store.data_point_values, one new
+    index) instead of a full scan - EXCEPT the one case that index can't
+    yet safely serve (see workgraph_discovery.
+    has_confirmed_non_fasttrack_definitions' own docstring: a genuinely
+    discovered, non-fast-track data point actually confirmed), where this
+    still falls back to the exact original full scan rather than risk
+    ever silently dropping a real candidate. The inner loop below - the
+    real matching decision - is completely unchanged either way; only
+    where `others` comes from differs, so the two paths are guaranteed to
+    produce IDENTICAL candidate results (see
+    tests/test_workgraph_pipeline2.py's own index-vs-full-scan
+    equivalence tests)."""
     if issue is None:
         issue = ws.get_issue_or_cluster(work_object_id)
     my_sig = wp.get_or_compute_work_object_signature(work_object_id, issue)
     my_topic_key = wp._topic_key_for_signature(issue, my_sig)
     my_project_id = issue.get("project_id")
+
+    if workgraph_discovery.has_confirmed_non_fasttrack_definitions():
+        others = ws.list_issues(states=None, limit=10000) + ws.list_clusters(limit=10000)
+    else:
+        wp.ensure_fasttrack_index_backfilled()
+        pool_ids = wp.candidate_pool_via_data_point_index(work_object_id, my_sig, my_topic_key)
+        others = [o for o in (ws.get_issue_or_cluster(oid) for oid in pool_ids) if o is not None]
+
     candidates = []
-    for other in ws.list_issues(states=None, limit=10000) + ws.list_clusters(limit=10000):
+    for other in others:
         if other["id"] == work_object_id:
             continue
         if my_project_id and my_project_id == other.get("project_id"):

@@ -91,7 +91,9 @@ different jobs.
                                              "escalation_note": "2nd follow-up, now from the
                                              requester's manager rather than the requester"}, ...],
                         "resolution_signals": [{"claim_type": "ask"|"decision"|"commitment",
-                                             "claim_text": "...", "resolution_note": "..."}, ...]}}
+                                             "claim_text": "...", "resolution_note": "..."}, ...],
+                        "dependency_signals": [{"relationship": "depends_on"|"blocks"|"enables",
+                                             "target_project_id": "proj-042", "reason": "..."}, ...]}}
    ```
    Computed ONCE per raw_item, permanently — never re-extract an item that already has a row here
    (check first; the routes list above tell you which raw_items already have one). Writing this
@@ -138,11 +140,33 @@ different jobs.
      closed), so the suggestion this becomes points at the exact open claim it's resolving.
      `resolution_note` is a short, specific reason (what/where the confirmation is), not a
      restatement of the claim text.
-   - This only ever CREATES A SUGGESTION for a human to confirm (workgraph_reconcile.py) — it
-     never closes anything itself. If you're not confident a specific earlier claim was actually
-     fulfilled by THIS raw_item, omit the entry entirely; a missed resolution just means one more
-     item stays open a little longer, which costs nothing — a wrongly-suggested one costs Marc's
-     trust in the queue.
+   - (task #319) When `claim_text` matches an existing open claim exactly, or this raw_item carries
+     a real structured reference (e.g. a PR number) that ties it to that claim's own reference,
+     writing this entry reaches a WIDER match than the byte-exact-only path this signal already fed
+     (workgraph_claims._resolve_explicit_completions, alongside workgraph_reconcile.py's own
+     byte-exact matcher) — but either path still only ever CREATES A SUGGESTION for a human to
+     confirm, same as every other claim-closing mechanism in this codebase; nothing here auto-closes
+     a claim. If you're not confident a specific earlier claim was actually fulfilled by THIS
+     raw_item, omit the entry entirely; a missed resolution just means one more item stays open a
+     little longer, which costs nothing — a wrongly-suggested one costs Marc's trust in the ledger.
+
+   **`dependency_signals` (added 2026-08-11, task #319) — only populate this when THIS raw_item's
+   content explicitly and specifically states that this issue's own project depends on, is blocked
+   by, or enables another SPECIFIC, real project you have already confirmed exists — never a
+   topical-similarity guess, never a project you're merely inferring might exist:**
+   - Before adding an entry, confirm the OTHER project is real: you must already have its exact
+     `project_id` from your own normal reads this wake (`GET /api/workgraph/projects` or a project
+     detail page you've already opened) — never invent or guess an id. If you can't name the real
+     other project's id, omit the entry entirely; a missed dependency costs nothing, a wrong one
+     writes a real row into `project_links` that a human then has to notice and undo.
+   - `relationship` is from THIS project's own point of view: `depends_on` (this project cannot
+     finish until the named one does), `blocks` (this project is what's holding the named one up),
+     `enables` (this project makes the named one possible, without strictly gating it). `reason` is
+     a short, specific quote or paraphrase of what in this raw_item actually said so.
+   - This is project-level, not issue-level (same reasoning as `project_links`' own schema
+     comment) — only meaningful once this issue is already grouped into a real project; if it
+     isn't yet, the signal is silently dropped rather than guessed at, so there's no harm in still
+     writing the entry if you're unsure whether grouping has happened yet.
 
    **`dates_mentioned` entries need real judgment on `kind` and `whose` (added 2026-07-30 for
    `kind`, Marc's direct request; `whose` added 2026-08-03, task #57/design doc Section 9.7) — this

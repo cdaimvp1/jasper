@@ -38,6 +38,7 @@ v2 formula:
 """
 from __future__ import annotations
 
+import difflib
 import json
 import math
 import re
@@ -45,7 +46,7 @@ import sys
 import time
 from pathlib import Path
 from types import MappingProxyType
-from typing import Optional
+from typing import Any, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
@@ -596,6 +597,13 @@ def score_issue(issue: dict, now: float, weights: dict = DEFAULT_WEIGHTS,
     # staleness/value reasons. Only ever "no confirmation seen yet", never
     # "this hasn't happened" - see workgraph_aristotle.py's own docstring.
     prereq = workgraph_aristotle.check_prerequisites(issue["id"], raw_items)
+    # Task #319: a second, real source of gating signal - object-to-object
+    # project_links dependencies, not just Aristotle's own taught signal-
+    # type rules. Only checked when Aristotle's own rule already found
+    # nothing (check_prerequisites_all's own "first match wins" discipline,
+    # extended across both sources rather than picking one arbitrarily).
+    if not prereq:
+        prereq = workgraph_aristotle.check_project_link_prerequisite(issue["id"])
     if prereq:
         # Enhancement idea panel #11: has_unmet_prerequisite was persisted
         # (issues.has_unmet_prerequisite, set a few lines below in
@@ -655,6 +663,143 @@ def run_choice_log_expiry_daily_if_due(now: float | None = None) -> Optional[dic
     ttl_days = config.get("nba", "choice_log_ttl_days") or STALENESS_SATURATION_DAYS
     expired = ws.expire_stale_nba_choice_logs(ttl_days)
     return {"expired": expired, "ttl_days": ttl_days}
+
+
+# --- Task #318: NBA outcome tracking - the one fuzzy piece --------------
+# Everything above/below this block (nba_outcome_log's create/dismiss
+# events) is fully deterministic, logged straight from the server route
+# that observed the reaction - no judgment involved. This block is the one
+# genuinely ambiguous piece the task asked for: given a hero-draft-reply's
+# real suggested_text (the only action_kind that ever carries one - see
+# nba_outcome_log's own table comment) and a plausible later sent version
+# of it, how much did Marc actually rewrite it?
+#
+# Two real, separate limitations, both worth naming plainly rather than
+# quietly working around:
+#
+# (1) No draft-to-sent linkage exists anywhere in Outlook's own COM model -
+#     Display()ing a draft and later hitting Send() on it produces a brand
+#     new Sent Items EntryID with zero reference back to the draft that
+#     became it. outlook_com_sent_ingest.py (task #270) already pulls every
+#     sent item into raw_items as a real outbound row on the SAME issue
+#     (via conversation_id/thread_key, exactly like its inbound sibling),
+#     which is what makes correlation possible AT ALL, but it can only ever
+#     be "the closest outbound item on this issue after the draft" - a
+#     heuristic time-window match, not a verified link. Two real drafts
+#     fired off close together on the same issue could produce a wrong
+#     pairing; this is disclosed, not hidden, in rewrite_note.
+#
+# (2) There is no live, synchronous LLM-call path anywhere in this codebase
+#     (confirmed by search - every place real judgment/generation is needed,
+#     e.g. workgraph_proactive's contract-review dispatch, routes through a
+#     Team Room message to a separate worker session, an async round-trip
+#     with no fit for a lightweight per-row classification like this one).
+#     Building that dispatch path is real, new infrastructure - exactly
+#     what this task said not to invent for this one piece. classify_
+#     rewrite_severity below is therefore a deterministic difflib-ratio
+#     PROXY for "how much did the meaning change," not a real semantic
+#     judgment - it will call `judge_fn` instead when one is supplied (kept
+#     pluggable so a real LLM-backed classifier can be dropped in later
+#     without touching the capture/correlation plumbing around it), but
+#     ships with no judge_fn wired in. Flagged here and in the task report,
+#     not silently passed off as more than it is.
+
+SENT_TEXT_CORRELATION_WINDOW_SECONDS = 7 * DAY  # give up trying to correlate after this long
+REWRITE_SEVERITY_THRESHOLD = 0.35  # judgment call: below this, "accepted as-is" with minor edits
+
+
+def _find_likely_sent_reply(issue_id: str, after_ts: float,
+                             window_seconds: float = SENT_TEXT_CORRELATION_WINDOW_SECONDS) -> Optional[dict]:
+    """The closest real outbound raw_item on this issue occurring after
+    after_ts (the draft event's own detected_ts) and within window_seconds -
+    see this module's own limitation (1) above for why this is a best-
+    effort heuristic, never a verified link. None when nothing outbound
+    shows up on this issue in the window (the draft was never sent, or
+    Sent Items ingestion hasn't caught up yet - both real, both handled the
+    same honest way: keep it pending, don't guess)."""
+    candidates = [
+        ri for ri in ws.get_raw_items_for_issue(issue_id)
+        if ri.get("direction") == "outbound" and ri.get("occurred_ts")
+        and after_ts < ri["occurred_ts"] <= after_ts + window_seconds
+    ]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda ri: ri["occurred_ts"])
+
+
+def classify_rewrite_severity(suggested_text: str, sent_text: str,
+                               judge_fn: Optional[Any] = None) -> dict:
+    """Returns {"severity": float in [0,1], "note": str}. severity is how
+    much sent_text diverges from suggested_text - 0 means identical, 1
+    means unrecognizable. judge_fn, if given, is called instead as
+    judge_fn(suggested_text, sent_text) -> {"severity": float, "note": str}
+    (the real semantic-judgment hook this module has no live caller for
+    yet - see the block docstring above); with none supplied (the only path
+    actually exercised today), falls back to a plain difflib.
+    SequenceMatcher ratio - a cheap, honest character-level proxy for
+    "did the wording change," explicitly NOT a claim about whether the
+    MEANING changed."""
+    if judge_fn is not None:
+        return judge_fn(suggested_text, sent_text)
+    similarity = difflib.SequenceMatcher(None, suggested_text or "", sent_text or "").ratio()
+    severity = round(1.0 - similarity, 4)
+    return {
+        "severity": severity,
+        "note": (f"difflib character-similarity proxy (not a semantic judgment - "
+                 f"see workgraph_nba module docstring): {similarity:.2f} similarity"),
+    }
+
+
+def attempt_rewrite_judgment(limit: int = 50, now: float | None = None) -> dict:
+    """Works through nba_outcome_log rows that captured real suggested_text
+    and have no sent_text resolved yet (ws.list_nba_outcomes_pending_
+    rewrite_judgment) - for each, tries to find a plausible sent
+    counterpart (_find_likely_sent_reply) and, if one turns up, classifies
+    the rewrite severity and records it (ws.record_rewrite_judgment,
+    flipping outcome to 'rewritten' only above REWRITE_SEVERITY_THRESHOLD).
+    Rows still inside the correlation window with no counterpart yet are
+    left untouched (Sent Items ingestion may just not have caught up);
+    rows that have aged past the window with nothing found are marked
+    abandoned (ws.mark_nba_outcome_correlation_abandoned) so they stop
+    being retried forever."""
+    if now is None:
+        now = time.time()
+    pending = ws.list_nba_outcomes_pending_rewrite_judgment(limit)
+    judged = abandoned = still_pending = 0
+    for row in pending:
+        sent_item = _find_likely_sent_reply(row["issue_id"], row["detected_ts"])
+        if sent_item is not None:
+            sent_text = text_extract.resolve_item_text(sent_item) or sent_item.get("body_preview") or ""
+            result = classify_rewrite_severity(row["suggested_text"], sent_text)
+            ws.record_rewrite_judgment(
+                row["id"], sent_text=sent_text, rewrite_severity=result["severity"],
+                rewrite_note=result["note"], rewritten=result["severity"] >= REWRITE_SEVERITY_THRESHOLD,
+            )
+            judged += 1
+        elif now - row["detected_ts"] > SENT_TEXT_CORRELATION_WINDOW_SECONDS:
+            ws.mark_nba_outcome_correlation_abandoned(
+                row["id"],
+                f"no outbound raw_item found on this issue within "
+                f"{SENT_TEXT_CORRELATION_WINDOW_SECONDS / DAY:.0f}d of the draft - "
+                "either never sent, or Outlook's lack of draft-to-sent linkage means "
+                "this heuristic correlation simply couldn't find it (see module docstring)",
+            )
+            abandoned += 1
+        else:
+            still_pending += 1
+    return {"judged": judged, "abandoned": abandoned, "still_pending": still_pending}
+
+
+def run_rewrite_judgment_daily_if_due(now: float | None = None) -> Optional[dict]:
+    """Same once-a-day gate as run_choice_log_expiry_daily_if_due above -
+    Sent Items ingestion runs on its own cadence, so re-attempting
+    correlation more than once a day buys nothing real."""
+    if now is None:
+        now = time.time()
+    today = time.strftime("%Y-%m-%d", time.localtime(now))
+    if not ws.claim_daily_run("nba_rewrite_judgment", today):
+        return None
+    return attempt_rewrite_judgment(now=now)
 
 
 def recompute_all(now: float | None = None) -> dict:

@@ -81,15 +81,26 @@ def dispatch_contract_review(issue_id: str, raw_item_id: int) -> Optional[int]:
     """Same underlying primitives server_lean.py's own /api/cockpit/actions
     route uses (create_prepared_action + team_room.post_message +
     create_pending_action) - a second CALLER of the one real dispatch
-    mechanism, not a second mechanism. state='approved' at creation is
-    Marc's standing settings-toggle approval (see module docstring), the
-    same shortcut the human-click route takes for its own click.
-    Idempotent per raw_item - a second call for the same raw_item is a
-    no-op (returns None), same discipline as the click-path's own
-    idempotency_key check."""
+    mechanism, not a second mechanism. Idempotent per raw_item - a second
+    call for the same raw_item is a no-op (returns None), same discipline
+    as the click-path's own idempotency_key check.
+
+    Task #317: the initial state now follows ws.resolve_required_approval
+    ("review_contract") - the real dispatch table - instead of a hardcoded
+    'approved'. review_contract resolves False (a contract review is an
+    internal Jasper-side write-up with no effect outside Jasper until Marc
+    reads it), so this action_type's own real-world effect is still
+    contained and Marc's standing settings-toggle approval (see module
+    docstring) is still what actually approves the TRIGGER firing - this
+    just makes the row's own state honestly reflect the table's verdict
+    instead of a value nothing computed. If a future action_type added
+    here ever resolved True, this branch is what stops it from silently
+    reusing the 'approved' shortcut the old hardcoded value gave every
+    action_type regardless of what it was."""
     idempotency_key = _idempotency_key(raw_item_id, "review_contract")
     if ws.find_prepared_action_by_idempotency_key(idempotency_key) is not None:
         return None
+    required_approval = ws.resolve_required_approval("review_contract")
     prepared_id = ws.create_prepared_action(
         claim_id=None, action_type="review_contract",
         proposed_parameters_json=json.dumps({
@@ -98,8 +109,16 @@ def dispatch_contract_review(issue_id: str, raw_item_id: int) -> Optional[int]:
         }),
         evidence_refs_json=json.dumps([raw_item_id]),
         rationale=f"{_PROACTIVE_RATIONALE_PREFIX} incoming message asked for a document review",
-        risk_class="low", idempotency_key=idempotency_key, state="approved",
+        risk_class="low", idempotency_key=idempotency_key, required_approval=required_approval,
+        state="ready_for_approval" if required_approval else "approved",
     )
+    if required_approval:
+        # Awaiting a real human approval step (server_lean.py's
+        # /api/prepared-actions/{id}/approve) before dispatch - never
+        # reached by either of today's two proactive action_types, both
+        # of which resolve False, but a real gate rather than a dead
+        # branch if that ever changes.
+        return prepared_id
     sender = config.get("manager", "id") or "marc"
     envelope = "@bridge [COCKPIT-ACTION] {}".format(json.dumps(
         {"type": "review_contract", "issue_id": issue_id, "instructions": ""}, ensure_ascii=False))
@@ -139,11 +158,17 @@ def _draft_status_update_body(issue_id: str) -> str:
 def dispatch_status_update_draft(issue_id: str, raw_item_id: int, entry_id: str) -> Optional[int]:
     """Drafts a reply and saves it to the Drafts folder via outlook_actions.
     draft_reply(save_only=True) - never Display()s/Send()s it. Idempotent
-    per raw_item, same as dispatch_contract_review."""
+    per raw_item, same as dispatch_contract_review.
+
+    Task #317: same table-driven state as dispatch_contract_review -
+    draft_status_update resolves False (a Drafts-folder-only artifact, same
+    contract as draft_reply), so behavior is unchanged; the branch below
+    only fires for a future action_type this function doesn't use today."""
     idempotency_key = _idempotency_key(raw_item_id, "draft_status_update")
     if ws.find_prepared_action_by_idempotency_key(idempotency_key) is not None:
         return None
     body = _draft_status_update_body(issue_id)
+    required_approval = ws.resolve_required_approval("draft_status_update")
     prepared_id = ws.create_prepared_action(
         claim_id=None, action_type="draft_status_update",
         proposed_parameters_json=json.dumps({
@@ -151,8 +176,11 @@ def dispatch_status_update_draft(issue_id: str, raw_item_id: int, entry_id: str)
         }),
         evidence_refs_json=json.dumps([raw_item_id]),
         rationale=f"{_PROACTIVE_RATIONALE_PREFIX} incoming message asked for a status update",
-        risk_class="low", idempotency_key=idempotency_key, state="approved",
+        risk_class="low", idempotency_key=idempotency_key, required_approval=required_approval,
+        state="ready_for_approval" if required_approval else "approved",
     )
+    if required_approval:
+        return prepared_id
     ws.update_prepared_action_state(prepared_id, "executing")
     try:
         outlook_actions.draft_reply(entry_id, body=body, save_only=True)

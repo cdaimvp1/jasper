@@ -88,6 +88,205 @@ def test_find_candidates_finds_a_real_2_point_match(ws_db):
     assert "stakeholder" in candidates[0]["matched_signals"]
 
 
+def _noise_issues(ws_db, n, prefix="noise", with_party=True):
+    """N issues sharing zero real data points with anything else. With
+    with_party=True each gets its own unique external party/company, so
+    none of them ever collide on supplier/stakeholder with each other or
+    with a/b - real stress-test noise for the equivalence tests, where
+    the point is "the two paths still agree," not pool size.
+
+    with_party=False (no external party at all) models the OTHER common
+    real case - a plain internal-only thread - and is what the pool-size
+    reduction test uses: subject_entity's own presence-based fallback
+    (see candidate_pool_via_data_point_index's own docstring) only ever
+    narrows the pool past objects that have NO external party at all
+    (has_external gates topic_key itself, see _topic_key_for_signature) -
+    an issue that DOES carry an external party and an informative title
+    legitimately stays in that fallback's pool no matter how unrelated it
+    otherwise is, since a fuzzy substring match can't be safely
+    pre-filtered by presence alone any tighter without risking a real
+    missed candidate."""
+    ids = []
+    for i in range(n):
+        issue_id = _issue(ws_db, f"{prefix} {i}: totally unrelated internal note")
+        if with_party:
+            _link_party(ws_db, issue_id, f"{prefix}-party-{i}", f"{prefix}{i}@other-{i}.com", company=f"Other Co {i}")
+        ids.append(issue_id)
+    return ids
+
+
+def _sorted_candidates(candidates):
+    return sorted((c["candidate_id"], tuple(sorted(c["matched_signals"]))) for c in candidates)
+
+
+# --- task #331: datapoint_value -> work_object_ids index rewrite ----------
+#
+# find_candidates used to unconditionally scan EVERY issue/cluster
+# (ws.list_issues(limit=10000) + ws.list_clusters(limit=10000)) and run the
+# real matching computation against each one. It's now sourced from
+# workgraph_projects.candidate_pool_via_data_point_index instead, with the
+# ORIGINAL full scan kept only as a fallback for the one case that index
+# can't yet safely serve (workgraph_discovery.
+# has_confirmed_non_fasttrack_definitions). These tests assert the two
+# paths - both real production code, not a reimplementation - produce
+# IDENTICAL results, then give some rough evidence the index path really
+# does less work.
+
+def test_find_candidates_index_path_matches_full_scan_fallback_multi_type(ws_db, isolated_paths, monkeypatch):
+    """A rich scenario spanning reference/supplier/stakeholder/amount
+    matches, plus 25 signal-less noise issues - the index path (default)
+    and the original full-scan fallback (forced via monkeypatch) must
+    return the exact same candidate set for the exact same item."""
+    a = _issue(ws_db, "Requested approval for Veeva CRM press release")
+    _link_party(ws_db, a, "shared_party", "rep@acme.com", company="Acme")
+    a_rid = _raw_item(ws_db, a, "Veeva CRM", "ka", body_preview="Total contract value: $50,000.00")
+    conn = ws_db._connect()
+    conn.execute("UPDATE raw_items SET pr_number_base = 'PR700001' WHERE id = ?", (a_rid,))
+    conn.close()
+
+    # 2-point match: shared party (supplier+stakeholder) AND shared PR ref.
+    b = _issue(ws_db, "MARC REVIEW REQUESTED: Veeva CRM press release quote")
+    _link_party(ws_db, b, "shared_party", "rep@acme.com", company="Acme")
+    b_rid = _raw_item(ws_db, b, "Veeva CRM quote", "kb", body_preview="See PR700001 attached.")
+    conn = ws_db._connect()
+    conn.execute("UPDATE raw_items SET pr_number_base = 'PR700001' WHERE id = ?", (b_rid,))
+    conn.close()
+
+    # 2-point match: shared company (supplier) AND a within-1% amount -
+    # otherwise totally unrelated to a/b (different party, no shared ref).
+    c = _issue(ws_db, "Separate Acme renewal")
+    _link_party(ws_db, c, "acme_other_contact", "other@acme.com", company="Acme")
+    _raw_item(ws_db, c, "Acme renewal", "kc", body_preview="Total contract value: $50,250.00")
+
+    _noise_issues(ws_db, 25)
+
+    indexed = p2.find_candidates(a)
+
+    monkeypatch.setattr(p2.workgraph_discovery, "has_confirmed_non_fasttrack_definitions", lambda: True)
+    full_scan = p2.find_candidates(a)
+
+    assert _sorted_candidates(indexed) == _sorted_candidates(full_scan)
+    # Real assertions on content too, not just "the two paths agree" -
+    # agreeing on a wrong answer would still pass the line above alone.
+    ids = {cid for cid, _ in _sorted_candidates(indexed)}
+    assert ids == {b, c}
+    signals_by_id = dict(_sorted_candidates(indexed))
+    # >= (superset), not == : the shared "veeva crm press release" title
+    # text between a/b also legitimately fires subject_entity - real,
+    # correct, incidental behavior this test isn't about; the point here
+    # is that reference/supplier/stakeholder (b) and supplier/amount (c)
+    # are ALL present via the index path, matching the full scan exactly.
+    assert set(signals_by_id[b]) >= {"reference", "supplier", "stakeholder"}
+    assert set(signals_by_id[c]) >= {"supplier", "amount"}
+
+
+def test_find_candidates_presence_fallback_covers_fuzzy_only_match(ws_db, isolated_paths, monkeypatch):
+    """The one correctness-sensitive case for this rewrite: a pair that
+    matches ONLY on the two genuinely FUZZY point types (subject_entity's
+    substring overlap, product_service's substring overlap) - zero shared
+    reference/supplier/stakeholder/amount/document. A plain exact-value
+    index lookup alone would silently miss this pair entirely; the
+    presence-based fallback (candidate_pool_via_data_point_index's own
+    docstring) must still surface it, and the result must still match
+    the full-scan fallback exactly."""
+    title_a = ("Action required: Approve the Requisition that JANE SMITH submitted "
+               "- PR1111111 - Cloud Analytics Platform Subscription Renewal ($10,000.00 USD)")
+    title_b = ("Action required: Approve the Requisition that BOB JONES submitted "
+               "- PR2222222 - Cloud Analytics Platform Subscription Renewal ($99,999.00 USD)")
+    a = _issue(ws_db, title_a)
+    _link_party(ws_db, a, "party-a", "repa@vendor-a.com", company="Vendor A")
+    b = _issue(ws_db, title_b)
+    _link_party(ws_db, b, "party-b", "repb@vendor-b.com", company="Vendor B")
+    _noise_issues(ws_db, 15)
+
+    indexed = p2.find_candidates(a)
+
+    monkeypatch.setattr(p2.workgraph_discovery, "has_confirmed_non_fasttrack_definitions", lambda: True)
+    full_scan = p2.find_candidates(a)
+
+    assert _sorted_candidates(indexed) == _sorted_candidates(full_scan)
+    assert len(indexed) == 1
+    assert indexed[0]["candidate_id"] == b
+    assert set(indexed[0]["matched_signals"]) == {"subject_entity", "product_service"}
+
+
+def test_find_candidates_falls_back_to_full_scan_when_a_real_discovery_is_confirmed(ws_db, isolated_paths, monkeypatch):
+    """workgraph_discovery.has_confirmed_non_fasttrack_definitions is the
+    one flag that must force the ORIGINAL full scan (see its own
+    docstring on why the index can't yet safely serve a genuinely
+    discovered data point) - confirmed here by spying on ws.list_issues
+    rather than monkeypatching the flag directly, so this actually
+    exercises the real trigger condition."""
+    a = _issue(ws_db, "A")
+    ws_db.create_data_point_definition(
+        id="dp-real-discovery", name="Real discovery", description="test", point_type="entity",
+        deterministic_rule=None, discovered_from="test", status="confirmed",
+    )
+    ws_db.confirm_data_point_definition("dp-real-discovery", confirmed_by="marc")
+
+    calls = {"n": 0}
+    real_list_issues = ws_db.list_issues
+
+    def counting_list_issues(*a_, **kw):
+        calls["n"] += 1
+        return real_list_issues(*a_, **kw)
+
+    monkeypatch.setattr(p2.ws, "list_issues", counting_list_issues)
+
+    p2.find_candidates(a)
+
+    assert calls["n"] == 1  # the full-scan branch really ran
+
+
+def test_find_candidates_keeps_the_fasttrack_index_current(ws_db, isolated_paths):
+    """Task #331 item 4 - the index must get written as data points get
+    computed, not just read. A fresh signature compute (find_candidates'
+    own get_or_compute_work_object_signature call) must leave real
+    dp-fasttrack-* rows behind for the next lookup to use."""
+    a = _issue(ws_db, "Requested approval for Veeva CRM press release")
+    _link_party(ws_db, a, "shared_party", "rep@acme.com", company="Acme")
+
+    p2.find_candidates(a)
+
+    values = {v["definition_id"]: v["value"] for v in ws_db.list_data_point_values_for_work_object(a)}
+    assert values.get("dp-fasttrack-supplier") == "acme"
+    assert values.get("dp-fasttrack-stakeholder") == "party:shared_party"
+
+
+def test_find_candidates_index_path_examines_far_fewer_pairs_than_full_scan(ws_db, isolated_paths, monkeypatch):
+    """Rough before/after evidence (not a rigorous benchmark) that the
+    index rewrite actually reduces work: with 40 signal-less noise issues
+    plus 1 real candidate, the indexed path should call the real, per-pair
+    _matched_data_points computation only a handful of times, while the
+    full-scan fallback calls it once per noise issue plus the real one."""
+    a = _issue(ws_db, "Requested approval for Veeva CRM press release")
+    _link_party(ws_db, a, "shared_party", "rep@acme.com", company="Acme")
+    b = _issue(ws_db, "MARC REVIEW REQUESTED: Veeva CRM press release quote")
+    _link_party(ws_db, b, "shared_party", "rep@acme.com", company="Acme")
+    _noise_issues(ws_db, 40, with_party=False)
+
+    real_matched = wp._matched_data_points
+    calls = {"n": 0}
+
+    def counting_matched(*a_, **kw):
+        calls["n"] += 1
+        return real_matched(*a_, **kw)
+
+    monkeypatch.setattr(wp, "_matched_data_points", counting_matched)
+    indexed_candidates = p2.find_candidates(a)
+    indexed_calls = calls["n"]
+
+    calls["n"] = 0
+    monkeypatch.setattr(p2.workgraph_discovery, "has_confirmed_non_fasttrack_definitions", lambda: True)
+    full_scan_candidates = p2.find_candidates(a)
+    full_scan_calls = calls["n"]
+
+    assert _sorted_candidates(indexed_candidates) == _sorted_candidates(full_scan_candidates)
+    assert full_scan_calls >= 41  # every noise issue plus b
+    assert indexed_calls <= 3     # only b (and maybe a itself) ever reach the real comparison
+    assert indexed_calls < full_scan_calls
+
+
 def test_find_candidates_has_no_side_effects(ws_db):
     """The whole point of retiring the old queue - detection alone must
     write nothing anywhere. pending_project_suggestions itself is gone

@@ -443,6 +443,53 @@ def init_workgraph() -> None:
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_nba_choice_log_issue_status ON nba_choice_log(issue_id, status, offered_ts DESC)")
 
+            # Task #318: nba_choice_log above tracks "which candidate among
+            # several offered got picked" - a real but NARROWER thing than
+            # what this table tracks. This is the disposition of one
+            # specific suggested action once Marc actually reacted to it:
+            # accepted verbatim (a deterministic-action click - draft-reply/
+            # draft-forward/hero-draft-reply/a cockpit-action dispatch),
+            # dismissed/ignored outright (the issue-level Dismiss button, or
+            # a choice-log offer that expired untouched), or accepted but
+            # heavily rewritten before being sent (only meaningful for the
+            # one action type that carries real Jasper-authored TEXT to
+            # rewrite - hero-draft-reply's draft body; draft-reply/draft-
+            # forward have no suggested wording at all, only a suggested
+            # ACT, so "rewritten" never applies to those two). Deliberately
+            # a new table, not new columns on nba_choice_log: that table's
+            # row is a per-OFFER snapshot (one row per ranked-candidates
+            # view), this table's row is a per-REACTION event - a single
+            # offer can end up with zero, one, or several reactions logged
+            # against it over time (e.g. Marc drafts a reply, doesn't send
+            # it, later dismisses the issue instead), which doesn't fit
+            # nba_choice_log's one-offer-one-resolution shape without
+            # force-fitting a different cardinality onto it.
+            #
+            # suggested_text/sent_text/rewrite_severity/rewrite_note are
+            # ONLY ever populated for the hero-draft-reply action_kind (see
+            # workgraph_proactive._draft_status_update_body and workgraph_
+            # nba.attempt_rewrite_judgment) - every other action_kind logs
+            # with all four NULL, honestly reflecting that Jasper never
+            # authored wording for those, so there is nothing to diff.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS nba_outcome_log (
+                    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                    issue_id          TEXT NOT NULL REFERENCES issues(id),
+                    action_kind       TEXT NOT NULL,
+                    source_surface    TEXT,
+                    raw_item_id       INTEGER,
+                    outcome           TEXT NOT NULL CHECK (outcome IN ('accepted_as_is','dismissed','rewritten')),
+                    detected_ts       REAL NOT NULL,
+                    suggested_text    TEXT,
+                    sent_text         TEXT,
+                    rewrite_severity  REAL,
+                    rewrite_note      TEXT,
+                    detail_json       TEXT
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_nba_outcome_log_issue ON nba_outcome_log(issue_id, detected_ts DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_nba_outcome_log_kind_outcome ON nba_outcome_log(action_kind, outcome)")
+
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS alerts (
                     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1385,6 +1432,17 @@ def init_workgraph() -> None:
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_data_point_values_wo ON data_point_values(work_object_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_data_point_values_def ON data_point_values(definition_id)")
+            # Task #331 (2026-08-11): the two indices above answer "every
+            # value for this work object" and "every row for this
+            # definition" - neither supports the one lookup
+            # workgraph_projects.candidate_pool_via_data_point_index actually
+            # needs, "every OTHER work object sharing this EXACT value for
+            # this definition," without a full table scan. Purely additive -
+            # same existing (definition_id, work_object_id, value) columns,
+            # no new table, no data migration.
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_data_point_values_def_value ON data_point_values(definition_id, value)"
+            )
 
             # contractpodai_requests (task #265, 2026-08-07): a real, external
             # SYSTEM's own structured fields, kept in a table scoped to that
@@ -2612,6 +2670,33 @@ def init_workgraph() -> None:
                     UNIQUE(source_surface, pattern_key)
                 )
             """)
+
+            # Task #322: recurring multi-step signal_type sequences observed
+            # across closed/completed projects of the same category (see
+            # workgraph_sequences.py) - "of N completed projects in category
+            # X, M of them showed this stage sequence in order." Deliberately
+            # NOT a rule/gate table (that's prerequisite_rules/workgraph_
+            # aristotle.py's job) - every row here is purely descriptive,
+            # informational context a reader can consume, never enforced or
+            # auto-applied. Recomputed wholesale per category (replace_
+            # sequence_patterns deletes+reinserts that category's rows) rather
+            # than incrementally upserted, since a pattern's support can both
+            # grow AND shrink as more projects close - unlike response_
+            # patterns' hit_count, which only ever goes up.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS sequence_patterns (
+                    id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    category                    TEXT NOT NULL,
+                    step_sequence               TEXT NOT NULL,  -- JSON array of signal_type stage tokens, in order
+                    step_count                  INTEGER NOT NULL,
+                    total_projects_in_category  INTEGER NOT NULL,
+                    matching_project_count       INTEGER NOT NULL,
+                    matching_project_ids        TEXT NOT NULL,  -- JSON array - the real evidence backing this row
+                    computed_ts                 REAL NOT NULL,
+                    UNIQUE(category, step_sequence)
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_sequence_patterns_category ON sequence_patterns(category)")
         finally:
             conn.close()
 
@@ -4467,17 +4552,77 @@ def list_pending_actions(issue_id: Optional[str] = None) -> list[dict]:
 PREPARED_ACTION_TERMINAL_STATES = ("succeeded", "failed", "rejected", "expired", "cancelled")
 
 
+# Task #317: the real Actor x Action x Object x Consequence dispatch table.
+# Actor is always Jasper itself (a worker dispatched either by a human click
+# - server_lean.py's api_cockpit_action - or by Marc's own standing
+# proactive-actions toggle - workgraph_proactive.py) - this codebase has
+# exactly one actor today, so the axis that actually varies per action_type
+# is Consequence: does dispatching this action_type produce ANY effect
+# visible outside Jasper (a sent email, a message to a third party) before
+# Marc separately reviews/acts on the result? Keyed on the real, grep-
+# confirmed action_type/action_kind values that exist in this codebase today
+# (CockpitActionBody's own comment, ingest/ACTION_BRIDGE_ROUTINE.md's action_
+# kind list, and workgraph_proactive.py's two proactive triggers) - no
+# speculative entries for an action_kind nothing produces yet. A plain,
+# inspectable dict a human can read top to bottom, not a score:
+#   0 (False) -> the action_type's own real-world effect is CONTAINED - a
+#     Drafts-folder draft that's never Display()ed/Send()d, a contract-
+#     review write-up, a thread summary - all internal Jasper-side
+#     artifacts Marc still has to separately act on before anything leaves
+#     Jasper. Safe to auto-approve the same way every one of these already
+#     did before this table existed.
+#   1 (True) -> either genuinely unbounded (custom: "follow instructions
+#     literally" per ACTION_BRIDGE_ROUTINE.md - could resolve to anything,
+#     including an externally-visible send) or, via the .get(...) fallback
+#     below, an action_type this table has never seen - conservative-by-
+#     default, same as Section 12.10's standing rule that approval is never
+#     satisfied implicitly.
+PREPARED_ACTION_APPROVAL_TABLE: dict[str, int] = {
+    "draft_reply": 0,          # Drafts-folder only - outlook_actions.draft_reply never Send()s
+    "review_contract": 0,      # worker reads a doc, writes a review - no effect outside Jasper
+    "contract_review": 0,      # synonym for review_contract (ACTION_BRIDGE_ROUTINE.md / skills_registry)
+    "summarize": 0,            # produces a summary artifact only
+    "draft_status_update": 0,  # same Drafts-folder-only contract as draft_reply
+    "custom": 1,               # unbounded instructions - conservative default
+}
+
+
+def resolve_required_approval(action_type: str) -> int:
+    """Task #317: the one real dispatch function every prepared_action
+    creation now goes through to decide required_approval, instead of the
+    old hardcoded default nothing ever read (grep-confirmed before this was
+    built: every real caller left required_approval at its default and no
+    code anywhere consumed the column). Looks up PREPARED_ACTION_APPROVAL_
+    TABLE by action_type; an action_type not in the table (no real producer
+    creates one today - confirmed by grep) conservatively defaults to 1
+    (approval required) rather than guessing it's safe. Deliberately just a
+    dict lookup, not an LLM call - the real action_type values this
+    codebase produces today are few, fixed, and already fully covered by
+    the table; a genuinely new, ambiguous action_type would be a deliberate
+    product decision (add a row here), not something to route through a
+    fresh model call on every dispatch."""
+    return PREPARED_ACTION_APPROVAL_TABLE.get(action_type, 1)
+
+
 def create_prepared_action(*, claim_id: Optional[int], action_type: str, proposed_parameters_json: str,
                             evidence_refs_json: str, rationale: str, risk_class: str,
-                            idempotency_key: str, required_approval: int = 1,
+                            idempotency_key: str, required_approval: Optional[int] = None,
                             state: str = "proposed") -> int:
     """Design doc Section 12.10 (prompt-injection boundary, a standing
-    constraint): required_approval defaults 1 for every action_type - no
-    code path in this codebase flips it to 0 based on anything evidence
-    content itself says (e.g. a supplier's email cannot mark its own
-    resulting action as pre-approved, no matter how it's worded). The one
-    real caller (server_lean.py's api_cockpit_action) never passes this
-    parameter at all, so it always stays the default."""
+    constraint) + task #317: required_approval, when not passed explicitly,
+    is now COMPUTED via resolve_required_approval(action_type) - the real
+    Actor x Action x Object x Consequence dispatch table - instead of the
+    old hardcoded-1-but-never-read default. No code path flips a computed
+    True to False based on anything evidence content itself says (e.g. a
+    supplier's email cannot mark its own resulting action as pre-approved,
+    no matter how it's worded) - the table is keyed only on action_type,
+    never on message content. `state` is left to the caller (still defaults
+    'proposed' - the real callers that need the computed value to actually
+    gate dispatch, not just get stored, pass `state` explicitly based on
+    required_approval; see server_lean.py's api_cockpit_action and
+    workgraph_proactive.py)."""
+    if required_approval is None:
+        required_approval = resolve_required_approval(action_type)
     now = time.time()
     with _lock:
         conn = _connect()
@@ -4732,6 +4877,196 @@ def expire_stale_nba_choice_logs(older_than_days: float) -> int:
             return cur.rowcount
         finally:
             conn.close()
+
+
+# --- nba_outcome_log (task #318) ----------------------------------------
+# See the CREATE TABLE's own comment (init_workgraph) for why this is a
+# separate table from nba_choice_log rather than new columns on it.
+
+def create_nba_outcome_event(*, issue_id: str, action_kind: str, outcome: str,
+                              source_surface: Optional[str] = None,
+                              raw_item_id: Optional[int] = None,
+                              suggested_text: Optional[str] = None,
+                              detail_json: Optional[str] = None) -> int:
+    """Logs one real reaction to one suggested action - deterministic,
+    called directly from the server route that just observed the reaction
+    (a successful draft-reply/draft-forward/hero-draft-reply call, or an
+    issue-level Dismiss), never from a periodic sweep. outcome must be
+    'accepted_as_is' or 'dismissed' at call time - 'rewritten' is only ever
+    reached later, via record_rewrite_judgment below, once a real sent-text
+    counterpart has actually been found and judged."""
+    if outcome not in ("accepted_as_is", "dismissed"):
+        raise ValueError(f"create_nba_outcome_event only logs initial outcomes, not {outcome!r}")
+    now = time.time()
+    with _lock:
+        conn = _connect()
+        try:
+            cur = conn.execute(
+                """INSERT INTO nba_outcome_log
+                   (issue_id, action_kind, source_surface, raw_item_id, outcome, detected_ts,
+                    suggested_text, detail_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (issue_id, action_kind, source_surface, raw_item_id, outcome, now,
+                 suggested_text, detail_json),
+            )
+            return cur.lastrowid
+        finally:
+            conn.close()
+
+
+def get_nba_outcome_event(id: int) -> Optional[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute("SELECT * FROM nba_outcome_log WHERE id = ?", (id,)).fetchone()
+        finally:
+            conn.close()
+    return dict(row) if row else None
+
+
+def list_nba_outcomes_pending_rewrite_judgment(limit: int = 200) -> list[dict]:
+    """'accepted_as_is' rows that captured real Jasper-authored suggested_text
+    (hero-draft-reply only - see the table's own comment) but have no
+    sent_text resolved yet - the real candidate pool workgraph_nba's
+    rewrite-severity pass works through. A plain draft-reply/draft-forward
+    row (suggested_text always NULL - nothing was ever authored to rewrite)
+    never appears here, by construction of the WHERE clause, not a filter
+    bolted on after the fact."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM nba_outcome_log WHERE outcome = 'accepted_as_is' "
+                "AND suggested_text IS NOT NULL AND sent_text IS NULL "
+                "ORDER BY detected_ts ASC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def record_rewrite_judgment(id: int, *, sent_text: str, rewrite_severity: float,
+                             rewrite_note: Optional[str] = None, rewritten: bool = True) -> None:
+    """Records the result of comparing a captured suggested_text against a
+    real, correlated sent_text - always stores sent_text/rewrite_severity/
+    rewrite_note, and only flips outcome to 'rewritten' when the caller's
+    own judgment (rewritten=True, the caller's threshold, not this
+    function's) says the text actually changed meaningfully; a near-
+    identical match stays 'accepted_as_is' with the severity score kept for
+    the record."""
+    with _lock:
+        conn = _connect()
+        try:
+            outcome = "rewritten" if rewritten else "accepted_as_is"
+            conn.execute(
+                """UPDATE nba_outcome_log
+                   SET sent_text = ?, rewrite_severity = ?, rewrite_note = ?, outcome = ?
+                   WHERE id = ?""",
+                (sent_text, rewrite_severity, rewrite_note, outcome, id),
+            )
+        finally:
+            conn.close()
+
+
+def mark_nba_outcome_correlation_abandoned(id: int, note: str) -> None:
+    """A real, named limitation, not a judgment: no matching outbound
+    Sent-Items row ever turned up on this issue within the correlation
+    window (workgraph_nba.SENT_TEXT_CORRELATION_WINDOW_SECONDS) - Outlook's
+    COM model has no draft-to-sent linkage to fall back on, so this gives
+    up rather than guessing. sent_text is set to '' (not left NULL) so this
+    row drops out of list_nba_outcomes_pending_rewrite_judgment's pool for
+    good - outcome and rewrite_severity are deliberately left untouched
+    (still 'accepted_as_is', still NULL): absence of a correlate is not
+    evidence either way about whether the text was rewritten."""
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                "UPDATE nba_outcome_log SET sent_text = ?, rewrite_note = ? WHERE id = ?",
+                ("", note, id),
+            )
+        finally:
+            conn.close()
+
+
+def list_nba_outcomes(*, action_kind: Optional[str] = None, outcome: Optional[str] = None,
+                       since_ts: Optional[float] = None, limit: int = 1000) -> list[dict]:
+    """Raw outcome rows, most recent first - the general-purpose reader
+    behind nba_outcome_summary below, also useful on its own for anyone who
+    wants the individual events rather than an aggregate."""
+    clauses, params = [], []
+    if action_kind is not None:
+        clauses.append("action_kind = ?")
+        params.append(action_kind)
+    if outcome is not None:
+        clauses.append("outcome = ?")
+        params.append(outcome)
+    if since_ts is not None:
+        clauses.append("detected_ts >= ?")
+        params.append(since_ts)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                f"SELECT * FROM nba_outcome_log {where} ORDER BY detected_ts DESC LIMIT ?",
+                (*params, limit),
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def nba_outcome_summary(*, group_by: str = "action_kind") -> list[dict]:
+    """Task #318's real 'memory of its own usefulness' reader: per action_
+    kind (or per issue category, when group_by='category') counts of
+    accepted_as_is/dismissed/rewritten, plus two plain, non-opaque ratios -
+    accepted_rate (accepted_as_is / total, verbatim-only) and used_rate
+    ((accepted_as_is + rewritten) / total, since a heavily-rewritten
+    suggestion Marc still sent was still USEFUL enough to act on, just not
+    verbatim - dismissed is the only outright rejection). Deliberately raw
+    counts + two arithmetic ratios, not a single blended "quality score" -
+    no opaque model, every number here is directly explainable from the
+    table it's counted from.
+
+    group_by='category' joins issues.category - a row whose issue was since
+    deleted (should not happen in practice, join is LEFT-safe regardless)
+    falls under category=None rather than being silently dropped."""
+    if group_by not in ("action_kind", "category"):
+        raise ValueError("group_by must be 'action_kind' or 'category'")
+    with _lock:
+        conn = _connect()
+        try:
+            if group_by == "action_kind":
+                rows = conn.execute(
+                    "SELECT action_kind AS key, outcome, COUNT(*) AS n "
+                    "FROM nba_outcome_log GROUP BY action_kind, outcome"
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT i.category AS key, o.outcome AS outcome, COUNT(*) AS n "
+                    "FROM nba_outcome_log o LEFT JOIN issues i ON i.id = o.issue_id "
+                    "GROUP BY i.category, o.outcome"
+                ).fetchall()
+        finally:
+            conn.close()
+
+    by_key: dict = {}
+    for r in rows:
+        entry = by_key.setdefault(r["key"], {"accepted_as_is": 0, "dismissed": 0, "rewritten": 0})
+        entry[r["outcome"]] = r["n"]
+
+    summary = []
+    for key, counts in by_key.items():
+        total = counts["accepted_as_is"] + counts["dismissed"] + counts["rewritten"]
+        summary.append({
+            "key": key, "total": total, **counts,
+            "accepted_rate": (counts["accepted_as_is"] / total) if total else None,
+            "used_rate": ((counts["accepted_as_is"] + counts["rewritten"]) / total) if total else None,
+        })
+    summary.sort(key=lambda s: s["total"], reverse=True)
+    return summary
 
 
 # --- alerts -------------------------------------------------------------
@@ -6794,6 +7129,78 @@ def clear_response_patterns() -> int:
             conn.close()
 
 
+# --- sequence_patterns (task #322: recurring multi-step signal_type
+# sequences across closed projects of one category) ------------------------
+
+def replace_sequence_patterns(category: str, patterns: list[dict]) -> None:
+    """Wholesale replace of one category's rows - a recompute pass (see
+    workgraph_sequences.recompute_and_store), not an incremental upsert
+    (unlike response_patterns' hit_count, a sequence's support can shrink as
+    well as grow between recomputes, e.g. a previously-qualifying pattern
+    dropping below MIN_MATCHING_PROJECTS once more closed projects come in
+    that don't share it - an upsert-only writer could never remove a row
+    that stopped qualifying). Delete-then-insert in ONE transaction so a
+    category's pattern set is never left half-updated. Each `patterns` dict:
+    {step_sequence: list[str], total_projects_in_category: int,
+    matching_project_count: int, matching_project_ids: list[str]}."""
+    now = time.time()
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("DELETE FROM sequence_patterns WHERE category = ?", (category,))
+            for p in patterns:
+                step_sequence = list(p["step_sequence"])
+                conn.execute(
+                    """INSERT INTO sequence_patterns
+                       (category, step_sequence, step_count, total_projects_in_category,
+                        matching_project_count, matching_project_ids, computed_ts)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (category, json.dumps(step_sequence), len(step_sequence),
+                     p["total_projects_in_category"], p["matching_project_count"],
+                     json.dumps(list(p["matching_project_ids"])), now),
+                )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.close()
+
+
+def list_sequence_patterns(category: Optional[str] = None) -> list[dict]:
+    """Every stored sequence pattern, optionally scoped to one category.
+    Ordered by matching_project_count DESC (strongest evidence first), then
+    step_count DESC (a longer chain with equal support is more informative),
+    then category/step_sequence ASC as a stable, deterministic tie-break -
+    same discipline as list_response_patterns' own tie-break fix. JSON
+    columns (step_sequence, matching_project_ids) are parsed back to real
+    lists here so no caller has to know the storage encoding."""
+    with _lock:
+        conn = _connect()
+        try:
+            if category:
+                rows = conn.execute(
+                    "SELECT * FROM sequence_patterns WHERE category = ? "
+                    "ORDER BY matching_project_count DESC, step_count DESC, category ASC, step_sequence ASC",
+                    (category,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM sequence_patterns "
+                    "ORDER BY matching_project_count DESC, step_count DESC, category ASC, step_sequence ASC"
+                ).fetchall()
+        finally:
+            conn.close()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["step_sequence"] = json.loads(d["step_sequence"])
+        d["matching_project_ids"] = json.loads(d["matching_project_ids"])
+        out.append(d)
+    return out
+
+
 def socrates_source_outcomes(signature: str) -> list[dict]:
     """Per-tier contribution tally for a question signature - the learned-
     routing projection (mirrors Theo's retrieval-log.sourceOutcomes). Ranked
@@ -7290,6 +7697,32 @@ def find_open_claim_by_canonical_key(issue_id: str, claim_type: str, canonical_k
                 """SELECT * FROM claims WHERE issue_id = ? AND claim_type = ?
                    AND status = 'open' AND canonical_key = ? ORDER BY id DESC LIMIT 1""",
                 (issue_id, claim_type, canonical_key),
+            ).fetchone()
+        finally:
+            conn.close()
+    return dict(row) if row else None
+
+
+def find_open_claim_by_canonical_key_prefix(issue_id: str, claim_type: str, prefix: str) -> Optional[dict]:
+    """Task #319: owner-agnostic sibling of find_open_claim_by_canonical_key -
+    matches on the reference-tier PREFIX only ("{claim_type}|{action_family}|
+    {reference_base}|", see canonical_key_for_claim's own docstring for the
+    two-tier scheme), never the trailing owner segment. Built for completion-
+    signal matching (workgraph_claims._find_claim_for_resolution_signal): the
+    message that resolves an earlier ask/commitment ("PR1161567 approved")
+    rarely carries the same author/owner framing as the original ask did, so
+    requiring an exact owner match on top of the real structured reference
+    would silently miss genuine matches. Still never fuzzy - the reference +
+    action-family prefix is the same real structural signal canonical_key's
+    own docstring already trusts as "materially safer than any text
+    comparison," just without the owner suffix locked in."""
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                """SELECT * FROM claims WHERE issue_id = ? AND claim_type = ?
+                   AND status = 'open' AND canonical_key LIKE ? ORDER BY id DESC LIMIT 1""",
+                (issue_id, claim_type, prefix + "%"),
             ).fetchone()
         finally:
             conn.close()
@@ -8104,6 +8537,115 @@ def list_data_point_values_for_work_object(work_object_id: str) -> list[dict]:
         finally:
             conn.close()
     return [dict(r) for r in rows]
+
+
+def list_work_object_ids_for_data_point_value(definition_id: str, value: str) -> list[str]:
+    """Task #331 - the real index lookup workgraph_projects.candidate_pool_
+    via_data_point_index uses in place of find_candidates' old full
+    ws.list_issues(limit=10000) + ws.list_clusters(limit=10000) scan: "every
+    OTHER work object that has THIS exact value recorded for THIS
+    definition," served by idx_data_point_values_def_value instead of a
+    table scan. Deliberately plain value EQUALITY, matching exactly what
+    every current fast-track point type this feeds (reference/supplier/
+    stakeholder) already does in workgraph_projects._matched_data_points -
+    never a fuzzy/substring read, which would be a real semantics change,
+    not a performance one."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT DISTINCT work_object_id FROM data_point_values WHERE definition_id = ? AND value = ?",
+                (definition_id, value),
+            ).fetchall()
+        finally:
+            conn.close()
+    return [r["work_object_id"] for r in rows]
+
+
+def list_data_point_values_for_definition(definition_id: str) -> list[dict]:
+    """Task #331 - every (work_object_id, value) row for one definition,
+    for the two match dimensions the plain-equality lookup above can't
+    safely serve: dp-fasttrack-amount (a 1%-tolerance RANGE compare, done
+    in Python by the caller against this full row set - still far smaller
+    than the whole corpus, since only work objects with a real dollar
+    figure ever get a row here at all) and dp-fasttrack-subject-entity/
+    dp-fasttrack-product-service (genuinely fuzzy substring compares in
+    workgraph_projects._matched_data_points - this only ever supplies
+    PRESENCE, i.e. every work object that could possibly contribute that
+    point, never a stand-in for the real fuzzy comparison itself)."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM data_point_values WHERE definition_id = ?", (definition_id,)
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def replace_data_point_values_for_work_object(
+    work_object_id: str, definition_ids: list[str], values_by_definition: dict[str, list[str]],
+) -> None:
+    """Task #331 - keeps the fast-track index (see workgraph_projects.
+    _sync_fasttrack_data_point_index) current: one atomic delete-then-
+    insert, SCOPED ONLY to the given definition_ids (the fast-track ones),
+    so this never touches a genuinely-discovered non-fast-track row
+    written elsewhere by workgraph_discovery.matched_discovered_points -
+    that mechanism's own separate, deliberately-duplicate-tolerant
+    audit-trail semantics (see its own docstring) are untouched here.
+    values_by_definition maps definition_id -> the CURRENT full list of
+    values this work object carries for it (an empty/omitted entry means
+    "no value today" and simply leaves no row after the delete, correctly
+    clearing a value that no longer applies, e.g. a reference number that
+    got corrected). Safe to call repeatedly - each call fully supersedes
+    this work object's own prior fast-track rows, never accumulates
+    duplicates the way matched_discovered_points' own writer can."""
+    now = time.time()
+    with _lock:
+        conn = _connect()
+        try:
+            placeholders = ",".join("?" for _ in definition_ids)
+            conn.execute(
+                f"DELETE FROM data_point_values WHERE work_object_id = ? AND definition_id IN ({placeholders})",
+                (work_object_id, *definition_ids),
+            )
+            rows = [
+                (definition_id, work_object_id, value, "deterministic", now)
+                for definition_id in definition_ids
+                for value in values_by_definition.get(definition_id, [])
+            ]
+            if rows:
+                conn.executemany(
+                    """INSERT INTO data_point_values
+                       (definition_id, work_object_id, value, extraction_source, extracted_ts)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    rows,
+                )
+        finally:
+            conn.close()
+
+
+def list_work_object_ids_for_lineage_ids(lineage_ids: list[str]) -> list[str]:
+    """Task #331 - the "document" match dimension's own index lookup, at
+    zero extra schema cost: artifact_lineages.id is already the table's
+    real PRIMARY KEY (see its own CREATE TABLE comment), so "which OTHER
+    work objects share ANY of my accepted_lineages" is already an
+    indexed point lookup today, nothing new to build or keep in sync."""
+    if not lineage_ids:
+        return []
+    with _lock:
+        conn = _connect()
+        try:
+            placeholders = ",".join("?" for _ in lineage_ids)
+            rows = conn.execute(
+                f"SELECT DISTINCT work_object_id FROM artifact_lineages "
+                f"WHERE id IN ({placeholders}) AND work_object_id IS NOT NULL",
+                lineage_ids,
+            ).fetchall()
+        finally:
+            conn.close()
+    return [r["work_object_id"] for r in rows]
 
 
 def observe_candidate_pattern(pattern_signature: str, *, is_new_thread: bool) -> dict:

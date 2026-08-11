@@ -11,6 +11,7 @@ import time
 import config
 import team_room
 import workgraph_proactive as wp
+import workgraph_store as ws
 
 
 def _enable_proactive_actions(monkeypatch, enabled=True):
@@ -167,6 +168,49 @@ def test_sweep_is_a_noop_when_disabled(ws_db, monkeypatch):
     result = wp.run_proactive_actions_sweep()
 
     assert result == {"enabled": False, "checked": 0, "dispatched": 0}
+
+
+def test_contract_review_gate_blocks_dispatch_when_table_requires_approval(ws_db, monkeypatch):
+    """Task #317: neither of workgraph_proactive.py's two action_types
+    requires approval in the real dispatch table today, but the gate
+    itself must be real, not a dead branch - force it via monkeypatch and
+    confirm team_room.post_message is never called and the row sits at
+    'ready_for_approval', not 'approved'."""
+    _enable_proactive_actions(monkeypatch)
+    monkeypatch.setattr(ws, "resolve_required_approval", lambda action_type: 1)
+    calls = []
+    monkeypatch.setattr(team_room, "post_message", lambda sender, body: calls.append(1) or {"message_id": "x"})
+    issue = _issue(ws_db)
+    rid = _inbound_raw_item(ws_db, issue, "kgate1", "please review the attached contract")
+    ws_db.create_attachment(entity_type="raw_item", entity_id=str(rid), kind="reference",
+                             filename="SOW.pdf", stored_path="p.pdf", content_type="application/pdf",
+                             size_bytes=10, sha256_hex="hgate1", uploaded_by="outlook_ingest")
+
+    result = wp.check_raw_item_for_proactive_action(rid)
+
+    assert result == "review_contract"
+    assert calls == []  # never dispatched
+    prepared = ws_db.find_prepared_action_by_idempotency_key(wp._idempotency_key(rid, "review_contract"))
+    assert prepared["state"] == "ready_for_approval"
+    assert prepared["required_approval"] == 1
+
+
+def test_status_update_gate_blocks_dispatch_when_table_requires_approval(ws_db, monkeypatch):
+    _enable_proactive_actions(monkeypatch)
+    monkeypatch.setattr(ws, "resolve_required_approval", lambda action_type: 1)
+    import outlook_actions
+    calls = []
+    monkeypatch.setattr(outlook_actions, "draft_reply", lambda entry_id, **kw: calls.append(1) or {"ok": True})
+    issue = _issue(ws_db)
+    rid = _inbound_raw_item(ws_db, issue, "kgate2", "can I get a status update on this?", entry_id="entryid-GATE")
+
+    result = wp.check_raw_item_for_proactive_action(rid)
+
+    assert result == "draft_status_update"
+    assert calls == []  # never drafted
+    prepared = ws_db.find_prepared_action_by_idempotency_key(wp._idempotency_key(rid, "draft_status_update"))
+    assert prepared["state"] == "ready_for_approval"
+    assert prepared["required_approval"] == 1
 
 
 def test_sweep_advances_cursor_and_dispatches(ws_db, monkeypatch):

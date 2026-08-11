@@ -10,6 +10,7 @@ import time
 import pytest
 
 import workgraph_claims as wc
+import workgraph_reconcile as wr
 
 
 def _issue(ws_db, title="Issue", state="active"):
@@ -797,3 +798,191 @@ def test_reopen_suggestion_dedupes_against_a_second_reoccurrence(ws_db):
     suggestions = ws_db.list_pending_claim_suggestions(iid)
     reopen_suggestions = [s for s in suggestions if s["suggestion_kind"] == "reopen"]
     assert len(reopen_suggestions) == 1
+
+
+# --- explicit-completion suggestion (task #319, scoped to suggest-only per
+# Marc's explicit 2026-08-11 call after review) -----------------------------
+# resolution_signals (task #155) already carries curator's judgment that a
+# raw_item's content directly names a specific earlier open claim as
+# fulfilled - workgraph_reconcile.generate_resolution_signal_suggestions
+# already turned that into a suggest-only pending_claim_suggestion via
+# byte-exact text matching alone. _resolve_explicit_completions' real,
+# still-real value-add is a WIDER match (byte-exact, or - new - a
+# reference+action-family canonical_key match) over the same signals, fed
+# into the identical suggestion queue via ws.create_claim_suggestion - never
+# a direct status change. An initial version of this function auto-resolved
+# directly; Marc's explicit review call was that every other claim-closing
+# path in this codebase requires a human confirm first, and a rare false
+# structural match silently closing a real open commitment was a worse
+# failure mode than one extra confirm click - so this stays suggest-only,
+# same as everything else in workgraph_reconcile.py.
+
+def test_resolution_signal_creates_suggestion_for_matching_open_claim_by_exact_text(ws_db):
+    iid = _issue(ws_db)
+    rid1 = _raw_item(ws_db, iid, "comp1", {"commitments": ["I'll send the signed SOW"]}, direction="outbound")
+    wc.materialize_claims_for_raw_item(rid1)
+    claim = wc.list_open_claims_for_issue(iid, claim_type="commitment")[0]
+
+    rid2 = _raw_item(ws_db, iid, "comp2", {
+        "resolution_signals": [{"claim_type": "commitment", "claim_text": "I'll send the signed SOW",
+                                 "resolution_note": "signed SOW attached"}],
+    }, direction="outbound")
+    wc.materialize_claims_for_raw_item(rid2)
+
+    # Suggest-only: the claim itself is untouched until a human confirms.
+    assert ws_db.get_claim(claim["id"])["status"] == "open"
+    suggestions = ws_db.list_pending_claim_suggestions(iid)
+    assert len(suggestions) == 1
+    assert suggestions[0]["claim_id"] == claim["id"]
+    assert suggestions[0]["suggestion_kind"] == "resolve"
+    assert suggestions[0]["evidence_type"] == "explicit_resolution_signal"
+    assert suggestions[0]["raw_item_id"] == rid2
+
+
+def test_resolution_signal_creates_suggestion_via_canonical_key_reference_fallback(ws_db):
+    """The real gap fix: a resolution message that shares the SAME
+    structured reference (a PR number) as the original ask, but doesn't
+    reproduce its text byte-for-byte - byte-exact find_open_claim_by_text
+    (and so generate_resolution_signal_suggestions alone) would miss this;
+    the reference+action-family canonical_key prefix match must still find
+    it and queue a suggestion, same as the byte-exact case."""
+    iid = _issue(ws_db)
+    rid1 = _raw_item(ws_db, iid, "canon-comp1",
+                      {"asks": ["Please approve PR1161567 at your earliest convenience"]}, direction="inbound")
+    conn = ws_db._connect()
+    conn.execute("UPDATE raw_items SET pr_number_base = 'PR1161567' WHERE id = ?", (rid1,))
+    conn.close()
+    wc.materialize_claims_for_raw_item(rid1)
+    claim = wc.list_open_claims_for_issue(iid, claim_type="ask")[0]
+
+    rid2 = _raw_item(ws_db, iid, "canon-comp2", {
+        "resolution_signals": [{"claim_type": "ask", "claim_text": "Please approve PR1161567 as soon as possible",
+                                 "resolution_note": "approved in Ariba"}],
+    }, direction="inbound")
+    conn = ws_db._connect()
+    conn.execute("UPDATE raw_items SET pr_number_base = 'PR1161567' WHERE id = ?", (rid2,))
+    conn.close()
+    wc.materialize_claims_for_raw_item(rid2)
+
+    assert ws_db.get_claim(claim["id"])["status"] == "open"
+    suggestions = ws_db.list_pending_claim_suggestions(iid)
+    assert len(suggestions) == 1
+    assert suggestions[0]["claim_id"] == claim["id"]
+
+
+def test_resolution_signal_without_structural_match_leaves_claim_open(ws_db):
+    iid = _issue(ws_db)
+    rid1 = _raw_item(ws_db, iid, "nomatch1", {"commitments": ["I'll send the signed SOW"]}, direction="outbound")
+    wc.materialize_claims_for_raw_item(rid1)
+    claim = wc.list_open_claims_for_issue(iid, claim_type="commitment")[0]
+
+    rid2 = _raw_item(ws_db, iid, "nomatch2", {
+        "resolution_signals": [{"claim_type": "commitment", "claim_text": "a totally unrelated paraphrase",
+                                 "resolution_note": "?"}],
+    }, direction="outbound")
+    wc.materialize_claims_for_raw_item(rid2)
+
+    assert ws_db.get_claim(claim["id"])["status"] == "open"
+    assert ws_db.list_pending_claim_suggestions(iid) == []
+
+
+def test_resolution_signal_suggestion_is_not_duplicated_by_the_other_call_site(ws_db):
+    """Harmony check: workgraph_reconcile.generate_resolution_signal_
+    suggestions still runs off the same resolution_signals field (a
+    separate call site, e.g. server_lean.py's ingest handler) using its
+    own byte-exact-only match. Both paths target the identical (claim_id,
+    evidence_type) pair for a byte-exact case, and ws.create_claim_
+    suggestion's own dedupe-then-insert means only ONE pending suggestion
+    ever exists regardless of which call site runs first or whether both
+    run - never a duplicate row for the same signal."""
+    iid = _issue(ws_db)
+    rid1 = _raw_item(ws_db, iid, "harmony1", {"commitments": ["I'll send the signed SOW"]}, direction="outbound")
+    wc.materialize_claims_for_raw_item(rid1)
+
+    rid2 = _raw_item(ws_db, iid, "harmony2", {
+        "resolution_signals": [{"claim_type": "commitment", "claim_text": "I'll send the signed SOW",
+                                 "resolution_note": "signed SOW attached"}],
+    }, direction="outbound")
+    wc.materialize_claims_for_raw_item(rid2)  # creates the suggestion via _resolve_explicit_completions
+    wr.generate_resolution_signal_suggestions(rid2)  # same signal, byte-exact path - must not duplicate
+
+    assert len(ws_db.list_pending_claim_suggestions(iid)) == 1
+
+
+# --- project_links dependency-signal writer (task #319) --------------------
+# project_links already has the right shape (from/to project id + a
+# link_type enum covering depends_on/blocks/enables) but had zero writer
+# anywhere - _write_project_link_signals is that writer, driven by a new
+# curator-extraction field (dependency_signals, SYNTHESIS_ROUTINE.md).
+
+def test_dependency_signal_writes_a_project_link(ws_db):
+    proj_a = ws_db.create_project_with_new_id(name="New H1 Deal")
+    proj_b = ws_db.create_project_with_new_id(name="Old H1 Exit")
+    iid = _issue_in_project(ws_db, proj_a, "New deal signature")
+    rid = _raw_item(ws_db, iid, "dep1", {
+        "dependency_signals": [{"relationship": "depends_on", "target_project_id": proj_b,
+                                 "reason": "needs the old contract exited first"}],
+    }, direction="inbound")
+
+    wc.materialize_claims_for_raw_item(rid)
+
+    links = ws_db.list_project_links_for_project(proj_a)
+    assert len(links) == 1
+    assert links[0]["from_project_id"] == proj_a
+    assert links[0]["to_project_id"] == proj_b
+    assert links[0]["link_type"] == "depends_on"
+    assert links[0]["created_by"] == "claims_dependency_signal"
+
+
+def test_dependency_signal_is_idempotent_across_two_raw_items(ws_db):
+    """The same detected relationship, restated on a second raw_item on the
+    same issue, must not create a second project_links row."""
+    proj_a = ws_db.create_project_with_new_id(name="New H1 Deal")
+    proj_b = ws_db.create_project_with_new_id(name="Old H1 Exit")
+    iid = _issue_in_project(ws_db, proj_a, "New deal signature")
+    signal = {"relationship": "depends_on", "target_project_id": proj_b, "reason": "needs the old contract first"}
+
+    rid1 = _raw_item(ws_db, iid, "dep-idem1", {"dependency_signals": [signal]}, direction="inbound")
+    wc.materialize_claims_for_raw_item(rid1)
+    rid2 = _raw_item(ws_db, iid, "dep-idem2", {"dependency_signals": [signal]}, direction="inbound")
+    wc.materialize_claims_for_raw_item(rid2)
+
+    assert len(ws_db.list_project_links_for_project(proj_a)) == 1
+
+
+def test_dependency_signal_skipped_when_issue_has_no_project(ws_db):
+    proj_b = ws_db.create_project_with_new_id(name="Old H1 Exit")
+    iid = _issue(ws_db)  # deliberately not grouped into any project
+    rid = _raw_item(ws_db, iid, "dep-noproj", {
+        "dependency_signals": [{"relationship": "depends_on", "target_project_id": proj_b, "reason": "x"}],
+    }, direction="inbound")
+
+    wc.materialize_claims_for_raw_item(rid)
+
+    assert ws_db.list_project_links_for_project(proj_b) == []
+
+
+def test_dependency_signal_skipped_when_target_project_is_not_real(ws_db):
+    proj_a = ws_db.create_project_with_new_id(name="New H1 Deal")
+    iid = _issue_in_project(ws_db, proj_a, "New deal signature")
+    rid = _raw_item(ws_db, iid, "dep-fake", {
+        "dependency_signals": [{"relationship": "depends_on", "target_project_id": "proj-does-not-exist",
+                                 "reason": "x"}],
+    }, direction="inbound")
+
+    wc.materialize_claims_for_raw_item(rid)
+
+    assert ws_db.list_project_links_for_project(proj_a) == []
+
+
+def test_dependency_signal_skipped_for_unrecognized_relationship(ws_db):
+    proj_a = ws_db.create_project_with_new_id(name="A")
+    proj_b = ws_db.create_project_with_new_id(name="B")
+    iid = _issue_in_project(ws_db, proj_a, "Issue")
+    rid = _raw_item(ws_db, iid, "dep-badrel", {
+        "dependency_signals": [{"relationship": "same_supplier", "target_project_id": proj_b, "reason": "x"}],
+    }, direction="inbound")
+
+    wc.materialize_claims_for_raw_item(rid)
+
+    assert ws_db.list_project_links_for_project(proj_a) == []

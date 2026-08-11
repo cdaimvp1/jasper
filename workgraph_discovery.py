@@ -761,6 +761,47 @@ def seed_fasttrack_vocabulary(*, confirmed_by: str = "marc") -> list[str]:
 
 _FASTTRACK_PREFIX = "dp-fasttrack-"
 
+# Task #331 - public names for the fast-track ids workgraph_projects.
+# candidate_pool_via_data_point_index/_sync_fasttrack_data_point_index
+# write real, current data_point_values rows against (the same ids
+# _FASTTRACK_DEFINITIONS above already seeds as data_point_definitions
+# rows) - exported here, the one place these ids are already the source
+# of truth, rather than re-hardcoding the literal strings a second time
+# in workgraph_projects.py.
+FASTTRACK_REFERENCE_ID = "dp-fasttrack-reference"
+FASTTRACK_SUPPLIER_ID = "dp-fasttrack-supplier"
+FASTTRACK_STAKEHOLDER_ID = "dp-fasttrack-stakeholder"
+FASTTRACK_AMOUNT_ID = "dp-fasttrack-amount"
+FASTTRACK_PRODUCT_SERVICE_ID = "dp-fasttrack-product-service"
+FASTTRACK_SUBJECT_ENTITY_ID = "dp-fasttrack-subject-entity"
+
+
+def has_confirmed_non_fasttrack_definitions() -> bool:
+    """Task #331 - the one flag workgraph_pipeline2.find_candidates checks
+    before trusting the fast-track data-point index in place of its old
+    full ws.list_issues(limit=10000) + ws.list_clusters(limit=10000) scan.
+
+    matched_discovered_points' own "discovered:*" points are genuine
+    value EQUALITY too (values_a & values_b, a plain set intersection) -
+    just as indexable in principle as the fast-track ones - but nothing
+    proactively writes a discovered value ahead of time the way
+    _sync_fasttrack_data_point_index does for the fast-track fields:
+    matched_discovered_points only ever records a value AFTER already
+    finding a match via a full raw-text read of BOTH sides, so the index
+    has no reliable picture of a discovered value in advance. Rather than
+    risk silently dropping a real discovered-point-only candidate,
+    find_candidates falls back to its original full scan the moment any
+    such definition is confirmed at all - safe because that's still
+    exactly today's real, live installation state (zero confirmed
+    non-fast-track definitions on any real corpus yet), so this always
+    returns False in practice right now, and the fallback is what keeps
+    that true forever without becoming a silent correctness bug the day
+    Marc confirms his first genuine discovery."""
+    return any(
+        not d["id"].startswith(_FASTTRACK_PREFIX)
+        for d in ws.list_data_point_definitions(status="confirmed")
+    )
+
 
 def _extract_labeled_field_value(text: str, label: str) -> Optional[str]:
     for m in _LABELED_FIELD_VALUE_RE.finditer(text):

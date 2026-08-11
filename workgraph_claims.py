@@ -48,6 +48,31 @@ import re
 import unicodedata
 from typing import Optional
 
+_DOLLAR_RE = re.compile(r"\$\s?[\d,]+(?:\.\d+)?")
+
+
+def _classify_refinement(old_claim: dict, new_spec: dict) -> str:
+    """Fix 3 (task #310 follow-up, 2026-08-11, doc Section 7): which
+    reconciliation sub-type a superseded-and-replaced claim represents.
+    Only ever called on a genuinely unambiguous 1-old/1-new pairing (see
+    _reconcile_extraction_correction) - never a guess among candidates,
+    just a real diff between the one old claim and the one new spec that
+    replaced it.
+
+    owner_changed beats timing_changed beats monetary_changed beats the
+    generic 'refined' fallback - a real change in who owns an obligation
+    is the most consequential single fact to flag, ahead of a date or
+    dollar-figure correction on the same claim."""
+    if old_claim.get("owner") != new_spec.get("owner") and (old_claim.get("owner") or new_spec.get("owner")):
+        return "owner_changed"
+    if old_claim.get("claim_type") == "date":
+        return "timing_changed"
+    old_amounts = set(_DOLLAR_RE.findall(old_claim.get("text") or ""))
+    new_amounts = set(_DOLLAR_RE.findall(new_spec.get("text") or ""))
+    if old_amounts and new_amounts and old_amounts != new_amounts:
+        return "monetary_changed"
+    return "refined"
+
 import workgraph_store as ws
 
 _OTHER_SIDE = {"marc": "counterparty", "counterparty": "marc", "unknown": "unknown"}
@@ -357,13 +382,32 @@ def _reconcile_extraction_correction(issue_id: str, raw_item_id: int, blob: dict
 
     to_insert = []
     to_supersede = []
+    all_added = []    # across every claim_type bucket - see the pairing note below
+    all_removed = []
     for claim_type in set(new_by_type) | set(old_by_type):
         new_list = new_by_type.get(claim_type, [])
         old_list = old_by_type.get(claim_type, [])
         old_texts = {c["text"] for c in old_list}
         new_texts = {s["text"] for s in new_list}
-        to_insert.extend(spec for spec in new_list if spec["text"] not in old_texts)
-        to_supersede.extend(claim["id"] for claim in old_list if claim["text"] not in new_texts)
+        added = [spec for spec in new_list if spec["text"] not in old_texts]
+        removed = [claim for claim in old_list if claim["text"] not in new_texts]
+        to_insert.extend(added)
+        to_supersede.extend(claim["id"] for claim in removed)
+        all_added.extend(added)
+        all_removed.extend(removed)
+
+    # Fix 3 (2026-08-11, doc Section 7): classify the change ONLY when
+    # there's EXACTLY one addition and one removal across the WHOLE
+    # reconciliation pass (not just within one claim_type bucket - a real
+    # owner/type correction, e.g. "decision" re-extracted as "ask" for the
+    # same text, spans two buckets by construction). This is still the one
+    # genuinely unambiguous pairing, never a guess among candidates - this
+    # module's own established "no fuzzy 1:1 pairing" rule (see this
+    # function's docstring above) is about genuinely ambiguous
+    # multi-to-multi cases, not a single global candidate on each side.
+    refinements = []  # (old_claim, new_spec, event_type) - see _classify_refinement
+    if len(all_added) == 1 and len(all_removed) == 1:
+        refinements.append((all_removed[0], all_added[0], _classify_refinement(all_removed[0], all_added[0])))
 
     if not to_insert and not to_supersede:
         # The extraction's content_hash changed (that's why we're here at
@@ -385,6 +429,14 @@ def _reconcile_extraction_correction(issue_id: str, raw_item_id: int, blob: dict
         issue_id=issue_id, raw_item_id=raw_item_id, to_insert=insert_specs,
         to_supersede=to_supersede, new_materialized_hash=new_content_hash,
     )
+    # Fix 3 (2026-08-11): log the real sub-type on the superseded claim -
+    # separate from reconcile_extraction_claims' own transaction since a
+    # missing/failed event log must never roll back a real claims write.
+    for old_claim, new_spec, event_type in refinements:
+        ws.log_claim_event(
+            old_claim["id"], event_type, actor="curator",
+            note=(new_spec.get("text") or "")[:160], raw_item_id=raw_item_id,
+        )
     _bump_for_key_facts(blob, issue_id)
     return len(to_insert)
 

@@ -433,6 +433,10 @@ def test_correction_wording_change_supersedes_old_and_inserts_new(ws_db):
     assert len(open_claims) == 1
     assert open_claims[0]["text"] == "please send the SIGNED sow by Friday"
     assert ws_db.get_claim(old_claim["id"])["status"] == "superseded"
+    # Fix 3 (2026-08-11): a plain wording change on the one unambiguous
+    # old->new pair (no owner/date/dollar difference) logs as 'refined'.
+    events = ws_db.list_claim_events_for_claim(old_claim["id"])
+    assert any(e["event_type"] == "refined" for e in events)
 
 
 def test_correction_owner_change_supersedes_and_reinserts(ws_db):
@@ -453,6 +457,55 @@ def test_correction_owner_change_supersedes_and_reinserts(ws_db):
     new_ask = wc.list_open_claims_for_issue(iid, claim_type="ask")[0]
     assert new_ask["text"] == "going with vendor B"
     assert ws_db.get_claim(old_decision["id"])["status"] == "superseded"
+    # Fix 3 (2026-08-11): decision (owner=None) -> ask (owner=counterparty)
+    # is a real owner change by this diff's own rule, even though the
+    # underlying correction was a claim_type fix, not owner reassignment.
+    events = ws_db.list_claim_events_for_claim(old_decision["id"])
+    assert any(e["event_type"] == "owner_changed" for e in events)
+
+
+def test_correction_dollar_figure_change_logs_monetary_changed(ws_db):
+    iid = _issue(ws_db)
+    rid = _raw_item(ws_db, iid, "rec-money", {"commitments": ["I'll pay $50,000 for this"]}, direction="outbound")
+    wc.materialize_claims_for_raw_item(rid)
+    old_claim = wc.list_open_claims_for_issue(iid, claim_type="commitment")[0]
+
+    _reextract(ws_db, rid, {"commitments": ["I'll pay $75,000 for this"]})
+    wc.materialize_claims_for_raw_item(rid)
+
+    assert ws_db.get_claim(old_claim["id"])["status"] == "superseded"
+    events = ws_db.list_claim_events_for_claim(old_claim["id"])
+    assert any(e["event_type"] == "monetary_changed" for e in events)
+
+
+def test_correction_date_claim_change_logs_timing_changed(ws_db):
+    iid = _issue(ws_db)
+    rid = _raw_item(ws_db, iid, "rec-timing",
+                     {"dates_mentioned": [{"text": "due Friday", "kind": "hard"}]}, direction="outbound")
+    wc.materialize_claims_for_raw_item(rid)
+    old_claim = wc.list_open_claims_for_issue(iid, claim_type="date")[0]
+
+    _reextract(ws_db, rid, {"dates_mentioned": [{"text": "due next Monday instead", "kind": "hard"}]})
+    wc.materialize_claims_for_raw_item(rid)
+
+    assert ws_db.get_claim(old_claim["id"])["status"] == "superseded"
+    events = ws_db.list_claim_events_for_claim(old_claim["id"])
+    assert any(e["event_type"] == "timing_changed" for e in events)
+
+
+def test_classify_refinement_owner_beats_timing_and_monetary(ws_db):
+    """Unit-level: owner_changed wins even when the same pair would also
+    qualify for timing_changed/monetary_changed - see _classify_refinement's
+    own docstring on why owner comes first."""
+    old_claim = {"claim_type": "date", "owner": "marc", "text": "pay $50,000 by Friday"}
+    new_spec = {"claim_type": "date", "owner": "counterparty", "text": "pay $75,000 by Monday"}
+    assert wc._classify_refinement(old_claim, new_spec) == "owner_changed"
+
+
+def test_classify_refinement_plain_wording_change_is_refined(ws_db):
+    old_claim = {"claim_type": "ask", "owner": "counterparty", "text": "send the sow"}
+    new_spec = {"claim_type": "ask", "owner": "counterparty", "text": "send the SIGNED sow"}
+    assert wc._classify_refinement(old_claim, new_spec) == "refined"
 
 
 def test_correction_is_idempotent_second_rerun_is_noop(ws_db):

@@ -1078,6 +1078,50 @@ def init_workgraph() -> None:
                         conn.execute("ROLLBACK")
                     except sqlite3.OperationalError:
                         pass
+
+            # Task #310 follow-up, Fix 3 (2026-08-11, Marc's own engineering-
+            # direction doc, Section 7): 'refined'/'owner_changed'/
+            # 'timing_changed'/'monetary_changed' - the real reconciliation
+            # sub-types this table's own docstring above already invited
+            # ("revisit if a real case shows these aren't enough"). Fired by
+            # workgraph_claims._reconcile_extraction_correction ONLY when a
+            # corrected extraction removes exactly one open claim of a type
+            # and adds exactly one new one of the same type - the one
+            # genuinely unambiguous pairing (not the multi-to-multi guessing
+            # this same function's docstring already refuses to do). Same
+            # rebuild-and-copy pattern, runs after the 'reopen' widening above
+            # so a rebuild always finds 'reopen' already present.
+            existing_sql = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='claim_events'"
+            ).fetchone()
+            if existing_sql and "'refined'" not in (existing_sql["sql"] or ""):
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    conn.execute("ALTER TABLE claim_events RENAME TO claim_events_pre_fix3")
+                    conn.execute("""
+                        CREATE TABLE claim_events (
+                            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                            claim_id    INTEGER NOT NULL REFERENCES claims(id),
+                            event_type  TEXT NOT NULL CHECK (event_type IN
+                                          ('create','escalate','acknowledge','complete','dismiss','reopen',
+                                           'refined','owner_changed','timing_changed','monetary_changed')),
+                            ts          REAL NOT NULL,
+                            actor       TEXT NOT NULL,
+                            note        TEXT,
+                            raw_item_id INTEGER REFERENCES raw_items(id)
+                        )
+                    """)
+                    conn.execute("""
+                        INSERT INTO claim_events (id, claim_id, event_type, ts, actor, note, raw_item_id)
+                        SELECT id, claim_id, event_type, ts, actor, note, raw_item_id FROM claim_events_pre_fix3
+                    """)
+                    conn.execute("DROP TABLE claim_events_pre_fix3")
+                    conn.execute("COMMIT")
+                except sqlite3.OperationalError:
+                    try:
+                        conn.execute("ROLLBACK")
+                    except sqlite3.OperationalError:
+                        pass
             conn.execute("CREATE INDEX IF NOT EXISTS idx_claim_events_claim ON claim_events(claim_id, ts)")
 
             # pending_claim_suggestions (2026-08-04, architecture-review

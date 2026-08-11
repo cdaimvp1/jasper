@@ -216,10 +216,12 @@ def test_process_new_item_tries_next_candidate_after_a_no(ws_db, isolated_paths,
 
     def fake_popen(*a_, **kw):
         calls["n"] += 1
-        # First judged candidate says no, second says yes - then a 3rd
-        # call is step 6's own post-merge extraction, which also reads
-        # this same fake stdout (a harmless "no" line it just ignores,
-        # since it isn't a VERDICT: line at all).
+        # First judged candidate says no, second says yes. No 3rd call:
+        # step 6's post-merge run_project_extraction now reads the claims
+        # ledger (task #304) rather than making an LLM call unconditionally
+        # - none of a/b/c have a materialized claim in this test, so
+        # run_project_extraction short-circuits at "no_claims_yet" before
+        # ever touching Popen.
         return _FakeProcess("VERDICT: no\n" if calls["n"] == 1 else "VERDICT: yes\n")
 
     monkeypatch.setattr(p2.subprocess, "Popen", fake_popen)
@@ -227,7 +229,7 @@ def test_process_new_item_tries_next_candidate_after_a_no(ws_db, isolated_paths,
     result = p2.process_new_item(a)
 
     assert result["action"] == "merged"
-    assert calls["n"] == 3  # 2 judgment calls (no, then yes) + 1 post-merge extraction call
+    assert calls["n"] == 2  # 2 judgment calls (no, then yes)
 
 
 # --- process_new_item Total Recall precedent fast-path (2026-08-07) -------
@@ -360,17 +362,21 @@ def test_process_new_item_no_candidates_never_touches_lessons(ws_db, isolated_pa
     assert ws_db.get_lesson_by_situation("category:contract|company:acme", "confirmed") is None
 
 
-# --- run_project_extraction (step 6) --------------------------------------
+# --- run_project_extraction (step 6, consolidated onto claims - task #304) -
 
-def test_run_project_extraction_creates_new_issues_from_full_text(ws_db, isolated_paths, monkeypatch):
+def test_run_project_extraction_creates_issue_from_cited_claims(ws_db, isolated_paths, monkeypatch):
     project_id = ws_db.create_project_with_new_id(name="Test Project", category="other")
     a = _issue(ws_db, "Kickoff note")
-    _raw_item(ws_db, a, "Kickoff", "ka", body_preview="We need a signed SOW by Friday.")
+    rid = _raw_item(ws_db, a, "Kickoff", "ka", body_preview="We need a signed SOW by Friday.")
     ws_db.assign_issue_to_project(a, project_id)
+    claim_id = ws_db.insert_claim(
+        issue_id=a, raw_item_id=rid, claim_type="ask", text="Get the SOW signed by Friday.",
+        author="counterparty", author_basis="direction", owner="marc",
+    )
 
     _mock_claude(
         monkeypatch,
-        "ITEM: Get SOW signed | STATUS: active | NOTE: mentioned directly in the text\n"
+        f"ISSUE: Get SOW signed | CLAIM_IDS: {claim_id}\n"
         "SUMMARY: Waiting on a signed SOW.\n",
     )
 
@@ -381,19 +387,57 @@ def test_run_project_extraction_creates_new_issues_from_full_text(ws_db, isolate
     created = ws_db.get_issue(result["created_issue_ids"][0])
     assert created["title"] == "Get SOW signed"
     assert created["project_id"] == project_id
+    moved_claim = ws_db.get_claim(claim_id)
+    assert moved_claim["issue_id"] == result["created_issue_ids"][0]
     assert result["summary"] == "Waiting on a signed SOW."
 
 
-def test_run_project_extraction_skips_already_tracked_titles(ws_db, isolated_paths, monkeypatch):
+def test_run_project_extraction_ignores_claim_ids_not_in_this_project(ws_db, isolated_paths, monkeypatch):
     project_id = ws_db.create_project_with_new_id(name="Test Project", category="other")
-    existing = _issue(ws_db, "Get SOW signed")
-    ws_db.assign_issue_to_project(existing, project_id)
+    a = _issue(ws_db, "Kickoff note")
+    ws_db.assign_issue_to_project(a, project_id)
+    other = _issue(ws_db, "Unrelated issue")  # not a member of this project
+    other_rid = _raw_item(ws_db, other, "Other", "kb")
+    stray_claim_id = ws_db.insert_claim(
+        issue_id=other, raw_item_id=other_rid, claim_type="ask", text="Unrelated ask.",
+        author="counterparty", author_basis="direction", owner="marc",
+    )
 
-    _mock_claude(monkeypatch, "ITEM: Get SOW signed | STATUS: active | NOTE: same as before\n")
+    _mock_claude(monkeypatch, f"ISSUE: Hallucinated issue | CLAIM_IDS: {stray_claim_id}\n")
 
     result = p2.run_project_extraction(project_id)
 
-    assert result["created_issue_ids"] == []
+    assert result["action"] == "no_claims_yet"
+    assert ws_db.get_claim(stray_claim_id)["issue_id"] == other
+
+
+def test_run_project_extraction_deduplicates_claim_id_cited_twice_in_one_response(ws_db, isolated_paths, monkeypatch):
+    project_id = ws_db.create_project_with_new_id(name="Test Project", category="other")
+    a = _issue(ws_db, "Kickoff note")
+    rid = _raw_item(ws_db, a, "Kickoff", "ka")
+    ws_db.assign_issue_to_project(a, project_id)
+    claim_id = ws_db.insert_claim(
+        issue_id=a, raw_item_id=rid, claim_type="ask", text="Get the SOW signed.",
+        author="counterparty", author_basis="direction", owner="marc",
+    )
+
+    _mock_claude(
+        monkeypatch,
+        f"ISSUE: First title | CLAIM_IDS: {claim_id}\n"
+        f"ISSUE: Second title | CLAIM_IDS: {claim_id}\n",
+    )
+
+    result = p2.run_project_extraction(project_id)
+
+    assert len(result["created_issue_ids"]) == 1
+
+
+def test_run_project_extraction_no_claims_yet(ws_db, isolated_paths):
+    project_id = ws_db.create_project_with_new_id(name="Test Project", category="other")
+    a = _issue(ws_db, "Kickoff note")
+    ws_db.assign_issue_to_project(a, project_id)
+
+    assert p2.run_project_extraction(project_id)["action"] == "no_claims_yet"
 
 
 def test_run_project_extraction_not_found(ws_db, isolated_paths):

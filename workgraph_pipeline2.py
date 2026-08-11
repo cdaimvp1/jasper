@@ -347,55 +347,93 @@ def run_pipeline_for_ungrouped_items(limit: int = 500) -> dict:
     return {"checked": len(results), "results": results}
 
 
-_EXTRACTION_PROMPT_TEMPLATE = """You are reviewing the full communication history of ONE real business project to keep its tracked checklist current.
+_EXTRACTION_PROMPT_TEMPLATE = """You are reviewing the already-extracted claims (asks/decisions/commitments/dates) tracked against ONE real business project, to decide which genuinely belong together as separate trackable issues.
 
-PROJECT FULL TEXT (every linked communication):
-{project_text}
+CLAIMS (id | type | status | text):
+{claims_text}
 
-EXISTING TRACKED ITEMS (may be empty for a brand-new project):
+EXISTING TRACKED ISSUES (may be empty for a brand-new project):
 {existing_items}
 
-Read the project text and decide what checklist items (asks/issues/requests/deliverables) are genuinely present. For each one that is NEW (not already in the existing tracked items list) or whose STATUS has changed, output one line in exactly this format:
+Decide which claims above are not yet covered by an existing tracked issue and genuinely belong together as one real, separately trackable issue - a pricing-negotiation ask and a separate onboarding-scope ask living in the same communications are TWO issues, not one. For each new issue, output one line in exactly this format:
 
-ITEM: <short title> | STATUS: <active|done|blocked> | NOTE: <one-sentence grounding in the actual text>
+ISSUE: <short title> | CLAIM_IDS: <comma-separated claim ids from the list above>
+
+Only cite claim ids that appear in the CLAIMS list above - never invent one, and never cite the same claim id under two different ISSUE lines.
 
 Then, on its own final line, output a one-sentence project summary in exactly this format:
 
-SUMMARY: <one sentence describing the real current state of this project>
+SUMMARY: <one sentence describing the real current state of this project, grounded only in the claims above>
 
 Output nothing else.
 """
 
 
 def _parse_extraction_output(stdout: str) -> dict:
-    items = []
+    issues = []
     summary = None
     for line in (stdout or "").splitlines():
         line = line.strip()
-        if line.upper().startswith("ITEM:"):
+        if line.upper().startswith("ISSUE:"):
             rest = line.split(":", 1)[1]
             fields = [f.strip() for f in rest.split("|")]
-            entry = {"title": fields[0] if fields else ""}
+            title = fields[0] if fields else ""
+            claim_ids = []
             for field in fields[1:]:
-                if field.upper().startswith("STATUS:"):
-                    entry["status"] = field.split(":", 1)[1].strip().lower()
-                elif field.upper().startswith("NOTE:"):
-                    entry["note"] = field.split(":", 1)[1].strip()
-            if entry["title"]:
-                items.append(entry)
+                if field.upper().startswith("CLAIM_IDS:"):
+                    for part in field.split(":", 1)[1].split(","):
+                        part = part.strip()
+                        if part.isdigit():
+                            claim_ids.append(int(part))
+            if title and claim_ids:
+                issues.append({"title": title, "claim_ids": claim_ids})
         elif line.upper().startswith("SUMMARY:"):
             summary = line.split(":", 1)[1].strip()
-    return {"items": items, "summary": summary}
+    return {"issues": issues, "summary": summary}
 
 
 def run_project_extraction(project_id: str) -> dict:
     """Step 6 - fires immediately after every successful group (a merge
-    or a new-project creation), never on a separate schedule. Reads the
-    WHOLE project's full-text corpus (every member cluster/issue's own
-    raw_items), asks the LLM what checklist items are genuinely present
-    and what changed, and writes real issues + a project summary via the
-    same deterministic store functions synthesis already uses elsewhere
-    in this codebase - never a new, separate storage shape."""
+    or a new-project creation), never on a separate schedule.
+
+    Consolidated onto the claim-grounded path (task #304, item #3,
+    2026-08-11, Marc's own explicit build authorization and his own
+    "correct fix for a company-wide rollout" call): previously read the
+    project's WHOLE raw-text corpus and created issues directly via
+    ws.create_issue_with_new_id, with zero claim/evidence/party linkage -
+    a real, separate mechanism from curator's claim-grounded extract_
+    issue_from_project (SYNTHESIS_ROUTINE.md step 4a). The two disagreeing
+    is exactly the live inconsistency Marc flagged; worse, this function's
+    own upsert_synthesis call stamped synthesized_from_marker to the SAME
+    marker curator's staleness check reads, so a project could permanently
+    read "already synthesized" the moment this ungrounded pass ran,
+    starving curator's real pass from ever correcting it.
+
+    Now reads the project's already-materialized claims (list_claims_for_
+    issues over every member cluster/issue - the same claims ledger
+    server_lean.py's POST /api/workgraph/raw_items/{id}/extraction route
+    materializes at extraction time, normally well before grouping runs),
+    asks the LLM which claims belong together as a real issue, and creates
+    each one through workgraph_projects.extract_issue_from_project - the
+    exact same deterministic mechanics (claim reassignment, evidence,
+    parties) curator's own routine uses. One mechanism, always
+    claim-grounded, from the moment an issue is born.
+
+    Deliberately reads claims from every member (cluster OR already-real
+    issue), not just clusters - the "new_project" caller in
+    process_new_item assigns the triggering work_object (which can itself
+    already be a real, is_raw_cluster=0 issue, not only a cluster) to the
+    project BEFORE calling this, so its claims must stay eligible on this
+    very first pass. Two dedup layers, matching exactly the level of trust
+    extract_issue_from_project's own callers already extend elsewhere in
+    this codebase (curator's own SYNTHESIS_ROUTINE step 4a has the same
+    shape and no stronger guarantee): already_cited below is a genuine,
+    new, code-level guard against the SAME claim id appearing under two
+    different ISSUE: lines within one LLM response; avoiding re-citation
+    of a claim an EARLIER run_project_extraction call already moved onto
+    a real issue relies on the EXISTING TRACKED ISSUES list in the prompt
+    below, the same "don't re-extract what's already tracked" discipline
+    curator's own claim-grounded flow already runs on."""
     project = ws.get_project(project_id)
     if project is None:
         return {"project_id": project_id, "action": "not_found"}
@@ -404,12 +442,17 @@ def run_project_extraction(project_id: str) -> dict:
         [c["id"] for c in ws.list_clusters_for_project(project_id)]
         + [i["id"] for i in ws.list_issues_for_project(project_id)]
     )
-    project_text = "\n\n===\n\n".join(full_text_for_work_object(mid) for mid in member_ids)
+    claims_by_member = ws.list_claims_for_issues(member_ids)
+    all_claims = [c for claims in claims_by_member.values() for c in claims]
+    if not all_claims:
+        return {"project_id": project_id, "action": "no_claims_yet"}
+
+    claims_text = "\n".join(f"{c['id']} | {c['claim_type']} | {c['status']} | {c['text']}" for c in all_claims)
     existing = ws.list_issues_for_project(project_id)
     existing_text = "\n".join(f"- {i['title']}" for i in existing) or "(none yet)"
 
     prompt = _EXTRACTION_PROMPT_TEMPLATE.format(
-        project_text=project_text[:_MAX_TEXT_CHARS], existing_items=existing_text,
+        claims_text=claims_text[:_MAX_TEXT_CHARS], existing_items=existing_text,
     )
     try:
         proc = _run_headless_claude(prompt, timeout=_EXTRACTION_TIMEOUT_SECONDS)
@@ -417,17 +460,21 @@ def run_project_extraction(project_id: str) -> dict:
         return {"project_id": project_id, "action": "timeout"}
 
     parsed = _parse_extraction_output(proc.stdout)
-    existing_titles = {i["title"] for i in existing}
+    valid_claim_ids = {c["id"] for c in all_claims}
+    already_cited: set = set()
     created = []
-    for entry in parsed["items"]:
-        if entry["title"] in existing_titles:
+    for entry in parsed["issues"]:
+        claim_ids = [cid for cid in entry["claim_ids"] if cid in valid_claim_ids and cid not in already_cited]
+        if not claim_ids:
             continue
-        new_issue_id = ws.create_issue_with_new_id(
-            title=entry["title"], category=project.get("category"),
-            state="done" if entry.get("status") == "done" else "active",
-        )
-        ws.assign_issue_to_project(new_issue_id, project_id, reason="pipeline2: extracted from project full text")
-        created.append(new_issue_id)
+        try:
+            result = wp.extract_issue_from_project(
+                project_id, title=entry["title"], category=project.get("category"), claim_ids=claim_ids,
+            )
+        except ValueError:
+            continue  # never let one malformed LLM line abort the whole extraction pass
+        already_cited.update(claim_ids)
+        created.append(result["issue_id"])
 
     if parsed["summary"]:
         marker = workgraph_synthesis.compute_evidence_marker("project", project_id)

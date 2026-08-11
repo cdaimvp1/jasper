@@ -694,6 +694,23 @@ def candidate_pool_via_data_point_index(work_object_id: str, sig: dict, topic_ke
     return pool
 
 
+def _full_text_for_cross_mention(work_object_id: str) -> str:
+    """Task #335's own text source - deliberately a small, local re-fetch
+    (same ws.get_raw_items_for_issue + text_extract.resolve_item_text
+    pattern already used just above for party-field extraction) rather
+    than importing workgraph_pipeline2.full_text_for_work_object: that
+    module already imports workgraph_projects (workgraph_pipeline2.py's
+    own `import workgraph_projects as wp`), so the reverse import here
+    would be circular. Subject line included (a real relationship phrase
+    can sit in the subject, not just the body)."""
+    parts = []
+    for item in ws.get_raw_items_for_issue(work_object_id):
+        subject = item.get("subject") or ""
+        body = text_extract.resolve_item_text(item)
+        parts.append(f"{subject}\n{body}")
+    return "\n".join(parts)
+
+
 def _matched_data_points(a_id: str, a_sig: dict, a_topic_key: str,
                           b_id: str, b_sig: dict, b_topic_key: str) -> list:
     """Task #184 (2026-08-04, Marc's direct redesign) - replaces
@@ -730,6 +747,15 @@ def _matched_data_points(a_id: str, a_sig: dict, a_topic_key: str,
       - "amount": a shared dollar value (within 1%).
       - "document": shared attachment/document lineage.
       - "subject_entity": a shared, specific normalized subject/topic core.
+      - "cross_mention" (task #335, per #324's design): one side's own text
+        names a company the OTHER side's parties/vocabulary already know
+        about, near relationship-language ("the existing Scriptly
+        subcontract") - see workgraph_signals.cross_mention_match. Closes
+        the real, confirmed prime/subcontractor gap a bare "supplier"
+        point alone can't (two different company names never clear 2
+        points on "supplier" alone). Deterministic, zero LLM cost, never a
+        score - the matched company+keyword pair is embedded directly in
+        the returned point string for full auditability.
 
     Deliberately NOT a point type here, per Marc's own explicit rule
     ("never used as the primary matching data points"): sender/participant
@@ -808,6 +834,26 @@ def _matched_data_points(a_id: str, a_sig: dict, a_topic_key: str,
     b_suppliers.discard("")
     if a_suppliers and b_suppliers and not a_suppliers.isdisjoint(b_suppliers):
         points.append("supplier")
+
+    # Task #335 (per #324's design): "cross_mention" - a company name one
+    # side's own text names, sitting near relationship-language ("the
+    # existing Scriptly subcontract"), when that company is one the OTHER
+    # side's own parties/vocabulary already know about. Reuses a_suppliers/
+    # b_suppliers computed just above - the exact same normalized company
+    # vocabulary "supplier" already trusts - never a new extraction. Checked
+    # both directions (a's text against b's companies, and vice versa) since
+    # either side's raw text might be the one carrying the relationship
+    # phrase. Full text is fetched lazily, only when there's a real company
+    # vocabulary on the OTHER side worth searching for - never for a pair
+    # with no supplier signal on either side at all.
+    if b_suppliers:
+        hit = workgraph_signals.cross_mention_match(_full_text_for_cross_mention(a_id), b_suppliers)
+        if hit:
+            points.append(f"cross_mention:{hit[0]} ({hit[1]})")
+    if a_suppliers and not any(p.startswith("cross_mention:") for p in points):
+        hit = workgraph_signals.cross_mention_match(_full_text_for_cross_mention(b_id), a_suppliers)
+        if hit:
+            points.append(f"cross_mention:{hit[0]} ({hit[1]})")
 
     a_external = {p["party_id"] for p in a_sig["participant_roles"] if p.get("affiliation") == "external"}
     b_external = {p["party_id"] for p in b_sig["participant_roles"] if p.get("affiliation") == "external"}

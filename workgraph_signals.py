@@ -475,6 +475,53 @@ def normalize_company_name(name: Optional[str]) -> str:
     return _COMPANY_SUFFIX_RE.sub("", name.lower().strip()).strip()
 
 
+_RELATIONSHIP_KEYWORDS = (
+    "subcontract", "sub-contract", "subcontractor", "flow-down", "flowdown",
+    "prime contract", "teaming agreement", "change order under", "work order under",
+)
+_CROSS_MENTION_WINDOW_CHARS = 200
+
+
+def cross_mention_match(text: str, known_companies: set) -> Optional[tuple]:
+    """Task #335 (per #324's design, docs/design/CANDIDATE_DETECTION_
+    BROADENING.md): the one new deterministic point type that closes the
+    real, confirmed gap a bare shared-company match (the "supplier" point
+    in workgraph_projects._matched_data_points) can't - a prime/
+    subcontractor pair with two DIFFERENT company names only ever earns
+    ONE structured point today (see that design doc's own probe: a real
+    Scriptly PV1 / Scriptly-Sodalis bridge / direct Sodalis MSA case never
+    cleared the 2-point gate). This corroborates a weak single-company
+    signal with something that says "and this text is explicitly
+    describing a relationship," rather than a bare coincidental mention.
+
+    Deliberately narrow and inspectable, never a score: fires only when
+    `text` contains, as a literal case-insensitive substring, a company
+    name from `known_companies` (the OTHER side's already-normalized
+    supplier vocabulary - see normalize_company_name, whose lowercase-
+    plus-suffix-strip form is exactly what this searches for) within
+    `_CROSS_MENTION_WINDOW_CHARS` characters of one of a short, curated
+    relationship-language keyword list. Returns (company, keyword) - the
+    literal matched pair, so the caller can build an auditable
+    matched_signals string like "cross_mention:Scriptly (subcontract)" -
+    or None. Never invents a company name; only ever checks names the
+    caller already extracted through the normal party/company pipeline."""
+    if not text or not known_companies:
+        return None
+    lowered = text.lower()
+    for company in known_companies:
+        if not company or len(company) < 3:
+            continue  # too short/generic a normalized name to search for reliably
+        idx = lowered.find(company)
+        while idx != -1:
+            window = lowered[max(0, idx - _CROSS_MENTION_WINDOW_CHARS):
+                              idx + len(company) + _CROSS_MENTION_WINDOW_CHARS]
+            for keyword in _RELATIONSHIP_KEYWORDS:
+                if keyword in window:
+                    return company, keyword
+            idx = lowered.find(company, idx + 1)
+    return None
+
+
 def extract_labeled_party_field(body_text: str) -> Optional[str]:
     """The real counterparty name out of ANY automated system's body, read
     from a labeled field (Supplier/Vendor/Counterparty/Company Name/

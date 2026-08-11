@@ -416,6 +416,73 @@ def test_matched_data_points_supplier_and_subject_entity_combine_to_two_points(w
     assert len(points) >= 2
 
 
+# --- "cross_mention" point type (task #335, per #324's design doc) -------
+# Closes the real, confirmed gap: a prime/subcontractor pair with two
+# DIFFERENT company names only ever earns one structured point ("supplier"
+# doesn't fire when the two sides' companies are disjoint) - the real
+# Scriptly PV1 / Scriptly-Sodalis bridge / direct Sodalis MSA case
+# (docs/design/CANDIDATE_DETECTION_BROADENING.md) never cleared the
+# 2-point gate for exactly this reason, even though the bridge item's own
+# text plainly named the relationship ("the existing Scriptly subcontract").
+
+def test_matched_data_points_cross_mention_fires_on_disjoint_suppliers(ws_db):
+    """The exact gap this closes: companies are disjoint (no "supplier"
+    point), but one side's own text names the OTHER side's company next
+    to real relationship language - reported as its own point, fully
+    auditable (the literal company + keyword are embedded in the string)."""
+    a = _issue(ws_db, "Scriptly PV1 work order")
+    _link_party(ws_db, a, "p1", "rep@scriptly.example", company="Scriptly")
+    b = _issue(ws_db, "Sodalis MSA change order")
+    _link_party(ws_db, b, "p2", "rep@sodalis.example", company="Sodalis")
+    _raw_item_with_body(
+        ws_db, b, "Sodalis MSA change order", "cm1",
+        body_preview="This change order continues the existing Scriptly subcontract arrangement.",
+        from_actor="rep@sodalis.example",
+    )
+
+    points = _matched_points_pair(a, b)
+
+    assert "supplier" not in points  # disjoint companies - confirms this isn't just riding along
+    assert "cross_mention:scriptly (subcontract)" in points
+
+
+def test_matched_data_points_cross_mention_requires_relationship_keyword(ws_db):
+    """A bare company mention with no nearby relationship language must
+    NOT fire - this is the guard against treating any coincidental mention
+    of a known vendor's name as evidence of a real relationship."""
+    a = _issue(ws_db, "Scriptly PV1 work order")
+    _link_party(ws_db, a, "p1", "rep@scriptly.example", company="Scriptly")
+    b = _issue(ws_db, "Sodalis MSA change order")
+    _link_party(ws_db, b, "p2", "rep@sodalis.example", company="Sodalis")
+    _raw_item_with_body(
+        ws_db, b, "Sodalis MSA change order", "cm2",
+        body_preview="Scriptly are a completely unrelated vendor we also happen to use.",
+        from_actor="rep@sodalis.example",
+    )
+
+    points = _matched_points_pair(a, b)
+
+    assert not any(p.startswith("cross_mention:") for p in points)
+
+
+def test_matched_data_points_cross_mention_checks_both_directions(ws_db):
+    """The mention can live on EITHER side's text - not just the side
+    whose own company is being searched for."""
+    a = _issue(ws_db, "Scriptly PV1 work order")
+    _raw_item_with_body(
+        ws_db, a, "Scriptly PV1 work order", "cm3",
+        body_preview="This work order is issued as a flow-down under the direct Sodalis MSA.",
+        from_actor="rep@scriptly.example",
+    )
+    _link_party(ws_db, a, "p1", "rep@scriptly.example", company="Scriptly")
+    b = _issue(ws_db, "Sodalis MSA change order")
+    _link_party(ws_db, b, "p2", "rep@sodalis.example", company="Sodalis")
+
+    points = _matched_points_pair(a, b)
+
+    assert "cross_mention:sodalis (flow-down)" in points
+
+
 def test_matched_data_points_category_is_never_a_point_type(ws_db):
     """Category is dropped entirely as a point type (per _matched_data_
     points' own docstring) - an internal taxonomy tag, not extracted

@@ -95,6 +95,7 @@ import workgraph_focus
 import workgraph_digest
 import workgraph_party_review
 import workgraph_relationships
+import workgraph_status_report
 import text_extract
 import workgraph_discovery
 
@@ -1137,6 +1138,12 @@ class WorkgraphIssueStatusBody(BaseModel):
     priority: Optional[str] = None
     actor: Optional[str] = None
     reason: Optional[str] = None
+
+
+class StatusReportBody(BaseModel):
+    skip_llm: bool = False
+    output_path: Optional[str] = None
+    model: Optional[str] = None
 
 
 class CockpitActionBody(BaseModel):
@@ -2891,6 +2898,29 @@ async def api_relationship_audit():
     way a claim suggestion is, so it doesn't fit that route's resolve
     contract. Read-only, computed fresh every call."""
     return JSONResponse({"relationships": sanitize_surrogates(workgraph_relationships.list_relationships_needing_review())})
+
+
+@app.post("/api/workgraph/status-report")
+async def api_workgraph_status_report(body: StatusReportBody):
+    """"Workload Status Update Report" skill (2026-08-11): regenerates
+    Marc's manually-maintained status spreadsheet (Lane_Status_April_
+    2026.xlsx's own 9-column shape) from the graph itself - see
+    workgraph_status_report.py's own module docstring for the real two-
+    stage contract (Stage 1 deterministic/real-data-only, Stage 2 exactly
+    ONE headless-claude pass over the whole active-project portfolio at
+    once for the three subjective columns + a clearly-labeled end-date
+    projection where Stage 1 found no real captured deadline).
+
+    NOT instant - Stage 2's single call can take several minutes on a
+    large graph, so this runs via asyncio.to_thread rather than blocking
+    the event loop the way every other synchronous SQLite route here
+    would (same reasoning as /api/mail/refresh-now). skip_llm=True
+    returns the real, deterministic Stage 1 table alone - no subprocess,
+    no wait."""
+    path = body.output_path or str(Path.home() / "Downloads" / "Workload_Status_Update_Report.xlsx")
+    result = await asyncio.to_thread(
+        workgraph_status_report.generate_report, path, skip_llm=body.skip_llm, model=body.model)
+    return JSONResponse(sanitize_surrogates(result))
 
 
 @app.get("/api/workgraph/parties")

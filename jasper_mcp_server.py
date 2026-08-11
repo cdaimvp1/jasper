@@ -441,6 +441,34 @@ def jasper_acknowledge_proactive_action(prepared_action_id: int) -> dict:
     return _post(f"/api/prepared-actions/{prepared_action_id}/acknowledge", {})
 
 
+@mcp.tool()
+def jasper_workload_status_report(skip_llm: bool = False) -> dict:
+    """Regenerates Marc's manually-maintained "Workload Status Update
+    Report" spreadsheet straight from Jasper's own graph - same 9-column
+    shape as his real Lane_Status_April_2026.xlsx (Project Name/
+    Description/Vendor/Start & End Dates/Stakeholders/Resourcing Needed/
+    Complexity/Visibility/Anticipated Spend). Two real stages: every open
+    project's real fields (title, synthesized description, real linked
+    vendor/relationship, real linked stakeholders, real opened date, a
+    real captured deadline claim or dollar-figure claim where one
+    genuinely exists) come from the graph with zero invention; then
+    EXACTLY one LLM pass over the whole table fills the three genuinely-
+    subjective columns (Resourcing Support Needed/Complexity/Visibility)
+    plus a clearly-labeled end-date PROJECTION only where no real deadline
+    was captured - never indistinguishable from a real date in the cell
+    text.
+
+    NOT instant - the LLM pass runs once over the ENTIRE active-project
+    portfolio and can take several minutes on a large graph; say so if
+    Marc is waiting live. skip_llm=True skips straight to the real,
+    deterministic Stage 1 table only (fast, no subprocess) - useful if
+    Marc just wants the real data without the judgment-call columns.
+    Returns {"output_path", "project_count", "stage2": {...}} - relay the
+    output_path back to Marc (the actual .xlsx, written to his Downloads
+    folder) rather than trying to render the table yourself."""
+    return _post("/api/workgraph/status-report", {"skip_llm": skip_llm})
+
+
 if __name__ == "__main__":
     threading.Thread(target=_restart_when_this_file_changes, daemon=True).start()
     mcp.run(transport="sse", host=MCP_HOST, port=MCP_PORT)

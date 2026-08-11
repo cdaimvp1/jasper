@@ -47,6 +47,7 @@ import workgraph_pipeline2
 import workgraph_claims_backfill
 import workgraph_discovery
 import workgraph_proactive
+import workgraph_relationships
 import config
 
 from paths import DATA_DIR
@@ -555,6 +556,20 @@ def run() -> dict:
     except Exception as e:
         proactive_actions_result = {"error": str(e)}
 
+    # 18. Relationship vs. Project separation sweep (task #304, item #1 of
+    # Marc's 2026-08-11 build authorization) - same once/day gate. Reads
+    # workgraph_pipeline2.py's own 'rejected' work_object_relationships
+    # rows (pairs it already judged NOT the same project) and turns any
+    # pair that shares a real supplier name into a durable, named
+    # Relationship spanning both projects. Deliberately reads only
+    # pipeline2's past output - never calls into it, per Marc's own
+    # standing "keep it entirely separate" instruction in that file's
+    # docstring - so this step cannot affect grouping/merge decisions.
+    try:
+        relationship_sweep_result = workgraph_relationships.run_relationship_sweep_daily_if_due()
+    except Exception as e:
+        relationship_sweep_result = {"error": str(e)}
+
     summary = {
         "mail": mail_result,
         "sent_mail": sent_mail_result,
@@ -578,6 +593,7 @@ def run() -> dict:
         "claims_backfill": claims_backfill_result,
         "discovery_monthly": discovery_monthly_result,
         "proactive_actions": proactive_actions_result,
+        "relationship_sweep": relationship_sweep_result,
     }
     _log(f"REFRESH ok mail_inserted={mail_result.get('inserted', '?')} "
         f"relay_ok={relay_result.get('ok')} relay_calendar_advanced={relay_result.get('cursor_advanced')} "

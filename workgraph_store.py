@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 import random
 import re
 import sqlite3
@@ -1578,6 +1579,66 @@ def init_workgraph() -> None:
                 )
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_plf_status ON pending_link_fetches(status)")
+
+            # --- Phase D: work_object_relationships graph (task #188,
+            # 2026-08-05). Genuine pre-existing gap closed 2026-08-11 while
+            # building task #304: this table was created live on the real
+            # DB but its CREATE TABLE was never captured as a permanent
+            # migration here, so any FRESH install/test DB never got it at
+            # all - upsert_work_object_relationship and every other reader
+            # of this table would hard-crash with "no such table" the
+            # moment pipeline2's Phase D code ran against a clean DB.
+            # UNIQUE(from_id, to_id) backs upsert_work_object_relationship's
+            # own ON CONFLICT(from_id, to_id) clause.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS work_object_relationships (
+                    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                    from_id             TEXT NOT NULL,
+                    to_id               TEXT NOT NULL,
+                    relationship_type  TEXT NOT NULL,
+                    match_count         INTEGER NOT NULL DEFAULT 0,
+                    matched_signals_json TEXT,
+                    created_ts          REAL NOT NULL,
+                    resolved_ts         REAL,
+                    UNIQUE(from_id, to_id)
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_wor_type ON work_object_relationships(relationship_type)")
+
+            # --- Relationship vs. Project separation (2026-08-11, Marc's
+            # explicit build authorization, item #1). A durable, NAMED
+            # business relationship (e.g. "Sodalis") that can span multiple
+            # separate PROJECTS - genuinely distinct from
+            # work_object_relationships, which is pipeline2's own pairwise
+            # merge-candidate bookkeeping at the work_object level (candidate/
+            # bridge/confirmed/rejected), never a durable named entity and
+            # never surfaced to a human as "these are the same relationship."
+            # Deliberately does NOT touch workgraph_pipeline2.py - per Marc's
+            # own standing instruction embedded in that file's module
+            # docstring ("KEEP IT ENTIRELY SEPARATE... BUILD NEW MECHANISMS
+            # FOR IT"), this is pure additive schema read by a new, separate
+            # module (workgraph_relationships.py) that only ever READS
+            # pipeline2's already-written work_object_relationships output,
+            # never calls into or is called by pipeline2's decision flow.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS relationships (
+                    id          TEXT PRIMARY KEY,
+                    name        TEXT NOT NULL,
+                    status      TEXT NOT NULL DEFAULT 'active',
+                    created_ts  REAL NOT NULL,
+                    updated_ts  REAL NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS project_relationships (
+                    project_id       TEXT NOT NULL,
+                    relationship_id  TEXT NOT NULL,
+                    reason           TEXT,
+                    linked_ts        REAL NOT NULL,
+                    PRIMARY KEY (project_id, relationship_id)
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_pr_relationship ON project_relationships(relationship_id)")
 
             # --- Total Recall: a small, deterministic precedent store (see
             # workgraph_lessons.py). One row per (situation_key, outcome) -
@@ -5956,6 +6017,26 @@ def list_pending_work_object_relationships(limit: int = 1000) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def list_work_object_relationships_by_type(relationship_type: str, limit: int = 1000) -> list[dict]:
+    """Task #304 (Relationship vs. Project separation, 2026-08-11): the raw
+    material for workgraph_relationships.py's sweep is exactly the
+    'rejected' rows here - pairs judged NOT the same project, but which
+    still carry real matched_signals_json (shared supplier/stakeholder/
+    subject_entity etc.) worth turning into a durable cross-project
+    Relationship link rather than being dead-ended forever."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                """SELECT * FROM work_object_relationships
+                   WHERE relationship_type = ? ORDER BY created_ts ASC LIMIT ?""",
+                (relationship_type, limit),
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
 def resolve_work_object_relationship(relationship_id: int, status: str, *, now: Optional[float] = None) -> None:
     """status must be 'confirmed' or 'rejected' - curator's real judgment
     (Phase F), never a mechanical re-classification. A 'genuinely unsure'
@@ -5999,6 +6080,108 @@ def list_work_object_relationships_for(work_object_id: str, relationship_types: 
                     "SELECT * FROM work_object_relationships WHERE from_id = ? OR to_id = ?",
                     (work_object_id, work_object_id),
                 ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+# --- Relationship vs. Project separation (2026-08-11, build item #1) -------
+# A durable, NAMED business relationship (e.g. "Sodalis") that can span
+# multiple separate projects - genuinely distinct from
+# work_object_relationships above (pipeline2's own pairwise merge-candidate
+# bookkeeping, never a durable named entity). Read/written only by the new,
+# standalone workgraph_relationships.py sweep and its API surface - never by
+# workgraph_pipeline2.py itself, per Marc's own standing instruction in that
+# file's module docstring.
+
+def get_or_create_relationship_by_name(name: str, *, now: Optional[float] = None) -> str:
+    """Case-insensitive dedup on name - "Sodalis" and "sodalis" resolve to
+    the SAME relationship row rather than growing near-duplicates. Returns
+    the existing or newly-created relationship's id."""
+    now = now if now is not None else time.time()
+    with _lock:
+        conn = _connect()
+        try:
+            existing = conn.execute(
+                "SELECT id FROM relationships WHERE lower(name) = lower(?)", (name,)
+            ).fetchone()
+            if existing:
+                return existing["id"]
+            relationship_id = f"rel-{uuid.uuid4().hex[:12]}"
+            conn.execute(
+                "INSERT INTO relationships (id, name, status, created_ts, updated_ts) VALUES (?, ?, 'active', ?, ?)",
+                (relationship_id, name, now, now),
+            )
+            return relationship_id
+        finally:
+            conn.close()
+
+
+def get_relationship(relationship_id: str) -> Optional[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute("SELECT * FROM relationships WHERE id = ?", (relationship_id,)).fetchone()
+        finally:
+            conn.close()
+    return dict(row) if row else None
+
+
+def link_project_to_relationship(project_id: str, relationship_id: str, *,
+                                  reason: Optional[str] = None, now: Optional[float] = None) -> None:
+    """Idempotent - INSERT OR IGNORE, since a re-run of the detection sweep
+    finding the same project/relationship pair again is expected, not an
+    error."""
+    now = now if now is not None else time.time()
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                """INSERT OR IGNORE INTO project_relationships (project_id, relationship_id, reason, linked_ts)
+                   VALUES (?, ?, ?, ?)""",
+                (project_id, relationship_id, reason, now),
+            )
+        finally:
+            conn.close()
+
+
+def list_relationships_for_project(project_id: str) -> list[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                """SELECT r.*, pr.reason, pr.linked_ts FROM relationships r
+                   JOIN project_relationships pr ON pr.relationship_id = r.id
+                   WHERE pr.project_id = ?""",
+                (project_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def list_projects_for_relationship(relationship_id: str) -> list[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                """SELECT p.*, pr.reason, pr.linked_ts FROM projects p
+                   JOIN project_relationships pr ON pr.project_id = p.id
+                   WHERE pr.relationship_id = ?""",
+                (relationship_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def list_relationships(status: str = "active") -> list[dict]:
+    """Every tracked relationship, for the review-sweep listing (item #2)
+    and any future admin/API surface."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute("SELECT * FROM relationships WHERE status = ?", (status,)).fetchall()
         finally:
             conn.close()
     return [dict(r) for r in rows]

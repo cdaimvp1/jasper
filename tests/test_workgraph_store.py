@@ -2935,3 +2935,57 @@ def test_list_system_table_proposals_filters_by_status(ws_db):
     confirmed = ws_db.list_system_table_proposals(status="confirmed")
     assert confirmed[0]["resolved_by"] == "marc"
     assert confirmed[0]["resolved_ts"] is not None
+
+
+# --- relationships / project_relationships (task #304) ----------------------
+
+def test_get_or_create_relationship_by_name_dedups_case_insensitive(ws_db):
+    rid1 = ws_db.get_or_create_relationship_by_name("Sodalis")
+    rid2 = ws_db.get_or_create_relationship_by_name("sodalis")
+    assert rid1 == rid2
+    assert ws_db.get_relationship(rid1)["name"] == "Sodalis"
+
+
+def test_link_project_to_relationship_is_idempotent(ws_db):
+    ws_db.create_project(id="proj-1", name="Proj 1")
+    rid = ws_db.get_or_create_relationship_by_name("Authenticx")
+    ws_db.link_project_to_relationship("proj-1", rid, reason="first link")
+    ws_db.link_project_to_relationship("proj-1", rid, reason="second link, same pair")
+    projects = ws_db.list_projects_for_relationship(rid)
+    assert [p["id"] for p in projects] == ["proj-1"]
+
+
+def test_list_relationships_for_project_and_list_projects_for_relationship(ws_db):
+    ws_db.create_project(id="proj-a", name="Proj A")
+    ws_db.create_project(id="proj-b", name="Proj B")
+    rid = ws_db.get_or_create_relationship_by_name("Authenticx")
+    ws_db.link_project_to_relationship("proj-a", rid)
+    ws_db.link_project_to_relationship("proj-b", rid)
+
+    projects = ws_db.list_projects_for_relationship(rid)
+    assert {p["id"] for p in projects} == {"proj-a", "proj-b"}
+
+    rels = ws_db.list_relationships_for_project("proj-a")
+    assert len(rels) == 1
+    assert rels[0]["name"] == "Authenticx"
+
+
+def test_list_relationships_filters_by_status(ws_db):
+    ws_db.get_or_create_relationship_by_name("Authenticx")
+    assert len(ws_db.list_relationships(status="active")) == 1
+    assert ws_db.list_relationships(status="archived") == []
+
+
+def test_list_work_object_relationships_by_type(ws_db):
+    ws_db.upsert_work_object_relationship(
+        a_id="wo-1", b_id="wo-2", relationship_type="rejected",
+        match_count=2, matched_signals=["supplier", "stakeholder"],
+    )
+    ws_db.upsert_work_object_relationship(
+        a_id="wo-3", b_id="wo-4", relationship_type="candidate",
+        match_count=2, matched_signals=["reference"],
+    )
+    rejected = ws_db.list_work_object_relationships_by_type("rejected")
+    assert len(rejected) == 1
+    assert rejected[0]["from_id"] == "wo-1"
+    assert ws_db.list_work_object_relationships_by_type("candidate")[0]["from_id"] == "wo-3"

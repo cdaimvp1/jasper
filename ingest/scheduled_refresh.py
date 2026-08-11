@@ -48,6 +48,7 @@ import workgraph_claims_backfill
 import workgraph_discovery
 import workgraph_proactive
 import workgraph_relationships
+import workgraph_noise
 import config
 
 from paths import DATA_DIR
@@ -265,7 +266,7 @@ def run_synthesis_oneshot() -> dict:
         if size < workgraph_synthesis_light.LIGHT_PATH_MAX_BYTES:
             try:
                 light_results.append(workgraph_synthesis_light.run_light_synthesis(
-                    entity["entity_type"], entity["entity_id"]))
+                    entity["entity_type"], entity["entity_id"], model="haiku"))
             except Exception as e:
                 light_results.append({"entity_type": entity["entity_type"], "entity_id": entity["entity_id"],
                                        "action": "error", "error": str(e)})
@@ -570,6 +571,15 @@ def run() -> dict:
     except Exception as e:
         relationship_sweep_result = {"error": str(e)}
 
+    # Deterministic, no LLM calls - same "keep it entirely separate" discipline as the
+    # relationship sweep above; reads raw_items/claims only, never touches grouping/merge
+    # decisions, writes only projects.status via the pre-existing noise-archived value (task
+    # #310 follow-up, 2026-08-11, Marc's own direct request after reviewing real report output).
+    try:
+        noise_sweep_result = workgraph_noise.run_noise_sweep_daily_if_due()
+    except Exception as e:
+        noise_sweep_result = {"error": str(e)}
+
     summary = {
         "mail": mail_result,
         "sent_mail": sent_mail_result,
@@ -594,6 +604,7 @@ def run() -> dict:
         "discovery_monthly": discovery_monthly_result,
         "proactive_actions": proactive_actions_result,
         "relationship_sweep": relationship_sweep_result,
+        "noise_sweep": noise_sweep_result,
     }
     _log(f"REFRESH ok mail_inserted={mail_result.get('inserted', '?')} "
         f"relay_ok={relay_result.get('ok')} relay_calendar_advanced={relay_result.get('cursor_advanced')} "

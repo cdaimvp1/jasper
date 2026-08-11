@@ -2989,3 +2989,78 @@ def test_list_work_object_relationships_by_type(ws_db):
     assert len(rejected) == 1
     assert rejected[0]["from_id"] == "wo-1"
     assert ws_db.list_work_object_relationships_by_type("candidate")[0]["from_id"] == "wo-3"
+
+
+# --- accuracy telemetry counters (task #304, item #4) -----------------------
+
+def test_count_merge_events_counts_issue_membership_assignments_in_window(ws_db):
+    ws_db.create_project(id="proj-1", name="P1")
+    now = time.time()
+    conn = ws_db._connect()
+    conn.execute(
+        "INSERT INTO audit_log (entity_type, entity_id, field, old_value, new_value, changed_ts, reason) "
+        "VALUES ('project', 'proj-1', 'issue_membership', NULL, 'proj-1', ?, 'merge')",
+        (now,),
+    )
+    conn.execute(
+        "INSERT INTO audit_log (entity_type, entity_id, field, old_value, new_value, changed_ts, reason) "
+        "VALUES ('project', 'proj-1', 'issue_membership', 'proj-1', NULL, ?, 'detach, not a merge')",
+        (now,),
+    )
+    conn.commit()
+    conn.close()
+
+    assert ws_db.count_merge_events(now - 1, now + 1) == 1
+    assert ws_db.count_merge_events(now + 10, now + 20) == 0
+
+
+def test_count_identity_constraints_filters_by_type_and_window(ws_db):
+    ws_db.create_identity_constraint("cannot_merge", "a", "b", "split", actor="marc")
+    ws_db.create_identity_constraint("cannot_link", "c", "d", "other", actor="marc")
+    now = time.time()
+
+    assert ws_db.count_identity_constraints("cannot_merge", now - 5, now + 5) == 1
+    assert ws_db.count_identity_constraints("cannot_link", now - 5, now + 5) == 1
+    assert ws_db.count_identity_constraints("cannot_merge", now + 10, now + 20) == 0
+
+
+def test_count_audit_log_by_field_matches_only_the_given_field(ws_db):
+    now = time.time()
+    conn = ws_db._connect()
+    conn.execute(
+        "INSERT INTO audit_log (entity_type, entity_id, field, old_value, new_value, changed_ts, reason) "
+        "VALUES ('issue', 'wo-1', 'absorbed_cluster', 'wo-1', 'marc-1', ?, 'same pr_number_base')",
+        (now,),
+    )
+    conn.execute(
+        "INSERT INTO audit_log (entity_type, entity_id, field, old_value, new_value, changed_ts, reason) "
+        "VALUES ('project', 'proj-1', 'issue_membership', NULL, 'proj-1', ?, 'merge')",
+        (now,),
+    )
+    conn.commit()
+    conn.close()
+
+    assert ws_db.count_audit_log_by_field("absorbed_cluster", now - 1, now + 1) == 1
+    assert ws_db.count_audit_log_by_field("issue_membership", now - 1, now + 1) == 1
+
+
+def test_count_materialized_extractions_and_correction_events(ws_db):
+    rid = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key="k1", thread_key="k1", dedupe_key="k1",
+        occurred_ts=time.time(), subject="s", from_actor="a@example.com", participants_json="[]",
+    )
+    iid = ws_db.create_issue_with_new_id(title="Issue", category="other", state="active")
+    ws_db.create_extraction(rid, "{}")
+    assert ws_db.count_materialized_extractions() == 0  # not yet materialized
+
+    now = time.time()
+    ws_db.reconcile_extraction_claims(
+        issue_id=iid, raw_item_id=rid,
+        to_insert=[{"claim_type": "ask", "text": "Do the thing.", "author": "counterparty",
+                    "author_basis": "direction"}],
+        to_supersede=[], new_materialized_hash="h1",
+    )
+
+    assert ws_db.count_materialized_extractions() == 1
+    assert ws_db.count_claim_correction_events(now - 1, now + 60) == 1
+    assert ws_db.count_claim_correction_events(now + 100, now + 200) == 0

@@ -33,6 +33,12 @@ Checks:
      it isn't already running; a freshly-launched Cached Exchange Mode
      profile hasn't had time to sync before the scan reads it. Flags 3+
      consecutive cold-started scans, not a single one (which is normal)
+  10. Accuracy telemetry (task #304, item #4, 2026-08-11) - false-merge-
+      correction rate, false-split catches, claim-correction rate over a
+      rolling 7-day window. See workgraph_telemetry.py for the real query
+      logic and each metric's honest scope/caveats. Always ok=True - an
+      observability check, not a pass/fail gate; nothing here fails the
+      overall health-check status.
 
 Each check returns {"ok": bool, "detail": str, ...check-specific fields}.
 """
@@ -46,6 +52,7 @@ from pathlib import Path
 
 import paths
 import workgraph_store as ws
+import workgraph_telemetry
 import retention
 
 STALE_CURSOR_HOURS = 48.0
@@ -316,6 +323,24 @@ def check_body_capture_healthy() -> dict:
     }
 
 
+_TELEMETRY_WINDOW_SECONDS = 7 * 24 * 3600.0
+
+
+def check_accuracy_telemetry(now: float) -> dict:
+    """Task #304, item #4 (2026-08-11) - Marc's own build authorization,
+    wired into THIS exact mechanism because he pointed to it directly
+    ("it would have caught today's health-check blind spot pattern too").
+    Rolling 7-day window - see workgraph_telemetry.py for the real query
+    logic and each metric's honest scope/caveats. Always ok=True; this is
+    observability, never a pass/fail gate - a rising false_merge_
+    correction_rate or a growing false_split_catches count is Marc's own
+    signal to look closer, not something this check itself judges."""
+    metrics = workgraph_telemetry.compute_accuracy_metrics(
+        window_start=now - _TELEMETRY_WINDOW_SECONDS, window_end=now,
+    )
+    return {"ok": True, "window_days": 7, **metrics}
+
+
 def run(now: float | None = None) -> dict:
     if now is None:
         now = time.time()
@@ -329,6 +354,7 @@ def run(now: float | None = None) -> dict:
         "classify_link_progressing": check_classify_link_progressing(now),
         "outlook_cache_freshness": check_outlook_cache_freshness(),
         "body_capture_healthy": check_body_capture_healthy(),
+        "accuracy_telemetry": check_accuracy_telemetry(now),
     }
     # persist today's disk snapshot for TOMORROW's growth comparison
     ws.set_cursor(_SNAPSHOT_CURSOR_SOURCE, _SNAPSHOT_CURSOR_KEY, json.dumps(retention.disk_usage_report()))

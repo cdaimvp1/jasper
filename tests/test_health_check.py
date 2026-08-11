@@ -285,6 +285,21 @@ def test_get_last_result_reflects_the_run_that_actually_happened(ws_db):
     assert set(stored["checks"].keys()) == set(ran["checks"].keys())
 
 
+# --- task #304, item #4: accuracy telemetry check ------------------------
+
+def test_accuracy_telemetry_check_is_always_ok_and_wired_into_run(ws_db):
+    now = time.time()
+    result = hc.check_accuracy_telemetry(now)
+    assert result["ok"] is True
+    assert result["window_days"] == 7
+    assert result["merge_events"] == 0
+    assert result["false_merge_correction_rate"] is None
+
+    full = hc.run(now=now)
+    assert "accuracy_telemetry" in full["checks"]
+    assert full["checks"]["accuracy_telemetry"]["ok"] is True
+
+
 def test_get_last_result_does_not_change_when_gated(ws_db):
     struct = time.localtime()
     now = time.mktime((struct.tm_year, struct.tm_mon, struct.tm_mday, 12, 0, 0, 0, 0, -1))

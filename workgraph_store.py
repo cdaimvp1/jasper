@@ -7156,6 +7156,100 @@ def update_claim_status(claim_id: int, status: str, *, actor: str, superseded_by
             conn.close()
 
 
+# --- Accuracy telemetry (task #304, item #4, 2026-08-11) - read-only counts
+# over existing audit trails, never a new decision-affecting write path. See
+# workgraph_telemetry.py for the honest scope/caveats behind each metric.
+
+def count_merge_events(window_start: float, window_end: float) -> int:
+    """Every merge-shaped audit_log row (field='issue_membership', a real
+    new project assignment, not a detach) in the window - written by
+    merge_issues_txn/force_merge_projects. The one available proxy for
+    'how many merge decisions happened' - see workgraph_telemetry.py for
+    why this can't be perfectly disambiguated from a manual reassignment."""
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                """SELECT COUNT(*) AS n FROM audit_log
+                   WHERE field = 'issue_membership' AND new_value IS NOT NULL
+                     AND changed_ts >= ? AND changed_ts < ?""",
+                (window_start, window_end),
+            ).fetchone()
+        finally:
+            conn.close()
+    return row["n"]
+
+
+def count_identity_constraints(constraint_type: str, window_start: float, window_end: float) -> int:
+    """split_issue_from_project is the ONLY producer of constraint_type=
+    'cannot_merge' rows - Marc's own 'this grouping was wrong, undo it'
+    safety valve - so this is a clean, unambiguous false-merge-correction
+    count for the window."""
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                """SELECT COUNT(*) AS n FROM identity_constraints
+                   WHERE constraint_type = ? AND created_ts >= ? AND created_ts < ?""",
+                (constraint_type, window_start, window_end),
+            ).fetchone()
+        finally:
+            conn.close()
+    return row["n"]
+
+
+def count_audit_log_by_field(field: str, window_start: float, window_end: float) -> int:
+    """Generic counter for any audit_log field value - used for
+    field='absorbed_cluster' (workgraph_reconcile.py's stray-cluster
+    sweeps), the cleanest false-split-catch signal available today."""
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM audit_log WHERE field = ? AND changed_ts >= ? AND changed_ts < ?",
+                (field, window_start, window_end),
+            ).fetchone()
+        finally:
+            conn.close()
+    return row["n"]
+
+
+def count_materialized_extractions() -> int:
+    """Every raw_item_extractions row that's ever actually been
+    materialized into claims (materialized_hash IS NOT NULL) - the
+    denominator for a claim-correction rate. Not time-windowed - a
+    correction rate needs the full population an extraction could ever
+    have been corrected against, not just this window's extractions."""
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM raw_item_extractions WHERE materialized_hash IS NOT NULL"
+            ).fetchone()
+        finally:
+            conn.close()
+    return row["n"]
+
+
+def count_claim_correction_events(window_start: float, window_end: float) -> int:
+    """reconcile_extraction_claims is the ONLY writer of claim_events rows
+    whose note reads exactly 'added by a corrected extraction' - a clean,
+    unambiguous count of correction events (each reconciliation call can
+    write more than one, one per inserted claim, so this counts corrected
+    CLAIMS, not corrected raw_items)."""
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                """SELECT COUNT(*) AS n FROM claim_events
+                   WHERE note = 'added by a corrected extraction' AND ts >= ? AND ts < ?""",
+                (window_start, window_end),
+            ).fetchone()
+        finally:
+            conn.close()
+    return row["n"]
+
+
 def log_claim_event(claim_id: int, event_type: str, *, actor: str, note: Optional[str] = None,
                      ts: Optional[float] = None, raw_item_id: Optional[int] = None) -> int:
     """Design doc Section 12.3's right-sized event log - 5 real event types

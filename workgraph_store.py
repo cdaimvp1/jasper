@@ -1985,6 +1985,88 @@ def init_workgraph() -> None:
             except sqlite3.OperationalError:
                 pass
 
+            # Fix 4 (task #310 follow-up, 2026-08-11, Marc's own engineering-
+            # direction doc, Section 8): 'dormant' - the real lifecycle state
+            # this table was missing. Work never transitioned to a distinct
+            # "gone quiet, not manually closed" state before - it either sat
+            # at active/waiting/blocked forever or required a manual done/
+            # dismissed/archived action. workgraph_lifecycle.py's daily sweep
+            # is the real, deterministic writer; workgraph_claims.materialize_
+            # claims_for_raw_item is the real, deterministic reverter (new
+            # evidence on a dormant item always flips it back to active).
+            #
+            # MUST run after the three ALTER TABLE ADD COLUMN calls directly
+            # above (membership_state/is_raw_cluster/exposure_state) - a real
+            # ordering bug found live: on a brand-new database this rebuild
+            # used to run BEFORE those columns existed on the fresh table,
+            # so its own INSERT ... SELECT (which must name every column,
+            # copied verbatim from this table's live DDL so the rebuild can
+            # never silently drop one) raised "no such column: membership_
+            # state" - silently swallowed by the except below, so 'dormant'
+            # only ever got added on a SECOND init_workgraph() call. Same
+            # class of ordering mistake this file's own claim_events
+            # widening already made and fixed once (see that block's own
+            # comment on running after its raw_item_id ALTER).
+            existing_sql = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='work_objects'"
+            ).fetchone()
+            if existing_sql and "'dormant'" not in (existing_sql["sql"] or ""):
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    conn.execute("ALTER TABLE work_objects RENAME TO work_objects_pre_fix4")
+                    conn.execute("""
+                        CREATE TABLE work_objects (
+                            id                     TEXT PRIMARY KEY,
+                            object_type            TEXT NOT NULL CHECK (object_type IN
+                                                      ('relationship','program','project','engagement',
+                                                       'case','request','recurring_responsibility')),
+                            parent_id              TEXT REFERENCES work_objects(id),
+                            title                  TEXT NOT NULL,
+                            category               TEXT,
+                            status                 TEXT NOT NULL CHECK (status IN
+                                                      ('active','waiting','blocked','done',
+                                                       'noise-archived','dismissed','archived','dormant')),
+                            priority               TEXT CHECK (priority IN ('high','med','low')),
+                            priority_score         REAL,
+                            nba_action_kind        TEXT CHECK (nba_action_kind IN
+                                                      ('draft','review','approve','chase','wait','read','none')),
+                            nba_reason             TEXT,
+                            owner                  TEXT NOT NULL DEFAULT 'marc',
+                            due                    TEXT,
+                            confidence_tier        TEXT CHECK (confidence_tier IN ('H','M','L')),
+                            lesson_id_cited        INTEGER REFERENCES lessons(id),
+                            has_unmet_prerequisite INTEGER NOT NULL DEFAULT 0,
+                            claims_revision        INTEGER NOT NULL DEFAULT 0,
+                            last_deep_dive_ts      REAL,
+                            last_deep_dive_note    TEXT,
+                            opened_at              REAL NOT NULL,
+                            updated_at             REAL NOT NULL,
+                            membership_state       TEXT NOT NULL DEFAULT 'provisional'
+                                                      CHECK (membership_state IN ('provisional','confirmed')),
+                            is_raw_cluster         INTEGER NOT NULL DEFAULT 0,
+                            exposure_state         TEXT NOT NULL DEFAULT 'not_exposed' CHECK (exposure_state IN
+                                                      ('not_exposed','shown_in_project','used_in_summary','used_for_action'))
+                        )
+                    """)
+                    conn.execute("""
+                        INSERT INTO work_objects
+                        SELECT id, object_type, parent_id, title, category, status, priority, priority_score,
+                               nba_action_kind, nba_reason, owner, due, confidence_tier, lesson_id_cited,
+                               has_unmet_prerequisite, claims_revision, last_deep_dive_ts, last_deep_dive_note,
+                               opened_at, updated_at, membership_state, is_raw_cluster, exposure_state
+                        FROM work_objects_pre_fix4
+                    """)
+                    conn.execute("DROP TABLE work_objects_pre_fix4")
+                    conn.execute("COMMIT")
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_work_objects_type_status ON work_objects(object_type, status)")
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_work_objects_parent ON work_objects(parent_id)")
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_work_objects_priority ON work_objects(priority_score DESC)")
+                except sqlite3.OperationalError:
+                    try:
+                        conn.execute("ROLLBACK")
+                    except sqlite3.OperationalError:
+                        pass
+
             # `issues`/`projects` as views over work_objects - every existing
             # caller across the whole codebase keeps working completely
             # unchanged (confirmed empirically: partial-column INSERT/UPDATE,
@@ -5315,8 +5397,13 @@ def set_project_status(project_id: str, status: str) -> None:
     'noise-archived' added (2026-08-06, Marc's direct request): a whole
     project can now be marked noise the same way an individual issue
     already could - the DB CHECK constraint on work_objects.status already
-    permitted this value, this whitelist was just never extended to match."""
-    if status not in ("active", "waiting", "done", "archived", "dismissed", "noise-archived"):
+    permitted this value, this whitelist was just never extended to match.
+
+    'dormant' added (task #310 follow-up, Fix 4, 2026-08-11) - the exact
+    same class of gap this docstring already flagged once for noise-
+    archived: the DB CHECK constraint already permits it, this whitelist
+    just hadn't been told yet."""
+    if status not in ("active", "waiting", "done", "archived", "dismissed", "noise-archived", "dormant"):
         raise ValueError(f"invalid project status: {status!r}")
     with _lock:
         conn = _connect()

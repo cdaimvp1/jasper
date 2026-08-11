@@ -74,6 +74,7 @@ def _classify_refinement(old_claim: dict, new_spec: dict) -> str:
     return "refined"
 
 import workgraph_store as ws
+import workgraph_lifecycle
 
 _OTHER_SIDE = {"marc": "counterparty", "counterparty": "marc", "unknown": "unknown"}
 
@@ -489,6 +490,11 @@ def materialize_claims_for_raw_item(raw_item_id: int) -> int:
     ts = extraction.get("extracted_ts")
     author, author_basis = _resolve_author(raw_item)
     reference_base = raw_item.get("pr_number_base")
+
+    # Fix 4 (task #310 follow-up, 2026-08-11): real new evidence is about to
+    # be materialized for this work_object - if it (or its parent project)
+    # was dormant, wake it back up now. Dormant is never a permanent state.
+    workgraph_lifecycle.revert_dormant_if_needed(issue_id)
 
     if materialized_hash is None:
         inserted = _materialize_fresh(issue_id, raw_item_id, blob, ts, author, author_basis, reference_base)

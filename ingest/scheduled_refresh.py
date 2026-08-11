@@ -49,6 +49,7 @@ import workgraph_discovery
 import workgraph_proactive
 import workgraph_relationships
 import workgraph_noise
+import workgraph_lifecycle
 import config
 
 from paths import DATA_DIR
@@ -580,6 +581,16 @@ def run() -> dict:
     except Exception as e:
         noise_sweep_result = {"error": str(e)}
 
+    # Deterministic, no LLM calls (task #310 follow-up, Fix 4, 2026-08-11,
+    # Marc's own engineering-direction doc, Section 8). Flips active/waiting/
+    # blocked work with no real evidence in 60 days to 'dormant' - never a
+    # permanent state, since workgraph_claims.materialize_claims_for_raw_item
+    # auto-reverts it the instant new real evidence lands.
+    try:
+        dormant_sweep_result = workgraph_lifecycle.run_dormant_sweep_daily_if_due()
+    except Exception as e:
+        dormant_sweep_result = {"error": str(e)}
+
     summary = {
         "mail": mail_result,
         "sent_mail": sent_mail_result,
@@ -605,6 +616,7 @@ def run() -> dict:
         "proactive_actions": proactive_actions_result,
         "relationship_sweep": relationship_sweep_result,
         "noise_sweep": noise_sweep_result,
+        "dormant_sweep": dormant_sweep_result,
     }
     _log(f"REFRESH ok mail_inserted={mail_result.get('inserted', '?')} "
         f"relay_ok={relay_result.get('ok')} relay_calendar_advanced={relay_result.get('cursor_advanced')} "

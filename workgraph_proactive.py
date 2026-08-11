@@ -111,7 +111,12 @@ def dispatch_contract_review(issue_id: str, raw_item_id: int) -> Optional[int]:
         return prepared_id
     ws.create_pending_action(issue_id=issue_id, action_kind="review_contract", worker="bridge",
                               instructions="", message_id=result.get("message_id"))
-    ws.update_prepared_action_state(prepared_id, "succeeded")
+    # Design doc Section 11: message delivery is not itself authoritative
+    # execution state. Dispatching to the Team Room only confirms the
+    # request reached bridge - not that the review it names was ever
+    # actually completed, so "uncertain" (already a valid prepared_actions
+    # state), not "succeeded".
+    ws.update_prepared_action_state(prepared_id, "uncertain")
     return prepared_id
 
 

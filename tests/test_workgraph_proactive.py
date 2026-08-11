@@ -62,7 +62,10 @@ def test_contract_review_dispatches_when_attachment_and_phrase_both_match(ws_db,
     assert result == "review_contract"
     prepared = ws_db.find_prepared_action_by_idempotency_key(wp._idempotency_key(rid, "review_contract"))
     assert prepared is not None
-    assert prepared["state"] == "succeeded"
+    # Design doc Section 11: dispatching the team_room message only confirms
+    # the request reached bridge, not that the review itself ever completed -
+    # "uncertain", not "succeeded".
+    assert prepared["state"] == "uncertain"
     assert prepared["rationale"].startswith("Proactive:")
 
 

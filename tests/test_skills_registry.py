@@ -276,3 +276,100 @@ def test_rollback_skill_returns_none_when_there_is_nothing_to_fall_back_to(tmp_p
 
     assert skills_registry.rollback_skill("audit_invoice") is None
     assert skills_registry.rollback_skill("never_registered") is None
+
+
+# --- typed capability fields (task #320, 2026-08-11) ------------------------
+# Marc's engineering-direction doc Section 10, "Evolve Skills into typed
+# capabilities" - install_skill() gained a batch of OPTIONAL fields. These
+# tests prove the addition is genuinely additive: an old-style call that
+# passes none of them still works and gets honest defaults, never a
+# fabricated value; a new-style call that passes them gets them back
+# untouched.
+
+def test_install_skill_without_typed_fields_gets_honest_defaults(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    registry_path = tmp_path / "skills_registry.json"
+    monkeypatch.setattr(skills_registry, "REGISTRY_PATH", registry_path)
+    monkeypatch.setattr(skills_registry.paths, "DATA_DIR", data_dir)
+
+    source = _fake_source_skill(tmp_path)
+    entry = skills_registry.install_skill("audit_invoice", source, **_install_kwargs())
+
+    # list fields default to [] (safe to iterate without a None-check)
+    for field in ("applies_to_work_types", "required_inputs", "optional_inputs",
+                   "evidence_requirements", "preconditions", "allowed_systems",
+                   "permissions_required"):
+        assert entry[field] == []
+    # bool/str fields default to an honest "unknown" (None) - never guessed
+    for field in ("purpose", "reversible", "auto_run_eligible", "review_required", "cost_class"):
+        assert entry[field] is None
+    # terminal_states is the one exception - it's this system's own generic
+    # run-outcome model, not a fact asserted about the skill, so it defaults
+    # to a real value rather than None.
+    assert entry["terminal_states"] == ["succeeded", "failed"]
+
+
+def test_install_skill_with_typed_fields_stores_them_untouched(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    registry_path = tmp_path / "skills_registry.json"
+    monkeypatch.setattr(skills_registry, "REGISTRY_PATH", registry_path)
+    monkeypatch.setattr(skills_registry.paths, "DATA_DIR", data_dir)
+
+    source = _fake_source_skill(tmp_path)
+    entry = skills_registry.install_skill(
+        "audit_invoice", source, **_install_kwargs(),
+        purpose="Audits invoices against contract terms.",
+        applies_to_work_types=["invoice_audit"],
+        required_inputs=["invoice"], optional_inputs=["PO"],
+        evidence_requirements=["contract rates"], preconditions=["contract executed"],
+        allowed_systems=["filesystem"], permissions_required=["read invoice"],
+        reversible=True, auto_run_eligible=False, review_required=True,
+        cost_class="expensive", terminal_states=["succeeded", "failed", "needs_input"],
+    )
+
+    assert entry["purpose"] == "Audits invoices against contract terms."
+    assert entry["applies_to_work_types"] == ["invoice_audit"]
+    assert entry["required_inputs"] == ["invoice"]
+    assert entry["optional_inputs"] == ["PO"]
+    assert entry["evidence_requirements"] == ["contract rates"]
+    assert entry["preconditions"] == ["contract executed"]
+    assert entry["allowed_systems"] == ["filesystem"]
+    assert entry["permissions_required"] == ["read invoice"]
+    assert entry["reversible"] is True
+    assert entry["auto_run_eligible"] is False
+    assert entry["review_required"] is True
+    assert entry["cost_class"] == "expensive"
+    assert entry["terminal_states"] == ["succeeded", "failed", "needs_input"]
+
+    # get_skill_for_action must resolve the same real values back, not just
+    # install_skill's own return value.
+    resolved = skills_registry.get_skill_for_action("audit_invoice")
+    assert resolved["purpose"] == "Audits invoices against contract terms."
+    assert resolved["cost_class"] == "expensive"
+
+
+def test_typed_fields_do_not_break_a_pre_existing_entry_with_no_such_fields(tmp_path, monkeypatch):
+    # Real, load-bearing case: config/skills_registry.json entries written
+    # before task #320 have none of these keys at all (not even as null) -
+    # get_skill_for_action must still resolve them cleanly via .get()-style
+    # access, never KeyError.
+    data_dir = tmp_path / "data"
+    skill_dir = data_dir / "documents" / "reference" / "skills" / "fake-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# Fake Skill\n", encoding="utf-8")
+
+    registry_path = tmp_path / "skills_registry.json"
+    registry_path.write_text(json.dumps({
+        "contract_review": {
+            "skill_name": "fake-skill", "skill_dir": "documents/reference/skills/fake-skill",
+            "display_name": "Fake Skill", "label": "Run Fake Skill",
+            "produces": "a fake output", "output_kind": "output",
+        },
+    }), encoding="utf-8")
+    monkeypatch.setattr(skills_registry, "REGISTRY_PATH", registry_path)
+    monkeypatch.setattr(skills_registry.paths, "DATA_DIR", data_dir)
+
+    result = skills_registry.get_skill_for_action("contract_review")
+    assert result is not None
+    assert result.get("purpose") is None
+    assert result.get("applies_to_work_types") is None

@@ -17,6 +17,15 @@ hands back a real, existing filesystem path. Zero LLM calls, zero
 fabrication: an action_kind with no registry entry returns None, and every
 caller falls back to today's generic behavior.
 
+Typed capability fields (task #320, 2026-08-11): entries also carry OPTIONAL
+purpose, applies_to_work_types, required_inputs, optional_inputs,
+evidence_requirements, preconditions, allowed_systems, permissions_required,
+reversible, auto_run_eligible, review_required, cost_class, and
+terminal_states - see install_skill()'s docstring for defaults. These were
+backfilled by hand in config/skills_registry.json from each skill's own
+SKILL.md; a field left blank/None there means it genuinely wasn't stated in
+the skill's own docs, not that nobody looked.
+
 Versioning/fallback (added 2026-08-01): install_skill() vendors a skill into
 DATA_DIR/documents/reference/skills/<skill_name>/<version>/ - a version gets
 its OWN directory, never overwritten in place. Updating an action_kind to a
@@ -87,7 +96,20 @@ def get_skill_for_action(action_kind: str) -> Optional[dict]:
 
 
 def install_skill(action_kind: str, source_dir: Path, *, skill_name: str, display_name: str,
-                   label: str, produces: str, output_kind: str, version: str) -> dict:
+                   label: str, produces: str, output_kind: str, version: str,
+                   purpose: Optional[str] = None,
+                   applies_to_work_types: Optional[list] = None,
+                   required_inputs: Optional[list] = None,
+                   optional_inputs: Optional[list] = None,
+                   evidence_requirements: Optional[list] = None,
+                   preconditions: Optional[list] = None,
+                   allowed_systems: Optional[list] = None,
+                   permissions_required: Optional[list] = None,
+                   reversible: Optional[bool] = None,
+                   auto_run_eligible: Optional[bool] = None,
+                   review_required: Optional[bool] = None,
+                   cost_class: Optional[str] = None,
+                   terminal_states: Optional[list] = None) -> dict:
     """Vendors a real skill folder (already extracted from its .skill
     package) into DATA_DIR/documents/reference/skills/<skill_name>/<version>/
     and registers it under action_kind. If action_kind already points at a
@@ -97,7 +119,22 @@ def install_skill(action_kind: str, source_dir: Path, *, skill_name: str, displa
     right next to the new one. Re-installing the SAME version in place
     (identical version string) is treated as a clean replace, not an update -
     no new fallback entry, since there's nothing genuinely prior to fall back
-    to."""
+    to.
+
+    Typed capability fields (task #320, Marc's engineering-direction doc
+    Section 10 "Evolve Skills into typed capabities") - ALL optional, ALL
+    additive: every existing caller that omits them keeps working exactly as
+    before. Each is a directly-observable property of the skill (what work it
+    applies to, what it needs, what it touches, whether it's reversible/
+    auto-runnable/review-gated, its rough cost class, its terminal states) -
+    never fabricated by this module; callers that don't know a value should
+    pass None/omit it rather than invent one. List fields default to [] (not
+    None) so callers can safely iterate them without a None-check; bool/str
+    fields default to None (an honest "unknown") except terminal_states,
+    which defaults to the generic ["succeeded", "failed"] run-outcome model
+    every skill shares - that default is a property of THIS system's workflow
+    model, not a fact asserted about the skill itself, so it's not a
+    fabrication the way a guessed precondition or permission would be."""
     source_dir = Path(source_dir)
     if not source_dir.is_dir():
         raise FileNotFoundError(f"skill source not found: {source_dir}")
@@ -129,6 +166,19 @@ def install_skill(action_kind: str, source_dir: Path, *, skill_name: str, displa
         "skill_name": skill_name, "skill_dir": dest_rel.as_posix(), "display_name": display_name,
         "label": label, "produces": produces, "output_kind": output_kind,
         "version": version, "installed_at": time.time(), "previous_versions": keep,
+        "purpose": purpose,
+        "applies_to_work_types": applies_to_work_types or [],
+        "required_inputs": required_inputs or [],
+        "optional_inputs": optional_inputs or [],
+        "evidence_requirements": evidence_requirements or [],
+        "preconditions": preconditions or [],
+        "allowed_systems": allowed_systems or [],
+        "permissions_required": permissions_required or [],
+        "reversible": reversible,
+        "auto_run_eligible": auto_run_eligible,
+        "review_required": review_required,
+        "cost_class": cost_class,
+        "terminal_states": terminal_states if terminal_states is not None else ["succeeded", "failed"],
     }
     _save(registry)
     return registry[action_kind]

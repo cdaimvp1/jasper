@@ -165,5 +165,30 @@ def run_relationship_sweep_daily_if_due(now: float | None = None) -> dict | None
     return run_relationship_sweep()
 
 
+def list_relationships_needing_review() -> list[dict]:
+    """Task #304, item #2 (2026-08-11, Marc's own scoping call: chat/MCP
+    tool only, no cockpit UI, no confirm/reject queue - a relationship
+    spanning multiple projects isn't a proposal with a clean yes/no verdict
+    the way a claim suggestion is, it's a standing fact worth a look on
+    demand). Every active Relationship with 2+ linked projects - exactly
+    the "these share a strong relationship signal but are separate
+    projects, should they be?" question the Sodalis/Authenticx case
+    exposed. Read-only, computed live from relationships/
+    project_relationships - nothing here is a suggestion queue with its
+    own state, so there's nothing to resolve and nothing that goes stale."""
+    results = []
+    for rel in ws.list_relationships(status="active"):
+        projects = ws.list_projects_for_relationship(rel["id"])
+        if len(projects) < 2:
+            continue
+        results.append({
+            "relationship_id": rel["id"],
+            "name": rel["name"],
+            "projects": [{"id": p["id"], "name": p["name"], "status": p["status"]} for p in projects],
+        })
+    results.sort(key=lambda r: len(r["projects"]), reverse=True)
+    return results
+
+
 if __name__ == "__main__":
     print(json.dumps(run_relationship_sweep(), indent=2))

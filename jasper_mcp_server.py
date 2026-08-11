@@ -339,6 +339,22 @@ def jasper_resolve_review_item(kind: str, suggestion_id: int, decision: str) -> 
 
 
 @mcp.tool()
+def jasper_relationship_audit() -> dict:
+    """Task #304, item #2: every durable Relationship (a real business
+    relationship like a vendor, e.g. "Sodalis" or "Authenticx") that spans
+    2+ separate tracked projects - the "these are the same relationship
+    but different projects, should any of them actually be merged?"
+    question. Read-only and has no resolve counterpart - this is a
+    standing fact worth a look on demand, not a proposal with a yes/no
+    verdict, so it's deliberately separate from jasper_list_review_queue.
+    Use when Marc asks something like "anything to double check on
+    grouping" or "any relationships spanning multiple projects" - describe
+    what's found and let him decide whether a real merge is warranted;
+    never merge or split anything from this call alone."""
+    return _get("/api/workgraph/relationship-audit")
+
+
+@mcp.tool()
 def jasper_request_contract_review(issue_id: str, instructions: str = "") -> dict:
     """Dispatch a REAL contract-review skill run for this issue via Jasper's
     existing worker action-bridge (the same mechanism the cockpit's 'Review

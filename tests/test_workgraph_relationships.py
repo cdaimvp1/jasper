@@ -160,3 +160,44 @@ def test_run_relationship_sweep_daily_if_due_gates_to_once_per_day(ws_db):
     second = wr.run_relationship_sweep_daily_if_due(now=now + 60)
     assert first is not None
     assert second is None
+
+
+# --- list_relationships_needing_review (task #304, item #2) ----------------
+
+def test_list_relationships_needing_review_includes_multi_project_relationships(ws_db):
+    ws_db.create_project(id="proj-1", name="P1")
+    ws_db.create_project(id="proj-2", name="P2")
+    rid = ws_db.get_or_create_relationship_by_name("Authenticx")
+    ws_db.link_project_to_relationship("proj-1", rid)
+    ws_db.link_project_to_relationship("proj-2", rid)
+
+    review = wr.list_relationships_needing_review()
+
+    assert len(review) == 1
+    assert review[0]["name"] == "Authenticx"
+    assert {p["id"] for p in review[0]["projects"]} == {"proj-1", "proj-2"}
+
+
+def test_list_relationships_needing_review_excludes_single_project_relationships(ws_db):
+    ws_db.create_project(id="proj-1", name="P1")
+    rid = ws_db.get_or_create_relationship_by_name("Authenticx")
+    ws_db.link_project_to_relationship("proj-1", rid)
+
+    assert wr.list_relationships_needing_review() == []
+
+
+def test_list_relationships_needing_review_sorts_by_project_count_descending(ws_db):
+    for pid in ("proj-1", "proj-2", "proj-3", "proj-4"):
+        ws_db.create_project(id=pid, name=pid)
+    small = ws_db.get_or_create_relationship_by_name("Vendor Small")
+    big = ws_db.get_or_create_relationship_by_name("Vendor Big")
+    ws_db.link_project_to_relationship("proj-1", small)
+    ws_db.link_project_to_relationship("proj-2", small)
+    ws_db.link_project_to_relationship("proj-1", big)
+    ws_db.link_project_to_relationship("proj-2", big)
+    ws_db.link_project_to_relationship("proj-3", big)
+    ws_db.link_project_to_relationship("proj-4", big)
+
+    review = wr.list_relationships_needing_review()
+
+    assert [r["name"] for r in review] == ["Vendor Big", "Vendor Small"]

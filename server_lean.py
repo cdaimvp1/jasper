@@ -94,6 +94,7 @@ import workgraph_todo
 import workgraph_focus
 import workgraph_digest
 import workgraph_party_review
+import workgraph_relationships
 import text_extract
 import workgraph_discovery
 
@@ -2873,6 +2874,20 @@ async def api_review_queue():
         })
     items.sort(key=lambda i: i["created_ts"])
     return JSONResponse({"items": sanitize_surrogates(items), "count": len(items)})
+
+
+@app.get("/api/workgraph/relationship-audit")
+async def api_relationship_audit():
+    """Task #304, item #2 (2026-08-11, Marc's own scoping call: chat/MCP
+    tool only, no cockpit UI). Every active Relationship spanning 2+
+    projects - the "these share a real relationship signal but are
+    separate projects, should they be?" question, on demand rather than
+    something Marc has to stumble into. Deliberately NOT folded into
+    /api/workgraph/review-queue above - a relationship-spans-projects
+    finding isn't a proposal with a clean confirmed/rejected verdict the
+    way a claim suggestion is, so it doesn't fit that route's resolve
+    contract. Read-only, computed fresh every call."""
+    return JSONResponse({"relationships": sanitize_surrogates(workgraph_relationships.list_relationships_needing_review())})
 
 
 @app.get("/api/workgraph/parties")

@@ -64,16 +64,38 @@ def _run_headless_claude(prompt: str, *, timeout: int) -> subprocess.CompletedPr
     same reasoning workgraph_pipeline2.py's own copy documents: each
     mechanism gets its own copy of this real safety technique rather than
     a shared import, so no future change to one path can silently affect
-    another's timeout/tree-kill behavior."""
+    another's timeout/tree-kill behavior.
+
+    Prompt goes over STDIN, never as a command-line argument (task #304
+    backfill-sizing investigation, 2026-08-11, real bug reproduced live):
+    Windows' CreateProcess has a hard ~32K character total-command-line
+    limit, and this module's own _PROMPT_MAX_CHARS (90,000) routinely
+    exceeds it for any project with real evidence past roughly 30-90KB -
+    confirmed live as WinError 206 ("The filename or extension is too
+    long") the first time this function was ever exercised against a
+    project with genuinely large new evidence. `claude -p` (no positional
+    prompt argument) reads the prompt from stdin instead - confirmed
+    directly (`echo ... | claude -p`) - which has no such length ceiling.
+
+    encoding="utf-8" is explicit, not incidental: text=True alone lets
+    Python fall back to the Windows locale codepage (cp1252 here) for the
+    stdin write, which crashed with UnicodeEncodeError on the very next
+    real project tried (a stray BOM/\\ufeff character from real email
+    content, un-representable in cp1252) - real evidence can carry any
+    Unicode character, so the encoding can't be locale-dependent.
+    errors="replace" is a deliberate last-resort safety net on top of
+    that, not a substitute for it - one character Python still can't
+    round-trip should never crash a whole backfill pass over it."""
     env = os.environ.copy()
     proc = subprocess.Popen(
-        ["claude", "-p", prompt, "--allowedTools", ""],
+        ["claude", "-p", "--allowedTools", ""],
         cwd=str(Path(__file__).resolve().parent), env=env,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", errors="replace",
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
     )
     try:
-        stdout, stderr = proc.communicate(timeout=timeout)
+        stdout, stderr = proc.communicate(input=prompt, timeout=timeout)
     except subprocess.TimeoutExpired:
         try:
             subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True, timeout=15)

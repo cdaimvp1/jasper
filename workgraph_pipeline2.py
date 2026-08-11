@@ -87,19 +87,38 @@ def _run_headless_claude(prompt: str, *, timeout: int, model: Optional[str] = No
     default (unset) since they're real judgment calls this pipeline
     already trusts at that quality bar; _llm_backfill_company is
     deliberately cheap/fast, a narrow single-field lookup, not a judgment
-    call, so it doesn't need to pay for the default model."""
+    call, so it doesn't need to pay for the default model.
+
+    Prompt goes over STDIN, never as a command-line argument (task #304
+    backfill-sizing investigation, 2026-08-11): Windows' CreateProcess has
+    a hard ~32K character total-command-line limit - workgraph_synthesis_
+    light.py's own copy of this same pattern hit it live (WinError 206)
+    the first time it ran against a project with real, large evidence.
+    This module's own _MAX_TEXT_CHARS (12,000, doubled for judge_
+    candidate's two-issue comparison) stays under that ceiling today, but
+    fixing this the same way here too closes the same real fragility
+    rather than leaving one copy patched and the other still latent.
+
+    encoding="utf-8" is explicit for the same reason as the stdin fix
+    above: text=True alone falls back to the Windows locale codepage
+    (cp1252), which can't represent every character real evidence text
+    can carry (confirmed live via the same sibling bug in workgraph_
+    synthesis_light.py - a stray BOM character). errors="replace" is a
+    deliberate last-resort safety net on top of that, never a substitute
+    for it."""
     env = os.environ.copy()
-    args = ["claude", "-p", prompt, "--allowedTools", ""]
+    args = ["claude", "-p", "--allowedTools", ""]
     if model:
         args += ["--model", model]
     proc = subprocess.Popen(
         args,
         cwd=str(Path(__file__).resolve().parent), env=env,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", errors="replace",
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
     )
     try:
-        stdout, stderr = proc.communicate(timeout=timeout)
+        stdout, stderr = proc.communicate(input=prompt, timeout=timeout)
     except subprocess.TimeoutExpired:
         try:
             subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True, timeout=15)
@@ -410,9 +429,13 @@ def run_project_extraction(project_id: str) -> dict:
     starving curator's real pass from ever correcting it.
 
     Now reads the project's already-materialized claims (list_claims_for_
-    issues over every member cluster/issue - the same claims ledger
-    server_lean.py's POST /api/workgraph/raw_items/{id}/extraction route
-    materializes at extraction time, normally well before grouping runs),
+    issues over every member cluster/issue - the same claims ledger both
+    real materialize_claims_for_raw_item producers write to at extraction
+    time, normally well before grouping runs: server_lean.py's POST
+    /api/workgraph/raw_items/{id}/extraction route for curator's full
+    synthesis wake, and workgraph_synthesis_light.py's hybrid-routing
+    light path for small evidence deltas - this reads whichever already
+    ran, agnostic to which one it was),
     asks the LLM which claims belong together as a real issue, and creates
     each one through workgraph_projects.extract_issue_from_project - the
     exact same deterministic mechanics (claim reassignment, evidence,

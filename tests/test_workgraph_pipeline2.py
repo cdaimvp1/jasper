@@ -45,8 +45,13 @@ class _FakeProcess:
         self.stderr = stderr
         self.args = ["claude"]
         self.pid = 12345
+        self.sent_input = None
 
-    def communicate(self, timeout=None):
+    def communicate(self, input=None, timeout=None):
+        # task #304 (2026-08-11): real code now sends the prompt over stdin
+        # (Windows argv-length fix), not as a Popen argument - capture it
+        # here for tests that need to inspect the prompt's actual content.
+        self.sent_input = input
         return self.stdout, self.stderr
 
 
@@ -124,16 +129,18 @@ def test_judge_candidate_reads_both_sides_full_text(ws_db, isolated_paths, monke
 
     captured = {}
 
-    def fake_popen(args, **kw):
-        captured["prompt"] = args[2]  # ["claude", "-p", prompt, ...]
-        return _FakeProcess("VERDICT: yes\n")
+    def fake_popen(*a_, **kw):
+        proc = _FakeProcess("VERDICT: yes\n")
+        captured["proc"] = proc
+        return proc
 
     monkeypatch.setattr(p2.subprocess, "Popen", fake_popen)
 
     verdict = p2.judge_candidate(a, b, ["supplier", "stakeholder"])
 
     assert verdict is True
-    assert "Full text of item A" in captured["prompt"] or "Full text of item B" in captured["prompt"]
+    prompt = captured["proc"].sent_input  # sent over stdin, not argv - see _FakeProcess.communicate
+    assert "Full text of item A" in prompt or "Full text of item B" in prompt
 
 
 def test_judge_candidate_returns_none_on_timeout(ws_db, isolated_paths, monkeypatch):
@@ -254,12 +261,17 @@ def _fake_popen_rejecting_judgment_calls(extraction_reply: str = "SUMMARY: ok\n"
     distinctive "judging whether" text; run_project_extraction's own
     post-merge/post-new-project call never does - this lets a test assert
     "the LLM judgment call never happened" while still tolerating step 6's
-    always-fires extraction call."""
-    def fake_popen(args, **kw):
-        prompt = args[2]
-        if "judging whether" in prompt.lower():
-            raise AssertionError("judge_candidate must not be called when a strong precedent applies")
-        return _FakeProcess(extraction_reply)
+    always-fires extraction call. The prompt now arrives over stdin (task
+    #304 Windows argv-length fix), so the check happens inside
+    communicate(), not at Popen() call time."""
+    class _CheckingProcess(_FakeProcess):
+        def communicate(self, input=None, timeout=None):
+            if input and "judging whether" in input.lower():
+                raise AssertionError("judge_candidate must not be called when a strong precedent applies")
+            return super().communicate(input=input, timeout=timeout)
+
+    def fake_popen(*a_, **kw):
+        return _CheckingProcess(extraction_reply)
     return fake_popen
 
 

@@ -108,17 +108,22 @@ def test_find_candidates_has_no_side_effects(ws_db):
 
 # --- judge_candidate / _parse_verdict (step 4) ----------------------------
 
-def test_parse_verdict_yes():
-    assert p2._parse_verdict("some preamble\nVERDICT: yes\n") is True
+def test_parse_verdict_same_project():
+    assert p2._parse_verdict("some preamble\nVERDICT: same_project\n") == "same_project"
 
 
-def test_parse_verdict_no():
-    assert p2._parse_verdict("VERDICT: no") is False
+def test_parse_verdict_related_different_project():
+    assert p2._parse_verdict("VERDICT: related_different_project") == "related_different_project"
+
+
+def test_parse_verdict_unrelated():
+    assert p2._parse_verdict("VERDICT: unrelated") == "unrelated"
 
 
 def test_parse_verdict_none_when_unparseable():
     assert p2._parse_verdict("I could not determine this.") is None
     assert p2._parse_verdict("") is None
+    assert p2._parse_verdict("VERDICT: yes") is None  # old 2-way wire format is no longer valid
 
 
 def test_judge_candidate_reads_both_sides_full_text(ws_db, isolated_paths, monkeypatch):
@@ -130,7 +135,7 @@ def test_judge_candidate_reads_both_sides_full_text(ws_db, isolated_paths, monke
     captured = {}
 
     def fake_popen(*a_, **kw):
-        proc = _FakeProcess("VERDICT: yes\n")
+        proc = _FakeProcess("VERDICT: same_project\n")
         captured["proc"] = proc
         return proc
 
@@ -138,9 +143,30 @@ def test_judge_candidate_reads_both_sides_full_text(ws_db, isolated_paths, monke
 
     verdict = p2.judge_candidate(a, b, ["supplier", "stakeholder"])
 
-    assert verdict is True
+    assert verdict == "same_project"
     prompt = captured["proc"].sent_input  # sent over stdin, not argv - see _FakeProcess.communicate
     assert "Full text of item A" in prompt or "Full text of item B" in prompt
+
+
+def test_judge_candidate_includes_precedent_as_context_only(ws_db, isolated_paths, monkeypatch):
+    """2026-08-11: precedent must reach the prompt as one contextual line,
+    never as a bypass of this call - see process_new_item's own docstring."""
+    a = _issue(ws_db, "Deal A")
+    b = _issue(ws_db, "Deal B")
+    captured = {}
+
+    def fake_popen(*a_, **kw):
+        proc = _FakeProcess("VERDICT: same_project\n")
+        captured["proc"] = proc
+        return proc
+
+    monkeypatch.setattr(p2.subprocess, "Popen", fake_popen)
+
+    p2.judge_candidate(a, b, ["supplier"], precedent_context="similar contract cases have previously matched")
+
+    prompt = captured["proc"].sent_input
+    assert "similar contract cases have previously matched" in prompt
+    assert "context only" in prompt.lower()
 
 
 def test_judge_candidate_returns_none_on_timeout(ws_db, isolated_paths, monkeypatch):
@@ -162,7 +188,7 @@ def test_process_new_item_merges_immediately_on_yes(ws_db, isolated_paths, monke
     _link_party(ws_db, a, "shared_party", "rep@acme.com", company="Acme")
     b = _issue(ws_db, "MARC REVIEW REQUESTED: Veeva CRM press release quote")
     _link_party(ws_db, b, "shared_party", "rep@acme.com", company="Acme")
-    _mock_claude(monkeypatch, "VERDICT: yes\n")
+    _mock_claude(monkeypatch, "VERDICT: same_project\n")
 
     result = p2.process_new_item(a)
 
@@ -173,20 +199,64 @@ def test_process_new_item_merges_immediately_on_yes(ws_db, isolated_paths, monke
     assert ws_db.list_identity_constraints_for_subject(a) == []
 
 
-def test_process_new_item_no_permanent_veto_on_no(ws_db, isolated_paths, monkeypatch):
+def test_process_new_item_no_permanent_veto_on_unrelated(ws_db, isolated_paths, monkeypatch):
     a = _issue(ws_db, "Requested approval for Veeva CRM press release")
     _link_party(ws_db, a, "shared_party", "rep@acme.com", company="Acme")
     b = _issue(ws_db, "MARC REVIEW REQUESTED: Veeva CRM press release quote")
     _link_party(ws_db, b, "shared_party", "rep@acme.com", company="Acme")
-    _mock_claude(monkeypatch, "VERDICT: no\n")
+    _mock_claude(monkeypatch, "VERDICT: unrelated\n")
 
     result = p2.process_new_item(a)
 
     assert result["action"] == "new_project"
     assert ws_db.get_issue(a)["project_id"] != ws_db.get_issue(b)["project_id"]
-    # Critically: no cannot_merge/cannot_link constraint recorded - a "no"
-    # today must not permanently block re-evaluation later.
+    # Critically: no cannot_merge/cannot_link constraint recorded - a
+    # non-match today must not permanently block re-evaluation later.
     assert ws_db.list_identity_constraints_for_subject(a) == []
+
+
+def test_process_new_item_ambiguous_when_multiple_distinct_projects_both_match(ws_db, isolated_paths, monkeypatch):
+    """Doc Section 4, Step 4 (2026-08-11): two existing PROJECTS can't
+    both silently win just because both their candidates happen to get
+    judged first - never picked arbitrarily, parked instead."""
+    a = _issue(ws_db, "Requested approval for Veeva CRM press release")
+    _link_party(ws_db, a, "shared_party", "rep@acme.com", company="Acme")
+    b = _issue(ws_db, "MARC REVIEW REQUESTED: Veeva CRM press release quote")
+    _link_party(ws_db, b, "shared_party", "rep@acme.com", company="Acme")
+    project_x = ws_db.create_project_with_new_id(name="Project X", category="other")
+    ws_db.assign_issue_to_project(b, project_x)
+    c = _issue(ws_db, "Please review Veeva CRM press release terms")
+    _link_party(ws_db, c, "shared_party", "rep@acme.com", company="Acme")
+    project_y = ws_db.create_project_with_new_id(name="Project Y", category="other")
+    ws_db.assign_issue_to_project(c, project_y)
+    _mock_claude(monkeypatch, "VERDICT: same_project\n")
+
+    result = p2.process_new_item(a)
+
+    assert result["action"] == "ambiguous"
+    assert set(result["candidate_project_ids"]) == {project_x, project_y}
+    assert ws_db.get_issue(a)["project_id"] is None
+
+
+def test_process_new_item_related_different_project_writes_relationship_signal(ws_db, isolated_paths, monkeypatch):
+    """2026-08-11: a 'related but different project' read must not
+    vanish - it becomes work_object_relationships' first real production
+    writer, the exact table workgraph_relationships.run_relationship_
+    sweep() already reads to build durable Relationship rows."""
+    a = _issue(ws_db, "New Scriptly work order")
+    _link_party(ws_db, a, "shared_party", "rep@acme.com", company="Acme")
+    b = _issue(ws_db, "Existing Sodalis MSA")
+    _link_party(ws_db, b, "shared_party", "rep@acme.com", company="Acme")
+    project_b = ws_db.create_project_with_new_id(name="Sodalis MSA project", category="other")
+    ws_db.assign_issue_to_project(b, project_b)
+    _mock_claude(monkeypatch, "VERDICT: related_different_project\n")
+
+    result = p2.process_new_item(a)
+
+    assert result["action"] == "new_project"  # no same_project match - a still gets its own project
+    relationships = ws_db.list_work_object_relationships_by_type("rejected")
+    assert len(relationships) == 1
+    assert {relationships[0]["from_id"], relationships[0]["to_id"]} == {a, b}
 
 
 def test_process_new_item_becomes_its_own_project_with_no_candidates(ws_db, isolated_paths):
@@ -209,9 +279,11 @@ def test_process_new_item_already_grouped_is_a_noop(ws_db, isolated_paths):
     assert result["project_id"] == project_id
 
 
-def test_process_new_item_tries_next_candidate_after_a_no(ws_db, isolated_paths, monkeypatch):
-    """Two real 2+-point candidates for the same item - a "no" on the
-    first must not stop the pipeline from trying the second."""
+def test_process_new_item_judges_every_candidate_before_deciding(ws_db, isolated_paths, monkeypatch):
+    """Two real 2+-point candidates for the same item - 2026-08-11
+    rewrite (doc Section 4, Step 4): EVERY candidate is judged, not just
+    until the first non-match. An unrelated first read must not stop the
+    pipeline from reaching the second, real match."""
     a = _issue(ws_db, "Requested approval for Veeva CRM press release")
     _link_party(ws_db, a, "shared_party", "rep@acme.com", company="Acme")
     b = _issue(ws_db, "MARC REVIEW REQUESTED: Veeva CRM press release quote")
@@ -223,26 +295,29 @@ def test_process_new_item_tries_next_candidate_after_a_no(ws_db, isolated_paths,
 
     def fake_popen(*a_, **kw):
         calls["n"] += 1
-        # First judged candidate says no, second says yes. No 3rd call:
-        # step 6's post-merge run_project_extraction now reads the claims
-        # ledger (task #304) rather than making an LLM call unconditionally
-        # - none of a/b/c have a materialized claim in this test, so
-        # run_project_extraction short-circuits at "no_claims_yet" before
-        # ever touching Popen.
-        return _FakeProcess("VERDICT: no\n" if calls["n"] == 1 else "VERDICT: yes\n")
+        # First judged candidate is unrelated, second is the real match.
+        # No 3rd call: step 6's post-merge run_project_extraction reads
+        # the claims ledger (task #304) rather than making an LLM call
+        # unconditionally - none of a/b/c have a materialized claim in
+        # this test, so run_project_extraction short-circuits at
+        # "no_claims_yet" before ever touching Popen.
+        return _FakeProcess("VERDICT: unrelated\n" if calls["n"] == 1 else "VERDICT: same_project\n")
 
     monkeypatch.setattr(p2.subprocess, "Popen", fake_popen)
 
     result = p2.process_new_item(a)
 
     assert result["action"] == "merged"
-    assert calls["n"] == 2  # 2 judgment calls (no, then yes)
+    assert calls["n"] == 2  # 2 judgment calls (unrelated, then same_project)
 
 
-# --- process_new_item Total Recall precedent fast-path (2026-08-07) -------
+# --- process_new_item Total Recall precedent (2026-08-07, rewritten 2026-08-11) --
 # workgraph_lessons.precedent_prefilter is keyed on the NEW item's own
 # category+company situation, not a specific pair - see process_new_item's
-# own docstring for the full design reasoning.
+# own docstring for the full design reasoning. 2026-08-11 (doc Section 5):
+# precedent used to let a "confirmed"/"rejected" read skip judge_candidate
+# entirely - now it is ALWAYS just one line of context in the prompt;
+# judge_candidate is called for every real candidate, every time.
 
 def _seed_strong_precedent(source_issue_id: str, *, outcome: str = "confirmed",
                             situation_key_val: str = "category:contract|company:acme"):
@@ -256,72 +331,95 @@ def _seed_strong_precedent(source_issue_id: str, *, outcome: str = "confirmed",
         )
 
 
-def _fake_popen_rejecting_judgment_calls(extraction_reply: str = "SUMMARY: ok\n"):
-    """A judge_candidate call always sends _JUDGMENT_PROMPT_TEMPLATE's
-    distinctive "judging whether" text; run_project_extraction's own
-    post-merge/post-new-project call never does - this lets a test assert
-    "the LLM judgment call never happened" while still tolerating step 6's
-    always-fires extraction call. The prompt now arrives over stdin (task
-    #304 Windows argv-length fix), so the check happens inside
-    communicate(), not at Popen() call time."""
-    class _CheckingProcess(_FakeProcess):
+def _fake_popen_capturing_judgment_prompts(verdict_reply: str = "VERDICT: same_project\n",
+                                            extraction_reply: str = "SUMMARY: ok\n"):
+    """Returns (fake_popen, captured) - captured["judgment_prompts"]
+    collects every prompt that looks like a real judge_candidate call
+    (_JUDGMENT_PROMPT_TEMPLATE's distinctive "judging the real
+    relationship" text), so a test can assert the LLM WAS called (the
+    opposite assertion from before 2026-08-11's precedent-bypass
+    removal) and inspect what precedent context actually reached it.
+    The reply returned is decided dynamically per-call based on the real
+    prompt content, not fixed at Popen() construction time - matches how
+    the real code only knows the prompt at communicate(), not Popen()."""
+    captured = {"judgment_prompts": []}
+
+    class _CapturingProcess(_FakeProcess):
+        def __init__(self):
+            super().__init__("")
+
         def communicate(self, input=None, timeout=None):
-            if input and "judging whether" in input.lower():
-                raise AssertionError("judge_candidate must not be called when a strong precedent applies")
-            return super().communicate(input=input, timeout=timeout)
+            self.sent_input = input
+            if input and "judging the real relationship" in input.lower():
+                captured["judgment_prompts"].append(input)
+                return verdict_reply, ""
+            return extraction_reply, ""
 
     def fake_popen(*a_, **kw):
-        return _CheckingProcess(extraction_reply)
-    return fake_popen
+        return _CapturingProcess()
+    return fake_popen, captured
 
 
-def test_process_new_item_confirmed_precedent_skips_llm_and_merges(ws_db, isolated_paths, monkeypatch):
+def test_process_new_item_confirmed_precedent_still_calls_the_llm_and_merges(ws_db, isolated_paths, monkeypatch):
+    """2026-08-11 rewrite (doc Section 5): a 'confirmed' precedent must
+    never bypass judge_candidate - it only ever informs the prompt.
+    Verified two ways: the LLM verdict decides the outcome (mocked
+    same_project -> merged), AND the precedent line actually reached the
+    prompt as context, not a hardcoded VERDICT."""
     a = _issue(ws_db, "Renewal notice", category="contract")
     _link_party(ws_db, a, "shared_party", "rep@acme.com", company="Acme")
     b = _issue(ws_db, "Renewal notice v2", category="contract")
     _link_party(ws_db, b, "shared_party", "rep@acme.com", company="Acme")
     _seed_strong_precedent(a, outcome="confirmed")
-    monkeypatch.setattr(p2.subprocess, "Popen", _fake_popen_rejecting_judgment_calls())
+    fake_popen, captured = _fake_popen_capturing_judgment_prompts("VERDICT: same_project\n")
+    monkeypatch.setattr(p2.subprocess, "Popen", fake_popen)
 
     result = p2.process_new_item(a)
 
     assert result["action"] == "merged"
     assert ws_db.get_issue(a)["project_id"] == ws_db.get_issue(b)["project_id"]
+    assert len(captured["judgment_prompts"]) == 1
+    assert "previously turned out to be" in captured["judgment_prompts"][0]
+    assert "context only" in captured["judgment_prompts"][0].lower()
 
 
-def test_process_new_item_confirmed_precedent_does_not_rewrite_the_lesson(ws_db, isolated_paths, monkeypatch):
-    """The precedent-driven skip must never re-validate/inflate its OWN
-    trust score - only a genuine LLM judgment writes a lesson, exactly
-    mirroring the old group_issue()'s behavior (writes only ever came
-    from a real human/LLM decision, never from the auto-resolve shortcut
-    itself - otherwise it's a closed, self-reinforcing loop nothing can
-    ever correct)."""
+def test_process_new_item_confirmed_precedent_does_not_override_contradicting_evidence(ws_db, isolated_paths, monkeypatch):
+    """The single most important guarantee of the 2026-08-11 rewrite: a
+    strong 'confirmed' precedent must NOT force a merge when the real
+    LLM read of THIS pair's actual evidence says unrelated."""
     a = _issue(ws_db, "Renewal notice", category="contract")
     _link_party(ws_db, a, "shared_party", "rep@acme.com", company="Acme")
     b = _issue(ws_db, "Renewal notice v2", category="contract")
     _link_party(ws_db, b, "shared_party", "rep@acme.com", company="Acme")
     _seed_strong_precedent(a, outcome="confirmed")
-    monkeypatch.setattr(p2.subprocess, "Popen", _fake_popen_rejecting_judgment_calls())
-
-    before = ws_db.get_lesson_by_situation("category:contract|company:acme", "confirmed")
-    p2.process_new_item(a)
-    after = ws_db.get_lesson_by_situation("category:contract|company:acme", "confirmed")
-
-    assert after["hit_count"] == before["hit_count"]
-
-
-def test_process_new_item_rejected_precedent_skips_llm_and_makes_new_project(ws_db, isolated_paths, monkeypatch):
-    a = _issue(ws_db, "Renewal notice", category="contract")
-    _link_party(ws_db, a, "shared_party", "rep@acme.com", company="Acme")
-    b = _issue(ws_db, "Renewal notice v2", category="contract")
-    _link_party(ws_db, b, "shared_party", "rep@acme.com", company="Acme")
-    _seed_strong_precedent(a, outcome="rejected")
-    monkeypatch.setattr(p2.subprocess, "Popen", _fake_popen_rejecting_judgment_calls())
+    fake_popen, captured = _fake_popen_capturing_judgment_prompts("VERDICT: unrelated\n")
+    monkeypatch.setattr(p2.subprocess, "Popen", fake_popen)
 
     result = p2.process_new_item(a)
 
     assert result["action"] == "new_project"
     assert ws_db.get_issue(a)["project_id"] != ws_db.get_issue(b)["project_id"]
+    assert len(captured["judgment_prompts"]) == 1  # the LLM really was asked, not skipped
+
+
+def test_process_new_item_rejected_precedent_still_calls_the_llm(ws_db, isolated_paths, monkeypatch):
+    """Symmetric case: a 'rejected' precedent must not skip the LLM
+    either - and here the real read contradicts the precedent and finds
+    a real match, which must win."""
+    a = _issue(ws_db, "Renewal notice", category="contract")
+    _link_party(ws_db, a, "shared_party", "rep@acme.com", company="Acme")
+    b = _issue(ws_db, "Renewal notice v2", category="contract")
+    _link_party(ws_db, b, "shared_party", "rep@acme.com", company="Acme")
+    _seed_strong_precedent(a, outcome="rejected")
+    fake_popen, captured = _fake_popen_capturing_judgment_prompts("VERDICT: same_project\n")
+    monkeypatch.setattr(p2.subprocess, "Popen", fake_popen)
+
+    result = p2.process_new_item(a)
+
+    assert result["action"] == "merged"
+    assert ws_db.get_issue(a)["project_id"] == ws_db.get_issue(b)["project_id"]
+    assert len(captured["judgment_prompts"]) == 1
+    assert "previously turned out not" in captured["judgment_prompts"][0].lower()
 
 
 def test_process_new_item_no_precedent_falls_through_to_llm_and_records_outcome(ws_db, isolated_paths, monkeypatch):
@@ -334,7 +432,7 @@ def test_process_new_item_no_precedent_falls_through_to_llm_and_records_outcome(
     _link_party(ws_db, a, "shared_party", "rep@acme.com", company="Acme")
     b = _issue(ws_db, "MARC REVIEW REQUESTED: Veeva CRM press release quote", category="contract")
     _link_party(ws_db, b, "shared_party", "rep@acme.com", company="Acme")
-    _mock_claude(monkeypatch, "VERDICT: yes\n")
+    _mock_claude(monkeypatch, "VERDICT: same_project\n")
 
     assert ws_db.get_lesson_by_situation("category:contract|company:acme", "confirmed") is None
 
@@ -351,7 +449,7 @@ def test_process_new_item_no_precedent_records_rejected_when_llm_says_no(ws_db, 
     _link_party(ws_db, a, "shared_party", "rep@acme.com", company="Acme")
     b = _issue(ws_db, "MARC REVIEW REQUESTED: Veeva CRM press release quote", category="contract")
     _link_party(ws_db, b, "shared_party", "rep@acme.com", company="Acme")
-    _mock_claude(monkeypatch, "VERDICT: no\n")
+    _mock_claude(monkeypatch, "VERDICT: unrelated\n")
 
     result = p2.process_new_item(a)
 

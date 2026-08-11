@@ -185,7 +185,7 @@ def find_candidates(work_object_id: str, issue: Optional[dict] = None) -> list[d
     return candidates
 
 
-_JUDGMENT_PROMPT_TEMPLATE = """You are judging whether two real pieces of business communication describe the SAME underlying deal/project, or two different ones.
+_JUDGMENT_PROMPT_TEMPLATE = """You are judging the real relationship between two pieces of business communication.
 
 ITEM A (already tracked):
 {text_a}
@@ -194,95 +194,150 @@ ITEM B (new, being evaluated):
 {text_b}
 
 They already share {match_count} real data point(s): {matched_signals}.
+{precedent_line}
+Read both fully, then choose EXACTLY one of these three outcomes - decide only from the evidence above, using the historical note (if any) only as context, never as the answer itself:
 
-Read both fully. Decide: are these genuinely the same underlying deal or vendor relationship (even if they cover different individual transactions within one overall relationship), or are they unrelated/different deals that merely share a coincidental signal?
+- SAME_PROJECT: these describe the same underlying deal/workstream (even if they cover different individual transactions within one overall relationship).
+- RELATED_DIFFERENT_PROJECT: same vendor/counterparty/relationship, but a genuinely distinct piece of work (a different SOW, a different renewal cycle, a different initiative).
+- UNRELATED: the shared signal is coincidental; these are unrelated.
 
 Respond with EXACTLY one line, nothing else:
-VERDICT: yes
+VERDICT: same_project
 or
-VERDICT: no
+VERDICT: related_different_project
+or
+VERDICT: unrelated
 """
 
+_VALID_VERDICTS = ("same_project", "related_different_project", "unrelated")
 
-def _parse_verdict(stdout: str) -> Optional[bool]:
+
+def _parse_verdict(stdout: str) -> Optional[str]:
     """None (never a guess) when no parseable VERDICT line exists at
     all - a timeout, a crashed subprocess, or a malformed response all
-    fall through to this, and the caller treats it exactly like "no":
-    move on, no permanent record either way."""
+    fall through to this, and the caller treats it exactly like
+    "unrelated": move on, no permanent record either way."""
     for line in (stdout or "").splitlines():
         line = line.strip()
         if line.upper().startswith("VERDICT:"):
             value = line.split(":", 1)[1].strip().lower()
-            if value == "yes":
-                return True
-            if value == "no":
-                return False
+            if value in _VALID_VERDICTS:
+                return value
     return None
 
 
-def judge_candidate(work_object_id: str, candidate_id: str, matched_signals: list) -> Optional[bool]:
+def judge_candidate(work_object_id: str, candidate_id: str, matched_signals: list,
+                     *, model: Optional[str] = None, precedent_context: Optional[str] = None) -> Optional[str]:
     """The real, immediate LLM read of both sides' full text - step 4
     itself. Never raises on a timeout - treated the same as an
     unparseable response (None), so one slow/stuck judgment call can
-    never crash the whole pipeline run."""
+    never crash the whole pipeline run.
+
+    Returns one of _VALID_VERDICTS, or None on timeout/unparseable reply.
+    Widened from a plain yes/no to a 3-way outcome (2026-08-11, Marc's
+    own engineering-direction doc, Section 4 Step 4): a "related but
+    different project" read used to have nowhere to go but the same bit
+    as "unrelated," silently discarding a real relationship signal.
+
+    precedent_context: optional one-line note injected into the prompt
+    as CONTEXT ONLY, never a bypass of this call (2026-08-11, Section 5
+    of the same doc: prior confirmed/rejected precedent must never skip
+    this real evidence read - process_new_item now always calls this
+    function, for every candidate, regardless of precedent).
+
+    model: process_new_item's live call passes "sonnet" (2026-08-11,
+    Marc's own direct instruction, after a live side-by-side comparison
+    this session confirmed Sonnet matches Opus's judgment on both a real
+    positive and a real negative merge pair) - kept as an optional
+    override here, not a hardcoded default, so a future A/B test against
+    a different tier stays just as easy."""
     text_a = full_text_for_work_object(candidate_id)
     text_b = full_text_for_work_object(work_object_id)
+    precedent_line = f"\nHistorical note (context only - still judge THIS pair on the evidence above): {precedent_context}\n" if precedent_context else ""
     prompt = _JUDGMENT_PROMPT_TEMPLATE.format(
         text_a=text_a[:_MAX_TEXT_CHARS], text_b=text_b[:_MAX_TEXT_CHARS],
         match_count=len(matched_signals), matched_signals=", ".join(matched_signals),
+        precedent_line=precedent_line,
     )
     try:
-        proc = _run_headless_claude(prompt, timeout=_JUDGE_TIMEOUT_SECONDS)
+        proc = _run_headless_claude(prompt, timeout=_JUDGE_TIMEOUT_SECONDS, model=model)
     except subprocess.TimeoutExpired:
         return None
     return _parse_verdict(proc.stdout)
 
 
-def process_new_item(work_object_id: str) -> dict:
+def _precedent_context_line(precedent: Optional[str], issue: dict) -> Optional[str]:
+    category = issue.get("category") or "this type of"
+    if precedent == "confirmed":
+        return (f"similar {category} cases with this counterparty have previously turned out to be "
+                f"real matches")
+    if precedent == "rejected":
+        return (f"similar {category} cases with this counterparty have previously turned out NOT "
+                f"to match")
+    return None
+
+
+def process_new_item(work_object_id: str, *, model: Optional[str] = "sonnet") -> dict:
     """The real step 3->4 pipeline for ONE freshly-classified item that
     step 2's exact-match check already failed to link anywhere. Finds
-    every 2+-point candidate, judges each with a real LLM read of full
-    text, merges immediately on the first "yes" - no queue, no permanent
-    veto on a "no". If nothing matches (or every candidate says no),
-    this item becomes its own new project immediately - per Marc's own
-    words, every item ends up in SOME project, never left dangling.
+    every 2+-point candidate and judges ALL of them with a real LLM read
+    of full text before deciding anything - no permanent veto on a
+    non-match. If nothing matches, this item becomes its own new project
+    immediately - per Marc's own words, every item ends up in SOME
+    project, never left dangling.
 
-    Total Recall precedent fast-path (2026-08-07, Marc's explicit later
-    request - this pipeline's original build deliberately did NOT use
-    workgraph_lessons.py at all, per Marc's own words at the time: "KEEP
-    IT ENTIRELY SEPARATE." Revisited now that #269's cleanup retires
-    confirm_suggestion/reject_suggestion, the only writers
-    record_confirmed_or_rejected ever had - without this, the lesson
-    store would only ever shrink in relevance, never learn from this
-    pipeline's own decisions). workgraph_lessons.precedent_prefilter is
-    read-only and keyed on the NEW item's own category+company situation
-    (not a specific pair) - a 'confirmed' verdict means this exact
-    situation has repeatedly turned out to be a real match with STRONG_
-    PRECEDENT_HITS+ confidence, so the first candidate is trusted without
-    spending an LLM call; 'rejected' means the opposite, so no candidate
-    here gets an LLM call either - go straight to a new project. Neither
-    skip path writes a lesson itself (mirrors the old group_issue()
-    behavior exactly - a precedent-driven skip must never re-validate and
-    inflate its OWN trust score, or it becomes a closed, self-reinforcing
-    loop nothing can ever correct). A genuine LLM judgment (the `else`
-    path below, precedent is None) DOES write the real outcome via
-    record_confirmed_or_rejected - confirmed on a merge, rejected once no
-    real candidate merged - keeping the lesson store current off this
-    pipeline's own judgment calls, the same way it used to stay current
-    off curator/Marc's suggestion-queue resolutions.
+    Rewritten 2026-08-11 per Marc's own engineering-direction doc,
+    Sections 4 (Step 4) and 5, after this session's own audit confirmed
+    two real gaps against it:
+
+    (1) USED TO merge on the first candidate that returned a "yes" and
+    return immediately, never comparing the remaining candidates. Now
+    every candidate is judged first (judge_candidate returns one of
+    same_project/related_different_project/unrelated/None), and the
+    verdicts are evaluated together:
+      - exactly one DISTINCT target project among same_project verdicts
+        -> merge (unchanged real-world outcome for the common case).
+      - MULTIPLE distinct target projects both say same_project -> this
+        is the doc's real "ambiguous" outcome. Never picked arbitrarily -
+        returned as action="ambiguous" with every conflicting project id,
+        and the item is left ungrouped (no permanent decision either way,
+        same "no veto" philosophy this pipeline already applies to a
+        plain non-match - it will naturally be re-evaluated next cycle by
+        run_pipeline_for_ungrouped_items, which only pulls project_id IS
+        NULL items).
+      - a related_different_project verdict, on any candidate, now
+        writes a real signal instead of vanishing: ws.upsert_work_object_
+        relationship(..., relationship_type="rejected", ...) - the exact
+        same table workgraph_relationships.run_relationship_sweep()
+        already reads to build durable, named Relationship rows. This is
+        that mechanism's first live production writer; previously only
+        tests ever called it.
+
+    (2) USED TO let a "confirmed"/"rejected" Total Recall precedent skip
+    judge_candidate (the LLM) entirely - an unconditional bypass of
+    current-evidence inspection the doc's Section 5 explicitly names as
+    unsafe. Precedent is now ALWAYS just one line of context injected
+    into the judgment prompt (_precedent_context_line) - judge_candidate
+    is called for every real candidate, every time, regardless of
+    precedent. record_confirmed_or_rejected still logs the real,
+    genuine verdict afterward exactly as before - precedent only ever
+    informs the read, never replaces it.
+
+    model: "sonnet" (2026-08-11, Marc's own direct instruction after a
+    live side-by-side test this session confirmed Sonnet matches Opus's
+    judgment on a real positive AND a real negative merge pair) - passed
+    through as an explicit default here, not hardcoded inside judge_
+    candidate itself, so a future re-test against a different tier only
+    ever requires changing this one call site.
 
     Haiku backfill runs here, once, right before candidate search -
     between the deterministic extraction and the 2+-point matching gate.
     Genuinely PLURAL (design doc §5.2, task #215) - fills EVERY confirmed
     data point still missing a value for this item in one call, not just
-    company (the narrow single-field version built 2026-08-06 and
-    explicitly retired the same day per Marc's own direct correction:
-    "do not scope it ONLY to those fields, do the whole build"). Only
-    runs for THIS item, never for the existing candidates it gets
-    compared against below - each of those already went through this
-    same step when IT was the new item being processed, so there's
-    nothing to re-backfill. invalidate_work_object_signature is required
-    here, not optional: get_or_compute_work_object_signature is
+    company. Only runs for THIS item, never for the existing candidates -
+    each of those already went through this same step when IT was the
+    new item being processed. invalidate_work_object_signature is
+    required here, not optional: get_or_compute_work_object_signature is
     cache-first, so without busting the cache, find_candidates below
     would read the STALE pre-backfill signature and the new party would
     never reach the point-matching gate at all this run."""
@@ -298,40 +353,64 @@ def process_new_item(work_object_id: str) -> dict:
 
     candidates = find_candidates(work_object_id, issue)
     precedent = workgraph_lessons.precedent_prefilter(issue)
-    judged_any = False
-    if precedent != "rejected":
-        for candidate in candidates:
-            if precedent == "confirmed":
-                verdict = True  # trust the strong precedent - no LLM call, no re-write of the lesson itself
-            else:
-                verdict = judge_candidate(work_object_id, candidate["candidate_id"], candidate["matched_signals"])
-                judged_any = True
-            if verdict is not True:
-                continue
+    precedent_context = _precedent_context_line(precedent, issue)
+
+    judged = []  # list of (candidate, verdict)
+    for candidate in candidates:
+        verdict = judge_candidate(work_object_id, candidate["candidate_id"], candidate["matched_signals"],
+                                   model=model, precedent_context=precedent_context)
+        judged.append((candidate, verdict))
+
+    for candidate, verdict in judged:
+        if verdict == "related_different_project":
+            try:
+                ws.upsert_work_object_relationship(
+                    a_id=work_object_id, b_id=candidate["candidate_id"], relationship_type="rejected",
+                    match_count=len(candidate["matched_signals"]), matched_signals=candidate["matched_signals"],
+                )
+            except Exception:
+                pass  # relationship bookkeeping must never break the real grouping decision
+
+    same_project = [(c, v) for c, v in judged if v == "same_project"]
+    target_projects: dict[str, list[dict]] = {}
+    for candidate, _ in same_project:
+        other = ws.get_issue_or_cluster(candidate["candidate_id"])
+        target = (other or {}).get("project_id") or candidate["candidate_id"]
+        target_projects.setdefault(target, []).append(candidate)
+
+    if len(target_projects) > 1:
+        # Real ambiguity (doc Section 4, Step 4): more than one existing
+        # project both read as "same project." Never guess - park it,
+        # exactly like a plain non-match, so it's re-evaluated next cycle
+        # rather than silently mis-filed.
+        return {"work_object_id": work_object_id, "action": "ambiguous",
+                "candidate_project_ids": list(target_projects.keys())}
+
+    if len(target_projects) == 1:
+        candidates_for_target = next(iter(target_projects.values()))
+        for candidate in candidates_for_target:
             result = wp.merge_issues(
                 work_object_id, candidate["candidate_id"],
-                reason_label=f"pipeline2: {'precedent-confirmed' if precedent == 'confirmed' else 'LLM-confirmed'} "
-                             f"match ({','.join(candidate['matched_signals'])})",
+                reason_label=f"pipeline2: LLM-confirmed match ({','.join(candidate['matched_signals'])})",
             )
             if result["status"] == "merged":
                 project_id = result["project_id"]
-                if judged_any:
-                    workgraph_lessons.record_confirmed_or_rejected(issue_id_a=work_object_id, status="confirmed")
-                run_project_extraction(project_id)
+                workgraph_lessons.record_confirmed_or_rejected(issue_id_a=work_object_id, status="confirmed")
+                run_project_extraction(project_id, model="haiku")
                 return {"work_object_id": work_object_id, "action": "merged",
                         "project_id": project_id, "candidate_id": candidate["candidate_id"]}
             # "deferred" - a rare two-already-established-projects collision,
             # merge_issues' own existing safety net. Try the next candidate
-            # rather than treat this as a final answer.
+            # for this same target rather than treat this as a final answer.
 
-    if judged_any:
+    if judged:
         workgraph_lessons.record_confirmed_or_rejected(issue_id_a=work_object_id, status="rejected")
 
     project_id = ws.create_project_with_new_id(
         name=issue.get("title") or "Untitled", category=issue.get("category"),
     )
     ws.assign_issue_to_project(work_object_id, project_id, reason="pipeline2: no real match found, new project")
-    run_project_extraction(project_id)
+    run_project_extraction(project_id, model="haiku")
     return {"work_object_id": work_object_id, "action": "new_project", "project_id": project_id}
 
 
@@ -411,9 +490,16 @@ def _parse_extraction_output(stdout: str) -> dict:
     return {"issues": issues, "summary": summary}
 
 
-def run_project_extraction(project_id: str) -> dict:
+def run_project_extraction(project_id: str, *, model: Optional[str] = None) -> dict:
     """Step 6 - fires immediately after every successful group (a merge
     or a new-project creation), never on a separate schedule.
+
+    model: optional cheap-model override (see _run_headless_claude's own
+    docstring) - the live forward-path caller (process_new_item) never
+    passes this, so it stays on this pipeline's trusted default (opus);
+    only the one-time stale-marker backfill script (task #304/#310,
+    2026-08-11 cost investigation) passes an override, deliberately
+    scoped to that backfill alone.
 
     Consolidated onto the claim-grounded path (task #304, item #3,
     2026-08-11, Marc's own explicit build authorization and his own
@@ -478,7 +564,7 @@ def run_project_extraction(project_id: str) -> dict:
         claims_text=claims_text[:_MAX_TEXT_CHARS], existing_items=existing_text,
     )
     try:
-        proc = _run_headless_claude(prompt, timeout=_EXTRACTION_TIMEOUT_SECONDS)
+        proc = _run_headless_claude(prompt, timeout=_EXTRACTION_TIMEOUT_SECONDS, model=model)
     except subprocess.TimeoutExpired:
         return {"project_id": project_id, "action": "timeout"}
 

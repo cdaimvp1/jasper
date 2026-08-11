@@ -872,6 +872,20 @@ def test_merge_issues_txn_creates_new_project_when_neither_has_one(ws_db):
     assert ws_db.get_project(project_id)["name"] == "New"
 
 
+def test_merge_issues_txn_records_structured_merge_pair_in_audit_log(ws_db):
+    """Reversibility fix (task #310 follow-up, 2026-08-11): which two work
+    objects merged must be a real, structured, queryable field - not only
+    ever recoverable by parsing the free-text `reason` string."""
+    a = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    b = ws_db.create_issue_with_new_id(title="B", state="active", category="other")
+    result = ws_db.merge_issues_txn(a, b, reason_label="test", new_project_name="New", new_project_category="other")
+    project_id = result["project_id"]
+
+    rows = ws_db.list_audit_log("project", project_id)
+    related_ids = {r["related_entity_id"] for r in rows if r["field"] == "issue_membership"}
+    assert related_ids == {a, b}
+
+
 def test_merge_issues_txn_singleton_loser_still_auto_merges(ws_db):
     """2026-07-31 (step 5): a loser project whose ONLY member is the issue
     being merged itself (no other real members) is low-risk - nothing else
@@ -3064,3 +3078,56 @@ def test_count_materialized_extractions_and_correction_events(ws_db):
     assert ws_db.count_materialized_extractions() == 1
     assert ws_db.count_claim_correction_events(now - 1, now + 60) == 1
     assert ws_db.count_claim_correction_events(now + 100, now + 200) == 0
+
+
+# --- raw_items.sensitive (task #330) ----------------------------------------
+
+def test_raw_item_sensitive_defaults_to_false(ws_db):
+    rid = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key="k-sens-1", thread_key="k-sens-1", dedupe_key="k-sens-1",
+        occurred_ts=time.time(), subject="s", from_actor="a@example.com", participants_json="[]",
+    )
+    assert ws_db.get_raw_item(rid)["sensitive"] == 0
+
+
+def test_set_raw_item_sensitive_sets_and_clears(ws_db):
+    rid = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key="k-sens-2", thread_key="k-sens-2", dedupe_key="k-sens-2",
+        occurred_ts=time.time(), subject="s", from_actor="a@example.com", participants_json="[]",
+    )
+
+    ws_db.set_raw_item_sensitive(rid, True)
+    assert ws_db.get_raw_item(rid)["sensitive"] == 1
+
+    ws_db.set_raw_item_sensitive(rid, False)
+    assert ws_db.get_raw_item(rid)["sensitive"] == 0
+
+
+def test_list_raw_items_since_default_includes_sensitive_rows(ws_db):
+    """Default behavior (exclude_sensitive=False) is unchanged - any other
+    caller of this function besides workgraph_discovery.py still sees every
+    row, sensitive or not."""
+    rid = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key="k-sens-3", thread_key="k-sens-3", dedupe_key="k-sens-3",
+        occurred_ts=time.time(), subject="s", from_actor="a@example.com", participants_json="[]",
+    )
+    ws_db.set_raw_item_sensitive(rid, True)
+
+    ids = [r["id"] for r in ws_db.list_raw_items_since(0.0)]
+    assert rid in ids
+
+
+def test_list_raw_items_since_exclude_sensitive_filters_flagged_rows(ws_db):
+    normal_id = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key="k-sens-4", thread_key="k-sens-4", dedupe_key="k-sens-4",
+        occurred_ts=time.time(), subject="s", from_actor="a@example.com", participants_json="[]",
+    )
+    sensitive_id = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key="k-sens-5", thread_key="k-sens-5", dedupe_key="k-sens-5",
+        occurred_ts=time.time(), subject="s", from_actor="b@example.com", participants_json="[]",
+    )
+    ws_db.set_raw_item_sensitive(sensitive_id, True)
+
+    ids = [r["id"] for r in ws_db.list_raw_items_since(0.0, exclude_sensitive=True)]
+    assert normal_id in ids
+    assert sensitive_id not in ids

@@ -170,7 +170,17 @@ def record_observations_for_item(raw_item: dict) -> list[dict]:
     Returns the updated observation row for each signature this item
     exhibited, so a caller (the setup bulk pass, or a live per-item hook)
     can immediately check crosses_significance_bar without a second
-    DB round trip."""
+    DB round trip.
+
+    Task #330: an item flagged raw_items.sensitive=1 (set only by a human
+    or a narrow deterministic detector, never guessed here) contributes
+    NO observations at all - it's real work content that shouldn't train
+    pattern-discovery. This is the single choke point both the live
+    per-item hook (workgraph_classify.py, called once per newly-linked
+    item) and the setup bulk pass (run_setup_discovery below) go through,
+    so guarding here protects both without editing either caller."""
+    if raw_item.get("sensitive"):
+        return []
     thread_key = raw_item.get("thread_key") or raw_item.get("stable_key") or ""
     rows = []
     for signature in derive_pattern_signatures(raw_item):
@@ -348,7 +358,13 @@ def propose_from_observation(
 # --- bulk setup pass + monthly sweep ----------------------------------------
 
 def _sample_raw_items_for_signature(signature: str, raw_items: list[dict], limit: int = _MAX_EXAMPLES) -> list[dict]:
-    matches = [item for item in raw_items if signature in derive_pattern_signatures(item)]
+    # Task #330: never hand a sensitive item's real text to the LLM
+    # proposal call as an "example" - excluded here regardless of
+    # whether the caller's raw_items_pool already filtered it out.
+    matches = [
+        item for item in raw_items
+        if signature in derive_pattern_signatures(item) and not item.get("sensitive")
+    ]
     return matches[:limit]
 
 
@@ -415,8 +431,13 @@ def _labels_cooccurring_with_domain(
     demand from the same raw_items a per-field proposal would sample
     from rather than a separately-tracked table (nothing here is lost by
     not persisting it: this is cheap local text-regex work, no LLM call)."""
+    # Task #330: same sensitive-exclusion as _sample_raw_items_for_signature
+    # - the values harvested here go straight into the system-table LLM
+    # proposal prompt's fields_block, so a sensitive item's real labeled-
+    # field values must never reach this pool either.
     matches = (
-        [item for item in raw_items_pool if f"sender_domain:{domain}" in derive_pattern_signatures(item)]
+        [item for item in raw_items_pool
+         if f"sender_domain:{domain}" in derive_pattern_signatures(item) and not item.get("sensitive")]
         if raw_items_pool is not None else _raw_items_matching_signature(f"sender_domain:{domain}", limit=50)
     )
     labels: dict[str, list[str]] = {}
@@ -557,7 +578,11 @@ def run_setup_discovery(*, role_hint: Optional[str] = None, window_days: int = 9
     candidate is tested against real recurrence exactly the same way with
     or without a role hint."""
     cutoff = time.time() - (window_days * 86400)
-    raw_items = ws.list_raw_items_since(cutoff)
+    # Task #330: exclude_sensitive=True here is belt-and-suspenders with
+    # record_observations_for_item's own internal guard below (and with
+    # _sample_raw_items_for_signature's filter downstream) - cheap at the
+    # source, so a sensitive item never even enters this pool.
+    raw_items = ws.list_raw_items_since(cutoff, exclude_sensitive=True)
 
     touched_signatures: set[str] = set()
     for item in raw_items:
@@ -600,7 +625,7 @@ def run_monthly_sweep() -> dict:
     today, and #266 made not taking it far more expensive."""
     all_signatures = [row["pattern_signature"] for row in ws.list_candidate_pattern_observations()]
     cutoff = time.time() - (180 * 86400)  # same window _raw_items_matching_signature's fallback path used
-    raw_items_pool = ws.list_raw_items_since(cutoff)
+    raw_items_pool = ws.list_raw_items_since(cutoff, exclude_sensitive=True)  # task #330
     proposals = check_and_propose_for_signatures(all_signatures, raw_items_pool=raw_items_pool)
 
     now = time.time()
@@ -643,7 +668,7 @@ def _raw_items_matching_signature(signature: str, limit: int = _MAX_EXAMPLES) ->
     a handful of representative examples, not exhaustive recall."""
     cutoff = time.time() - (180 * 86400)
     matches = []
-    for item in ws.list_raw_items_since(cutoff):
+    for item in ws.list_raw_items_since(cutoff, exclude_sensitive=True):
         if signature in derive_pattern_signatures(item):
             matches.append(item)
             if len(matches) >= limit:

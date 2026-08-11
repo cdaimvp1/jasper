@@ -315,3 +315,53 @@ def test_check_and_propose_system_table_never_proposes_twice_for_the_same_domain
     assert first is not None
     assert second is None
     assert len(ws_db.list_system_table_proposals()) == 1
+
+
+# --- sensitive-content exclusion (task #330) --------------------------------
+
+def test_record_observations_for_item_skips_sensitive_item(ws_db):
+    """A raw_item flagged sensitive=1 contributes zero observations - the
+    choke point both the live per-item hook (workgraph_classify.py) and
+    the setup bulk pass go through."""
+    item = _item(id=1, from_actor="jane@newvendor.com")
+    item["sensitive"] = 1
+
+    rows = wd.record_observations_for_item(item)
+
+    assert rows == []
+    assert ws_db.get_candidate_pattern_observation("sender_domain:newvendor.com") is None
+
+
+def test_record_observations_for_item_still_records_when_not_sensitive(ws_db):
+    """Sanity check the guard is specific to sensitive=1, not a regression
+    that broke the ordinary path."""
+    item = _item(id=1, from_actor="jane@newvendor.com")
+    item["sensitive"] = 0
+
+    rows = wd.record_observations_for_item(item)
+
+    assert len(rows) == 1
+    assert ws_db.get_candidate_pattern_observation("sender_domain:newvendor.com") is not None
+
+
+def test_sample_raw_items_for_signature_excludes_sensitive_items():
+    normal = _item(id=1, from_actor="jane@newvendor.com")
+    normal["sensitive"] = 0
+    sensitive = _item(id=2, from_actor="jane@newvendor.com")
+    sensitive["sensitive"] = 1
+
+    samples = wd._sample_raw_items_for_signature("sender_domain:newvendor.com", [normal, sensitive])
+
+    ids = [s["id"] for s in samples]
+    assert 1 in ids
+    assert 2 not in ids
+
+
+def test_labels_cooccurring_with_domain_excludes_sensitive_items(monkeypatch):
+    monkeypatch.setattr(wd.text_extract, "resolve_item_text", lambda item: "Batch Number: BN-SENSITIVE")
+    sensitive = _item(id=1, from_actor="jane@vendor.example.com")
+    sensitive["sensitive"] = 1
+
+    labels = wd._labels_cooccurring_with_domain("vendor.example.com", raw_items_pool=[sensitive])
+
+    assert labels == {}

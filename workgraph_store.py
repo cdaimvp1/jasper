@@ -820,6 +820,19 @@ def init_workgraph() -> None:
                 )
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_entity ON audit_log(entity_type, entity_id, changed_ts)")
+            try:
+                # Reversibility fix (task #310 follow-up, 2026-08-11, Marc's own
+                # engineering-direction doc, Section 4 Step 5 + Section 22): a
+                # merge's audit_log row stored the OTHER side of the pair only
+                # inside free text (the `reason` string), never a structured
+                # column - "which two work objects merged" was only ever
+                # human-readable, not queryable. Plain nullable ADD COLUMN, no
+                # CHECK constraint involved, so no rebuild-and-copy needed -
+                # every existing row keeps NULL here, which is honest (they
+                # never recorded this).
+                conn.execute("ALTER TABLE audit_log ADD COLUMN related_entity_id TEXT")
+            except sqlite3.OperationalError:
+                pass
 
             # --- Per-communication extraction (real LLM judgment, computed ONCE
             # per raw_item and never recomputed - see workgraph_synthesis.py /
@@ -2478,6 +2491,31 @@ def init_workgraph() -> None:
             except sqlite3.OperationalError:
                 pass
             try:
+                # Task #330 (2026-08-11, engineering-direction doc Section
+                # 13 - lowest-priority item on the queue, no single
+                # confirmed incident behind it, deliberately built as the
+                # smallest real piece rather than a guessed-at subsystem).
+                # Marc's own words: "sensitive-content controls should
+                # eventually support excluding or specially handling
+                # categories of information that should not become normal
+                # workgraph learning material." This is that exclusion
+                # flag - real work content (an HR/compliance/legal-
+                # privileged thread, say) that should still be tracked
+                # normally but never feed the semantic-learning/pattern-
+                # discovery mechanisms in workgraph_discovery.py. Default 0
+                # (DEFAULT 0 also backfills every pre-existing row to 0, not
+                # NULL - SQLite applies a constant ADD COLUMN default to
+                # existing rows). Never set automatically by any detector
+                # that guesses broadly across content - only a human, or a
+                # narrow/explicit/deterministic detector, via set_raw_item_
+                # sensitive below. Deliberately separate from workgraph_
+                # noise.py's gate: noise = "shouldn't be a tracked project
+                # at all"; this = "real work content that still shouldn't
+                # train pattern-discovery."
+                conn.execute("ALTER TABLE raw_items ADD COLUMN sensitive INTEGER NOT NULL DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass
+            try:
                 # Task #29 (2026-08-01): attachments were stored on disk but
                 # never read by any extraction function - a real order-form
                 # PDF or pricing XLSX sitting right there was structurally
@@ -2852,6 +2890,24 @@ def set_held_aside_status(raw_item_id: int, status: str) -> None:
         conn = _connect()
         try:
             conn.execute("UPDATE raw_items SET held_aside_status = ? WHERE id = ?", (status, raw_item_id))
+        finally:
+            conn.close()
+
+
+def set_raw_item_sensitive(raw_item_id: int, sensitive: bool) -> None:
+    """Task #330's manual/narrow-detector setter for raw_items.sensitive
+    (see that column's own migration comment). Deliberately the ONLY
+    write path for this column - there is no bulk/sweep function that
+    sets it, matching the doc's own constraint that this is never an LLM
+    (or any broad heuristic) guessing across content. A human reviewing
+    an item, or workgraph_noise.py-style narrow deterministic detector,
+    calls this directly with a real, specific item id."""
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                "UPDATE raw_items SET sensitive = ? WHERE id = ?", (1 if sensitive else 0, raw_item_id)
+            )
         finally:
             conn.close()
 
@@ -3724,7 +3780,7 @@ def get_raw_items_for_issue(issue_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def list_raw_items_since(cutoff_ts: float) -> list[dict]:
+def list_raw_items_since(cutoff_ts: float, *, exclude_sensitive: bool = False) -> list[dict]:
     """Every raw_item (linked or not) occurring at/after cutoff_ts -
     workgraph_discovery.py's setup/monthly-sweep window reader. No index
     on occurred_ts - a real, deliberate call, not an oversight: at this
@@ -3732,13 +3788,20 @@ def list_raw_items_since(cutoff_ts: float) -> list[dict]:
     scan filtered by a single comparison is sub-millisecond in SQLite: the
     index would be premature for a table that doesn't need it yet, and
     every OTHER range-style read in this module (e.g. get_raw_items_for_
-    issue above) already accepts the same tradeoff."""
+    issue above) already accepts the same tradeoff.
+
+    exclude_sensitive (task #330): default False keeps this function's
+    existing, general-purpose behavior unchanged for any other caller -
+    workgraph_discovery.py's own callers pass True explicitly, since that
+    module is exactly the "shouldn't feed learning material" case a
+    raw_items.sensitive=1 row is meant to be excluded from."""
     with _lock:
         conn = _connect()
         try:
-            rows = conn.execute(
-                "SELECT * FROM raw_items WHERE occurred_ts >= ? ORDER BY occurred_ts ASC", (cutoff_ts,)
-            ).fetchall()
+            sql = "SELECT * FROM raw_items WHERE occurred_ts >= ?"
+            if exclude_sensitive:
+                sql += " AND sensitive = 0"
+            rows = conn.execute(sql + " ORDER BY occurred_ts ASC", (cutoff_ts,)).fetchall()
         finally:
             conn.close()
     return [dict(r) for r in rows]
@@ -5759,9 +5822,10 @@ def merge_issues_txn(issue_id_a: str, issue_id_b: str, *, reason_label: str,
                             (winner, now, member_id),
                         )
                         conn.execute(
-                            """INSERT INTO audit_log (entity_type, entity_id, field, old_value, new_value, changed_ts, reason)
-                               VALUES ('project', ?, 'issue_membership', ?, ?, ?, ?)""",
-                            (winner, loser, winner, now, f"{reason_label}: project {loser} merged into {winner}"),
+                            """INSERT INTO audit_log
+                               (entity_type, entity_id, field, old_value, new_value, changed_ts, reason, related_entity_id)
+                               VALUES ('project', ?, 'issue_membership', ?, ?, ?, ?, ?)""",
+                            (winner, loser, winner, now, f"{reason_label}: project {loser} merged into {winner}", loser),
                         )
                     conn.execute("UPDATE projects SET status = ?, updated_at = ? WHERE id = ?", ("archived", now, loser))
                     project_id = winner
@@ -5784,9 +5848,10 @@ def merge_issues_txn(issue_id_a: str, issue_id_b: str, *, reason_label: str,
                     conn.execute("UPDATE work_objects SET parent_id = ?, updated_at = ? WHERE id = ?", (project_id, now, iid))
                     conn.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (now, project_id))
                     conn.execute(
-                        """INSERT INTO audit_log (entity_type, entity_id, field, old_value, new_value, changed_ts, reason)
-                           VALUES ('project', ?, 'issue_membership', ?, ?, ?, ?)""",
-                        (project_id, old_project_id, project_id, now, f"{reason_label} with {other}"),
+                        """INSERT INTO audit_log
+                           (entity_type, entity_id, field, old_value, new_value, changed_ts, reason, related_entity_id)
+                           VALUES ('project', ?, 'issue_membership', ?, ?, ?, ?, ?)""",
+                        (project_id, old_project_id, project_id, now, f"{reason_label} with {other}", other),
                     )
 
                 conn.execute("COMMIT")

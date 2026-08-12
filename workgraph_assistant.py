@@ -77,6 +77,8 @@ _ALLOWED_TOOLS = [
     "mcp__claude_ai_Microsoft_365__teams_list_chats",
 ]
 
+_CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)  # task #368 - Windows-only constant
+
 _SYSTEM_PROMPT = (
     "You are Jasper, a work assistant embedded in Marc's Outlook task pane. "
     "\"The drawer\" or \"project drawer\" is Jasper's own term for the "
@@ -219,7 +221,7 @@ def _run_claude(prompt: str, *, session_id: str, is_new: bool, timeout: int) -> 
         # codec (cp1252) mangles any non-ASCII char in claude -p's UTF-8
         # JSON output (confirmed live 2026-08-06 - an em dash in a reply
         # came back as "\udc9d" mojibake) before json.loads even runs.
-        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+        creationflags=_CREATE_NEW_PROCESS_GROUP,
     )
     try:
         stdout, stderr = proc.communicate(input=prompt, timeout=timeout)

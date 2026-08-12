@@ -69,6 +69,14 @@ _JUDGE_TIMEOUT_SECONDS = 300
 _EXTRACTION_TIMEOUT_SECONDS = 600
 _MAX_TEXT_CHARS = 12000
 
+# Task #368: CREATE_NEW_PROCESS_GROUP only exists on Windows - a bare
+# `subprocess.CREATE_NEW_PROCESS_GROUP` attribute access raises AttributeError
+# on any other platform, before Popen is even called (this app is Windows-only
+# in practice, but a test run off-Windows would crash here regardless of
+# mocking). getattr(..., 0) is a real no-op value there, not just a test
+# workaround - subprocess.Popen accepts creationflags=0 on every platform.
+_CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+
 
 def _run_headless_claude(prompt: str, *, timeout: int, model: Optional[str] = None) -> subprocess.CompletedProcess:
     """New, self-contained headless-claude subprocess primitive for this
@@ -115,7 +123,7 @@ def _run_headless_claude(prompt: str, *, timeout: int, model: Optional[str] = No
         cwd=str(Path(__file__).resolve().parent), env=env,
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, encoding="utf-8", errors="replace",
-        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+        creationflags=_CREATE_NEW_PROCESS_GROUP,
     )
     try:
         stdout, stderr = proc.communicate(input=prompt, timeout=timeout)

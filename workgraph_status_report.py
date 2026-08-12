@@ -376,6 +376,9 @@ Every project_id from the input array above must appear as a key in "judgments",
 """
 
 
+_CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)  # task #368 - Windows-only constant
+
+
 def _run_headless_claude(prompt: str, *, timeout: int, model: Optional[str] = None) -> subprocess.CompletedProcess:
     """Same real, hard-won subprocess contract as workgraph_synthesis_
     light._run_headless_claude (a fresh copy, not a shared import - see
@@ -393,7 +396,7 @@ def _run_headless_claude(prompt: str, *, timeout: int, model: Optional[str] = No
         cwd=str(Path(__file__).resolve().parent), env=env,
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, encoding="utf-8", errors="replace",
-        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+        creationflags=_CREATE_NEW_PROCESS_GROUP,
     )
     try:
         stdout, stderr = proc.communicate(input=prompt, timeout=timeout)

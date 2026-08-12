@@ -74,6 +74,9 @@ _PROMPT_MAX_CHARS = 90_000  # defensive cap on what actually goes in the prompt,
 _TIMEOUT_SECONDS = 240
 
 
+_CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)  # task #368 - Windows-only constant
+
+
 def _run_headless_claude(prompt: str, *, timeout: int, model: str | None = None) -> subprocess.CompletedProcess:
     """Self-contained tree-kill subprocess primitive, deliberately NOT
     imported from workgraph_pipeline2.py or ingest/scheduled_refresh.py -
@@ -118,7 +121,7 @@ def _run_headless_claude(prompt: str, *, timeout: int, model: str | None = None)
         cwd=str(Path(__file__).resolve().parent), env=env,
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, encoding="utf-8", errors="replace",
-        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+        creationflags=_CREATE_NEW_PROCESS_GROUP,
     )
     try:
         stdout, stderr = proc.communicate(input=prompt, timeout=timeout)

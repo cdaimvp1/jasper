@@ -285,6 +285,9 @@ def _parse_proposal(stdout: str) -> Optional[dict]:
     return None
 
 
+_CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)  # task #368 - Windows-only constant
+
+
 def _run_headless_claude(prompt: str, *, timeout: int, model: Optional[str] = None) -> subprocess.CompletedProcess:
     """Same self-contained subprocess-safety primitive as workgraph_
     pipeline2._run_headless_claude (CREATE_NEW_PROCESS_GROUP + taskkill
@@ -298,7 +301,7 @@ def _run_headless_claude(prompt: str, *, timeout: int, model: Optional[str] = No
     proc = subprocess.Popen(
         args, cwd=str(Path(__file__).resolve().parent), env=env,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+        creationflags=_CREATE_NEW_PROCESS_GROUP,
     )
     try:
         stdout, stderr = proc.communicate(timeout=timeout)

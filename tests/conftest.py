@@ -30,6 +30,28 @@ os.environ.setdefault("TEAM_CONFIG_DIR", str(BODY / "tests" / "_pytest_scratch" 
 import pytest
 
 
+def pytest_configure(config):
+    """Task #368: an external review's run of this same archive reported
+    302/14 against a 100%-clean local run - one suspected cause (besides
+    the CREATE_NEW_PROCESS_GROUP portability bug fixed in source this same
+    task) was "an uninitialized scratch DB". Confirmed live: the fallback
+    dir above (_FALLBACK_DATA_DIR, used only when nothing already set
+    TEAM_DATA_DIR) had real accumulated leftovers on this very machine -
+    dbg.db/dbg2.db/dbg3.db/workgraph.db/bus.db from old ad hoc `python -c`
+    debugging, none of it from any current test (every real test already
+    goes through ws_db/bus_db/isolated_paths below, each on its own
+    pytest tmp_path). Wiping this fallback dir once, here, before ANY test
+    runs, means whatever ends up in it (a test/helper that someday forgets
+    to override TEAM_DATA_DIR) always starts from a clean, deterministic
+    state - never from whatever a previous, unrelated run happened to
+    leave behind. A hook, not a fixture, so it can't be skipped by
+    collection order or -k filtering."""
+    import shutil
+    scratch_root = BODY / "tests" / "_pytest_scratch"
+    if scratch_root.exists():
+        shutil.rmtree(scratch_root, ignore_errors=True)
+
+
 @pytest.fixture(autouse=True)
 def _clear_nba_value_cache():
     """workgraph_nba._value_cache is intentionally process-global (see its

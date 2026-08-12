@@ -294,6 +294,29 @@ def judge_candidate(work_object_id: str, candidate_id: str, matched_signals: lis
     return _parse_verdict(proc.stdout)
 
 
+def _pair_key(a_id: str, b_id: str) -> str:
+    return ":".join(sorted((a_id, b_id)))
+
+
+def _evidence_hash_for_pair(work_object_id: str, candidate_id: str, matched_signals: list) -> str:
+    """Cheap (no LLM call) fingerprint of exactly what judge_candidate would
+    read for this pair right now - the same full_text_for_work_object reads
+    it makes internally, plus the matched-signal set. Used to decide
+    whether a previously-cached verdict (pair_judgment_cache) is still
+    trustworthy: the moment either side's real evidence changes, this hash
+    changes too, and the pair gets judged fresh rather than reusing a stale
+    answer (review point #4 - an unrelated/related_different_project/
+    ambiguous verdict on UNCHANGED evidence used to re-trigger the
+    identical LLM call every scheduled cycle for as long as the item stayed
+    ungrouped)."""
+    payload = {
+        "a": full_text_for_work_object(candidate_id),
+        "b": full_text_for_work_object(work_object_id),
+        "matched_signals": sorted(matched_signals),
+    }
+    return ws.canonical_json_hash(payload)
+
+
 def _precedent_context_line(precedent: Optional[str], issue: dict) -> Optional[str]:
     category = issue.get("category") or "this type of"
     if precedent == "confirmed":
@@ -385,8 +408,24 @@ def process_new_item(work_object_id: str, *, model: Optional[str] = "sonnet") ->
 
     judged = []  # list of (candidate, verdict)
     for candidate in candidates:
-        verdict = judge_candidate(work_object_id, candidate["candidate_id"], candidate["matched_signals"],
-                                   model=model, precedent_context=precedent_context)
+        # Review point #4: skip the LLM call entirely when this exact pair
+        # was already judged against evidence that hasn't changed since -
+        # see _evidence_hash_for_pair's own docstring. A cache miss (new
+        # pair, or evidence that's genuinely different now) always falls
+        # through to the real call below.
+        pair_key = _pair_key(work_object_id, candidate["candidate_id"])
+        evidence_hash = _evidence_hash_for_pair(work_object_id, candidate["candidate_id"], candidate["matched_signals"])
+        cached = ws.get_cached_judgment(pair_key)
+        if cached and cached["evidence_hash"] == evidence_hash:
+            verdict = cached["verdict"]
+        else:
+            verdict = judge_candidate(work_object_id, candidate["candidate_id"], candidate["matched_signals"],
+                                       model=model, precedent_context=precedent_context)
+            if verdict is not None:
+                # A None verdict (timeout/unparseable) is deliberately never
+                # cached - it's not a real answer worth remembering, and
+                # caching it would block a retry that might succeed next time.
+                ws.upsert_cached_judgment(pair_key, evidence_hash, verdict, model=model)
         judged.append((candidate, verdict))
 
     for candidate, verdict in judged:

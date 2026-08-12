@@ -3259,6 +3259,28 @@ def test_list_work_object_relationships_by_type(ws_db):
     assert ws_db.list_work_object_relationships_by_type("candidate")[0]["from_id"] == "wo-3"
 
 
+# --- pair_judgment_cache (review point #4, 2026-08-11) ----------------------
+
+def test_get_cached_judgment_returns_none_when_absent(ws_db):
+    assert ws_db.get_cached_judgment("wo-1:wo-2") is None
+
+
+def test_upsert_and_get_cached_judgment_round_trips(ws_db):
+    ws_db.upsert_cached_judgment("wo-1:wo-2", "hash-abc", "unrelated", model="sonnet")
+    cached = ws_db.get_cached_judgment("wo-1:wo-2")
+    assert cached["evidence_hash"] == "hash-abc"
+    assert cached["verdict"] == "unrelated"
+    assert cached["model"] == "sonnet"
+
+
+def test_upsert_cached_judgment_overwrites_prior_entry_for_same_pair(ws_db):
+    ws_db.upsert_cached_judgment("wo-1:wo-2", "hash-abc", "unrelated", model="sonnet")
+    ws_db.upsert_cached_judgment("wo-1:wo-2", "hash-def", "same_project", model="sonnet")
+    cached = ws_db.get_cached_judgment("wo-1:wo-2")
+    assert cached["evidence_hash"] == "hash-def"
+    assert cached["verdict"] == "same_project"
+
+
 # --- accuracy telemetry counters (task #304, item #4) -----------------------
 
 def test_count_merge_events_counts_issue_membership_assignments_in_window(ws_db):

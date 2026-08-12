@@ -1814,6 +1814,33 @@ def init_workgraph() -> None:
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_wor_type ON work_object_relationships(relationship_type)")
 
+            # --- Ambiguous/unrelated judgment fingerprint cache (2026-08-11,
+            # review point #4). process_new_item re-evaluates every
+            # candidate for any item still ungrouped on every scheduled
+            # pipeline run - a candidate pair that judge_candidate reads as
+            # unrelated/related_different_project/ambiguous used to re-ask
+            # the identical LLM question every single cycle for as long as
+            # the item stayed ungrouped, since no outcome besides a real
+            # merge wrote anything durable. Keyed on the pair (order-
+            # independent) plus a content hash of exactly what
+            # judge_candidate reads (both sides' full text + matched
+            # signals, via the same canonical_json_hash used elsewhere in
+            # this file) - a cache hit is only ever trusted when the hash
+            # still matches, so the moment either side's real evidence
+            # changes, the pair is judged fresh, never stuck on stale
+            # evidence. A None verdict (timeout/unparseable) is deliberately
+            # never written here by the caller - only a real, parsed
+            # verdict is worth remembering.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS pair_judgment_cache (
+                    pair_key       TEXT PRIMARY KEY,
+                    evidence_hash  TEXT NOT NULL,
+                    verdict        TEXT NOT NULL,
+                    model          TEXT,
+                    judged_ts      REAL NOT NULL
+                )
+            """)
+
             # --- Relationship vs. Project separation (2026-08-11, Marc's
             # explicit build authorization, item #1). A durable, NAMED
             # business relationship (e.g. "Sodalis") that can span multiple
@@ -6899,6 +6926,47 @@ def get_work_object_relationship(a_id: str, b_id: str) -> Optional[dict]:
         finally:
             conn.close()
     return dict(row) if row else None
+
+
+# --- pair_judgment_cache (2026-08-11, review point #4) ----------------------
+
+def get_cached_judgment(pair_key: str) -> Optional[dict]:
+    """Read-only lookup - the caller (workgraph_pipeline2.process_new_item)
+    decides whether the stored evidence_hash still matches today's evidence
+    before trusting the cached verdict; this function makes no freshness
+    judgment of its own."""
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM pair_judgment_cache WHERE pair_key = ?", (pair_key,)
+            ).fetchone()
+        finally:
+            conn.close()
+    return dict(row) if row else None
+
+
+def upsert_cached_judgment(pair_key: str, evidence_hash: str, verdict: str, *,
+                            model: Optional[str] = None, now: Optional[float] = None) -> None:
+    """Overwrites any prior cached verdict for this pair unconditionally -
+    the caller only ever calls this with a freshly-computed evidence_hash,
+    so the new row is always the more current one."""
+    now = now if now is not None else time.time()
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                """INSERT INTO pair_judgment_cache (pair_key, evidence_hash, verdict, model, judged_ts)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(pair_key) DO UPDATE SET
+                       evidence_hash = excluded.evidence_hash,
+                       verdict = excluded.verdict,
+                       model = excluded.model,
+                       judged_ts = excluded.judged_ts""",
+                (pair_key, evidence_hash, verdict, model, now),
+            )
+        finally:
+            conn.close()
 
 
 def list_pending_work_object_relationships(limit: int = 1000) -> list[dict]:

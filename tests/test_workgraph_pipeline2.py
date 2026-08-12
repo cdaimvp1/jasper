@@ -510,6 +510,76 @@ def test_process_new_item_judges_every_candidate_before_deciding(ws_db, isolated
     assert calls["n"] == 2  # 2 judgment calls (unrelated, then same_project)
 
 
+# --- pair_judgment_cache (review point #4, 2026-08-11) --------------------
+# An "ambiguous" outcome is the one case that leaves the item genuinely
+# ungrouped (project_id stays NULL) after process_new_item returns, so it's
+# the only outcome a later pipeline cycle would ever re-process the SAME
+# item against - exactly the repeated-LLM-call scenario this cache exists
+# to short-circuit.
+
+def test_process_new_item_ambiguous_second_call_reuses_cache_no_new_llm_calls(ws_db, isolated_paths, monkeypatch):
+    a = _issue(ws_db, "Requested approval for Veeva CRM press release")
+    _link_party(ws_db, a, "shared_party", "rep@acme.com", company="Acme")
+    b = _issue(ws_db, "MARC REVIEW REQUESTED: Veeva CRM press release quote")
+    _link_party(ws_db, b, "shared_party", "rep@acme.com", company="Acme")
+    project_x = ws_db.create_project_with_new_id(name="Project X", category="other")
+    ws_db.assign_issue_to_project(b, project_x)
+    c = _issue(ws_db, "Please review Veeva CRM press release terms")
+    _link_party(ws_db, c, "shared_party", "rep@acme.com", company="Acme")
+    project_y = ws_db.create_project_with_new_id(name="Project Y", category="other")
+    ws_db.assign_issue_to_project(c, project_y)
+
+    calls = {"n": 0}
+
+    def fake_popen(*a_, **kw):
+        calls["n"] += 1
+        return _FakeProcess("VERDICT: same_project\n")
+    monkeypatch.setattr(p2.subprocess, "Popen", fake_popen)
+
+    first = p2.process_new_item(a)
+    assert first["action"] == "ambiguous"
+    assert calls["n"] == 2  # one real LLM call per candidate (b, c)
+
+    second = p2.process_new_item(a)
+    assert second["action"] == "ambiguous"
+    assert set(second["candidate_project_ids"]) == {project_x, project_y}
+    assert calls["n"] == 2  # unchanged evidence - both pairs served from cache, no new calls
+    assert ws_db.get_issue(a)["project_id"] is None
+
+
+def test_process_new_item_ambiguous_cache_invalidated_when_evidence_changes(ws_db, isolated_paths, monkeypatch):
+    a = _issue(ws_db, "Requested approval for Veeva CRM press release")
+    _link_party(ws_db, a, "shared_party", "rep@acme.com", company="Acme")
+    b = _issue(ws_db, "MARC REVIEW REQUESTED: Veeva CRM press release quote")
+    _link_party(ws_db, b, "shared_party", "rep@acme.com", company="Acme")
+    project_x = ws_db.create_project_with_new_id(name="Project X", category="other")
+    ws_db.assign_issue_to_project(b, project_x)
+    c = _issue(ws_db, "Please review Veeva CRM press release terms")
+    _link_party(ws_db, c, "shared_party", "rep@acme.com", company="Acme")
+    project_y = ws_db.create_project_with_new_id(name="Project Y", category="other")
+    ws_db.assign_issue_to_project(c, project_y)
+    _mock_claude(monkeypatch, "VERDICT: same_project\n")
+
+    first = p2.process_new_item(a)
+    assert first["action"] == "ambiguous"
+
+    # New evidence lands on `a` between cycles - real, substantive content
+    # change to the "new item" side of every pair this candidate set has.
+    _raw_item(ws_db, a, "Follow-up on Veeva CRM press release", "a-followup",
+              body_preview="Adding new context that changes the evidence.")
+
+    calls = {"n": 0}
+
+    def fake_popen(*a_, **kw):
+        calls["n"] += 1
+        return _FakeProcess("VERDICT: same_project\n")
+    monkeypatch.setattr(p2.subprocess, "Popen", fake_popen)
+
+    second = p2.process_new_item(a)
+    assert second["action"] == "ambiguous"
+    assert calls["n"] == 2  # evidence_hash changed for both pairs - real calls made again
+
+
 # --- process_new_item Total Recall precedent (2026-08-07, rewritten 2026-08-11) --
 # workgraph_lessons.precedent_prefilter is keyed on the NEW item's own
 # category+company situation, not a specific pair - see process_new_item's

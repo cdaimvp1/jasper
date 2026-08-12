@@ -499,6 +499,81 @@ def test_judge_candidates_caps_and_ranks_by_matched_signal_count(ws_db, isolated
     assert f"{p2._MAX_COMPARATIVE_CANDIDATES}-candidate" in captured.out
 
 
+# --- task #364: aggregate candidates by parent Project before judgment ----
+
+def test_aggregate_candidates_by_project_collapses_same_project_siblings(ws_db, isolated_paths):
+    a = _issue(ws_db, "Deal A")
+    project_x = ws_db.create_project_with_new_id(name="Project X", category="other")
+    sib1 = _issue(ws_db, "Sibling 1")
+    ws_db.assign_issue_to_project(sib1, project_x)
+    sib2 = _issue(ws_db, "Sibling 2")
+    ws_db.assign_issue_to_project(sib2, project_x)
+    standalone = _issue(ws_db, "Standalone, no project yet")
+
+    candidates = [
+        {"candidate_id": sib1, "matched_signals": ["supplier"]},
+        {"candidate_id": sib2, "matched_signals": ["supplier", "stakeholder"]},
+        {"candidate_id": standalone, "matched_signals": ["supplier"]},
+    ]
+
+    aggregated = p2._aggregate_candidates_by_project(candidates)
+
+    assert len(aggregated) == 2  # sib1+sib2 collapsed to one slot, standalone untouched
+    by_id = {c["candidate_id"]: c for c in aggregated}
+    assert standalone in by_id
+    # the richer sibling (2 matched signals) is the representative
+    assert sib2 in by_id
+    assert sib1 not in by_id
+    # matched_signals on the survivor is the UNION across both siblings
+    assert sorted(by_id[sib2]["matched_signals"]) == ["stakeholder", "supplier"]
+
+
+def test_aggregate_candidates_by_project_leaves_standalone_candidates_untouched(ws_db, isolated_paths):
+    a = _issue(ws_db, "Deal A")
+    b = _issue(ws_db, "Deal B, no project yet")
+    c = _issue(ws_db, "Deal C, no project yet")
+    candidates = [
+        {"candidate_id": b, "matched_signals": ["supplier"]},
+        {"candidate_id": c, "matched_signals": ["stakeholder"]},
+    ]
+
+    aggregated = p2._aggregate_candidates_by_project(candidates)
+
+    assert _sorted_candidates(aggregated) == _sorted_candidates(candidates)
+
+
+def test_judge_candidates_aggregates_same_project_siblings_into_one_slot(ws_db, isolated_paths, monkeypatch):
+    """Task #364: 3 Issues that ALREADY share one Project must consume only
+    ONE of judge_candidates' comparative-prompt slots, not 3 - confirmed by
+    inspecting the real rendered prompt for exactly one CANDIDATE block."""
+    a = _issue(ws_db, "Deal A")
+    _raw_item(ws_db, a, "Subject A", "ka", body_preview="Full text of item A")
+    project_x = ws_db.create_project_with_new_id(name="Project X", category="other")
+    sibs = []
+    for i in range(3):
+        sib = _issue(ws_db, f"Sibling {i}")
+        _raw_item(ws_db, sib, f"Subject sib {i}", f"ksib{i}", body_preview=f"Full text of sibling {i}")
+        ws_db.assign_issue_to_project(sib, project_x)
+        sibs.append(sib)
+    candidates = [{"candidate_id": s, "matched_signals": ["supplier"]} for s in sibs]
+    captured = {}
+
+    def fake_popen(*a_, **kw):
+        proc = _FakeProcess("MATCH: 1\nVERDICT: same_project\n")
+        captured["proc"] = proc
+        return proc
+
+    monkeypatch.setattr(p2.subprocess, "Popen", fake_popen)
+
+    result = p2.judge_candidates(a, candidates)
+
+    prompt = captured["proc"].sent_input
+    assert prompt.count("CANDIDATE 1") == 1
+    assert "CANDIDATE 2" not in prompt  # the 2 other siblings never got their own slot
+    assert result["status"] == "match"
+    assert result["candidate"]["candidate_id"] in sibs  # still resolves to a real member of Project X
+
+
 # --- process_new_item (the real step 3->4 orchestration) ------------------
 
 def test_process_new_item_merges_immediately_on_yes(ws_db, isolated_paths, monkeypatch):

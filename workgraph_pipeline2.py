@@ -291,6 +291,61 @@ def find_candidates(work_object_id: str, issue: Optional[dict] = None) -> list[d
 
 _MAX_COMPARATIVE_CANDIDATES = 8
 
+
+def _aggregate_candidates_by_project(candidates: list) -> list:
+    """Task #364: buckets candidates that already share the same parent
+    Project into a single comparative-prompt slot before ranking/capping,
+    so N sibling Issues under one already-established Project don't each
+    independently consume one of the _MAX_COMPARATIVE_CANDIDATES slots -
+    which could both push a real candidate from a DIFFERENT project out of
+    the capped set and waste tokens showing the model near-duplicate
+    evidence for what is, from the "which Project is this" question's own
+    point of view, a single answer.
+
+    GUARDRAIL (ROADMAP.md "Standing guardrail: the 2-point candidate-
+    detection gate is load-bearing"): every candidate passed in here has
+    ALREADY passed find_candidates' >=2-matched-point gate - this function
+    never re-examines or loosens that gate, it only changes how many
+    prompt slots already-gated candidates consume.
+
+    Candidates with no project_id (a raw cluster, or another Issue that
+    hasn't been grouped yet) are never bucketed with anything - there is
+    no parent Project to aggregate them under, so they pass through
+    unchanged, one slot each, exactly as before this task.
+
+    Representative per project bucket = the single member with the most
+    matched real data points (ties broken by candidate_id for determinism)
+    - the richest single piece of evidence for that project is what gets
+    read in full by judge_candidates. matched_signals on the returned
+    candidate is the UNION of every bucketed member's matched signals, so
+    the comparative prompt's own match-count line reflects the full
+    strength of the project's evidence, not just the one representative
+    Issue's slice of it. Whichever Issue ends up as the representative,
+    process_new_item's merge_issues call still resolves to the SAME
+    Project either way (merge_issues joins whichever side already has a
+    project_id) - this never changes which Project a "same_project"
+    verdict lands in, only which slot/evidence the model saw to get there."""
+    by_project: dict = {}
+    standalone = []
+    for c in candidates:
+        obj = ws.get_issue_or_cluster(c["candidate_id"])
+        project_id = (obj or {}).get("project_id")
+        if project_id:
+            by_project.setdefault(project_id, []).append(c)
+        else:
+            standalone.append(c)
+
+    aggregated = list(standalone)
+    for members in by_project.values():
+        representative = max(
+            sorted(members, key=lambda m: m["candidate_id"]),
+            key=lambda m: len(m["matched_signals"]),
+        )
+        union_signals = sorted(set().union(*(set(m["matched_signals"]) for m in members)))
+        aggregated.append({**representative, "matched_signals": union_signals})
+    return aggregated
+
+
 _CANDIDATE_BLOCK_TEMPLATE = """CANDIDATE {index} (already tracked - shares {match_count} real data point(s): {matched_signals}):
 {text}"""
 
@@ -397,7 +452,12 @@ def judge_candidates(work_object_id: str, candidates: list, *, model: Optional[s
     to a real candidate_id.
 
     Reads via build_identity_packet for every side, not a plain full-text
-    slice (review point #6/#9) - see that function's own docstring."""
+    slice (review point #6/#9) - see that function's own docstring.
+
+    Task #364: candidates are bucketed by parent Project (_aggregate_
+    candidates_by_project) BEFORE ranking/capping - see that function's
+    own docstring for why and its guardrail note."""
+    candidates = _aggregate_candidates_by_project(candidates)
     ranked = sorted(candidates, key=lambda c: -len(c["matched_signals"]))
     capped = ranked[:_MAX_COMPARATIVE_CANDIDATES]
     skipped = len(ranked) - len(capped)

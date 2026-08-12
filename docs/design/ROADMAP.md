@@ -55,6 +55,68 @@ shipping.
 
 ---
 
+## External architecture review #2 (2026-08-12) — findings and status
+
+A second external review, run against the current codebase (post tasks
+#354-381) plus the published VP pre-read artifact. Framed everything not
+yet built as known roadmap work, not as newly-discovered defects — and
+concluded the core architecture does not need to be redesigned. Every
+concrete, checkable claim below was independently verified against the
+live code before being recorded here (not taken on the review's word
+alone); see tasks #382-386 for the resulting queued work.
+
+**Corroborated, not new**: semantic-accuracy evaluation being the single
+highest-leverage open item (matches Track C.11 exactly, including a
+similar 20-50-example starting-corpus size), the FK/migration debt found
+by task #365's own audit (the review's own count — 19 FK columns across
+17 tables — matches that audit precisely), and the Scale A/Scale B
+framing in the pre-read (the review explicitly endorsed keeping this,
+not softening it).
+
+**New, verified findings** (see the individual tasks for full detail
+and file/line references):
+- **#382**: `_MAX_COMPARATIVE_CANDIDATES = 8` in `workgraph_pipeline2.py`
+  silently drops the 9th+ candidate past the cap rather than abstaining
+  - correctly logged (task #347), but observability isn't correctness.
+  A rare unresolved item is safer than a confident wrong merge past the
+  cap.
+- **#383**: hardcoded single-user semantics go deeper than vocabulary -
+  `workgraph_store.py:3558`'s `owner: str = "marc"` is a literal
+  production-code default, not just a test fixture, and the same
+  literal appears across ~28 files. `workgraph_classify.py`'s
+  `TOPIC_RULES` has 9 explicitly procurement-flavored categories. The
+  generalization story is better stated as "domain-agnostic
+  architecture, procurement- and single-user-specific current
+  configuration" than "just a config/vocabulary layer."
+- **#384**: 6 specific overclaims in the published pre-read artifact,
+  each verified - most notably "no LLM involved in getting data in,"
+  which is false for Teams/Calendar/SharePoint (`run_relay_oneshot`
+  genuinely spawns a headless `claude -p` to operate the M365
+  connector) - flagged as the single statement most likely to be caught
+  live by a technical audience. Also missing: an explicit "the ask"
+  slide - the pre-read explains Jasper well but never states what
+  decision the presentation wants leadership to make.
+- **#385**: reported (not yet independently reproduced here - no Linux
+  environment available in this session) cross-platform test
+  hermeticity gaps distinct from task #368's Windows-focused fixes:
+  missing optional packages (`watchdog`, MCP) in a Linux run, a
+  Windows-absolute-path assumption that may not hold under Linux
+  `pathlib`, and possibly-uninitialized-DB test dependencies in
+  `test_workgraph_projects.py`. Framed correctly by the review as
+  hermeticity issues, not evidence of a real runtime failure on
+  Jasper's actual Windows target.
+- **#386**: pure hygiene - exactly 13 files (confirmed via direct grep)
+  carry a stale `2026-08-13` docstring/comment date inherited from an
+  earlier review pass, one day after "today" at the time; undercuts
+  the pre-read's own "traceable as of 2026-08-12" claim. Also general,
+  not-yet-itemized ROADMAP.md drift against already-shipped fixes.
+
+**Trigger to revisit any of #382-386**: Marc's own explicit go-ahead,
+same as everything else on this roadmap. None of these were built as
+part of processing this review.
+
+---
+
 ## Track C.11 — labeled judgment corpus + end-to-end simulation test (HELD)
 
 Originally scoped in the 2026-08-11 design plan (`goofy-jingling-owl.md`,

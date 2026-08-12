@@ -496,6 +496,171 @@ def test_identity_conflict_never_reassigns_or_merges_anything(ws_db):
     assert ws_db.get_issue(issue_b)["project_id"] == project_b
 
 
+# --- task #369 broadening: shared document lineage --------------------------
+# Same conflict posture as the pr_number_base checks above, applied to a
+# real, already-tracked artifact_lineages chain (task #119/#122) instead of
+# a deterministic reference number.
+
+def _issue_attachment(ws_db, issue_id, filename, sha256_hex):
+    return ws_db.create_attachment(
+        entity_type="issue", entity_id=issue_id, kind="reference", filename=filename,
+        stored_path=filename, content_type="application/pdf", size_bytes=10,
+        sha256_hex=sha256_hex, uploaded_by="outlook_ingest",
+    )
+
+
+def test_identity_conflict_flagged_when_shared_document_lineage_spans_two_projects(ws_db):
+    project_a = ws_db.create_project_with_new_id(name="Project A", category="other")
+    project_b = ws_db.create_project_with_new_id(name="Project B", category="other")
+    issue_a = _issue(ws_db, state="active")
+    issue_b = _issue(ws_db, state="active")
+    ws_db.assign_issue_to_project(issue_a, project_a, reason="test")
+    ws_db.assign_issue_to_project(issue_b, project_b, reason="test")
+    _issue_attachment(ws_db, issue_a, "SOW.pdf", "sha-doc-1")
+    _issue_attachment(ws_db, issue_b, "SOW.pdf", "sha-doc-1")
+
+    conflicts = wr.list_identity_conflicts_from_shared_document_lineage()
+
+    assert len(conflicts) == 1
+    flagged_project_ids = {p["project_id"] for p in conflicts[0]["projects"]}
+    assert flagged_project_ids == {project_a, project_b}
+    # Flows through the same union'd entry point the API route calls.
+    all_conflicts = wr.list_identity_conflicts_across_grouped_projects()
+    assert any(c.get("lineage_id") for c in all_conflicts)
+
+
+def test_identity_conflict_not_flagged_for_document_lineage_when_both_issues_in_same_project(ws_db):
+    project = ws_db.create_project_with_new_id(name="Same project", category="other")
+    issue_a = _issue(ws_db, state="active")
+    issue_b = _issue(ws_db, state="active")
+    ws_db.assign_issue_to_project(issue_a, project, reason="test")
+    ws_db.assign_issue_to_project(issue_b, project, reason="test")
+    _issue_attachment(ws_db, issue_a, "SOW.pdf", "sha-doc-2")
+    _issue_attachment(ws_db, issue_b, "SOW.pdf", "sha-doc-2")
+
+    assert wr.list_identity_conflicts_from_shared_document_lineage() == []
+
+
+def test_identity_conflict_not_flagged_for_document_lineage_when_only_one_issue_grouped(ws_db):
+    project = ws_db.create_project_with_new_id(name="Project", category="other")
+    issue_a = _issue(ws_db, state="active")
+    issue_b = _issue(ws_db, state="active")
+    ws_db.assign_issue_to_project(issue_a, project, reason="test")
+    _issue_attachment(ws_db, issue_a, "SOW.pdf", "sha-doc-3")
+    _issue_attachment(ws_db, issue_b, "SOW.pdf", "sha-doc-3")
+
+    assert wr.list_identity_conflicts_from_shared_document_lineage() == []
+
+
+# --- task #369 broadening: newly-discovered exclusive identifier ------------
+# CONFIRMED, non-fast-tracked point_type='reference' definitions only - the
+# one discovered point_type carrying the same "shared value means same
+# real-world thing" guarantee pr_number_base already gets trusted for.
+
+def _confirmed_reference_definition(ws_db, def_id):
+    ws_db.create_data_point_definition(
+        id=def_id, name="Case number", description="a discovered case number",
+        point_type="reference", deterministic_rule=None, discovered_from="test", status="confirmed",
+    )
+    return def_id
+
+
+def test_identity_conflict_flagged_when_discovered_reference_value_spans_two_projects(ws_db):
+    project_a = ws_db.create_project_with_new_id(name="Project A", category="other")
+    project_b = ws_db.create_project_with_new_id(name="Project B", category="other")
+    issue_a = _issue(ws_db, state="active")
+    issue_b = _issue(ws_db, state="active")
+    ws_db.assign_issue_to_project(issue_a, project_a, reason="test")
+    ws_db.assign_issue_to_project(issue_b, project_b, reason="test")
+    def_id = _confirmed_reference_definition(ws_db, "dp-case-number")
+    ws_db.record_data_point_value(definition_id=def_id, work_object_id=issue_a, value="CASE-9001",
+                                   extraction_source="deterministic")
+    ws_db.record_data_point_value(definition_id=def_id, work_object_id=issue_b, value="CASE-9001",
+                                   extraction_source="deterministic")
+
+    conflicts = wr.list_identity_conflicts_from_discovered_reference_points()
+
+    assert len(conflicts) == 1
+    assert conflicts[0]["discovered_value"] == "CASE-9001"
+    flagged_project_ids = {p["project_id"] for p in conflicts[0]["projects"]}
+    assert flagged_project_ids == {project_a, project_b}
+    all_conflicts = wr.list_identity_conflicts_across_grouped_projects()
+    assert any(c.get("discovered_definition_id") == def_id for c in all_conflicts)
+
+
+def test_identity_conflict_not_flagged_for_discovered_reference_when_same_project(ws_db):
+    project = ws_db.create_project_with_new_id(name="Same project", category="other")
+    issue_a = _issue(ws_db, state="active")
+    issue_b = _issue(ws_db, state="active")
+    ws_db.assign_issue_to_project(issue_a, project, reason="test")
+    ws_db.assign_issue_to_project(issue_b, project, reason="test")
+    def_id = _confirmed_reference_definition(ws_db, "dp-case-number-2")
+    ws_db.record_data_point_value(definition_id=def_id, work_object_id=issue_a, value="CASE-9002",
+                                   extraction_source="deterministic")
+    ws_db.record_data_point_value(definition_id=def_id, work_object_id=issue_b, value="CASE-9002",
+                                   extraction_source="deterministic")
+
+    assert wr.list_identity_conflicts_from_discovered_reference_points() == []
+
+
+def test_identity_conflict_not_flagged_for_discovered_reference_when_only_one_issue_grouped(ws_db):
+    project = ws_db.create_project_with_new_id(name="Project", category="other")
+    issue_a = _issue(ws_db, state="active")
+    issue_b = _issue(ws_db, state="active")
+    ws_db.assign_issue_to_project(issue_a, project, reason="test")
+    def_id = _confirmed_reference_definition(ws_db, "dp-case-number-3")
+    ws_db.record_data_point_value(definition_id=def_id, work_object_id=issue_a, value="CASE-9003",
+                                   extraction_source="deterministic")
+    ws_db.record_data_point_value(definition_id=def_id, work_object_id=issue_b, value="CASE-9003",
+                                   extraction_source="deterministic")
+
+    assert wr.list_identity_conflicts_from_discovered_reference_points() == []
+
+
+def test_identity_conflict_ignores_fasttrack_reference_definition(ws_db):
+    """dp-fasttrack-reference is literally the same PR/PO signal
+    pr_number_base already reports via the existing check - this new check
+    must not re-flag the same real-world collision under a second name."""
+    project_a = ws_db.create_project_with_new_id(name="Project A", category="other")
+    project_b = ws_db.create_project_with_new_id(name="Project B", category="other")
+    issue_a = _issue(ws_db, state="active")
+    issue_b = _issue(ws_db, state="active")
+    ws_db.assign_issue_to_project(issue_a, project_a, reason="test")
+    ws_db.assign_issue_to_project(issue_b, project_b, reason="test")
+    ws_db.create_data_point_definition(
+        id="dp-fasttrack-reference", name="PR/PO reference number", description="d",
+        point_type="reference", deterministic_rule=None, discovered_from="fast-tracked", status="confirmed",
+    )
+    ws_db.record_data_point_value(definition_id="dp-fasttrack-reference", work_object_id=issue_a,
+                                   value="PR12345", extraction_source="deterministic")
+    ws_db.record_data_point_value(definition_id="dp-fasttrack-reference", work_object_id=issue_b,
+                                   value="PR12345", extraction_source="deterministic")
+
+    assert wr.list_identity_conflicts_from_discovered_reference_points() == []
+
+
+def test_identity_conflict_ignores_proposed_not_yet_confirmed_reference_definition(ws_db):
+    """A 'proposed' definition has no human confirm behind it yet - same
+    gate workgraph_discovery.matched_discovered_points itself requires
+    before it will read any discovered definition at all."""
+    project_a = ws_db.create_project_with_new_id(name="Project A", category="other")
+    project_b = ws_db.create_project_with_new_id(name="Project B", category="other")
+    issue_a = _issue(ws_db, state="active")
+    issue_b = _issue(ws_db, state="active")
+    ws_db.assign_issue_to_project(issue_a, project_a, reason="test")
+    ws_db.assign_issue_to_project(issue_b, project_b, reason="test")
+    ws_db.create_data_point_definition(
+        id="dp-case-number-4", name="Case number", description="d",
+        point_type="reference", deterministic_rule=None, discovered_from="test", status="proposed",
+    )
+    ws_db.record_data_point_value(definition_id="dp-case-number-4", work_object_id=issue_a,
+                                   value="CASE-9004", extraction_source="deterministic")
+    ws_db.record_data_point_value(definition_id="dp-case-number-4", work_object_id=issue_b,
+                                   value="CASE-9004", extraction_source="deterministic")
+
+    assert wr.list_identity_conflicts_from_discovered_reference_points() == []
+
+
 def test_merge_stray_clusters_skips_groups_with_only_clusters(ws_db):
     """Two clusters sharing a reference with no promoted issue yet is
     normal pre-promotion state, not this sweep's job - leave it for

@@ -268,7 +268,25 @@ def list_identity_conflicts_across_grouped_projects() -> list[dict]:
     silently dropped. Never reassigns or merges anything itself - this
     only ever informs, matching the "no permanent veto, no silent auto-
     move" philosophy workgraph_pipeline2.py already applies everywhere
-    else in the grouping pipeline."""
+    else in the grouping pipeline.
+
+    Task #369 broadening: this function's own pr_number_base logic below
+    is UNCHANGED - two more equally-conservative, equally read-only
+    identity-conflict checks (list_identity_conflicts_from_shared_
+    document_lineage, list_identity_conflicts_from_discovered_reference_
+    points, both further down this module) are unioned in below before
+    the final sort, so /api/workgraph/identity-conflict-audit's existing
+    caller sees every conflict type through this one same route with no
+    server_lean.py change needed. A third candidate broadening idea - an
+    explicit "this continues Project X" statement found in evidence - was
+    deliberately deferred: unlike the two added here, no existing
+    claim_type/signal_type already captures that statement (checked
+    workgraph_claims.py's claim taxonomy and workgraph_signals.py's
+    REQUEST_TO_CLOSURE_SIGNAL-style structured signals), so building it
+    would mean a whole new curator-extraction pass (the same weight as
+    resolution_signals' own explicit_resolution_signal evidence type,
+    task #304 item #5) - more than this pass's small-medium effort
+    budget, flagged as a real followup rather than rushed."""
     groups = ws.list_pr_number_base_groups_spanning_multiple_open_work_objects()
     conflicts = []
     for pr_number_base, members in groups.items():
@@ -285,6 +303,95 @@ def list_identity_conflicts_across_grouped_projects() -> list[dict]:
             continue  # all real issues resolve to the same project (or none grouped yet) - not a conflict
         conflicts.append({
             "pr_number_base": pr_number_base,
+            "projects": [{"project_id": pid, "issue_ids": iids} for pid, iids in by_project.items()],
+        })
+    conflicts.extend(list_identity_conflicts_from_shared_document_lineage())
+    conflicts.extend(list_identity_conflicts_from_discovered_reference_points())
+    conflicts.sort(key=lambda c: len(c["projects"]), reverse=True)
+    return conflicts
+
+
+def _by_project_for_grouped_real_issues(work_object_ids: list[str]) -> dict[str, list[str]]:
+    """Shared resolution step for the two NEW identity-conflict checks
+    below (task #369) - given a set of candidate work_object_ids, keeps
+    only the ones that resolve to a REAL issue (ws.get_issue() excludes
+    raw clusters and non-issue work objects by construction) that's
+    already been grouped into a project, then buckets by project_id.
+    Mirrors list_identity_conflicts_across_grouped_projects' own inline
+    pr_number_base resolution exactly - factored out here only for the
+    new checks; that original block above is left untouched."""
+    by_project: dict[str, list[str]] = {}
+    for work_object_id in work_object_ids:
+        issue = ws.get_issue(work_object_id)
+        project_id = (issue or {}).get("project_id")
+        if project_id:
+            by_project.setdefault(project_id, []).append(work_object_id)
+    return by_project
+
+
+def list_identity_conflicts_from_shared_document_lineage() -> list[dict]:
+    """Task #369 broadening #1: "shared unique document lineage" - the
+    SAME artifact_lineages/artifact_versions chain (task #119/#122)
+    workgraph_projects._matched_data_points already trusts as its
+    "document" point (a real, byte-identical attachment appearing in two
+    places), checked retroactively across already-grouped issues, the
+    same posture list_identity_conflicts_across_grouped_projects already
+    applies to pr_number_base. Read-only, live-computed every call,
+    never merges or reassigns anything - same discipline as every other
+    check in this module.
+
+    A lineage only ever forms from a real sha256 match (create_
+    attachment's own live hook, or backfill_artifact_lineages) - two
+    genuinely different documents never land in the same lineage, so
+    this needs no extra similarity threshold beyond the resolve-to-two-
+    different-projects gate every check here shares. See workgraph_
+    store.list_artifact_lineages_spanning_multiple_work_objects for the
+    read side."""
+    groups = ws.list_artifact_lineages_spanning_multiple_work_objects()
+    conflicts = []
+    for lineage_id, work_object_ids in groups.items():
+        by_project = _by_project_for_grouped_real_issues(work_object_ids)
+        if len(by_project) < 2:
+            continue
+        lineage = ws.get_artifact_lineage(lineage_id)
+        conflicts.append({
+            "lineage_id": lineage_id,
+            "document_title": lineage.get("title") if lineage else None,
+            "projects": [{"project_id": pid, "issue_ids": iids} for pid, iids in by_project.items()],
+        })
+    conflicts.sort(key=lambda c: len(c["projects"]), reverse=True)
+    return conflicts
+
+
+def list_identity_conflicts_from_discovered_reference_points() -> list[dict]:
+    """Task #369 broadening #2: "a newly-discovered exclusive identifier
+    shared across two Projects" - the discovered-vocabulary mechanism's
+    (task #212-217/#266) own point_type='reference' definitions, the one
+    discovered point_type carrying the same "shared value means same
+    real-world thing" guarantee pr_number_base already gets trusted for.
+    The other five point types (entity/amount/person/date/freetext) carry
+    no such guarantee - workgraph_projects._matched_data_points itself
+    never treats any of them as standalone-sufficient, only as one of
+    several contributing points to a scored candidate decision, so
+    flagging a shared value there as an identity CONFLICT would trust it
+    more than the rest of the system already does; deliberately excluded
+    to stay conservative. CONFIRMED, non-fast-tracked definitions only -
+    see workgraph_store.list_confirmed_discovered_reference_value_groups_
+    spanning_multiple_work_objects's own docstring for the full reasoning
+    (including why dp-fasttrack-reference itself is excluded - it's the
+    same signal pr_number_base already reports). Read-only, live-
+    computed every call, never merges or reassigns anything."""
+    groups = ws.list_confirmed_discovered_reference_value_groups_spanning_multiple_work_objects()
+    conflicts = []
+    for (definition_id, value), work_object_ids in groups.items():
+        by_project = _by_project_for_grouped_real_issues(work_object_ids)
+        if len(by_project) < 2:
+            continue
+        definition = ws.get_data_point_definition(definition_id)
+        conflicts.append({
+            "discovered_definition_id": definition_id,
+            "discovered_definition_name": definition.get("name") if definition else None,
+            "discovered_value": value,
             "projects": [{"project_id": pid, "issue_ids": iids} for pid, iids in by_project.items()],
         })
     conflicts.sort(key=lambda c: len(c["projects"]), reverse=True)

@@ -9535,6 +9535,61 @@ def list_work_object_ids_for_data_point_value(definition_id: str, value: str) ->
     return [r["work_object_id"] for r in rows]
 
 
+def list_confirmed_discovered_reference_value_groups_spanning_multiple_work_objects() -> dict[tuple[str, str], list[str]]:
+    """Task #369's identity-conflict broadening (workgraph_reconcile.
+    list_identity_conflicts_across_grouped_projects) - the read side for
+    "a newly-discovered exclusive identifier shared across two Projects,"
+    mirroring list_pr_number_base_groups_spanning_multiple_open_work_
+    objects' own shape one layer up in the discovered-vocabulary system
+    (task #212-217/#266) instead of the hardcoded PR/PO extractor.
+
+    Scoped to point_type='reference' ONLY - per the LLM proposal prompt's
+    own definition of that type (workgraph_discovery._PROPOSAL_PROMPT_
+    TEMPLATE: "a unique lookup ID that, if two messages share it,
+    definitely means the same real-world thing"), the one discovered
+    point_type carrying the same "shared value implies same real-world
+    identity" guarantee pr_number_base already gets trusted for. The
+    other five point types (entity/amount/person/date/freetext) carry no
+    such guarantee - workgraph_projects._matched_data_points itself never
+    treats any of them as standalone-sufficient, only as one of several
+    contributing points to a scored candidate decision, so surfacing a
+    shared value there as an identity CONFLICT would trust it more than
+    the rest of the system already does. status='confirmed' only - a
+    'proposed' definition has no human confirm behind it yet (same gate
+    matched_discovered_points itself requires).
+
+    Excludes every dp-fasttrack-* id, including dp-fasttrack-reference
+    itself (Marc's own seeded PR/PO field, task #217) - that one is the
+    exact same signal raw_items.pr_number_base already is, so including
+    it here would just re-flag the same PR/PO collision the existing
+    pr_number_base check already reports, under a second name. "Newly
+    discovered" here means genuinely discovered through the vocabulary
+    mechanism, not fast-tracked - the same non_fasttrack filter
+    workgraph_discovery.matched_discovered_points itself already applies.
+
+    Returns {(definition_id, value): [work_object_id, ...]} for every
+    (definition, value) pair recorded against 2+ DISTINCT work objects -
+    reconcile.py resolves those ids to real issues/projects the same way
+    it already does for pr_number_base groups."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute("""
+                SELECT DISTINCT dpv.definition_id AS definition_id, dpv.value AS value,
+                       dpv.work_object_id AS work_object_id
+                FROM data_point_values dpv
+                JOIN data_point_definitions d ON d.id = dpv.definition_id
+                WHERE d.status = 'confirmed' AND d.point_type = 'reference'
+                      AND d.id NOT LIKE 'dp-fasttrack-%'
+            """).fetchall()
+        finally:
+            conn.close()
+    groups: dict[tuple[str, str], set[str]] = {}
+    for row in rows:
+        groups.setdefault((row["definition_id"], row["value"]), set()).add(row["work_object_id"])
+    return {k: sorted(v) for k, v in groups.items() if len(v) > 1}
+
+
 def list_data_point_values_for_definition(definition_id: str) -> list[dict]:
     """Task #331 - every (work_object_id, value) row for one definition,
     for the two match dimensions the plain-equality lookup above can't
@@ -10724,6 +10779,52 @@ def list_other_occurrences_for_attachment(attachment_id: int) -> list[dict]:
         })
     out.sort(key=lambda o: o["uploaded_ts"])
     return out
+
+
+def list_artifact_lineages_spanning_multiple_work_objects() -> dict[str, list[str]]:
+    """Task #369's identity-conflict broadening (workgraph_reconcile.
+    list_identity_conflicts_across_grouped_projects) - the read side for
+    "shared unique document lineage," mirroring list_pr_number_base_
+    groups_spanning_multiple_open_work_objects' own shape one section up
+    in the design doc's own point-type taxonomy: workgraph_projects.
+    _matched_data_points already treats accepted_lineages overlap as its
+    "document" point (real, byte-identical attachment content spanning
+    two work objects), and task #119/#122's artifact_lineages/
+    artifact_versions is the same real, already-tracked lineage/version
+    chain that fact comes from - never a new hash comparison here.
+
+    Every attachment behind every artifact_version is resolved to its
+    owning work object exactly the way list_other_occurrences_for_
+    attachment already does (_work_object_id_for_attachment - direct for
+    an 'issue'-scoped attachment, via raw_items.issue_id for a
+    'raw_item'-scoped one; None for 'project'/'chat'-scoped or unlinked,
+    same honest non-guess). Unresolved attachments are silently skipped,
+    not counted - they contribute nothing to identity either way.
+
+    Returns {lineage_id: [work_object_id, ...]} for every lineage whose
+    versions resolve to 2+ DISTINCT work objects - reconcile.py resolves
+    those ids to real issues/projects the same way it already does for
+    pr_number_base groups (a work_object_id that's actually a raw
+    cluster, not a real issue, is filtered out there via get_issue(),
+    exactly like the existing check)."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute("""
+                SELECT av.lineage_id AS lineage_id, a.id AS attachment_id,
+                       a.entity_type AS entity_type, a.entity_id AS entity_id
+                FROM artifact_versions av
+                JOIN attachments a ON a.id = av.attachment_id
+            """).fetchall()
+        finally:
+            conn.close()
+    by_lineage: dict[str, set[str]] = {}
+    for row in rows:
+        work_object_id = _work_object_id_for_attachment(dict(row))
+        if not work_object_id:
+            continue
+        by_lineage.setdefault(row["lineage_id"], set()).add(work_object_id)
+    return {lid: sorted(ids) for lid, ids in by_lineage.items() if len(ids) > 1}
 
 
 def _ensure_artifact_versions(attachments: list[dict]) -> str:

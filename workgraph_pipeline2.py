@@ -309,9 +309,21 @@ For whichever candidate you choose (if any), decide the real relationship:
 
 Respond with EXACTLY these lines, nothing else:
 MATCH: <candidate number, or NONE if none of them match, or UNCERTAIN if you genuinely cannot tell>
-VERDICT: same_project
+VERDICT: <same_project or related_different_project - whichever real relationship you decided above>
 (include the VERDICT line only when MATCH is a candidate number - omit it entirely for NONE or UNCERTAIN)
 """
+# External-review finding #354 (2026-08-13): the example line above used to
+# hardcode "VERDICT: same_project" verbatim, one line after defining
+# SAME_PROJECT and RELATED_DIFFERENT_PROJECT as two equally valid verdicts -
+# a real contradiction that could suppress the Project-vs-Relationship
+# distinction Track B.5 exists to make. Very likely a regression: task #341
+# fixed this exact contradiction in the OLD pairwise prompt template, which
+# Track B.5 then deleted and rebuilt from scratch, silently reintroducing
+# it. The parser (_parse_comparative_verdict) already accepted both values
+# via _COMPARATIVE_VALID_VERDICTS - this was a prompt-text bug only, never
+# a parsing bug, and does NOT touch the 2-point candidate-detection gate
+# (see ROADMAP.md's standing guardrail) - only the wording of the example
+# shown to the model for an already-gated candidate's judgment.
 
 _COMPARATIVE_VALID_VERDICTS = ("same_project", "related_different_project")
 

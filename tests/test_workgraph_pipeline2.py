@@ -368,6 +368,25 @@ def test_candidate_set_hash_changes_when_evidence_changes(ws_db, isolated_paths)
 
 # --- judge_candidates / _parse_comparative_verdict (step 4) ---------------
 
+def test_comparative_prompt_example_does_not_hardcode_same_project():
+    """External-review finding #354 (2026-08-13): the prompt's own
+    "respond with EXACTLY these lines" example used to hardcode
+    "VERDICT: same_project" verbatim, one line after defining
+    SAME_PROJECT and RELATED_DIFFERENT_PROJECT as two equally valid
+    verdicts - a real contradiction that could suppress the
+    Project-vs-Relationship distinction. Guards against regressing back
+    to a fixed example: the instruction line must show both real options,
+    never a single hardcoded value."""
+    instruction_line = next(
+        line for line in p2._COMPARATIVE_JUDGMENT_PROMPT_TEMPLATE.splitlines()
+        if line.strip().upper().startswith("VERDICT:")
+    )
+    assert "same_project" in instruction_line
+    assert "related_different_project" in instruction_line
+    # the old bug: this exact fixed-example line reappearing verbatim
+    assert instruction_line.strip() != "VERDICT: same_project"
+
+
 def test_parse_comparative_verdict_match():
     assert p2._parse_comparative_verdict("MATCH: 2\nVERDICT: same_project\n", n=3) == {
         "status": "match", "index": 1, "verdict": "same_project",

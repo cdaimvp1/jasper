@@ -284,3 +284,127 @@ def top_pattern_for_category(category: Optional[str], exclude_project_id: Option
                      f'"{category}" projects so far.'),
         }
     return None
+
+
+# --- task #374: expected-next-step deviation notes, informational only ----
+# Builds on the SAME mined pattern data above (top_pattern_for_category) plus
+# stage_sequence_for_project - deliberately NO new persistent state. The
+# comparison this needs ("does this OPEN project's own observed stage list
+# still contain the category's strongest typical chain, in order") is exactly
+# the same order-preserving-subsequence check detect_sequence_patterns_for_
+# category already does for CLOSED projects during mining - reusing
+# _is_order_preserving_subsequence here, at read/score time, against one
+# open project's own already-cheap stage_sequence_for_project (one
+# list_issues_for_project + one batched get_raw_items_for_issues call) costs
+# nothing an aggregate table would meaningfully save. workgraph_nba.py's own
+# score_issue already does several other per-issue/per-project DB reads
+# inline at score time (workgraph_aristotle.check_prerequisites, workgraph_
+# lessons.find_matching_lesson) without precomputed tables backing them -
+# this fits that same house style, batched by unique project id per tick
+# (deviation_notes_for_projects below) rather than by issue, since the
+# comparison is a whole-PROJECT fact, not a per-issue one.
+#
+# Never a gate: nothing below ever changes a score, ranks anything, or marks
+# anything as missing/error - see deviation_note_for_project's own docstring.
+# The resulting sentence is appended to nba_reason as one more free-text
+# tidbit, the exact same way workgraph_lessons' "precedent: ..." line already
+# is - nba_reason already carries several independent informational
+# fragments joined by " · ", so this is additive to an existing convention,
+# not a new field. A dedicated field was considered and rejected: nothing
+# downstream parses nba_reason's internal structure (confirmed - it is only
+# ever rendered as one opaque string), so a second column would only add a
+# second thing to keep in sync with no real consumer needing it separated.
+
+
+def _first_deviating_step(step_sequence: list[str], observed_stages: list[str]) -> Optional[dict]:
+    """Walks `step_sequence` against `observed_stages` the same order-
+    preserving way _is_order_preserving_subsequence does (each step must be
+    found, in order, somewhere in the remainder of observed_stages - not
+    necessarily adjacent), but stops at and reports the FIRST step with no
+    match left, instead of collapsing straight to a bare True/False. Returns
+    None when every step matched (no real deviation - the project's own
+    history still contains the typical chain, in order). Returns
+    {"missing_step", "preceding_step", "following_step"} for the first real
+    gap: preceding_step is the last step from step_sequence already matched
+    (None only if the very first step itself is missing); following_step is
+    the step immediately after the missing one in step_sequence (None only
+    if the missing step is the chain's last). Reports only the FIRST gap
+    deliberately - one clear, checkable note beats an exhaustive list of
+    every downstream step that also happens to look unmatched once the
+    chain has already broken once."""
+    it = iter(observed_stages)
+    preceding: Optional[str] = None
+    for idx, token in enumerate(step_sequence):
+        matched = False
+        for stage in it:
+            if stage == token:
+                matched = True
+                break
+        if not matched:
+            return {
+                "missing_step": token,
+                "preceding_step": preceding,
+                "following_step": step_sequence[idx + 1] if idx + 1 < len(step_sequence) else None,
+            }
+        preceding = token
+    return None
+
+
+def deviation_note_for_project(project_id: str, category: Optional[str]) -> Optional[str]:
+    """The single, human-readable deviation sentence for one OPEN project,
+    or None when there's nothing worth saying - no category, no stored
+    pattern strong enough to survive excluding this project's own evidence
+    (top_pattern_for_category's own honesty rule), or the project's real
+    observed stage_sequence_for_project already contains the category's
+    strongest typical chain as an order-preserving subsequence (the common,
+    boring, "on track" case - most open projects will hit this branch and
+    get None, by design).
+
+    Always purely descriptive: never raises, never returns anything that
+    reads as a requirement or a verdict - just "here's what similar past
+    projects usually also show, and it's not visible yet here." Uses this
+    module's own raw signal_type vocabulary in the note text (same choice
+    top_pattern_for_category's own note already makes) rather than inventing
+    a second, separate human-label mapping table for this one caller -
+    keeping one honest, deterministic vocabulary rather than two that could
+    drift apart."""
+    if not project_id or not category:
+        return None
+    pattern = top_pattern_for_category(category, exclude_project_id=project_id)
+    if not pattern:
+        return None
+    observed = stage_sequence_for_project(project_id)
+    gap = _first_deviating_step(pattern["step_sequence"], observed)
+    if not gap:
+        return None
+    if gap["following_step"]:
+        where = f'before "{gap["following_step"]}"'
+    elif gap["preceding_step"]:
+        where = f'after "{gap["preceding_step"]}"'
+    else:
+        where = "at some point"  # unreachable given MIN_PATTERN_LEN=3, kept as an honest fallback
+    return (
+        f'Projects in "{category}" have historically also involved "{gap["missing_step"]}" {where} '
+        f'— seen in {pattern["matching_project_count"]} of {pattern["total_projects_in_category"]} '
+        f'completed "{category}" projects, no evidence of one here yet — worth checking, not a rule.'
+    )
+
+
+def deviation_notes_for_projects(project_ids: list[str]) -> dict[str, str]:
+    """Batched counterpart to deviation_note_for_project, for a caller
+    (workgraph_nba.recompute_all/recompute_issues) scoring many issues that
+    share far fewer DISTINCT projects - computes the note ONCE per unique
+    project id, not once per issue, same batch-by-unique-key discipline as
+    this codebase's other per-tick caller-side lookups (e.g. workgraph_nba's
+    own category_staleness_baselines/identity_anchors_by_issue). Returns
+    only the entries that actually produced a real note; a project with no
+    category, no stored pattern, or no real deviation is simply absent -
+    callers do a plain dict.get(project_id) and treat a miss as "nothing to
+    add," never as an error."""
+    notes: dict[str, str] = {}
+    for project_id in sorted({pid for pid in project_ids if pid}):
+        project = ws.get_project(project_id)
+        note = deviation_note_for_project(project_id, project.get("category") if project else None)
+        if note:
+            notes[project_id] = note
+    return notes

@@ -534,6 +534,44 @@ def test_score_issue_no_project_link_warning_when_target_project_done(ws_db):
     assert not reason.startswith("No confirmation seen yet")
 
 
+# --- task #374: sequence deviation notes are additive/descriptive only ----
+# The detection itself (a real planted-missing-step case, and a no-false-
+# positive case for a project that follows the typical chain) is exercised
+# in tests/test_workgraph_sequences.py against workgraph_sequences.
+# deviation_note_for_project directly - these two just confirm the WIRING
+# into score_issue: the note (however it was computed) lands in nba_reason
+# verbatim, and never changes priority_score.
+
+def test_score_issue_appends_deviation_note_without_changing_score(ws_db):
+    issue_id = ws_db.create_issue_with_new_id(title="X", state="active", category="other")
+    ws_db.update_issue(issue_id, project_id="proj-1")
+    issue = ws_db.get_issue(issue_id)
+    now = time.time()
+    note = ('Projects in "procurement" have historically also involved "contractpodai_review_requested" '
+            'before "signature_requested_docusign" — seen in 2 of 2 completed "procurement" projects, '
+            'no evidence of one here yet — worth checking, not a rule.')
+
+    score_without, reason_without, _ = nba.score_issue(issue, now)
+    score_with, reason_with, _ = nba.score_issue(
+        issue, now, sequence_deviation_notes={"proj-1": note})
+
+    assert score_with == score_without  # descriptive only - never moves the score
+    assert note not in reason_without
+    assert reason_with == reason_without + " · " + note
+
+
+def test_score_issue_no_deviation_note_when_project_not_in_dict(ws_db):
+    issue_id = ws_db.create_issue_with_new_id(title="X", state="active", category="other")
+    ws_db.update_issue(issue_id, project_id="proj-1")
+    issue = ws_db.get_issue(issue_id)
+    now = time.time()
+
+    score, reason, _ = nba.score_issue(
+        issue, now, sequence_deviation_notes={"some-other-project": "irrelevant note"})
+
+    assert "irrelevant note" not in reason
+
+
 # --- Phase 0 fix (D11, 2026-08-03): lessons cross-engine leakage gate ------
 
 def _issue_with_matchable_lesson(ws_db):

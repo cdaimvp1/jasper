@@ -247,6 +247,77 @@ def test_top_pattern_for_category_none_when_nothing_stored_yet(ws_db):
     assert seq.top_pattern_for_category("procurement") is None
 
 
+# --- deviation_note_for_project / deviation_notes_for_projects (task #374) -
+# Informational-only expected-next-step deviation notes: does an OPEN
+# project's own observed stage history still contain the category's
+# strongest mined chain, in order? Never a gate - see workgraph_sequences'
+# own module-level docstring addendum for the design reasoning.
+
+def test_deviation_note_for_project_flags_missing_typical_step(ws_db):
+    _closed_project_with_stages(ws_db, "A", "procurement", _FULL_CHAIN, 100.0)
+    _closed_project_with_stages(ws_db, "B", "procurement", _FULL_CHAIN, 1000.0)
+    seq.recompute_and_store()
+
+    # Open project D: everything in _FULL_CHAIN except the legal-review
+    # step ("contractpodai_review_requested") - a real, planted gap.
+    proj_d = ws_db.create_project_with_new_id(name="D", category="procurement", status="active")
+    issue_d = _issue(ws_db, "D", project_id=proj_d)
+    _raw_item_at(ws_db, issue_d, "intake_new_project_assigned", "d-0", 2000.0)
+    _raw_item_at(ws_db, issue_d, "signature_requested_docusign", "d-1", 2001.0)
+    _raw_item_at(ws_db, issue_d, "signature_completed_docusign", "d-2", 2002.0)
+
+    note = seq.deviation_note_for_project(proj_d, "procurement")
+
+    assert note is not None
+    assert "contractpodai_review_requested" in note
+    assert "before" in note
+    assert "signature_requested_docusign" in note
+    assert "procurement" in note
+    assert "2 of 2" in note
+    assert "not a rule" in note  # explicitly non-enforcing wording
+
+
+def test_deviation_note_for_project_none_when_project_follows_typical_sequence(ws_db):
+    _closed_project_with_stages(ws_db, "A", "procurement", _FULL_CHAIN, 100.0)
+    _closed_project_with_stages(ws_db, "B", "procurement", _FULL_CHAIN, 1000.0)
+    seq.recompute_and_store()
+
+    proj_c = ws_db.create_project_with_new_id(name="C", category="procurement", status="active")
+    issue_c = _issue(ws_db, "C", project_id=proj_c)
+    for i, st in enumerate(_FULL_CHAIN):
+        _raw_item_at(ws_db, issue_c, st, f"c-{i}", 2000.0 + i)
+
+    assert seq.deviation_note_for_project(proj_c, "procurement") is None
+
+
+def test_deviation_note_for_project_none_without_category_or_pattern(ws_db):
+    proj = ws_db.create_project_with_new_id(name="Solo", category="procurement", status="active")
+    assert seq.deviation_note_for_project(proj, None) is None
+    assert seq.deviation_note_for_project(proj, "procurement") is None  # nothing stored yet
+
+
+def test_deviation_notes_for_projects_batches_by_distinct_project(ws_db):
+    _closed_project_with_stages(ws_db, "A", "procurement", _FULL_CHAIN, 100.0)
+    _closed_project_with_stages(ws_db, "B", "procurement", _FULL_CHAIN, 1000.0)
+    seq.recompute_and_store()
+
+    proj_d = ws_db.create_project_with_new_id(name="D", category="procurement", status="active")
+    issue_d = _issue(ws_db, "D", project_id=proj_d)
+    _raw_item_at(ws_db, issue_d, "intake_new_project_assigned", "d-0", 2000.0)
+    _raw_item_at(ws_db, issue_d, "signature_requested_docusign", "d-1", 2001.0)
+    _raw_item_at(ws_db, issue_d, "signature_completed_docusign", "d-2", 2002.0)
+
+    proj_c = ws_db.create_project_with_new_id(name="C", category="procurement", status="active")
+    issue_c = _issue(ws_db, "C", project_id=proj_c)
+    for i, st in enumerate(_FULL_CHAIN):
+        _raw_item_at(ws_db, issue_c, st, f"c-{i}", 3000.0 + i)
+
+    notes = seq.deviation_notes_for_projects([proj_d, proj_c, proj_d, None, "no-such-project"])
+
+    assert set(notes.keys()) == {proj_d}
+    assert notes[proj_d] == seq.deviation_note_for_project(proj_d, "procurement")
+
+
 def test_top_pattern_for_category_excludes_the_viewed_project_from_its_own_evidence(ws_db):
     proj_a = _closed_project_with_stages(ws_db, "A", "procurement", _FULL_CHAIN, 100.0)
     proj_b = _closed_project_with_stages(ws_db, "B", "procurement", _FULL_CHAIN, 1000.0)

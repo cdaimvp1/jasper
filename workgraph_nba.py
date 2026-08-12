@@ -55,6 +55,7 @@ import workgraph_confidence as confidence
 import workgraph_lessons
 import workgraph_aristotle
 import workgraph_recommend
+import workgraph_sequences
 import text_extract
 
 DAY = 86400.0
@@ -499,7 +500,8 @@ def score_issue(issue: dict, now: float, weights: dict = DEFAULT_WEIGHTS,
                  identity_anchors: Optional[list] = None,
                  category_staleness_baselines: Optional[dict] = None,
                  state_history: Optional[list] = None,
-                 open_claims: Optional[list] = None) -> tuple[float, str, Optional[int]]:
+                 open_claims: Optional[list] = None,
+                 sequence_deviation_notes: Optional[dict] = None) -> tuple[float, str, Optional[int]]:
     """Pure-ISH: the only non-arithmetic steps are reading this issue's own
     raw_items for the value regex, and looking up a matching Total Recall
     lesson (both just DB reads, still zero LLM calls).
@@ -518,6 +520,19 @@ def score_issue(issue: dict, now: float, weights: dict = DEFAULT_WEIGHTS,
     call for every issue, not one per issue, same batching discipline as
     identity_anchors. None/missing-category both fall back to the flat
     STALENESS_SATURATION_DAYS, same as before this feature existed.
+
+    `sequence_deviation_notes` (task #374): the caller's already-computed
+    workgraph_sequences.deviation_notes_for_projects() result, keyed by
+    project_id - one call per DISTINCT project for the whole tick, same
+    batching discipline as identity_anchors/category_staleness_baselines
+    above. Purely descriptive - see workgraph_sequences.deviation_note_
+    for_project's own docstring. NEVER affects score; when present for this
+    issue's project_id, its sentence is appended to nba_reason as one more
+    informational tidbit, same as the "precedent: ..." line below. None
+    (the default, and what a direct/unbatched caller gets) means simply no
+    deviation note is looked up for this call - never a live per-call DB
+    read from inside score_issue itself, matching this param's own batched-
+    by-caller shape rather than the aristotle/lessons calls' inline shape.
     Returns (priority_score, nba_reason, lesson_id_cited)."""
     if issue["state"] in ("done", "noise-archived", "dismissed"):
         return 0.0, "closed", None
@@ -642,6 +657,15 @@ def score_issue(issue: dict, now: float, weights: dict = DEFAULT_WEIGHTS,
         reasons.append(f"{ask_count} open asks")
     if not reasons:
         reasons.append("waiting on someone else")
+
+    # Task #374: expected-next-step deviation note (workgraph_sequences.
+    # deviation_note_for_project) - appended LAST, after the "waiting on
+    # someone else" fallback above, so a project with no other real
+    # reasoning doesn't lose that base status line to this purely
+    # additional, informational tidbit. Never changes `score`.
+    deviation_note = (sequence_deviation_notes or {}).get(issue.get("project_id"))
+    if deviation_note:
+        reasons.append(deviation_note)
 
     return round(score, 4), " · ".join(reasons), (lesson["id"] if lesson else None)
 
@@ -843,6 +867,11 @@ def recompute_all(now: float | None = None) -> dict:
     # for rank_actions), just filtered to claim_type='ask' here since that's
     # the only type ask_density_for_issue cares about.
     open_asks_by_issue = ws.list_open_claims_for_issues([i["id"] for i in issues], claim_type="ask")
+    # Task #374: one batched deviation-note lookup for this whole tick, keyed
+    # by DISTINCT project id (not one per issue) - same batching discipline
+    # as anchors_by_issue/state_history_by_issue/open_asks_by_issue above.
+    sequence_deviation_notes = workgraph_sequences.deviation_notes_for_projects(
+        [i.get("project_id") for i in issues])
     updated = 0
     for issue in issues:
         score, reason, lesson_id = score_issue(
@@ -850,6 +879,7 @@ def recompute_all(now: float | None = None) -> dict:
             category_staleness_baselines=category_staleness_baselines,
             state_history=state_history_by_issue.get(issue["id"]),
             open_claims=open_asks_by_issue.get(issue["id"]),
+            sequence_deviation_notes=sequence_deviation_notes,
         )
         action_kind = "review" if issue["state"] == "active" else "wait"
         # task #55: reason's prefix is a fixed, owned string (workgraph_
@@ -898,6 +928,10 @@ def recompute_issues(issue_ids: list[str], now: float | None = None) -> dict:
     category_staleness_baselines = compute_category_staleness_baselines()
     state_history_by_issue = ws.list_issue_state_history_for_issues(ids)
     open_asks_by_issue = ws.list_open_claims_for_issues(ids, claim_type="ask")
+    # Task #374: same batched-by-distinct-project deviation lookup as
+    # recompute_all above, scoped to this settlement pass's own issue set.
+    sequence_deviation_notes = workgraph_sequences.deviation_notes_for_projects(
+        [i.get("project_id") for i in issues])
     updated = 0
     for issue in issues:
         score, reason, lesson_id = score_issue(
@@ -905,6 +939,7 @@ def recompute_issues(issue_ids: list[str], now: float | None = None) -> dict:
             category_staleness_baselines=category_staleness_baselines,
             state_history=state_history_by_issue.get(issue["id"]),
             open_claims=open_asks_by_issue.get(issue["id"]),
+            sequence_deviation_notes=sequence_deviation_notes,
         )
         action_kind = "review" if issue["state"] == "active" else "wait"
         has_unmet_prerequisite = reason.startswith(workgraph_aristotle.WARNING_PREFIX)

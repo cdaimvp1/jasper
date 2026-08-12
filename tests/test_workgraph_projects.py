@@ -1049,3 +1049,149 @@ def test_find_project_ids_by_subject_fragment_excludes_closed_projects(ws_db):
     ws_db.set_project_status(pid, "archived")
 
     assert wp.find_project_ids_by_subject_fragment("Veeva CRM press release renewal - final terms") == []
+
+
+# --- build_project_handoff_package (task #373) -----------------------------
+
+def test_handoff_package_returns_none_for_unknown_project(ws_db):
+    assert wp.build_project_handoff_package("no-such-project") is None
+
+
+def test_handoff_package_minimal_project_has_every_section_honestly_empty(ws_db):
+    """A brand-new project with zero member issues, zero synthesis, zero
+    relationships/links - every section must still be present (never
+    missing/KeyError for a caller), just genuinely empty/None rather than
+    a placeholder."""
+    pid = ws_db.create_project_with_new_id(name="Brand New Deal", category="other")
+
+    pkg = wp.build_project_handoff_package(pid)
+
+    assert pkg["project_id"] == pid
+    assert isinstance(pkg["generated_at"], float)
+    assert pkg["relationship"] == {"relationships": []}
+    assert pkg["purpose"]["name"] == "Brand New Deal"
+    assert pkg["purpose"]["summary"] is None
+    assert pkg["current_state"]["status"] == "active"
+    assert pkg["current_state"]["issues"] == []
+    assert pkg["current_state"]["issue_state_counts"] == {}
+    assert pkg["decisions"] == []
+    assert pkg["open_commitments"] == []
+    assert pkg["stakeholders"] == []
+    assert pkg["artifacts"] == []
+    assert pkg["dates"] == []
+    assert pkg["dependencies"] == []
+    assert pkg["unresolved_questions"] == []
+    assert pkg["next_actions"] == []
+    assert pkg["evidence_references"] == []
+
+
+def test_handoff_package_assembles_real_data_across_every_section(ws_db):
+    a = _issue(ws_db, "Master services agreement")
+    b = _issue(ws_db, "Follow-on statement of work")
+    pid = _project_with_issues(ws_db, a, b)
+    ws_db.set_project_status(pid, "waiting")
+
+    rid_a = _raw_item(ws_db, a, "PR416079: MSA terms", "k-a")
+    rid_b = _raw_item(ws_db, b, "PR416080: SOW pricing", "k-b")
+
+    # Claims across every claim_type/status this package cares about.
+    ws_db.insert_claim(issue_id=a, raw_item_id=rid_a, claim_type="decision",
+                        text="Agreed on net-30 payment terms", author="marc", author_basis="direction")
+    open_commitment_id = ws_db.insert_claim(
+        issue_id=a, raw_item_id=rid_a, claim_type="commitment",
+        text="Marc will send the signed order form", author="marc", author_basis="direction", owner="marc",
+    )
+    done_commitment_id = ws_db.insert_claim(
+        issue_id=a, raw_item_id=rid_a, claim_type="commitment",
+        text="Vendor already sent the draft contract", author="counterparty", author_basis="direction", owner="counterparty",
+    )
+    ws_db.update_claim_status(done_commitment_id, "done", actor="marc")
+    open_ask_id = ws_db.insert_claim(
+        issue_id=b, raw_item_id=rid_b, claim_type="ask",
+        text="Can you confirm the SOW start date?", author="counterparty", author_basis="direction", owner="marc",
+    )
+    ws_db.touch_claim(open_ask_id, escalated=True, escalation_note="two weeks with no reply")
+    ws_db.insert_claim(issue_id=a, raw_item_id=rid_a, claim_type="date",
+                        text="Contract must be signed by end of quarter", author="counterparty",
+                        author_basis="direction", owner="marc", date_kind="hard")
+
+    # Real evidence rows (the ledger evidence_references reads from).
+    ws_db.add_evidence(issue_id=a, type="email", summary="MSA terms email", raw_item_id=rid_a)
+
+    # Stakeholders - reuses aggregate_parties_for_project, already tested
+    # elsewhere; here just confirming the package surfaces it.
+    _link_party(ws_db, a, "vendor-rep", "rep@acme.com", company="Acme")
+
+    # Artifacts: two attachments sharing a hash - a real artifact_versions/
+    # artifact_lineages record gets created by create_attachment itself.
+    ws_db.create_attachment(
+        entity_type="issue", entity_id=a, kind="upload", filename="msa_v1.docx",
+        stored_path="p1.docx", content_type=None, size_bytes=10,
+        sha256_hex="sharedhash373", uploaded_by="marc",
+    )
+    ws_db.create_attachment(
+        entity_type="issue", entity_id=b, kind="upload", filename="msa_v1_copy.docx",
+        stored_path="p2.docx", content_type=None, size_bytes=10,
+        sha256_hex="sharedhash373", uploaded_by="marc",
+    )
+
+    # Relationship (durable, named) + dependency (project_links) to a
+    # second, genuinely different project.
+    rel_id = ws_db.get_or_create_relationship_by_name("Acme")
+    ws_db.link_project_to_relationship(pid, rel_id, reason="same vendor")
+    other_pid = ws_db.create_project_with_new_id(name="Acme renewal (separate deal)", category="other")
+    ws_db.create_project_link(from_project_id=pid, to_project_id=other_pid,
+                               link_type="depends_on", reason="MSA must land first")
+
+    # Synthesis - purpose/current_state/next_actions all read from this.
+    ws_db.upsert_synthesis(
+        entity_type="project", entity_id=pid, summary="Negotiating MSA + follow-on SOW with Acme.",
+        next_steps_json=json.dumps([{"step": "Get MSA signed", "current": True}]),
+        suggested_actions_json=json.dumps([{"task_id": "t1", "label": "Chase signature", "rationale": "overdue"}]),
+        synthesized_from_marker="count:2|max_ts:1.0", derived_title="Acme MSA + SOW",
+    )
+
+    pkg = wp.build_project_handoff_package(pid)
+
+    assert pkg["project_id"] == pid
+    assert pkg["purpose"]["display_title"] == "Acme MSA + SOW"
+    assert pkg["purpose"]["summary"] == "Negotiating MSA + follow-on SOW with Acme."
+    assert pkg["current_state"]["status"] == "waiting"
+    assert pkg["current_state"]["issue_state_counts"] == {"active": 2}
+    assert {i["id"] for i in pkg["current_state"]["issues"]} == {a, b}
+    assert pkg["current_state"]["next_steps"][0]["step"] == "Get MSA signed"
+
+    assert len(pkg["decisions"]) == 1
+    assert pkg["decisions"][0]["text"] == "Agreed on net-30 payment terms"
+
+    assert len(pkg["open_commitments"]) == 1
+    assert pkg["open_commitments"][0]["claim_id"] == open_commitment_id
+    assert all(c["claim_id"] != done_commitment_id for c in pkg["open_commitments"])
+
+    assert len(pkg["unresolved_questions"]) == 1
+    assert pkg["unresolved_questions"][0]["claim_id"] == open_ask_id
+    assert pkg["unresolved_questions"][0]["escalated"] is True
+
+    assert len(pkg["dates"]) == 1
+    assert pkg["dates"][0]["date_kind"] == "hard"
+
+    assert len(pkg["stakeholders"]) == 1
+    assert pkg["stakeholders"][0]["id"] == "vendor-rep"
+
+    assert len(pkg["artifacts"]) == 2
+    lineaged = [art for art in pkg["artifacts"] if art.get("document_role")]
+    assert len(lineaged) == 2
+
+    assert pkg["relationship"]["relationships"][0]["name"] == "Acme"
+
+    assert len(pkg["dependencies"]) == 1
+    dep = pkg["dependencies"][0]
+    assert dep["link_type"] == "depends_on"
+    assert dep["direction"] == "outgoing"
+    assert dep["other_project_id"] == other_pid
+    assert dep["other_project_title"] == "Acme renewal (separate deal)"
+
+    assert any(na.get("task_id") == "t1" for na in pkg["next_actions"])
+
+    assert len(pkg["evidence_references"]) == 1
+    assert pkg["evidence_references"][0]["raw_item_id"] == rid_a

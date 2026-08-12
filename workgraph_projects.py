@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Optional
@@ -1174,3 +1175,225 @@ def aggregate_parties_for_project(project_id: str) -> list[dict]:
         p.setdefault("is_primary", False)
     parties.sort(key=lambda p: (p.get("affiliation") != "external", -p["issue_count"], p.get("first_seen_ts") or 0))
     return parties
+
+
+# --- Project Handoff Package (task #373) -----------------------------------
+#
+# A single, durable, JSON-serializable snapshot of one Project's real
+# business state - assembled entirely FROM the existing accessors above and
+# in workgraph_store.py (this module's own aggregate_parties_for_project;
+# workgraph_store's claim/evidence/attachment/artifact-lineage/relationship/
+# project_link readers; the same synthesis row _build_addin_focus_card in
+# server_lean.py already reads for the cockpit/add-in) - a superset view,
+# never a second, competing set of joins over the same tables.
+#
+# Per Marc's own framing when this task was scoped: this is also the
+# natural eventual mechanism for moving a Project's state between Jasper
+# installs WITHOUT carrying any learned-behavior/personality history along
+# with it. That boundary is deliberate and is why every section below reads
+# from tables that hold real, persisted BUSINESS fact (a claim, an
+# attachment, a party, a synthesis row, a project_link) and never from
+# anything that encodes learned preference/routing behavior (ownership_
+# rules, ownership learning, ambient-work policy, ingest_cursors, etc.) -
+# keep any future addition to this function on the business-state side of
+# that line.
+
+def build_project_handoff_package(project_id: str) -> Optional[dict]:
+    """Assembles the full handoff package for one Project. Returns None
+    only when the project itself doesn't exist; every section below is a
+    real (possibly empty) list/dict keyed by the section names task #373
+    named - relationship, purpose, current_state, decisions,
+    open_commitments, stakeholders, artifacts, dates, dependencies,
+    unresolved_questions, next_actions, evidence_references - never a
+    placeholder for a section this project genuinely has nothing in."""
+    project = ws.get_project(project_id)
+    if project is None:
+        return None
+
+    synthesis = ws.get_synthesis("project", project_id) or {}
+    issues = ws.list_issues_for_project(project_id)
+    issue_ids = [i["id"] for i in issues]
+    # Same display_title fallback convention _build_addin_focus_card
+    # already uses (list_issues_for_project's own rows never carry a
+    # synth-derived title the way list_issues()/list_projects() do) -
+    # reused as-is here rather than re-deriving a second title rule.
+    issue_title_by_id = {i["id"]: (i.get("display_title") or i["title"]) for i in issues}
+
+    claims_by_issue = ws.list_claims_for_issues(issue_ids) if issue_ids else {}
+    evidence_by_issue = ws.list_evidence_for_issues(issue_ids) if issue_ids else {}
+
+    display_title = synthesis.get("derived_title") or project.get("name")
+
+    # --- relationship: the durable, NAMED business relationship(s) this
+    # project belongs to (relationships/project_relationships, 2026-08-11) -
+    # explicitly NOT work_object_relationships (pipeline2's own pairwise
+    # merge-candidate bookkeeping, never a human-facing named entity).
+    relationship_section = {
+        "relationships": ws.list_relationships_for_project(project_id),
+    }
+
+    # --- purpose: what this project IS, in the curator's own real
+    # synthesized words when one exists - an honest empty summary when it
+    # doesn't, never invented here.
+    purpose_section = {
+        "name": project.get("name"),
+        "display_title": display_title,
+        "category": project.get("category"),
+        "summary": synthesis.get("summary"),
+    }
+
+    # --- current_state
+    issue_state_counts: dict[str, int] = {}
+    for i in issues:
+        issue_state_counts[i["state"]] = issue_state_counts.get(i["state"], 0) + 1
+    current_state_section = {
+        "status": project.get("status"),
+        "opened_at": project.get("opened_at"),
+        "updated_at": project.get("updated_at"),
+        "last_deep_dive_ts": project.get("last_deep_dive_ts"),
+        "last_deep_dive_note": project.get("last_deep_dive_note"),
+        "issue_state_counts": issue_state_counts,
+        "issues": [
+            {
+                "id": i["id"], "title": issue_title_by_id[i["id"]], "state": i["state"],
+                "category": i.get("category"), "priority": i.get("priority"),
+                "priority_score": i.get("priority_score"), "due": i.get("due"),
+                "nba_action_kind": i.get("nba_action_kind"), "nba_reason": i.get("nba_reason"),
+            }
+            for i in issues
+        ],
+        "next_steps": synthesis.get("next_steps") or [],
+        "estimated_completion": synthesis.get("estimated_completion"),
+        "synthesized_at": synthesis.get("synthesized_at"),
+    }
+
+    # --- decisions / open_commitments / unresolved_questions / dates: all
+    # four are the SAME real claims ledger (workgraph_claims.py's claim_
+    # type/status taxonomy) - split here by claim_type + status rather
+    # than re-querying claims four separate times. 'unresolved questions'
+    # = open asks; 'open commitments' = open commitments; decisions are
+    # kept regardless of status (a decision is a joint fact, not an
+    # obligation that gets 'done' - see claims.owner being NULL for
+    # decisions in workgraph_store's own schema comment); dates are kept
+    # regardless of status too, tagged with their own status so a caller
+    # can tell a still-open date from one already superseded/resolved.
+    decisions: list[dict] = []
+    open_commitments: list[dict] = []
+    unresolved_questions: list[dict] = []
+    dates: list[dict] = []
+    for iid in issue_ids:
+        title = issue_title_by_id.get(iid)
+        for c in claims_by_issue.get(iid, []):
+            entry = {
+                "issue_id": iid, "issue_title": title, "claim_id": c["id"],
+                "text": c.get("text"), "status": c.get("status"),
+                "author": c.get("author"), "owner": c.get("owner"),
+                "escalated": bool(c.get("escalated")), "escalation_note": c.get("escalation_note"),
+                "raw_item_id": c.get("raw_item_id"),
+                "first_seen_ts": c.get("first_seen_ts"), "last_seen_ts": c.get("last_seen_ts"),
+            }
+            ctype = c.get("claim_type")
+            if ctype == "decision":
+                decisions.append(entry)
+            elif ctype == "commitment" and c.get("status") == "open":
+                open_commitments.append(entry)
+            elif ctype == "ask" and c.get("status") == "open":
+                unresolved_questions.append(entry)
+            elif ctype == "date":
+                entry["date_kind"] = c.get("date_kind")
+                dates.append(entry)
+    decisions.sort(key=lambda e: e.get("first_seen_ts") or 0)
+    open_commitments.sort(key=lambda e: e.get("last_seen_ts") or 0, reverse=True)
+    unresolved_questions.sort(key=lambda e: e.get("last_seen_ts") or 0, reverse=True)
+    dates.sort(key=lambda e: e.get("last_seen_ts") or 0, reverse=True)
+
+    # --- stakeholders: this module's own existing project-wide party
+    # aggregation (2026-07-31) - reused verbatim, not re-derived.
+    stakeholders = aggregate_parties_for_project(project_id)
+
+    # --- artifacts: every real file tied to this project or any of its
+    # member issues (list_attachments_for_project already covers both),
+    # enriched with its lineage/version role (original/redline/
+    # counter_redline/executed_copy/...) when one has been recorded. An
+    # attachment with no recorded version stays plain - honest, never a
+    # guessed role.
+    artifacts: list[dict] = []
+    for att in ws.list_attachments_for_project(project_id):
+        entry = dict(att)
+        version = ws.find_artifact_version_by_attachment(att["id"])
+        if version:
+            lineage = ws.get_artifact_lineage(version["lineage_id"])
+            entry["artifact_lineage_id"] = version["lineage_id"]
+            entry["artifact_lineage_title"] = lineage.get("title") if lineage else None
+            entry["document_role"] = version.get("document_role")
+            entry["derived_from_id"] = version.get("derived_from_id")
+        artifacts.append(entry)
+
+    # --- dependencies: durable project-to-project links (project_links,
+    # 2026-07-31) - genuinely DIFFERENT projects that shouldn't merge but
+    # do bear on each other (blocks/depends_on/enables/same_supplier/
+    # follow_on/related), never pipeline2's own pairwise merge-candidate
+    # bookkeeping.
+    dependencies: list[dict] = []
+    for link in ws.list_project_links_for_project(project_id):
+        other_id = link["to_project_id"] if link["from_project_id"] == project_id else link["from_project_id"]
+        direction = "outgoing" if link["from_project_id"] == project_id else "incoming"
+        other_project = ws.get_project(other_id)
+        other_synthesis = ws.get_synthesis("project", other_id) if other_project else None
+        other_title = (other_synthesis or {}).get("derived_title") or (other_project or {}).get("name")
+        dependencies.append({
+            "link_type": link["link_type"], "direction": direction,
+            "other_project_id": other_id, "other_project_title": other_title,
+            "reason": link.get("reason"), "created_ts": link.get("created_ts"),
+        })
+
+    # --- next_actions: real, already-computed judgment only - the
+    # curator's own suggested_actions (synthesis) plus each still-open
+    # issue's deterministic nba_action_kind/nba_reason (set by the
+    # existing NBA scoring pass). Deliberately does NOT call
+    # workgraph_nba.candidate_actions/workgraph_recommend/deep_links the
+    # way _build_addin_focus_card does for the interactive add-in card -
+    # that machinery computes a fresh, live per-open-issue recommendation
+    # pass; this export is a snapshot of judgment already on the record,
+    # not a new recommendation run.
+    next_actions: list[dict] = list(synthesis.get("suggested_actions") or [])
+    for i in issues:
+        if i["state"] in ("active", "waiting", "blocked") and i.get("nba_action_kind"):
+            next_actions.append({
+                "issue_id": i["id"], "issue_title": issue_title_by_id[i["id"]],
+                "action_kind": i.get("nba_action_kind"), "rationale": i.get("nba_reason"),
+                "priority_score": i.get("priority_score"),
+            })
+
+    # --- evidence_references: the real evidence ledger (workgraph_store.
+    # evidence / list_evidence_for_issues) grounding everything above -
+    # every row already carries its own raw_item_id, the literal citation
+    # back to the source email/Teams message/calendar event.
+    evidence_references: list[dict] = []
+    for iid in issue_ids:
+        title = issue_title_by_id.get(iid)
+        for ev in evidence_by_issue.get(iid, []):
+            evidence_references.append({
+                "issue_id": iid, "issue_title": title, "type": ev.get("type"),
+                "summary": ev.get("summary"), "ts": ev.get("ts"),
+                "raw_item_id": ev.get("raw_item_id"),
+                "thread_key": ev.get("thread_key"), "signal_type": ev.get("signal_type"),
+            })
+    evidence_references.sort(key=lambda e: e.get("ts") or 0, reverse=True)
+
+    return {
+        "project_id": project_id,
+        "generated_at": time.time(),
+        "relationship": relationship_section,
+        "purpose": purpose_section,
+        "current_state": current_state_section,
+        "decisions": decisions,
+        "open_commitments": open_commitments,
+        "stakeholders": stakeholders,
+        "artifacts": artifacts,
+        "dates": dates,
+        "dependencies": dependencies,
+        "unresolved_questions": unresolved_questions,
+        "next_actions": next_actions,
+        "evidence_references": evidence_references,
+    }

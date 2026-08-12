@@ -15,9 +15,32 @@ logging wiring, not about actually spawning `claude -p`.
 """
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import workgraph_assistant
+
+
+def test_run_claude_sends_prompt_via_stdin_not_argv():
+    """External-review finding #358 (2026-08-13): the prompt used to be a
+    literal `claude -p <prompt>` command-line argument, stacked on top of
+    an already-large --append-system-prompt and a 29-tool --allowedTools
+    list in the same Windows command line - the exact crash class task
+    #309 already fixed elsewhere. Locks in the fix: the prompt text must
+    never appear as one of the constructed argv elements, and must be the
+    exact `input=` passed to Popen.communicate()."""
+    fake_proc = MagicMock()
+    fake_proc.communicate.return_value = ("{}", "")
+    fake_proc.returncode = 0
+    long_prompt = "this is Marc's message " * 50  # long enough to matter if it leaked into argv
+    with patch("workgraph_assistant.subprocess.Popen", return_value=fake_proc) as mocked_popen:
+        workgraph_assistant._run_claude(long_prompt, session_id="sid-1", is_new=True, timeout=30)
+
+    args = mocked_popen.call_args[0][0]
+    assert long_prompt not in args
+    assert all(long_prompt not in a for a in args)
+    assert args[0:2] == ["claude", "-p"]
+    fake_proc.communicate.assert_called_once_with(input=long_prompt, timeout=30)
+    assert mocked_popen.call_args.kwargs.get("stdin") is not None
 
 
 def test_chat_turns_roundtrip_ordered(ws_db):

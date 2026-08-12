@@ -171,8 +171,18 @@ _SYSTEM_PROMPT = (
 
 
 def _run_claude(prompt: str, *, session_id: str, is_new: bool, timeout: int) -> subprocess.CompletedProcess:
+    # prompt goes over STDIN, never as a command-line argument (2026-08-13,
+    # external-review finding #358) - same fix task #309/workgraph_pipeline2.
+    # _run_headless_claude already proved out: Windows' CreateProcess has a
+    # hard ~32K character total-command-line limit, and this call already
+    # stacks a fixed-but-large --append-system-prompt and a 29-tool
+    # --allowedTools list into that same limit before Marc's own message
+    # (unbounded length - a pasted status report, a long question) is even
+    # added. `claude -p` with no inline argument after -p reads the prompt
+    # from stdin - the exact same CLI behavior _run_headless_claude already
+    # relies on.
     args = [
-        "claude", "-p", prompt,
+        "claude", "-p",
         "--output-format", "json",
         "--mcp-config", _MCP_CONFIG,
         "--allowedTools", ",".join(_ALLOWED_TOOLS),
@@ -188,7 +198,7 @@ def _run_claude(prompt: str, *, session_id: str, is_new: bool, timeout: int) -> 
     env.pop("ANTHROPIC_AUTH_TOKEN", None)
     proc = subprocess.Popen(
         args, cwd=_CWD, env=env,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, encoding="utf-8", errors="replace",
         # explicit encoding, not just text=True: Windows' default locale
         # codec (cp1252) mangles any non-ASCII char in claude -p's UTF-8
@@ -197,7 +207,7 @@ def _run_claude(prompt: str, *, session_id: str, is_new: bool, timeout: int) -> 
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
     )
     try:
-        stdout, stderr = proc.communicate(timeout=timeout)
+        stdout, stderr = proc.communicate(input=prompt, timeout=timeout)
     except subprocess.TimeoutExpired:
         try:
             subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True, timeout=15)

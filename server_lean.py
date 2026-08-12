@@ -39,7 +39,7 @@ from typing import Optional
 
 from fastapi import FastAPI, Request, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, HTMLResponse, FileResponse, Response
+from fastapi.responses import JSONResponse, HTMLResponse, FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, ConfigDict, Field
@@ -3853,6 +3853,60 @@ async def api_addin_output_badge():
     the same underlying concept."""
     count = wg.count_unreviewed_worker_outputs() + wg.count_unacknowledged_proactive_actions()
     return JSONResponse({"count": count})
+
+
+# Task #377: push companion to the poll route above. Poll interval kept short
+# (a few seconds) rather than instant/event-driven, deliberately - the two
+# counts below are already the exact cheap COUNT queries the poll route
+# calls (see their own docstrings: "cheap enough to poll on every pane
+# render"), so re-checking them server-side every few seconds and only
+# writing an SSE frame when the number actually *changes* gets the badge to
+# near-real-time without adding emit_event() plumbing to every attachment/
+# prepared-action mutation call site across workgraph_store.py - lower risk
+# for a single-user local server than wiring a new event fan-out.
+_BADGE_STREAM_POLL_SECONDS = 3
+# Bounded connection lifetime so a forgotten/backgrounded pane doesn't hold a
+# generator (and its DB polling) open forever; EventSource reconnects on its
+# own when the server closes the stream, so this is invisible to Marc.
+_BADGE_STREAM_MAX_SECONDS = 30 * 60
+
+
+@app.get("/api/addin/output-badge/stream")
+async def api_addin_output_badge_stream(request: Request):
+    """Task #377 - M365_PLUGIN_INTEGRATION.md section 5c's own 'push, not
+    poll' target, applied to the add-in header badge specifically (5c itself
+    describes this for team_room chat replies; this is the same mechanism
+    for the narrower badge-count case). taskpane.html holds one EventSource
+    open on this route; /api/addin/output-badge (unchanged, see its own
+    docstring) stays live as the pane's initial-load/fallback fetch for a
+    client that can't hold a persistent connection.
+    """
+    async def _events():
+        last = None
+        deadline = time.time() + _BADGE_STREAM_MAX_SECONDS
+        while True:
+            if await request.is_disconnected():
+                return
+            try:
+                count = wg.count_unreviewed_worker_outputs() + wg.count_unacknowledged_proactive_actions()
+            except Exception:
+                count = last if last is not None else 0
+            if count != last:
+                last = count
+                yield f"data: {json.dumps({'count': count})}\n\n"
+            else:
+                # comment line (per the SSE spec) - keeps the connection warm
+                # and gives the loop a cheap tick to re-check is_disconnected().
+                yield ": keep-alive\n\n"
+            if time.time() > deadline:
+                return
+            await asyncio.sleep(_BADGE_STREAM_POLL_SECONDS)
+
+    return StreamingResponse(
+        _events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 class ProactiveActionsSettingsBody(BaseModel):

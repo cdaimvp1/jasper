@@ -656,6 +656,21 @@ def run() -> dict:
     except Exception as e:
         settlement_pass_result = {"error": str(e)}
 
+    # External-review finding #357 (2026-08-13): the settlement pass above
+    # only ever recomputed NBA - workgraph_alerts.run() had no matching
+    # end-of-cycle call, even though the summary dict below called
+    # alerts_result_2 "alerts_final" despite every graph-changing step from
+    # pipeline2_grouping through dormant_sweep still running AFTER it.
+    # workgraph_alerts.run() is a deterministic, no-LLM, dedup-on-write
+    # sweep (confirmed by reading it - batched queries, no per-item model
+    # calls, safe to call a third time in one cycle), so unlike NBA's
+    # recompute this doesn't need a touched-id-scoped variant - a plain
+    # full run is cheap enough to always do here.
+    try:
+        alerts_settlement_result = workgraph_alerts.run()
+    except Exception as e:
+        alerts_settlement_result = {"error": str(e)}
+
     summary = {
         "mail": mail_result,
         "sent_mail": sent_mail_result,
@@ -663,8 +678,13 @@ def run() -> dict:
         "alerts_after_mail": alerts_result_1,
         "relay": relay_result,
         "classify_after_relay": classify_result_2,
-        "nba_final": nba_result_2,
-        "alerts_final": alerts_result_2,
+        # Renamed from nba_final/alerts_final (2026-08-13, external-review
+        # finding #357): these two run BEFORE pipeline2_grouping through
+        # dormant_sweep below, so calling them "final" was never accurate -
+        # settlement_pass/alerts_settlement below are the real end-of-cycle
+        # values now.
+        "nba_after_relay": nba_result_2,
+        "alerts_after_relay": alerts_result_2,
         "pipeline2_grouping": pipeline2_result,
         "derived_title_backfill": derived_title_result,
         "synthesis": synthesis_result,
@@ -686,6 +706,7 @@ def run() -> dict:
         "dormant_sweep": dormant_sweep_result,
         "nba_rewrite_judgment": nba_rewrite_judgment_result,
         "settlement_pass": settlement_pass_result,
+        "alerts_settlement": alerts_settlement_result,
     }
     _log(f"REFRESH ok mail_inserted={mail_result.get('inserted', '?')} "
         f"relay_ok={relay_result.get('ok')} relay_calendar_advanced={relay_result.get('cursor_advanced')} "

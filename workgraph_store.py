@@ -3402,6 +3402,66 @@ def project_id_for_conversation_id(conversation_id: str) -> Optional[str]:
     return wo["parent_id"] if wo else None
 
 
+def project_ids_for_conversation_id(conversation_id: str) -> list[str]:
+    """Like project_id_for_conversation_id, but surfaces every DISTINCT
+    project this conversation_id's linked raw_items actually resolve to,
+    not just the most recent one (external-review finding #361,
+    2026-08-13): silently picking "most recent" when a conversation
+    genuinely spans two different Projects hid a real identity
+    contradiction from the caller instead of surfacing it - the exact
+    "notify, never silently pick" discipline Track B.8's identity-conflict
+    audit already established elsewhere in this codebase. Ordered by
+    most-recent-occurrence-first among the raw_items that produced each
+    distinct project, so the first element is the same answer
+    project_id_for_conversation_id alone would have given. Empty list, not
+    None, when nothing matches - callers check length, not truthiness."""
+    if not conversation_id:
+        return []
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                """SELECT issue_id FROM raw_items
+                   WHERE stable_key = ? AND issue_id IS NOT NULL
+                   ORDER BY occurred_ts DESC""",
+                (conversation_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+    if not rows:
+        return []
+    # Dedupe issue_ids while preserving most-recent-first order - the same
+    # issue can legitimately appear more than once (several raw_items
+    # linked to it).
+    seen_issue_ids = set()
+    issue_ids = []
+    for r in rows:
+        if r["issue_id"] not in seen_issue_ids:
+            seen_issue_ids.add(r["issue_id"])
+            issue_ids.append(r["issue_id"])
+    # Deliberately NOT get_issue()/the `issues` view here - same reasoning
+    # as project_id_for_conversation_id above: work_objects.parent_id is
+    # the ground truth for both a promoted issue and a still-raw cluster.
+    with _lock:
+        conn = _connect()
+        try:
+            placeholders = ",".join("?" * len(issue_ids))
+            wo_rows = conn.execute(
+                f"SELECT id, parent_id FROM work_objects WHERE id IN ({placeholders})", issue_ids,
+            ).fetchall()
+        finally:
+            conn.close()
+    parent_by_issue_id = {r["id"]: r["parent_id"] for r in wo_rows}
+    seen_project_ids = set()
+    ordered_project_ids = []
+    for iid in issue_ids:
+        pid = parent_by_issue_id.get(iid)
+        if pid and pid not in seen_project_ids:
+            seen_project_ids.add(pid)
+            ordered_project_ids.append(pid)
+    return ordered_project_ids
+
+
 # --- issues ---------------------------------------------------------------
 
 def create_issue(

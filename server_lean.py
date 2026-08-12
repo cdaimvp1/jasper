@@ -2551,10 +2551,28 @@ async def api_addin_focus_email(conversation_id: str):
     """Task #240: "focus on the email I have open" - Office.js's
     conversationId is the same Exchange conversation-thread GUID Outlook
     COM writes into raw_items.stable_key (ingest/outlook_scan.ps1),
-    so this is a direct, ground-truth lookup, not a guess."""
-    project_id = wg.project_id_for_conversation_id(conversation_id)
-    if project_id is None:
+    so this is a direct, ground-truth lookup, not a guess.
+
+    External-review finding #361 (2026-08-13): a single conversation_id
+    can, rarely but really, have linked raw_items spanning two different
+    Projects - the old code silently picked whichever was most recent,
+    hiding a real identity contradiction from the caller. Now surfaced
+    instead: ambiguous=true plus every candidate project, never a silent
+    pick - same "notify, never auto-correct" posture as Track B.8's
+    identity-conflict audit."""
+    project_ids = wg.project_ids_for_conversation_id(conversation_id)
+    if not project_ids:
         return JSONResponse({"matched": False})
+    if len(project_ids) > 1:
+        candidates = []
+        for pid in project_ids:
+            card = _build_addin_focus_card(pid)
+            if card is not None:
+                candidates.append({"id": pid, "title": card["project"].get("title") or "Untitled project"})
+        if not candidates:
+            return JSONResponse({"matched": False})
+        return SafeJSONResponse({"matched": True, "ambiguous": True, "projects": candidates})
+    project_id = project_ids[0]
     card = _build_addin_focus_card(project_id)
     if card is None:
         return JSONResponse({"matched": False})

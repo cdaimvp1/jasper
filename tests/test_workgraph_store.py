@@ -3894,3 +3894,70 @@ def test_run_pending_action_reconciliation_daily_if_due_runs_once_per_day(ws_db)
     assert first is not None
     assert first["auto_resolved"] == 1
     assert second is None  # already claimed for that same day, second call is a no-op
+
+
+# --- project_ids_for_conversation_id (external-review finding #361, 2026-08-13) ---
+
+def test_project_ids_for_conversation_id_returns_empty_for_unknown_conversation(ws_db):
+    assert ws_db.project_ids_for_conversation_id("no-such-conversation") == []
+
+
+def test_project_ids_for_conversation_id_single_project(ws_db):
+    project_id = ws_db.create_project_with_new_id(name="Only Project", category="other")
+    issue_id = ws_db.create_issue_with_new_id(title="Issue", state="active", category="other")
+    ws_db.assign_issue_to_project(issue_id, project_id)
+    rid = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key="conv-1", thread_key="conv-1", dedupe_key="conv-1",
+        occurred_ts=time.time(), subject="s", from_actor="a@example.com", participants_json="[]",
+    )
+    ws_db.link_raw_item_to_issue(rid, issue_id)
+
+    assert ws_db.project_ids_for_conversation_id("conv-1") == [project_id]
+
+
+def test_project_ids_for_conversation_id_surfaces_real_ambiguity(ws_db):
+    """The exact case the review flagged: one conversation_id whose linked
+    raw_items resolve to two genuinely different Projects must surface
+    BOTH, most-recent-first - never silently pick one."""
+    project_a = ws_db.create_project_with_new_id(name="Project A", category="other")
+    project_b = ws_db.create_project_with_new_id(name="Project B", category="other")
+    issue_a = ws_db.create_issue_with_new_id(title="Issue A", state="active", category="other")
+    issue_b = ws_db.create_issue_with_new_id(title="Issue B", state="active", category="other")
+    ws_db.assign_issue_to_project(issue_a, project_a)
+    ws_db.assign_issue_to_project(issue_b, project_b)
+    older_rid = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key="conv-2", thread_key="conv-2", dedupe_key="conv-2-a",
+        occurred_ts=1000.0, subject="s", from_actor="a@example.com", participants_json="[]",
+    )
+    newer_rid = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key="conv-2", thread_key="conv-2", dedupe_key="conv-2-b",
+        occurred_ts=2000.0, subject="s", from_actor="a@example.com", participants_json="[]",
+    )
+    ws_db.link_raw_item_to_issue(older_rid, issue_a)
+    ws_db.link_raw_item_to_issue(newer_rid, issue_b)
+
+    result = ws_db.project_ids_for_conversation_id("conv-2")
+
+    assert result == [project_b, project_a]  # most-recent-occurrence-first
+
+
+def test_project_ids_for_conversation_id_dedupes_same_project_across_issues(ws_db):
+    """Several raw_items/issues under the SAME project must collapse to
+    one entry, not read as ambiguous."""
+    project_id = ws_db.create_project_with_new_id(name="Shared Project", category="other")
+    issue_a = ws_db.create_issue_with_new_id(title="Issue A", state="active", category="other")
+    issue_b = ws_db.create_issue_with_new_id(title="Issue B", state="active", category="other")
+    ws_db.assign_issue_to_project(issue_a, project_id)
+    ws_db.assign_issue_to_project(issue_b, project_id)
+    rid_a = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key="conv-3", thread_key="conv-3", dedupe_key="conv-3-a",
+        occurred_ts=1000.0, subject="s", from_actor="a@example.com", participants_json="[]",
+    )
+    rid_b = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key="conv-3", thread_key="conv-3", dedupe_key="conv-3-b",
+        occurred_ts=2000.0, subject="s", from_actor="a@example.com", participants_json="[]",
+    )
+    ws_db.link_raw_item_to_issue(rid_a, issue_a)
+    ws_db.link_raw_item_to_issue(rid_b, issue_b)
+
+    assert ws_db.project_ids_for_conversation_id("conv-3") == [project_id]

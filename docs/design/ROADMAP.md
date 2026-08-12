@@ -14,6 +14,47 @@ durable version.
 
 ---
 
+## Standing guardrail: the 2-point candidate-detection gate is load-bearing (2026-08-12)
+
+Marc's own framing, verbatim: "whatever we do it need to continue to improve
+or maintain [grouping] ... the whole product fails if that regresses at
+all." This is a permanent operating constraint, not a one-time note tied to
+any single build cycle.
+
+**The rule this protects:** `workgraph_pipeline2.py`'s deterministic
+candidate-detection gate — a work object becomes a *candidate* for LLM
+judgment only if it shares two or more real, named matched data points with
+the new item (`if len(points) >= 2: candidates.append(...)`). This exact
+rule was introduced by task #184 (replacing the old weighted-score model)
+and has survived unchanged through every commit since, including every
+Track A/B/C commit from the 2026-08-11/12 review-response cycle — verified
+directly against the commit history, not assumed. Distinct from, and
+upstream of, *candidate judgment* (the LLM call deciding which cleared
+candidate, if any, is the real match) — that layer has legitimately changed
+this cycle (Track B.5's comparative-call rewrite), but never the gate that
+decides who's even eligible to be judged.
+
+**The standing rule:** any future change that touches `find_candidates`,
+`_matched_data_points`, the `>= 2` threshold itself, or `judge_candidates`'s
+verdict logic must be called out explicitly before being built — never
+bundled quietly into an unrelated task — and must ship with a before/after
+comparison against the existing regression corpus
+(`tests/test_workgraph_regression_corpus.py`) plus a live backtest, the
+same discipline already used before task #184's rewrite and task #180's
+scored-model backtest went live. No exception for "it's just a
+refactor" — the whole product's trustworthiness rests on this gate staying
+deterministic and at least as accurate as it is today, never quietly
+weaker.
+
+**Currently the only queued item this applies to:** aggregating candidates
+by parent Project before judgment (see the external-review findings below)
+— it does not touch the `>= 2` threshold, only how already-gated
+candidates get bucketed before the comparative LLM call, but it's close
+enough to the gate to require the shadow-compare treatment above before
+shipping.
+
+---
+
 ## UI / integration parity items (2026-08-11)
 
 Deferred during the Phase 1 build-queue pass. Each is a real, scoped gap;
@@ -137,6 +178,18 @@ audit it) and cross-checking every API call against `server_lean.py`,
   `http://127.0.0.1:8700`; the add-in only works when Outlook and the
   Jasper server share a machine. This is the real ceiling on "powerful"
   until there's a reachable-from-anywhere backend.
+
+  **Deliberately kept off the prioritized "do now" list (2026-08-12):**
+  this is a real deployment/infra decision (standing up a personal
+  tunnel/VPN, or a reverse proxy, so the same backend is reachable from
+  somewhere other than the literal same machine) rather than a code fix —
+  genuinely doable solo, with no Graph API or IT/tenant dependency, but
+  different in *kind* from the 28 scoped engineering items above/below:
+  it's an architecture/deployment choice, not a bounded bug or feature.
+  It touches zero backend decision logic — no grouping, no judgment,
+  nothing — only how the add-in's JS reaches the already-existing
+  backend. Scope this separately, on request, once Marc wants to make
+  that call.
 
 ---
 

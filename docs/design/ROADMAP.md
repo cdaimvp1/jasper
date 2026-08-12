@@ -526,7 +526,10 @@ counts, exact file locations, and reproduction logic all checked out.
     real, enumerated MCP allowlist (the read-only M365 tools they
     actually use) rather than either extreme - and the 2026-07-29
     fabricated-relay-report incident is worth re-reading in that light.
-  - `workgraph_assistant`'s 29-tool allowlist, 8 of them dispatching
+  - `workgraph_assistant`'s 30-tool allowlist (corrected 2026-08-12 -
+    both this line and the tool's own source comment had drifted to
+    "29" after a tool was added without updating either; re-counted
+    directly against `_ALLOWED_TOOLS` rather than assumed), 8 of them dispatching
     (draft/forward/message-worker/request-review). Untouched on purpose:
     a human watches each turn. But raw evidence DOES reach it through
     tool results (`jasper_search` returns evidence-search hits;

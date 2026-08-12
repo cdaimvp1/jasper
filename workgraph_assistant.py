@@ -188,12 +188,15 @@ def _run_claude(prompt: str, *, session_id: str, is_new: bool, timeout: int) -> 
     # external-review finding #358) - same fix task #309/workgraph_pipeline2.
     # _run_headless_claude already proved out: Windows' CreateProcess has a
     # hard ~32K character total-command-line limit, and this call already
-    # stacks a fixed-but-large --append-system-prompt and a 29-tool
-    # --allowedTools list into that same limit before Marc's own message
-    # (unbounded length - a pasted status report, a long question) is even
-    # added. `claude -p` with no inline argument after -p reads the prompt
-    # from stdin - the exact same CLI behavior _run_headless_claude already
-    # relies on.
+    # stacks a fixed-but-large --append-system-prompt and a large, comma-
+    # joined --allowedTools list (len(_ALLOWED_TOOLS) below - deliberately
+    # not a hardcoded count here, since that number drifts as tools get
+    # added/removed and a stale count in a comment is exactly the kind of
+    # doc-rot task #376's follow-up found and fixed elsewhere, 2026-08-12)
+    # into that same limit before Marc's own message (unbounded length - a
+    # pasted status report, a long question) is even added. `claude -p`
+    # with no inline argument after -p reads the prompt from stdin - the
+    # exact same CLI behavior _run_headless_claude already relies on.
     # --output-format stream-json (+ --verbose, required alongside --print
     # for it), not the single-result "json" format (external-review
     # finding #363, 2026-08-13): the single-result format's final JSON

@@ -8,8 +8,13 @@ modules directly - no dependency on server_lean.py running, no network hop.
 The one part that genuinely needs an agent (Teams/Calendar/SharePoint, since
 those MCP tools only work inside a live Claude Code session, confirmed this
 session) runs as a SCOPED ONE-SHOT headless `claude -p` invocation for
-`relay`, scoped to Bash only - same safety pattern already used for curator's
-action-bridge proof, not a persistent unsupervised agent left running.
+`relay`, --allowedTools scoped to exactly the M365 connector tools its own
+routine calls by name plus Bash (task #376 follow-up, 2026-08-12 - a real
+mismatch found where the declared allowlist said "Bash only" while the
+prompt directed named MCP tool calls, which only ever worked because this
+repo's permissions bypass ignores --allowedTools entirely) - same
+one-shot-and-exit safety pattern already used for curator's action-bridge
+proof, not a persistent unsupervised agent left running.
 
 Logs one summary line per run to DATA_DIR/scheduled_refresh.log (paths.DATA_DIR,
 i.e. TEAM_DATA_DIR - this file's own LOG_PATH already resolves it correctly in
@@ -171,6 +176,36 @@ SYNTHESIS_PROMPT = (
 
 
 
+# Task #376 follow-up (2026-08-12): the exact M365 connector tools each
+# prompt above actually directs its worker to call by name, enumerated
+# honestly instead of relying on "Bash" alone + the permissions bypass -
+# see run_relay_oneshot's/run_deepdive_oneshot's own docstrings for why.
+_RELAY_ALLOWED_TOOLS = ",".join([
+    "Bash",
+    "mcp__claude_ai_Microsoft_365__teams_list_chats",
+    "mcp__claude_ai_Microsoft_365__outlook_calendar_search",
+    "mcp__claude_ai_Microsoft_365__sharepoint_search",
+    "mcp__claude_ai_Microsoft_365__read_resource",
+])
+_DEEPDIVE_ALLOWED_TOOLS = ",".join([
+    "Bash",
+    "mcp__claude_ai_Microsoft_365__chat_message_search",
+    "mcp__claude_ai_Microsoft_365__outlook_email_search",
+    "mcp__claude_ai_Microsoft_365__sharepoint_search",
+    "mcp__claude_ai_Microsoft_365__read_resource",
+])
+
+# Keyword heuristic only, never a certainty - see run_relay_oneshot's own
+# docstring for why a real denial's exact wording can't be pinned to one
+# fixed string (it's the model's own paraphrase of what happened).
+_PERMISSION_DENIAL_KEYWORDS = ("permission", "requires approval", "not allowed", "denied")
+
+
+def _looks_like_permission_denial(stdout: str, stderr: str) -> bool:
+    text = f"{stdout or ''} {stderr or ''}".lower()
+    return any(kw in text for kw in _PERMISSION_DENIAL_KEYWORDS)
+
+
 def _log(line: str) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with LOG_PATH.open("a", encoding="utf-8") as f:
@@ -201,7 +236,31 @@ def run_relay_oneshot() -> dict:
     noticing. SharePoint's cursor gets the SAME unconditional
     this-wake's-timestamp update as calendar's, per the routine's own step 5
     ("only if enabled+ran") - so when the enabled flag is on, checking it
-    the same way is just as reliable a proxy, at no extra cost."""
+    the same way is just as reliable a proxy, at no extra cost.
+
+    --allowedTools now enumerates the exact M365 connector tools this
+    prompt actually directs the worker to call (task #376 follow-up,
+    2026-08-12), instead of the old "Bash" alone - a real mismatch that
+    happened to work only because .claude/settings.json's
+    permissions.defaultMode="bypassPermissions" ignores --allowedTools
+    entirely (confirmed live this same task: that file's own mtime predates
+    the 2026-07-29 fabricated-report incident above, so the bypass was
+    almost certainly already active then too - the original "connector
+    auth doesn't carry into headless" diagnosis still stands; a real
+    permission denial was checked for and ruled out, not just left
+    unconsidered). Enumerating honestly now means this keeps working
+    correctly if the bypass is ever narrowed, rather than silently breaking.
+    Deliberately NOT --strict-mcp-config (unlike the raw-evidence-reading
+    spawns task #376 tightened) - relay's whole job IS calling these MCP
+    tools, so that flag would definitionally break it.
+
+    possible_permission_denial (same task): a real denial's actual wording
+    is the MODEL's own paraphrase, not a fixed string (confirmed live via a
+    direct probe: "The Write tool is requesting permission... Your
+    permission settings require approval...") - so this is a keyword
+    heuristic over stdout/stderr, surfaced for a human to notice, never
+    used to flip `ok` itself (a heuristic false-positive should never mask
+    or override the real, deterministic cursor-advancement check above)."""
     calendar_cursor_before = ws.get_cursor("calendar", "default")
     sharepoint_enabled = ws.get_cursor("sharepoint", "enabled") == "1"
     sharepoint_cursor_before = ws.get_cursor("sharepoint", "default") if sharepoint_enabled else None
@@ -219,7 +278,7 @@ def run_relay_oneshot() -> dict:
     env.update(env_prefix)
     try:
         proc = _run_headless_with_tree_kill(
-            ["claude", "-p", RELAY_PROMPT, "--allowedTools", "Bash",
+            ["claude", "-p", RELAY_PROMPT, "--allowedTools", _RELAY_ALLOWED_TOOLS,
              "--add-dir", str(BODY), "--model", "claude-haiku-4-5-20251001"],
             cwd=str(BODY), env=env, timeout=900,
         )
@@ -241,6 +300,7 @@ def run_relay_oneshot() -> dict:
             "sharepoint_advanced": sharepoint_advanced,
             "calendar_cursor_before": calendar_cursor_before,
             "calendar_cursor_after": calendar_cursor_after,
+            "possible_permission_denial": _looks_like_permission_denial(proc.stdout, proc.stderr),
             "stdout_tail": proc.stdout[-1000:], "stderr_tail": proc.stderr[-1000:],
         }
     except Exception as e:
@@ -432,7 +492,13 @@ def run_deepdive_oneshot() -> dict:
     Skipped entirely (no subprocess spawned) when
     workgraph_deepdive.list_deepdive_candidates() is already empty (no
     active/waiting project exists, or - in practice, won't happen given
-    the anti-starvation ranking - literally none is eligible)."""
+    the anti-starvation ranking - literally none is eligible).
+
+    --allowedTools/possible_permission_denial: same task #376 follow-up
+    fix and same reasoning as run_relay_oneshot's own docstring - this
+    prompt directs the worker to call chat_message_search/outlook_email_
+    search/sharepoint_search/read_resource by name, so the allowlist now
+    says so explicitly instead of relying on the permissions bypass."""
     candidates = workgraph_deepdive.list_deepdive_candidates()
     if not candidates:
         return {"ok": True, "skipped": True, "reason": "no deep-dive candidates"}
@@ -450,11 +516,13 @@ def run_deepdive_oneshot() -> dict:
     env.update(env_prefix)
     try:
         proc = _run_headless_with_tree_kill(
-            ["claude", "-p", PROJECT_DEEPDIVE_PROMPT, "--allowedTools", "Bash", "--add-dir", str(BODY)],
+            ["claude", "-p", PROJECT_DEEPDIVE_PROMPT, "--allowedTools", _DEEPDIVE_ALLOWED_TOOLS,
+             "--add-dir", str(BODY)],
             cwd=str(BODY), env=env, timeout=1200,
         )
         return {"ok": proc.returncode == 0, "returncode": proc.returncode,
                 "project_id": candidates[0]["id"],
+                "possible_permission_denial": _looks_like_permission_denial(proc.stdout, proc.stderr),
                 "stdout_tail": proc.stdout[-1000:], "stderr_tail": proc.stderr[-1000:]}
     except Exception as e:
         return {"ok": False, "project_id": candidates[0]["id"], "error": str(e)}

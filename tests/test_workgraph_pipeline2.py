@@ -305,6 +305,66 @@ def test_find_candidates_has_no_side_effects(ws_db):
     assert ws_db.get_issue(b)["project_id"] is None
 
 
+# --- build_identity_packet (review point #6/#9) ---------------------------
+# get_raw_items_for_issue is occurred_ts ASC (oldest first); a plain
+# concat-then-slice therefore silently drops the NEWEST evidence once the
+# combined text exceeds the prompt budget. build_identity_packet instead
+# always keeps the earliest item + attachments + as much of the most
+# recent activity as fits, dropping the middle first if anything has to go.
+
+def test_build_identity_packet_matches_full_text_when_under_budget(ws_db, isolated_paths):
+    a = _issue(ws_db, "Deal A")
+    _raw_item(ws_db, a, "First", "k1", body_preview="oldest message")
+    _raw_item(ws_db, a, "Second", "k2", body_preview="newest message")
+
+    assert p2.build_identity_packet(a) == p2.full_text_for_work_object(a)
+
+
+def test_build_identity_packet_keeps_newest_and_earliest_drops_middle(ws_db, isolated_paths):
+    a = _issue(ws_db, "Deal A")
+    _raw_item(ws_db, a, "Oldest", "k1", body_preview="A" * 200)
+    _raw_item(ws_db, a, "Middle", "k2", body_preview="B" * 200)
+    _raw_item(ws_db, a, "Newest", "k3", body_preview="C" * 200)
+
+    packet = p2.build_identity_packet(a, char_budget=500)
+
+    assert "A" * 200 in packet  # earliest item always kept in full
+    assert "C" * 200 in packet  # most recent item wins the remaining budget
+    assert "B" * 200 not in packet  # the middle is what gets dropped
+    # Chronological order preserved among what survives: oldest text
+    # appears before newest text, not scrambled.
+    assert packet.index("A" * 200) < packet.index("C" * 200)
+
+
+def test_build_identity_packet_always_includes_attachment_even_with_many_recent_items(ws_db, isolated_paths):
+    a = _issue(ws_db, "Deal A")
+    _raw_item(ws_db, a, "Oldest", "k1", body_preview="origin message")
+    for i in range(5):
+        _raw_item(ws_db, a, f"Update {i}", f"k-recent-{i}", body_preview="D" * 200)
+    ws_db.create_attachment(entity_type="issue", entity_id=a, kind="upload",
+                             filename="ChangeRequest.pdf", stored_path="/tmp/cr.pdf",
+                             content_type="application/pdf", size_bytes=100, sha256_hex=None,
+                             uploaded_by="test", extracted_text="PR700001 signed change request")
+
+    packet = p2.build_identity_packet(a, char_budget=600)
+
+    assert "PR700001 signed change request" in packet
+    assert "origin message" in packet
+
+
+def test_build_identity_packet_evidence_hash_changes_when_evidence_changes(ws_db, isolated_paths):
+    a = _issue(ws_db, "Deal A")
+    _raw_item(ws_db, a, "First", "k1", body_preview="original content")
+    b = _issue(ws_db, "Deal B")
+    _raw_item(ws_db, b, "First", "kb1", body_preview="other side content")
+
+    hash_before = p2._evidence_hash_for_pair(a, b, ["supplier"])
+    _raw_item(ws_db, a, "Follow-up", "k2", body_preview="new content changes the evidence")
+    hash_after = p2._evidence_hash_for_pair(a, b, ["supplier"])
+
+    assert hash_before != hash_after
+
+
 # --- judge_candidate / _parse_verdict (step 4) ----------------------------
 
 def test_parse_verdict_same_project():

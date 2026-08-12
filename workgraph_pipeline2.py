@@ -129,27 +129,103 @@ def _run_headless_claude(prompt: str, *, timeout: int, model: Optional[str] = No
     return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
 
 
-def full_text_for_work_object(work_object_id: str) -> str:
+def _raw_item_parts(work_object_id: str) -> list[str]:
     """Every linked raw_item's full resolved text (never a preview) -
-    subject + real body - what steps 4/6 actually read. Newline-joined,
-    one raw_item per block. Also includes each linked attachment's own
-    extracted_text (2026-08-06, Kinaxis investigation) - real live example
-    that motivated this: a signed Change Request PDF/DOCX carried the only
-    copy of a real reference number nowhere present in any email body on
-    the same issue. Same real, already-extracted text source
-    reference_base_ids_for_issue (workgraph_projects.py) now also scans -
-    kept as a separate read here rather than sharing code, since that
-    function returns a normalized id set and this one needs raw prose."""
+    subject + real body - in occurred_ts ASC order (oldest first), same
+    order ws.get_raw_items_for_issue itself returns them in."""
     parts = []
     for item in ws.get_raw_items_for_issue(work_object_id):
         subject = item.get("subject") or ""
         body = text_extract.resolve_item_text(item)
         parts.append(f"Subject: {subject}\n{body}")
+    return parts
+
+
+def _attachment_parts(work_object_id: str) -> list[str]:
+    """Every linked attachment's own extracted_text (2026-08-06, Kinaxis
+    investigation) - real live example that motivated this: a signed
+    Change Request PDF/DOCX carried the only copy of a real reference
+    number nowhere present in any email body on the same issue."""
+    parts = []
     for att in ws.list_attachments_for_issue(work_object_id):
         text = att.get("extracted_text")
         if text:
             parts.append(f"Attachment ({att.get('filename') or 'unnamed'}):\n{text}")
-    return "\n\n---\n\n".join(parts)
+    return parts
+
+
+def full_text_for_work_object(work_object_id: str) -> str:
+    """Every linked raw_item's full resolved text (never a preview),
+    oldest-first, followed by every linked attachment's extracted text.
+    Same real, already-extracted text source reference_base_ids_for_issue
+    (workgraph_projects.py) now also scans - kept as a separate read here
+    rather than sharing code, since that function returns a normalized id
+    set and this one needs raw prose.
+
+    NOT what judge_candidate reads for its actual judgment prompt as of
+    review point #6/#9 - see build_identity_packet below. Kept as the
+    plain, untruncated "give me everything" primitive: _evidence_hash_
+    for_pair uses this (not the packet) precisely because the cache
+    fingerprint should reflect every real change to a work object's
+    evidence, not just the slice that happened to survive a budget."""
+    return "\n\n---\n\n".join(_raw_item_parts(work_object_id) + _attachment_parts(work_object_id))
+
+
+_IDENTITY_PACKET_ATTACHMENT_BUDGET = 2000
+_SECTION_SEPARATOR = "\n\n---\n\n"
+
+
+def build_identity_packet(work_object_id: str, char_budget: int = _MAX_TEXT_CHARS) -> str:
+    """The actual evidence judge_candidate reads for its judgment prompt -
+    a purpose-built, budget-aware assembly, NOT a plain oldest-first
+    concat-then-slice (review point #6/#9, confirmed live via this
+    session's own code read: get_raw_items_for_issue is occurred_ts ASC,
+    and judge_candidate truncated via text[:_MAX_TEXT_CHARS]). On a long-
+    running work object whose combined text exceeds the budget, that
+    ordering silently dropped the NEWEST evidence and any attachment
+    entirely - exactly backwards for a system whose value depends on
+    staying current.
+
+    Composed instead as, in this priority order:
+      1. attachments - own fixed sub-budget (_IDENTITY_PACKET_ATTACHMENT_
+         BUDGET), always included regardless of message volume. Real
+         identity-critical content per full_text_for_work_object's own
+         Kinaxis-investigation history has shown up ONLY in an attachment.
+      2. the EARLIEST raw item, in full - origin/identity context (who/
+         what this started as).
+      3. as many of the MOST RECENT raw items as still fit the remaining
+         budget, filled backward from newest toward oldest. If everything
+         can't fit, it's the MIDDLE (oldest-after-the-first) that gets
+         dropped - the newest activity is never the part silently cut.
+
+    Falls back to full_text_for_work_object's exact same oldest-first
+    join whenever the combined content is already under budget - byte-
+    identical output in the common (short) case; this only changes
+    behavior once real truncation would otherwise occur."""
+    item_parts = _raw_item_parts(work_object_id)
+    attachment_parts = _attachment_parts(work_object_id)
+    attachment_block = _SECTION_SEPARATOR.join(attachment_parts)[:_IDENTITY_PACKET_ATTACHMENT_BUDGET]
+
+    full_joined = _SECTION_SEPARATOR.join(item_parts + ([attachment_block] if attachment_block else []))
+    if len(full_joined) <= char_budget:
+        return full_joined
+
+    earliest_part = item_parts[0] if item_parts else None
+    remaining_budget = char_budget - len(attachment_block) - len(earliest_part or "")
+
+    kept_recent_newest_first = []
+    used = 0
+    for part in reversed(item_parts[1:]):
+        cost = len(part) + len(_SECTION_SEPARATOR)
+        if used + cost > remaining_budget:
+            break
+        kept_recent_newest_first.append(part)
+        used += cost
+    recent_parts_chronological = list(reversed(kept_recent_newest_first))
+
+    ordered_sections = [p for p in (earliest_part,) if p] + \
+        ([attachment_block] if attachment_block else []) + recent_parts_chronological
+    return _SECTION_SEPARATOR.join(ordered_sections)
 
 
 def find_candidates(work_object_id: str, issue: Optional[dict] = None) -> list[dict]:
@@ -278,12 +354,17 @@ def judge_candidate(work_object_id: str, candidate_id: str, matched_signals: lis
     this session confirmed Sonnet matches Opus's judgment on both a real
     positive and a real negative merge pair) - kept as an optional
     override here, not a hardcoded default, so a future A/B test against
-    a different tier stays just as easy."""
-    text_a = full_text_for_work_object(candidate_id)
-    text_b = full_text_for_work_object(work_object_id)
+    a different tier stays just as easy.
+
+    Reads via build_identity_packet, not a plain full-text slice (review
+    point #6/#9) - see that function's own docstring for why a naive
+    oldest-first concat-then-truncate silently dropped the newest
+    evidence and any attachment on a long-running work object."""
+    text_a = build_identity_packet(candidate_id)
+    text_b = build_identity_packet(work_object_id)
     precedent_line = f"\nHistorical note (context only - still judge THIS pair on the evidence above): {precedent_context}\n" if precedent_context else ""
     prompt = _JUDGMENT_PROMPT_TEMPLATE.format(
-        text_a=text_a[:_MAX_TEXT_CHARS], text_b=text_b[:_MAX_TEXT_CHARS],
+        text_a=text_a, text_b=text_b,
         match_count=len(matched_signals), matched_signals=", ".join(matched_signals),
         precedent_line=precedent_line,
     )

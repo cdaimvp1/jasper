@@ -181,9 +181,24 @@ def _run_claude(prompt: str, *, session_id: str, is_new: bool, timeout: int) -> 
     # added. `claude -p` with no inline argument after -p reads the prompt
     # from stdin - the exact same CLI behavior _run_headless_claude already
     # relies on.
+    # --output-format stream-json (+ --verbose, required alongside --print
+    # for it), not the single-result "json" format (external-review
+    # finding #363, 2026-08-13): the single-result format's final JSON
+    # object has no record of which tools were actually called during the
+    # turn, only the final text - which is exactly why the client used to
+    # fall back to keyword-guessing the reply text for "did something get
+    # dispatched." stream-json emits one JSON object per line, including
+    # {"type":"assistant","message":{"content":[{"type":"tool_use",
+    # "name":...}, ...]}} for every real tool call, terminated by the
+    # exact same {"type":"result", "is_error":..., "result":...,
+    # "session_id":..., "total_cost_usd":...} object the old "json" format
+    # returned as its only output - confirmed live against a real minimal
+    # call before writing this, not assumed from documentation alone.
+    # _parse_stream_json below extracts both.
     args = [
         "claude", "-p",
-        "--output-format", "json",
+        "--output-format", "stream-json",
+        "--verbose",
         "--mcp-config", _MCP_CONFIG,
         "--allowedTools", ",".join(_ALLOWED_TOOLS),
         "--append-system-prompt", _SYSTEM_PROMPT,
@@ -221,6 +236,54 @@ def _run_claude(prompt: str, *, session_id: str, is_new: bool, timeout: int) -> 
     return subprocess.CompletedProcess(args, proc.returncode, stdout, stderr)
 
 
+# Real tool names (external-review finding #363) whose successful call
+# means something was genuinely dispatched/queued on Marc's behalf, as
+# opposed to a pure read (jasper_search, jasper_get_project, the M365
+# read-only connector tools, etc.). Kept as an explicit, reviewable list -
+# same "no domain-specific name hardcoded where it can be avoided, but a
+# real dispatch-safety distinction needs a real list somewhere" tradeoff
+# skills_registry.py's own capability fields already made. Re-check this
+# list if _ALLOWED_TOOLS above ever gains a new mutating tool.
+_DISPATCH_TOOL_NAMES = frozenset({
+    "mcp__jasper__jasper_draft_reply",
+    "mcp__jasper__jasper_draft_forward",
+    "mcp__jasper__jasper_request_contract_review",
+    "mcp__jasper__jasper_message_worker",
+    "mcp__jasper__jasper_teach_prerequisite_rule",
+    "mcp__jasper__jasper_draft_review_request",
+    "mcp__jasper__jasper_mark_output_reviewed",
+    "mcp__jasper__jasper_acknowledge_proactive_action",
+})
+
+
+def _parse_stream_json(stdout: str) -> tuple[Optional[dict], list[str]]:
+    """Parses claude -p --output-format stream-json's newline-delimited
+    JSON. Returns (the final {"type":"result",...} object, or None if
+    never seen; every real tool name called during the turn, in call
+    order, duplicates included - the caller decides what "dispatched"
+    means). Malformed/partial lines are skipped, never raised - the same
+    "never let one bad line take down the whole parse" discipline as
+    every other best-effort text parse in this codebase."""
+    result_obj = None
+    tool_names: list[str] = []
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        obj_type = obj.get("type")
+        if obj_type == "result":
+            result_obj = obj
+        elif obj_type == "assistant":
+            for block in ((obj.get("message") or {}).get("content") or []):
+                if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name"):
+                    tool_names.append(block["name"])
+    return result_obj, tool_names
+
+
 def _call_claude_once(message: str, *, session_id: str, is_new: bool, timeout: int) -> dict:
     try:
         proc = _run_claude(message, session_id=session_id, is_new=is_new, timeout=timeout)
@@ -230,15 +293,15 @@ def _call_claude_once(message: str, *, session_id: str, is_new: bool, timeout: i
     if proc.returncode != 0:
         return {"ok": False, "session_id": session_id, "reply": "Jasper hit an error.",
                 "error": (proc.stderr or "")[-2000:]}
-    try:
-        result = json.loads(proc.stdout)
-    except (json.JSONDecodeError, ValueError):
+    result, tool_names = _parse_stream_json(proc.stdout)
+    if result is None:
         return {"ok": False, "session_id": session_id, "reply": "Jasper returned something unexpected.",
                 "error": proc.stdout[-2000:]}
     if result.get("is_error"):
         return {"ok": False, "session_id": session_id, "reply": "Jasper hit an error.", "error": json.dumps(result)[-2000:]}
+    dispatched_tools = [t for t in tool_names if t in _DISPATCH_TOOL_NAMES]
     return {"ok": True, "session_id": result.get("session_id", session_id), "reply": result.get("result", ""),
-            "cost_usd": result.get("total_cost_usd")}
+            "cost_usd": result.get("total_cost_usd"), "dispatched_tools": dispatched_tools}
 
 
 def ask(message: str, session_id: Optional[str] = None, *, timeout: int = _TIMEOUT_SECONDS,

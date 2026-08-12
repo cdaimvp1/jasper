@@ -53,6 +53,7 @@ import workgraph_claims_backfill
 import workgraph_discovery
 import workgraph_proactive
 import workgraph_relationships
+import workgraph_projects
 import workgraph_noise
 import workgraph_lifecycle
 import workgraph_self_audit
@@ -768,6 +769,17 @@ def run() -> dict:
     except Exception as e:
         supplier_entity_sweep_result = {"error": str(e)}
 
+    # Item 6a (2026-08-12, this session's Sodalis grouping investigation) -
+    # recurring counterpart to the one-time party-link/fasttrack-supplier
+    # backfills run manually this session. Same once/day gate, deterministic,
+    # no LLM calls - see run_party_and_supplier_resync_if_due's own docstring.
+    # Deliberately excludes claims->issue citation (item 6b/#387), which is
+    # LLM-driven and stays separately gated.
+    try:
+        party_supplier_resync_result = workgraph_projects.run_party_and_supplier_resync_if_due()
+    except Exception as e:
+        party_supplier_resync_result = {"error": str(e)}
+
     # Deterministic, no LLM calls - same "keep it entirely separate" discipline as the
     # relationship sweep above; reads raw_items/claims only, never touches grouping/merge
     # decisions, writes only projects.status via the pre-existing noise-archived value (task
@@ -879,6 +891,7 @@ def run() -> dict:
         "proactive_actions": proactive_actions_result,
         "relationship_sweep": relationship_sweep_result,
         "supplier_entity_sweep": supplier_entity_sweep_result,
+        "party_supplier_resync": party_supplier_resync_result,
         "noise_sweep": noise_sweep_result,
         "dormant_sweep": dormant_sweep_result,
         "self_audit_sweep": self_audit_result,

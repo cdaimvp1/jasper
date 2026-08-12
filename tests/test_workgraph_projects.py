@@ -821,6 +821,32 @@ def test_matched_data_points_ariba_descriptor_and_requester_together_is_two_poin
     assert len(points) >= 2
 
 
+def test_matched_data_points_shared_internal_party_now_counts_as_stakeholder():
+    """Retracted 2026-08-12 (Marc's direct correction, this session's
+    Sodalis investigation): a shared INTERNAL contact used to be
+    categorically excluded from the "stakeholder" point - now any shared
+    tracked party counts, paired here with a real "supplier" point so it
+    clears the 2-point gate the same way an external-party match always
+    has. A shared internal party ALONE (no second point) must still not
+    be enough - the 2-point gate itself is unchanged and is what makes
+    this safe."""
+    a = _sig(external_orgs=["Acme"],
+             participant_roles=[{"party_id": "party-marc-lane", "affiliation": "internal"}])
+    b = _sig(external_orgs=["Acme"],
+             participant_roles=[{"party_id": "party-marc-lane", "affiliation": "internal"}])
+    points = wp._matched_data_points("a", a, "", "b", b, "")
+    assert "stakeholder" in points
+    assert "supplier" in points
+    assert len(points) >= 2
+
+
+def test_matched_data_points_shared_internal_party_alone_is_not_two_points():
+    a = _sig(participant_roles=[{"party_id": "party-marc-lane", "affiliation": "internal"}])
+    b = _sig(participant_roles=[{"party_id": "party-marc-lane", "affiliation": "internal"}])
+    points = wp._matched_data_points("a", a, "", "b", b, "")
+    assert points == ["stakeholder"]
+
+
 def test_matched_data_points_product_service_alone_is_one_point():
     a = _sig(positive_vocabulary={"ariba_requester": None, "ariba_descriptor": "Workday HCM SaaS", "value_amount": None})
     b = _sig(positive_vocabulary={"ariba_requester": None, "ariba_descriptor": "Workday HCM SaaS", "value_amount": None})
@@ -1195,3 +1221,37 @@ def test_handoff_package_assembles_real_data_across_every_section(ws_db):
 
     assert len(pkg["evidence_references"]) == 1
     assert pkg["evidence_references"][0]["raw_item_id"] == rid_a
+
+
+# --- item 6a (2026-08-12): recurring party/supplier resync sweep -----------
+
+def test_run_party_and_supplier_resync_if_due_gates_once_per_day(ws_db):
+    now = time.time()
+    first = wp.run_party_and_supplier_resync_if_due(now)
+    assert first is not None
+
+    second = wp.run_party_and_supplier_resync_if_due(now + 60)
+    assert second is None
+
+
+def test_run_party_and_supplier_resync_if_due_only_touches_recently_updated_issues(ws_db, monkeypatch):
+    now = time.time()
+    recent = _issue(ws_db, "Recently touched issue")
+    conn = ws_db._connect()
+    conn.execute("UPDATE work_objects SET updated_at = ? WHERE id = ?", (now - 3600, recent))
+    conn.close()
+
+    stale = _issue(ws_db, "Stale issue from long ago")
+    conn = ws_db._connect()
+    conn.execute("UPDATE work_objects SET updated_at = ? WHERE id = ?", (now - 400 * 86400, stale))
+    conn.close()
+
+    touched = []
+    monkeypatch.setattr(wp, "_sync_fasttrack_data_point_index",
+                         lambda wid, issue, sig: touched.append(wid))
+
+    result = wp.run_party_and_supplier_resync_if_due(now)
+
+    assert recent in touched
+    assert stale not in touched
+    assert result["issues_checked"] == 1

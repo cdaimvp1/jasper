@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -253,6 +254,37 @@ def build_identity_packet(work_object_id: str, char_budget: int = _MAX_TEXT_CHAR
     return _SECTION_SEPARATOR.join(ordered_sections)
 
 
+_CLOSED_AND_STALE_CUTOFF_SECONDS = 365 * 86400  # ~12 months
+
+
+def _is_closed_and_stale(other: dict) -> bool:
+    """Task #382 replacement (2026-08-12, Marc's direct correction): the
+    original plan was to cap the comparative-judgment prompt at N candidates
+    and abstain past that - Marc's own call was that ANY cap on candidate
+    detection is the wrong shape ("why are we putting a candidate cap on
+    anything? we shouldn't"), since a real candidate silently (or even
+    loudly) excluded by an arbitrary count is worse than a bigger prompt.
+    His actual ask: never even consider a candidate that is BOTH closed
+    (workgraph_projects._CLOSED_STATES: done/dismissed/noise-archived) AND
+    hasn't been touched in ~12 months - closed-but-recent work stays a
+    real candidate (a straggler reply after closure is still worth
+    catching), and old-but-still-open work stays a real candidate too (a
+    long-running relationship isn't stale just because it's slow). Only
+    the conjunction of both is excluded. This shrinks the candidate POOL
+    itself in find_candidates, before any per-item signature computation
+    or comparative-prompt assembly - the right layer to fix this at,
+    since it also cuts wasted signature-computation cost, not just
+    prompt size. Task #388 (a separate, later decision) covers what to do
+    if a single vendor's still-active candidate pool is larger than one
+    comparative call should reasonably handle - this function does not
+    attempt to solve that; it only removes candidates that were never
+    worth considering as identity matches in the first place."""
+    if other.get("state") not in wp._CLOSED_STATES:
+        return False
+    updated_at = other.get("updated_at") or 0
+    return updated_at < time.time() - _CLOSED_AND_STALE_CUTOFF_SECONDS
+
+
 def find_candidates(work_object_id: str, issue: Optional[dict] = None) -> list[dict]:
     """Every existing project/ungrouped item sharing 2+ real data points
     with work_object_id - pure detection, no side effects, no suggestion
@@ -303,6 +335,8 @@ def find_candidates(work_object_id: str, issue: Optional[dict] = None) -> list[d
         if other["id"] == work_object_id:
             continue
         if my_project_id and my_project_id == other.get("project_id"):
+            continue
+        if _is_closed_and_stale(other):
             continue
         other_sig = wp.get_or_compute_work_object_signature(other["id"], other)
         other_topic_key = wp._topic_key_for_signature(other, other_sig)

@@ -584,14 +584,13 @@ def _fasttrack_index_values(sig: dict, topic_key: str) -> dict[str, list[str]]:
     if suppliers:
         values[workgraph_discovery.FASTTRACK_SUPPLIER_ID] = sorted(suppliers)
 
-    # Stakeholder mixes two independent value spaces (a tracked external
-    # party's id, or a bare Ariba requester NAME) that _matched_data_points
-    # already ORs together as "one shared stakeholder point" - prefixed
-    # here only so the two spaces can never collide on the same literal
-    # string, not to change which pairs match.
-    stakeholders = [
-        f"party:{p['party_id']}" for p in sig["participant_roles"] if p.get("affiliation") == "external"
-    ]
+    # Stakeholder mixes two independent value spaces (a tracked party's id -
+    # internal or external, per the 2026-08-12 retraction in
+    # _matched_data_points' own docstring - or a bare Ariba requester NAME)
+    # that _matched_data_points already ORs together as "one shared
+    # stakeholder point" - prefixed here only so the two spaces can never
+    # collide on the same literal string, not to change which pairs match.
+    stakeholders = [f"party:{p['party_id']}" for p in sig["participant_roles"]]
     requester = vocab.get("ariba_requester")
     if requester:
         stakeholders.append(f"name:{requester.lower().strip()}")
@@ -670,6 +669,54 @@ def ensure_fasttrack_index_backfilled() -> None:
         backfill_fasttrack_data_point_index()
 
 
+def run_party_and_supplier_resync_if_due(now: Optional[float] = None) -> Optional[dict]:
+    """Item 6a (2026-08-12) - the recurring counterpart to the one-time
+    corpus-wide backfills run manually this session (workgraph_parties.
+    run() over every issue, and backfill_fasttrack_data_point_index() over
+    every issue+cluster - both explicitly documented as safe to re-run).
+    Re-syncs party links AND the fasttrack supplier/stakeholder/etc. data-
+    point index for whatever issues actually changed recently, instead of
+    relying on someone remembering to re-run the full corpus backfill by
+    hand every time new evidence accrues on an already-confirmed issue -
+    see the real marc-649/Sodalis finding this session that motivated it.
+
+    Same once/day claim_daily_run gate as every other periodic sweep in
+    scheduled_refresh.py. A 25h lookback (not exactly 24h) gives a safe
+    overlap margin against clock drift between cycles - both party-
+    linking and fasttrack indexing are idempotent (see their own
+    docstrings), so reprocessing an issue twice in the overlap is a
+    no-op, never a correctness risk.
+
+    Deterministic, no LLM calls - reuses exactly the same functions
+    already proven safe to re-run this session, just scoped to changed
+    issues via ws.list_issue_ids_updated_since instead of the whole
+    corpus every time (workgraph_parties.run's own docstring: "not run
+    over the whole DB every time, since that's wasted work for issues
+    whose parties were already extracted on a prior pass and haven't
+    gained new evidence since").
+
+    Deliberately does NOT touch claims->issue citation (item 6b/#387) -
+    that step is LLM-driven (curator's synthesis judgment), confirmed
+    this session, and stays separately gated pending explicit usage
+    approval. This function only ever does the two deterministic halves."""
+    if now is None:
+        now = time.time()
+    today = time.strftime("%Y-%m-%d", time.localtime(now))
+    if not ws.claim_daily_run("party_and_supplier_resync", today):
+        return None
+    changed_ids = ws.list_issue_ids_updated_since(now - 90000)
+    parties_result = workgraph_parties.run(changed_ids)
+    supplier_reindexed = 0
+    for issue_id in changed_ids:
+        issue = ws.get_issue_or_cluster(issue_id)
+        if issue is None:
+            continue
+        sig = get_or_compute_work_object_signature(issue_id, issue)
+        _sync_fasttrack_data_point_index(issue_id, issue, sig)
+        supplier_reindexed += 1
+    return {"issues_checked": len(changed_ids), "supplier_reindexed": supplier_reindexed, **parties_result}
+
+
 def candidate_pool_via_data_point_index(work_object_id: str, sig: dict, topic_key: str) -> set:
     """Task #331 - find_candidates' real replacement for iterating every
     issue/cluster in the database. Returns every OTHER work_object_id that
@@ -692,9 +739,8 @@ def candidate_pool_via_data_point_index(work_object_id: str, sig: dict, topic_ke
         pool.update(ws.list_work_object_ids_for_data_point_value(workgraph_discovery.FASTTRACK_SUPPLIER_ID, supplier))
 
     for p in sig["participant_roles"]:
-        if p.get("affiliation") == "external":
-            pool.update(ws.list_work_object_ids_for_data_point_value(
-                workgraph_discovery.FASTTRACK_STAKEHOLDER_ID, f"party:{p['party_id']}"))
+        pool.update(ws.list_work_object_ids_for_data_point_value(
+            workgraph_discovery.FASTTRACK_STAKEHOLDER_ID, f"party:{p['party_id']}"))
     requester = vocab.get("ariba_requester")
     if requester:
         pool.update(ws.list_work_object_ids_for_data_point_value(
@@ -766,8 +812,9 @@ def _matched_data_points(a_id: str, a_sig: dict, a_topic_key: str,
         (workgraph_signals.normalize_company_name) so a tracked party's
         "Authenticx" and a system field's formal "AUTHENTICX INC" count as
         the same real vendor.
-      - "stakeholder": a shared NAMED person - either a tracked external
-        party in common, or a matching Ariba-extracted requester name.
+      - "stakeholder": a shared NAMED person - any tracked party in
+        common, internal or external (see the 2026-08-12 retraction
+        below), or a matching Ariba-extracted requester name.
         Deliberately one point type, not two, even when both fire - they
         answer the same question ("is there a shared named person"), and
         Marc's own list treats "named stakeholder" as one data point.
@@ -786,13 +833,8 @@ def _matched_data_points(a_id: str, a_sig: dict, a_topic_key: str,
         score - the matched company+keyword pair is embedded directly in
         the returned point string for full auditability.
 
-    Deliberately NOT a point type here, per Marc's own explicit rule
-    ("never used as the primary matching data points"): sender/participant
-    overlap (a shared INTERNAL contact) - always extracted and available
-    to whoever reviews a candidate's real content, but never counted
-    toward the 2+-point gate itself, on purpose. Category is dropped
-    entirely (not one of his listed data point types - an internal
-    taxonomy tag, not extracted evidence).
+    Category is dropped entirely (not one of Marc's listed data point
+    types - an internal taxonomy tag, not extracted evidence).
 
     Honest gap, not silently pretended-covered: three of his listed types
     have no extractor yet - a contract identifier distinct from a PR/PO
@@ -824,6 +866,30 @@ def _matched_data_points(a_id: str, a_sig: dict, a_topic_key: str,
     project (see workgraph_projects.extract_issue_from_project, corrected
     pipeline Phase D) - "split them up within the project," his words -
     rather than ever collapsing them into one blob.
+
+    Retracted 2026-08-12 (Marc's direct correction, this session's Sodalis
+    investigation): "stakeholder" used to count ONLY a shared EXTERNAL
+    party or a matching ariba_requester - a shared INTERNAL contact was
+    explicitly excluded, on the theory that internal overlap alone was too
+    common a signal to trust (nearly every real thread here shares Marc,
+    plus a handful of his own regular internal contacts). Marc's own
+    pushback: that reasoning conflates "is this one signal trustworthy
+    alone" with the 2+-point gate's actual job - no signal has to be
+    trustworthy alone, since it must always agree with a second,
+    independent one to become a candidate at all. Categorically zeroing
+    out internal-party overlap meant it could never even be HALF of a
+    real signal, a stricter posture than "let two independent things
+    agree and let curator/the LLM sort it out." Confirmed, concretely, to
+    be the actual reason dozens of real Sodalis-related issues/clusters
+    spanning the same vendor relationship never became CANDIDATES for
+    each other at all - and, downstream, why they never got linked at the
+    Relationship layer either (workgraph_relationships.
+    run_relationship_sweep only ever promotes a pair that first cleared
+    THIS gate and was then LLM-rejected as a same-project merge - no
+    candidacy here means nothing for that sweep to ever read). Any shared
+    tracked party now counts, internal or external - the 2+-point gate is
+    the one safety net this was always meant to rely on, not a second,
+    redundant one layered underneath it.
 
     The remaining absolute veto, unchanged: a cannot_merge/cannot_link
     identity_constraint is a real human override (an explicit past reject),
@@ -884,10 +950,10 @@ def _matched_data_points(a_id: str, a_sig: dict, a_topic_key: str,
         if hit:
             points.append(f"cross_mention:{hit[0]} ({hit[1]})")
 
-    a_external = {p["party_id"] for p in a_sig["participant_roles"] if p.get("affiliation") == "external"}
-    b_external = {p["party_id"] for p in b_sig["participant_roles"] if p.get("affiliation") == "external"}
+    a_parties = {p["party_id"] for p in a_sig["participant_roles"]}
+    b_parties = {p["party_id"] for p in b_sig["participant_roles"]}
     a_req, b_req = a_vocab.get("ariba_requester"), b_vocab.get("ariba_requester")
-    shared_named_person = (a_external and b_external and not a_external.isdisjoint(b_external)) or (
+    shared_named_person = (a_parties and b_parties and not a_parties.isdisjoint(b_parties)) or (
         a_req and b_req and a_req.lower().strip() == b_req.lower().strip())
     if shared_named_person:
         points.append("stakeholder")

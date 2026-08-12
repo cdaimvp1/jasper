@@ -88,6 +88,59 @@ def test_find_candidates_finds_a_real_2_point_match(ws_db):
     assert "stakeholder" in candidates[0]["matched_signals"]
 
 
+# --- task #382 replacement: closed+stale exclusion, not a hard N-cap -------
+
+def _set_issue_state_and_age(ws_db, issue_id, state, days_old):
+    conn = ws_db._connect()
+    conn.execute(
+        "UPDATE work_objects SET status = ?, updated_at = ? WHERE id = ?",
+        (state, time.time() - days_old * 86400, issue_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_find_candidates_excludes_a_closed_and_stale_match(ws_db):
+    """Marc's direct correction (2026-08-12): no candidate cap - instead,
+    never even consider a match that is BOTH closed AND untouched for
+    ~12 months. This is the conjunction case that should be excluded."""
+    a = _issue(ws_db, "Requested approval for Veeva CRM press release")
+    _link_party(ws_db, a, "shared_party", "rep@acme.com", company="Acme")
+    b = _issue(ws_db, "MARC REVIEW REQUESTED: Veeva CRM press release quote")
+    _link_party(ws_db, b, "shared_party", "rep@acme.com", company="Acme")
+    _set_issue_state_and_age(ws_db, b, "done", days_old=400)
+
+    assert p2.find_candidates(a) == []
+
+
+def test_find_candidates_keeps_a_closed_but_recent_match(ws_db):
+    """Closed-but-recent stays a real candidate - a straggler reply right
+    after closure is still worth catching."""
+    a = _issue(ws_db, "Requested approval for Veeva CRM press release")
+    _link_party(ws_db, a, "shared_party", "rep@acme.com", company="Acme")
+    b = _issue(ws_db, "MARC REVIEW REQUESTED: Veeva CRM press release quote")
+    _link_party(ws_db, b, "shared_party", "rep@acme.com", company="Acme")
+    _set_issue_state_and_age(ws_db, b, "done", days_old=10)
+
+    candidates = p2.find_candidates(a)
+    assert len(candidates) == 1
+    assert candidates[0]["candidate_id"] == b
+
+
+def test_find_candidates_keeps_an_old_but_still_open_match(ws_db):
+    """Old-but-still-open work stays a real candidate - a long-running
+    relationship isn't stale just because it's slow."""
+    a = _issue(ws_db, "Requested approval for Veeva CRM press release")
+    _link_party(ws_db, a, "shared_party", "rep@acme.com", company="Acme")
+    b = _issue(ws_db, "MARC REVIEW REQUESTED: Veeva CRM press release quote")
+    _link_party(ws_db, b, "shared_party", "rep@acme.com", company="Acme")
+    _set_issue_state_and_age(ws_db, b, "active", days_old=400)
+
+    candidates = p2.find_candidates(a)
+    assert len(candidates) == 1
+    assert candidates[0]["candidate_id"] == b
+
+
 def _noise_issues(ws_db, n, prefix="noise", with_party=True):
     """N issues sharing zero real data points with anything else. With
     with_party=True each gets its own unique external party/company, so

@@ -863,6 +863,58 @@ def recompute_all(now: float | None = None) -> dict:
     return {"scored": updated, "as_of": now}
 
 
+def recompute_issues(issue_ids: list[str], now: float | None = None) -> dict:
+    """Targeted counterpart to recompute_all() - rescopes an already-known
+    issue subset instead of re-fetching every open issue in the corpus.
+    Built for the settlement pass (2026-08-11, review point #7):
+    scheduled_refresh.py's grouping/extraction/synthesis/claims-backfill/
+    relationship/noise/dormant-sweep steps all run AFTER the cycle's own
+    two recompute_all() calls (steps 3 and 5), so priority_score/nba_reason
+    can sit stale relative to state those later steps just changed, for a
+    full cycle. This is the final call scheduled_refresh.run() makes,
+    scoped to only the issues those later steps actually touched.
+
+    Reuses score_issue() exactly as recompute_all does, with the same
+    batched side-query shape (list_identity_anchors_for_issues,
+    list_issue_state_history_for_issues, list_open_claims_for_issues all
+    accept an explicit id list) - only compute_category_staleness_
+    baselines stays a real DB-wide scan regardless of scope, same
+    unavoidable cost recompute_all already pays twice a cycle; paying it
+    once more for a bounded settlement pass is a small, acceptable add.
+
+    Silently skips any id that no longer resolves to an open issue (e.g.
+    it got grouped/dismissed/closed by the very step that flagged it) -
+    that is a real, expected outcome here, not an error."""
+    if now is None:
+        now = time.time()
+    if not issue_ids:
+        return {"scored": 0, "as_of": now}
+    by_id = ws.get_issues_by_ids(issue_ids)
+    issues = [i for i in by_id.values() if i.get("state") in ("active", "waiting", "blocked")]
+    if not issues:
+        return {"scored": 0, "as_of": now}
+    ids = [i["id"] for i in issues]
+    anchors_by_issue = ws.list_identity_anchors_for_issues(ids)
+    category_staleness_baselines = compute_category_staleness_baselines()
+    state_history_by_issue = ws.list_issue_state_history_for_issues(ids)
+    open_asks_by_issue = ws.list_open_claims_for_issues(ids, claim_type="ask")
+    updated = 0
+    for issue in issues:
+        score, reason, lesson_id = score_issue(
+            issue, now, identity_anchors=anchors_by_issue.get(issue["id"]),
+            category_staleness_baselines=category_staleness_baselines,
+            state_history=state_history_by_issue.get(issue["id"]),
+            open_claims=open_asks_by_issue.get(issue["id"]),
+        )
+        action_kind = "review" if issue["state"] == "active" else "wait"
+        has_unmet_prerequisite = reason.startswith(workgraph_aristotle.WARNING_PREFIX)
+        ws.update_issue(issue["id"], touch_updated_at=False, priority_score=score, nba_reason=reason,
+                         nba_action_kind=action_kind, lesson_id_cited=lesson_id,
+                         has_unmet_prerequisite=1 if has_unmet_prerequisite else 0)
+        updated += 1
+    return {"scored": updated, "as_of": now}
+
+
 def candidate_actions(
     issue: dict, evidence: list[dict], synthesis: Optional[dict] = None,
     project_synthesis: Optional[dict] = None,

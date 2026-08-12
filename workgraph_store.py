@@ -3743,6 +3743,28 @@ def list_issue_ids() -> list[str]:
     return [r["id"] for r in rows]
 
 
+def list_issue_ids_updated_since(ts: float) -> list[str]:
+    """Cheap "what changed" query for scheduled_refresh.py's settlement
+    pass (2026-08-11, review point #7) - every REAL state-changing write
+    bumps updated_at (touch_updated_at defaults to True on update_issue);
+    only workgraph_nba's own periodic NBA rescoring passes touch_
+    updated_at=False specifically so a scoring tick is never itself
+    mistaken for real activity - which is exactly why this simple
+    timestamp filter is a safe, correct "what did the later pipeline
+    steps actually touch this cycle" signal without requiring every one
+    of those steps to explicitly report its own touched-id list."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT id FROM issues WHERE updated_at >= ? AND state IN ('active', 'waiting', 'blocked')",
+                (ts,),
+            ).fetchall()
+        finally:
+            conn.close()
+    return [r["id"] for r in rows]
+
+
 def list_issue_ids_missing_derived_title() -> list[str]:
     """Task #52 (2026-08-04): every issue with no real derived_title yet -
     either no synthesis row at all, or one whose derived_title is NULL/

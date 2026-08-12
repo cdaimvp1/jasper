@@ -420,6 +420,10 @@ def run() -> dict:
     nba_result_2 = workgraph_nba.recompute_all()
     alerts_result_2 = workgraph_alerts.run()
 
+    # Marker for the settlement pass at the very end of this cycle (review
+    # point #7, 2026-08-11) - see that block's own comment for why.
+    settlement_pass_start_ts = time.time()
+
     # 5.1. Marc's exact replacement (2026-08-05) - the NEW, entirely
     # separate grouping+extraction pipeline. Every issue/cluster with no
     # project_id yet (this cycle's classify pass above just made some):
@@ -619,6 +623,27 @@ def run() -> dict:
     except Exception as e:
         nba_rewrite_judgment_result = {"error": str(e)}
 
+    # Settlement pass (review point #7, 2026-08-11): steps 3/5 above only
+    # recompute NBA/alerts BEFORE grouping/extraction/synthesis/claims-
+    # backfill/relationship/noise/dormant-sweep ever run - every one of
+    # those can change state (a new merge, a resolved claim, a project
+    # marked noise-archived) that priority_score/nba_reason then sit stale
+    # against for a full cycle until the NEXT run's early pass catches up,
+    # which is itself immediately stale relative to whatever ran after IT
+    # last time. Rather than threading an explicit touched-id list through
+    # every one of those steps (real change to many files, more surface
+    # for drift), this reuses the one thing they already all do for free:
+    # a genuine state-changing write bumps updated_at (see workgraph_nba.
+    # recompute_issues and list_issue_ids_updated_since's own docstrings
+    # for why an NBA rescore itself is deliberately excluded from that
+    # signal). Strictly additive - no existing step's behavior changes,
+    # this only adds one more targeted call at the very end.
+    try:
+        settlement_touched_ids = ws.list_issue_ids_updated_since(settlement_pass_start_ts)
+        settlement_pass_result = workgraph_nba.recompute_issues(settlement_touched_ids)
+    except Exception as e:
+        settlement_pass_result = {"error": str(e)}
+
     summary = {
         "mail": mail_result,
         "sent_mail": sent_mail_result,
@@ -647,6 +672,7 @@ def run() -> dict:
         "noise_sweep": noise_sweep_result,
         "dormant_sweep": dormant_sweep_result,
         "nba_rewrite_judgment": nba_rewrite_judgment_result,
+        "settlement_pass": settlement_pass_result,
     }
     _log(f"REFRESH ok mail_inserted={mail_result.get('inserted', '?')} "
         f"relay_ok={relay_result.get('ok')} relay_calendar_advanced={relay_result.get('cursor_advanced')} "

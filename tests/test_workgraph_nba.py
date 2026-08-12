@@ -668,6 +668,99 @@ def test_update_issue_default_still_touches_updated_at(ws_db):
     assert issue["updated_at"] > before
 
 
+# --- recompute_issues (review point #7, settlement pass, 2026-08-11) -------
+
+def test_recompute_issues_scores_only_the_requested_ids(ws_db):
+    target = ws_db.create_issue_with_new_id(title="Sign this", state="active", category="other")
+    untouched = ws_db.create_issue_with_new_id(title="Other issue", state="active", category="other")
+
+    result = nba.recompute_issues([target])
+
+    assert result["scored"] == 1
+    assert ws_db.get_issue(target)["priority_score"] is not None
+    assert ws_db.get_issue(untouched)["priority_score"] is None
+
+
+def test_recompute_issues_matches_recompute_all_output_for_the_same_issue(ws_db):
+    issue_id = ws_db.create_issue_with_new_id(title="Sign this", state="active", category="other")
+    row_id = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key="k-ri", thread_key="k-ri", dedupe_key="k-ri",
+        occurred_ts=time.time(), subject="Signature requested", from_actor="a@example.com",
+        participants_json="[]", body_preview="please sign",
+    )
+    ws_db.link_raw_item_to_issue(row_id, issue_id)
+    conn = ws_db._connect()
+    conn.execute("UPDATE raw_items SET signal_type = ? WHERE id = ?", ("signature_requested_docusign", row_id))
+    ws_db.create_prerequisite_rule(
+        trigger_signal_type="signature_requested_docusign", requires_signal_type="ariba_pr_fully_approved",
+        match_on="project", reason="an approved PO", created_by="marc",
+    )
+
+    nba.recompute_issues([issue_id], now=1000.0)
+    targeted = dict(ws_db.get_issue(issue_id))
+
+    nba.recompute_all(now=1000.0)
+    full = dict(ws_db.get_issue(issue_id))
+
+    assert targeted["priority_score"] == full["priority_score"]
+    assert targeted["nba_reason"] == full["nba_reason"]
+    assert targeted["has_unmet_prerequisite"] == full["has_unmet_prerequisite"] == 1
+
+
+def test_recompute_issues_skips_ids_that_are_now_closed(ws_db):
+    issue_id = ws_db.create_issue_with_new_id(title="Already done", state="active", category="other")
+    ws_db.update_issue(issue_id, state="done")
+
+    result = nba.recompute_issues([issue_id])
+
+    assert result["scored"] == 0
+    assert ws_db.get_issue(issue_id)["priority_score"] is None
+
+
+def test_recompute_issues_empty_list_is_a_noop(ws_db):
+    result = nba.recompute_issues([])
+    assert result["scored"] == 0
+
+
+def test_recompute_issues_does_not_reset_updated_at(ws_db):
+    issue_id = ws_db.create_issue_with_new_id(title="Stale one", state="active", category="other")
+    before = ws_db.get_issue(issue_id)["updated_at"]
+    time.sleep(0.01)
+
+    nba.recompute_issues([issue_id])
+
+    after = ws_db.get_issue(issue_id)["updated_at"]
+    assert after == before
+
+
+# --- list_issue_ids_updated_since (review point #7) -------------------------
+
+def test_list_issue_ids_updated_since_finds_recently_touched_issues(ws_db):
+    older = ws_db.create_issue_with_new_id(title="Older", state="active", category="other")
+    cutoff = time.time()
+    time.sleep(0.01)
+    newer = ws_db.create_issue_with_new_id(title="Newer", state="active", category="other")
+
+    touched = ws_db.list_issue_ids_updated_since(cutoff)
+
+    assert newer in touched
+    assert older not in touched
+
+
+def test_list_issue_ids_updated_since_excludes_nba_rescore_only_touches(ws_db):
+    """The settlement pass must never see its OWN NBA rescoring (or the
+    cycle's earlier recompute_all calls) as if it were real activity -
+    recompute_all/recompute_issues always write with touch_updated_at=False
+    for exactly this reason."""
+    issue_id = ws_db.create_issue_with_new_id(title="Quiet issue", state="active", category="other")
+    cutoff = time.time()
+    time.sleep(0.01)
+
+    nba.recompute_all()
+
+    assert issue_id not in ws_db.list_issue_ids_updated_since(cutoff)
+
+
 def test_score_issue_no_warning_when_no_rule_triggers(ws_db):
     issue_id = ws_db.create_issue_with_new_id(title="Normal issue", state="active", category="other")
     row_id = ws_db.insert_raw_item(

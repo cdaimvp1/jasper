@@ -373,9 +373,66 @@ counts, exact file locations, and reproduction logic all checked out.
 - **`PRAGMA foreign_keys=ON` is never executed** anywhere in
   `workgraph_store.py`. SQLite does not enforce declared FK constraints by
   default, so the schema's many declared foreign keys are currently
-  documentation, not enforcement. Do NOT flip this on blind — audit for
-  existing orphan rows first, repair, enable in tests, only then enable in
-  production.
+  documentation, not enforcement.
+
+  **Task #365 audit (2026-08-12, read-only, run against a copy of the live
+  DB, never the production file) found this is NOT a simple "audit orphans,
+  repair, flip the switch" job — the real picture is worse than "unenforced":**
+  - `issues` and `projects` are VIEWs over `work_objects` (the v2.1
+    work_objects migration, `#114`), not tables. `PRAGMA foreign_key_check`
+    itself throws `foreign key mismatch` the instant it reaches any FK
+    declared `REFERENCES issues(id)` / `REFERENCES projects(id)` — a view
+    has no rowid/unique index SQLite can enforce a FK against. 2 columns
+    (`nba_outcome_log.issue_id`, `pending_issue_state_suggestions.issue_id`)
+    hit this directly.
+  - 6 more columns (`artifact_lineages.work_object_id`,
+    `data_point_values.work_object_id`, `evidence_unit_links.work_object_id`,
+    `work_object_relationships.from_id`/`to_id`,
+    `work_object_signatures.work_object_id`) still declare
+    `REFERENCES work_objects_pre_fix4(id)` — a table `#339`'s own fix
+    renamed away and never restored; the referenced table **does not exist
+    at all**. SQLite auto-rewrites a child table's stored FK text when its
+    parent is renamed (confirmed live) — these columns are fossils of that
+    rename, not of anything in the current schema.
+  - 9 more columns (`claims.issue_id`, `issue_state_history.issue_id`,
+    `issue_parties.issue_id`, `source_containers.issue_id`,
+    `identity_anchors.issue_id`, `checklist_dismissals.issue_id`,
+    `nba_choice_log.issue_id`, `work_tasks.issue_id`,
+    `lessons.source_issue_id`, plus `project_links.from_project_id`/
+    `to_project_id`) still say `REFERENCES issues_pre_workobjects(id)` /
+    `REFERENCES projects_pre_workobjects(id)` — the SAME rename-fossil
+    pattern from the original `#114` migration. Checking these for real
+    finds **~20,700 "orphan" rows** (8,717 in `claims` alone) — but these
+    aren't data-integrity bugs; they're rows created normally after the
+    migration, whose issue/project ids correctly live in `work_objects`
+    and simply don't exist in the frozen pre-migration snapshot table the
+    stale FK text still names.
+  - Net: of ~43 declared FK columns audited, only a genuine handful
+    (`raw_items`, `claims`, `parties`, `attachments`, `data_point_definitions`,
+    `work_objects` self-refs, etc. — tables that were never renamed) are
+    actually checkable and clean today. **Flipping `PRAGMA foreign_keys=ON`
+    in production right now would immediately break every INSERT/UPDATE
+    touching the 17 affected columns** (view-mismatch error or "no such
+    table" on the ones pointing at vanished snapshot tables) — this is not
+    a "some cleanup rows" situation, it's "most of the FK graph points at
+    names that no longer resolve to anything real."
+  - **The actual fix is a schema rewrite**, not a data repair: every
+    affected table needs its `CREATE TABLE` recreated with its FK
+    re-pointed at the table that's real *today* (`work_objects` in place of
+    `issues`/`projects`/`issues_pre_workobjects`/`projects_pre_workobjects`/
+    `work_objects_pre_fix4`) — SQLite can't `ALTER ... REFERENCES` in
+    place. That's the same scale of work as the "Formalize schema
+    migrations" item below (migration ledger, backup, transactional
+    rewrite, post-migration integrity audit) — folded into that item
+    rather than attempted as a quick flip. Doing it as an isolated
+    one-off, table by table, without that scaffolding, on a DB with real
+    accumulated history, is exactly the kind of thing worth a deliberate
+    pass, not a same-session patch.
+  - **Decision for now:** do not enable `PRAGMA foreign_keys=ON` anywhere
+    (tests or production) until the FK-target rewrite happens. The
+    declared FKs stay documentation-only, as `#157` already concluded for
+    a related reason — this audit just confirms that conclusion was right
+    for an even stronger reason than originally known.
 
 ### Hardening and reliability (agreed, not urgent bugs)
 
@@ -385,7 +442,11 @@ counts, exact file locations, and reproduction logic all checked out.
   representative older DB snapshots) rather than `init_workgraph()`'s
   current accumulated inline create-if-absent/add-column/rebuild-view
   style. Reasonable for rapid single-user iteration to date; increasingly
-  risky the longer real accumulated history lives only in this DB.
+  risky the longer real accumulated history lives only in this DB. **First
+  real job for this subsystem once built: the FK-target rewrite the #365
+  audit above found necessary** (17 columns across ~15 tables still
+  reference tables renamed away by the `#114`/`#339` migrations - see that
+  audit's findings for the exact list).
 - **Explicit graph invariants beyond SQL FKs** — e.g. every promoted Issue
   has a valid Project, every Claim has resolvable evidence, no exclusive
   reference anchor belongs to two independently active objects, no `done`

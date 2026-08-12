@@ -1849,6 +1849,94 @@ def init_workgraph() -> None:
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_pr_relationship ON project_relationships(relationship_id)")
 
+            # --- Relationship identity normalization (2026-08-11, review
+            # point #5) - "Sodalis" and "sodalis" already dedup via
+            # get_or_create_relationship_by_name's old bare-string compare,
+            # but "Sodalis" and "Sodalis Inc" did not, so the two independent
+            # relationship-discovery producers (run_relationship_sweep and
+            # run_supplier_entity_sweep, #342) could each spell the same real
+            # company differently and grow two separate relationship rows for
+            # it. normalized_name (workgraph_signals.normalize_company_name -
+            # lowercase + strip a trailing corporate suffix) is the same key
+            # already used to dedup suppliers everywhere else in this
+            # codebase (workgraph_projects._matched_data_points,
+            # workgraph_relationships.py). Deferred import below: this module
+            # imports workgraph_signals, which itself imports this module at
+            # its own top level - a module-level import here would be a real
+            # circular import, but a call-time import is safe once both
+            # modules have finished loading.
+            try:
+                conn.execute("ALTER TABLE relationships ADD COLUMN normalized_name TEXT")
+            except sqlite3.OperationalError:
+                pass  # already added by a prior init_workgraph() call
+
+            _rel_needs_backfill = conn.execute(
+                "SELECT COUNT(*) AS n FROM relationships WHERE normalized_name IS NULL"
+            ).fetchone()["n"]
+            _rel_has_dupes = conn.execute(
+                """SELECT COUNT(*) AS n FROM (
+                       SELECT normalized_name FROM relationships
+                       WHERE normalized_name IS NOT NULL AND normalized_name != ''
+                       GROUP BY normalized_name HAVING COUNT(*) > 1
+                   )"""
+            ).fetchone()["n"]
+
+            if _rel_needs_backfill or _rel_has_dupes:
+                # The unique index created below, once it exists from an
+                # earlier init_workgraph() call, would otherwise reject this
+                # repair itself the instant two stale rows' normalized_name
+                # values collide mid-backfill (a real failure caught by this
+                # fix's own test). Drop it first and recreate once repair is
+                # complete. Only reached when something is PROVABLY stale
+                # (checked just above, two cheap queries on a small table) -
+                # an already-consistent DB never takes this path, so it can't
+                # reintroduce a needless index-drop race on the common,
+                # nothing-to-fix call.
+                conn.execute("DROP INDEX IF EXISTS idx_relationships_normalized_name")
+
+                if _rel_needs_backfill:
+                    import workgraph_signals
+                    for _rel_row in conn.execute(
+                        "SELECT id, name FROM relationships WHERE normalized_name IS NULL"
+                    ).fetchall():
+                        conn.execute(
+                            "UPDATE relationships SET normalized_name = ? WHERE id = ?",
+                            (workgraph_signals.normalize_company_name(_rel_row["name"]), _rel_row["id"]),
+                        )
+
+                # Consolidation for any duplicates that accumulated before
+                # this fix (two rows with the same normalized_name): reassign
+                # project_relationships links to the OLDEST row (kept as
+                # canonical) and drop the newer duplicate row(s). INSERT OR
+                # IGNORE + a plain DELETE make this idempotent against a
+                # concurrent process consolidating the same group at the same
+                # time - the loser is either present or already gone.
+                for _dupe_group in conn.execute(
+                    """SELECT normalized_name FROM relationships
+                       WHERE normalized_name IS NOT NULL AND normalized_name != ''
+                       GROUP BY normalized_name HAVING COUNT(*) > 1"""
+                ).fetchall():
+                    _members = conn.execute(
+                        "SELECT id FROM relationships WHERE normalized_name = ? ORDER BY created_ts ASC",
+                        (_dupe_group["normalized_name"],),
+                    ).fetchall()
+                    _canonical_id = _members[0]["id"]
+                    for _loser in _members[1:]:
+                        conn.execute(
+                            """INSERT OR IGNORE INTO project_relationships (project_id, relationship_id, reason, linked_ts)
+                               SELECT project_id, ?, reason, linked_ts FROM project_relationships WHERE relationship_id = ?""",
+                            (_canonical_id, _loser["id"]),
+                        )
+                        conn.execute("DELETE FROM project_relationships WHERE relationship_id = ?", (_loser["id"],))
+                        conn.execute("DELETE FROM relationships WHERE id = ?", (_loser["id"],))
+
+            # Partial index (excludes '') so a degenerate blank name can
+            # never collide-merge two otherwise-unrelated rows.
+            conn.execute(
+                """CREATE UNIQUE INDEX IF NOT EXISTS idx_relationships_normalized_name
+                   ON relationships(normalized_name) WHERE normalized_name != ''"""
+            )
+
             # --- Total Recall: a small, deterministic precedent store (see
             # workgraph_lessons.py). One row per (situation_key, outcome) -
             # repeats bump trust_score/hit_count on the SAME row rather than
@@ -6910,22 +6998,34 @@ def list_work_object_relationships_for(work_object_id: str, relationship_types: 
 # file's module docstring.
 
 def get_or_create_relationship_by_name(name: str, *, now: Optional[float] = None) -> str:
-    """Case-insensitive dedup on name - "Sodalis" and "sodalis" resolve to
-    the SAME relationship row rather than growing near-duplicates. Returns
-    the existing or newly-created relationship's id."""
+    """Dedups on workgraph_signals.normalize_company_name(name), not a bare
+    case-insensitive string compare - so "Sodalis", "sodalis", and "Sodalis
+    Inc" all resolve to the SAME relationship row rather than growing
+    near-duplicates, regardless of which of the two independent
+    relationship-discovery producers (run_relationship_sweep,
+    run_supplier_entity_sweep) or which literal spelling created it first.
+    A blank/degenerate normalized name is never used as a merge key (see
+    the partial unique index in init_workgraph) - each such call gets its
+    own row rather than silently merging unrelated blank-named entries.
+    Returns the existing or newly-created relationship's id."""
+    import workgraph_signals  # deferred - see init_workgraph's circular-import note
+    normalized = workgraph_signals.normalize_company_name(name)
     now = now if now is not None else time.time()
     with _lock:
         conn = _connect()
         try:
-            existing = conn.execute(
-                "SELECT id FROM relationships WHERE lower(name) = lower(?)", (name,)
-            ).fetchone()
+            existing = None
+            if normalized:
+                existing = conn.execute(
+                    "SELECT id FROM relationships WHERE normalized_name = ?", (normalized,)
+                ).fetchone()
             if existing:
                 return existing["id"]
             relationship_id = f"rel-{uuid.uuid4().hex[:12]}"
             conn.execute(
-                "INSERT INTO relationships (id, name, status, created_ts, updated_ts) VALUES (?, ?, 'active', ?, ?)",
-                (relationship_id, name, now, now),
+                """INSERT INTO relationships (id, name, normalized_name, status, created_ts, updated_ts)
+                   VALUES (?, ?, ?, 'active', ?, ?)""",
+                (relationship_id, name, normalized, now, now),
             )
             return relationship_id
         finally:

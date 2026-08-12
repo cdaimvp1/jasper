@@ -3159,6 +3159,61 @@ def test_get_or_create_relationship_by_name_dedups_case_insensitive(ws_db):
     assert ws_db.get_relationship(rid1)["name"] == "Sodalis"
 
 
+def test_get_or_create_relationship_by_name_dedups_corporate_suffix(ws_db):
+    # Review point #5: the two independent relationship-discovery producers
+    # (run_relationship_sweep, run_supplier_entity_sweep) can each spell the
+    # same real company differently - "Sodalis" vs "Sodalis Inc" must not
+    # grow two separate relationship rows.
+    rid1 = ws_db.get_or_create_relationship_by_name("Sodalis")
+    rid2 = ws_db.get_or_create_relationship_by_name("Sodalis Inc")
+    rid3 = ws_db.get_or_create_relationship_by_name("SODALIS LLC")
+    assert rid1 == rid2 == rid3
+    assert ws_db.get_relationship(rid1)["name"] == "Sodalis"
+
+
+def test_get_or_create_relationship_by_name_blank_names_never_merge(ws_db):
+    rid1 = ws_db.get_or_create_relationship_by_name("   ")
+    rid2 = ws_db.get_or_create_relationship_by_name("   ")
+    assert rid1 != rid2
+
+
+def test_init_workgraph_consolidates_pre_existing_duplicate_relationships(ws_db):
+    # Simulate two rows that were created before normalized_name existed
+    # (the exact scenario this migration must repair): same real company,
+    # two different literal spellings, each linked to a different project.
+    import time as _time
+    import workgraph_store as _ws_mod
+    conn = _ws_mod._connect()
+    try:
+        now = _time.time()
+        conn.execute(
+            "INSERT INTO relationships (id, name, normalized_name, status, created_ts, updated_ts) "
+            "VALUES ('rel-old', 'Sodalis', NULL, 'active', ?, ?)", (now, now),
+        )
+        conn.execute(
+            "INSERT INTO relationships (id, name, normalized_name, status, created_ts, updated_ts) "
+            "VALUES ('rel-new', 'Sodalis Inc', NULL, 'active', ?, ?)", (now + 1, now + 1),
+        )
+        ws_db.create_project(id="proj-old", name="Proj Old")
+        ws_db.create_project(id="proj-new", name="Proj New")
+        conn.execute(
+            "INSERT INTO project_relationships (project_id, relationship_id, linked_ts) VALUES ('proj-old', 'rel-old', ?)", (now,),
+        )
+        conn.execute(
+            "INSERT INTO project_relationships (project_id, relationship_id, linked_ts) VALUES ('proj-new', 'rel-new', ?)", (now,),
+        )
+    finally:
+        conn.close()
+
+    ws_db.init_workgraph()  # re-run the migration/consolidation pass
+
+    assert ws_db.get_relationship("rel-new") is None
+    survivor = ws_db.get_relationship("rel-old")
+    assert survivor is not None
+    linked_projects = {p["id"] for p in ws_db.list_projects_for_relationship("rel-old")}
+    assert linked_projects == {"proj-old", "proj-new"}
+
+
 def test_link_project_to_relationship_is_idempotent(ws_db):
     ws_db.create_project(id="proj-1", name="Proj 1")
     rid = ws_db.get_or_create_relationship_by_name("Authenticx")

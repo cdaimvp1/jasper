@@ -572,6 +572,21 @@ def run() -> dict:
     except Exception as e:
         relationship_sweep_result = {"error": str(e)}
 
+    # Second, additive relationship-discovery producer (task #342, Marc's own
+    # direct review, 2026-08-11): the sweep above only ever links projects
+    # that first became pipeline2 candidates (2+ matched points) - a pair
+    # sharing exactly one point (a bare company name) never becomes a
+    # candidate at all, so it can never produce a Relationship that way.
+    # This groups the corpus's own already-indexed supplier data points by
+    # normalized company name across ALL projects, independent of whether
+    # they were ever compared pairwise. Same "keep it separate, deterministic,
+    # no LLM" discipline as the sweep above; writes to the identical
+    # relationships/project_relationships tables.
+    try:
+        supplier_entity_sweep_result = workgraph_relationships.run_supplier_entity_sweep_daily_if_due()
+    except Exception as e:
+        supplier_entity_sweep_result = {"error": str(e)}
+
     # Deterministic, no LLM calls - same "keep it entirely separate" discipline as the
     # relationship sweep above; reads raw_items/claims only, never touches grouping/merge
     # decisions, writes only projects.status via the pre-existing noise-archived value (task
@@ -628,6 +643,7 @@ def run() -> dict:
         "discovery_monthly": discovery_monthly_result,
         "proactive_actions": proactive_actions_result,
         "relationship_sweep": relationship_sweep_result,
+        "supplier_entity_sweep": supplier_entity_sweep_result,
         "noise_sweep": noise_sweep_result,
         "dormant_sweep": dormant_sweep_result,
         "nba_rewrite_judgment": nba_rewrite_judgment_result,

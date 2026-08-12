@@ -201,3 +201,94 @@ def test_list_relationships_needing_review_sorts_by_project_count_descending(ws_
     review = wr.list_relationships_needing_review()
 
     assert [r["name"] for r in review] == ["Vendor Big", "Vendor Small"]
+
+
+# --- run_supplier_entity_sweep (task #342, Marc's own direct review,
+# 2026-08-11): a second, additive relationship-discovery producer. The
+# sweep above only ever links projects that FIRST became pipeline2
+# candidates (2+ matched points) and were then LLM-judged related_
+# different_project - a pair sharing exactly ONE point (a bare company
+# name, nothing else) never becomes a candidate at all, so it can never
+# produce a work_object_relationships row for that sweep to read. This
+# sweep groups the corpus's own already-indexed "supplier" data points by
+# normalized company name across ALL real projects, independent of
+# whether the pair was ever compared pairwise or judged by an LLM at all.
+
+import workgraph_projects as wp
+
+
+def _project_with_supplier(ws_db, project_id, project_name, issue_id, party_id, email, company):
+    """Builds a real project with one issue carrying a real supplier
+    signal, then forces the fasttrack data_point_values index to populate
+    (mirroring what get_or_compute_work_object_signature already does on
+    every real cache-miss in live operation - e.g. whenever find_
+    candidates runs for any other item) - the sweep reads that index
+    directly, never re-deriving party data itself."""
+    ws_db.create_project(id=project_id, name=project_name)
+    _issue(ws_db, issue_id)
+    _link_supplier(ws_db, issue_id, party_id, email, company)
+    ws_db.assign_issue_to_project(issue_id, project_id)
+    wp.get_or_compute_work_object_signature(issue_id)
+
+
+def test_supplier_entity_sweep_links_projects_that_never_became_pipeline2_candidates(ws_db):
+    """The real gap this closes: two projects sharing nothing but a bare
+    company name - Marc's own example, an EA Renewal and a later Copilot
+    Pilot under the same vendor - with NO work_object_relationships row of
+    any kind (since they'd never clear the 2+-point candidate gate in real
+    operation). The existing rejected-candidate sweep has nothing to read
+    here; this one still finds and links them."""
+    _project_with_supplier(ws_db, "proj-ea", "Microsoft EA Renewal", "wo-ea", "p1", "rep@microsoft.com", "Microsoft")
+    _project_with_supplier(ws_db, "proj-copilot", "Microsoft Copilot Pilot", "wo-copilot", "p2",
+                            "rep2@microsoft.com", "MICROSOFT CORP")
+
+    result = wr.run_supplier_entity_sweep()
+
+    assert result["relationships_created"] == 1
+    assert result["project_links_created"] == 2
+    rels = ws_db.list_relationships_for_project("proj-ea")
+    assert len(rels) == 1
+    assert rels[0]["name"].lower() == "microsoft"
+    linked_projects = {p["id"] for p in ws_db.list_projects_for_relationship(rels[0]["id"])}
+    assert linked_projects == {"proj-ea", "proj-copilot"}
+
+
+def test_supplier_entity_sweep_skips_a_company_appearing_in_only_one_project(ws_db):
+    _project_with_supplier(ws_db, "proj-solo", "Solo Project", "wo-solo", "p1", "rep@onlyone.com", "OnlyOne")
+
+    result = wr.run_supplier_entity_sweep()
+
+    assert result["relationships_created"] == 0
+    assert result["project_links_created"] == 0
+    assert ws_db.list_relationships_for_project("proj-solo") == []
+
+
+def test_supplier_entity_sweep_reuses_an_existing_relationship_for_a_third_project(ws_db):
+    """Idempotent and cumulative: a company already linked to two projects
+    by an earlier run picks up a third project on a later run without
+    creating a second, duplicate Relationship."""
+    _project_with_supplier(ws_db, "proj-1", "P1", "wo-1", "p1", "a@sodalis.com", "Sodalis")
+    _project_with_supplier(ws_db, "proj-2", "P2", "wo-2", "p2", "b@sodalis.com", "Sodalis")
+    wr.run_supplier_entity_sweep()
+
+    _project_with_supplier(ws_db, "proj-3", "P3", "wo-3", "p3", "c@sodalis.com", "Sodalis")
+    result = wr.run_supplier_entity_sweep()
+
+    assert result["relationships_created"] == 0  # already exists from the first run
+    assert result["project_links_created"] == 1  # only the new third project
+    rels = ws_db.list_relationships_for_project("proj-1")
+    assert len(rels) == 1
+    all_projects = {p["id"] for p in ws_db.list_projects_for_relationship(rels[0]["id"])}
+    assert all_projects == {"proj-1", "proj-2", "proj-3"}
+
+
+def test_supplier_entity_sweep_daily_gate_runs_once_per_day(ws_db, monkeypatch):
+    calls = []
+    monkeypatch.setattr(wr, "run_supplier_entity_sweep", lambda: calls.append(1) or {"ok": True})
+
+    first = wr.run_supplier_entity_sweep_daily_if_due(now=1000.0)
+    second = wr.run_supplier_entity_sweep_daily_if_due(now=1000.0 + 3600)
+
+    assert first == {"ok": True}
+    assert second is None
+    assert len(calls) == 1

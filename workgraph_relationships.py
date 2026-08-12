@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import time
 
+import workgraph_discovery
 import workgraph_projects
 import workgraph_signals
 import workgraph_store as ws
@@ -163,6 +164,137 @@ def run_relationship_sweep_daily_if_due(now: float | None = None) -> dict | None
     if not ws.claim_daily_run("relationship_sweep", today):
         return None
     return run_relationship_sweep()
+
+
+# --- second producer: shared-supplier entity sweep (2026-08-11, Marc's own
+# direct review) ------------------------------------------------------------
+# Real, confirmed gap in the sweep above: it only ever links two projects
+# that FIRST cleared workgraph_pipeline2.find_candidates' 2+-point gate AND
+# were then LLM-judged related_different_project. A pair sharing exactly
+# ONE data point (a company name, and nothing else) never even becomes a
+# candidate - it never reaches judge_candidate at all - so it can never
+# produce a work_object_relationships row for the sweep above to read.
+# Concretely: "Microsoft EA Renewal" and, six months later, "Microsoft
+# Copilot Pilot" may share nothing but "Microsoft" - never 2+ points, never
+# a candidate, never a Relationship, even though they obviously belong to
+# the same durable vendor relationship.
+#
+# Marc's own framing of the fix: "Relationship = rejected same-supplier
+# project candidate" should evolve toward "Relationship = canonical durable
+# business entity/context to which independently discovered projects can
+# attach" - with the rejected-candidate mechanism becoming ONE way of
+# discovering the link, not the only one. This is that second producer -
+# additive, not a replacement: run_relationship_sweep above is untouched,
+# and this reuses the exact same relationships/project_relationships
+# tables and the exact same get_or_create_relationship_by_name/
+# link_project_to_relationship primitives, so a Relationship discovered
+# either way is indistinguishable once it exists.
+#
+# Deterministic, no LLM, no score: reuses the data_point_values index
+# workgraph_projects._sync_fasttrack_data_point_index already maintains for
+# the "supplier" point (task #331) - the SAME normalized company name
+# (workgraph_signals.normalize_company_name) _matched_data_points itself
+# already trusts, just grouped across the WHOLE corpus instead of compared
+# pairwise. No new extraction, no new normalization rule, no O(n^2) scan -
+# one grouped pass over an already-indexed table.
+
+def _display_name_for_normalized_supplier(normalized_value: str, sample_work_object_ids: list) -> str | None:
+    """A real, non-fabricated spelling for a normalized company name -
+    same "never invent a name, only ever re-derive one already extracted"
+    discipline _shared_supplier_name above uses, just sampling a single
+    normalized value's own indexed work objects instead of comparing two
+    sides' sets. Returns None (never a guess) if, implausibly, none of the
+    sampled work objects' own signatures still carry a matching raw
+    spelling (e.g. the index is stale relative to a since-changed
+    signature) - callers must not fabricate a name in that case either."""
+    for work_object_id in sample_work_object_ids:
+        sig = workgraph_projects.get_or_compute_work_object_signature(work_object_id)
+        vocab = sig.get("positive_vocabulary") or {}
+        candidates = list(sig.get("external_orgs") or [])
+        system_party = vocab.get("system_party")
+        if system_party:
+            candidates.append(system_party)
+        for org in candidates:
+            if workgraph_signals.normalize_company_name(org) == normalized_value:
+                return org.strip()
+    return None
+
+
+def run_supplier_entity_sweep() -> dict:
+    """Groups the entire corpus's own already-indexed 'supplier' data
+    points by normalized company name, resolves each indexed work_object
+    to its owning PROJECT (a Relationship links projects, never raw
+    issues/clusters - same rule run_relationship_sweep's own docstring
+    states), and for any normalized company name spanning 2+ DISTINCT real
+    projects, links them all to a durable Relationship - creating it first
+    if this is the first time that name has produced one.
+
+    Same honest scope limits as run_relationship_sweep:
+      - A work object with no project yet (still an unpromoted cluster) is
+        skipped - nothing to link.
+      - Never fabricates a display name (see _display_name_for_normalized_
+        supplier) - a normalized value with no recoverable real spelling
+        contributes nothing rather than showing a mangled lowercase name
+        to a human.
+    Idempotent and safe to re-run: get_or_create_relationship_by_name/
+    link_project_to_relationship are both already dedupe-then-insert."""
+    rows = ws.list_data_point_values_for_definition(workgraph_discovery.FASTTRACK_SUPPLIER_ID)
+    projects_by_value: dict[str, set] = {}
+    sample_work_objects_by_value: dict[str, list] = {}
+    for row in rows:
+        obj = ws.get_issue_or_cluster(row["work_object_id"])
+        project_id = (obj or {}).get("project_id")
+        if not project_id:
+            continue
+        projects_by_value.setdefault(row["value"], set()).add(project_id)
+        sample_work_objects_by_value.setdefault(row["value"], []).append(row["work_object_id"])
+
+    known_names = {r["name"].lower() for r in ws.list_relationships(status="active")}
+    relationships_created = 0
+    project_links_created = 0
+    skipped_no_display_name = 0
+    entity_groups_found = 0
+
+    for normalized_value, project_ids in projects_by_value.items():
+        if len(project_ids) < 2:
+            continue
+        entity_groups_found += 1
+        display_name = _display_name_for_normalized_supplier(
+            normalized_value, sample_work_objects_by_value[normalized_value])
+        if not display_name:
+            skipped_no_display_name += 1
+            continue
+
+        is_new_name = display_name.lower() not in known_names
+        relationship_id = ws.get_or_create_relationship_by_name(display_name)
+        if is_new_name:
+            known_names.add(display_name.lower())
+            relationships_created += 1
+
+        reason = f"supplier_entity_sweep: shared company '{display_name}' across {len(project_ids)} projects"
+        before = ws.list_projects_for_relationship(relationship_id)
+        before_ids = {p["id"] for p in before}
+        for project_id in project_ids:
+            ws.link_project_to_relationship(project_id, relationship_id, reason=reason)
+        after = ws.list_projects_for_relationship(relationship_id)
+        project_links_created += len({p["id"] for p in after} - before_ids)
+
+    return {
+        "supplier_values_scanned": len(projects_by_value),
+        "entity_groups_found": entity_groups_found,
+        "relationships_created": relationships_created,
+        "project_links_created": project_links_created,
+        "skipped_no_display_name": skipped_no_display_name,
+    }
+
+
+def run_supplier_entity_sweep_daily_if_due(now: float | None = None) -> dict | None:
+    if now is None:
+        now = time.time()
+    today = time.strftime("%Y-%m-%d", time.localtime(now))
+    if not ws.claim_daily_run("supplier_entity_sweep", today):
+        return None
+    return run_supplier_entity_sweep()
 
 
 def list_relationships_needing_review() -> list[dict]:

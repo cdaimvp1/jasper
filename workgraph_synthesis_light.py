@@ -19,18 +19,20 @@ Scope, a deliberate, stated tradeoff: the light path covers the same
 core fields SYNTHESIS_ROUTINE.md's step 3 always requires (asks,
 decisions, dates_mentioned w/ kind+whose, commitments, key_facts) plus
 step 4's synthesis write (summary, derived_title, next_steps,
-suggested_actions) - but deliberately OMITS repeat_signals/
-resolution_signals (both require reading this issue's own prior claims
-first and judging a restatement/completion match - a second, harder
-judgment layered on top of the first extraction) and
-estimated_completion/per-step duration estimates (requires grounding
-against the sourcing-process knowledge base doc, a second read this
-path doesn't do). All four are individually optional per SYNTHESIS_
-ROUTINE.md itself ("omitting is a normal, correct outcome") - a
-light-path entity just gets the leaner, still-real treatment its actual
-size warrants. Nothing is permanently lost: routing is re-decided fresh
-on every wake, so an entity that grows past the threshold next time
-gets the full curator treatment then.
+suggested_actions), AND (2026-08-11, review point #1 - the light path
+covers the large majority of real wakes, so omitting these left semantic
+state maintenance structurally starved on the common path) repeat_
+signals/resolution_signals/dependency_signals too - each requires
+reading this {entity_type}'s own prior open claims first, which
+_prior_open_claims_context gathers as a cheap batched read and folds
+into the prompt, standing in for the heavy curator's own live API read
+of the same information. Still OMITS estimated_completion/per-step
+duration estimates (requires grounding against the sourcing-process
+knowledge base doc, a second read this path doesn't do) - that field is
+individually optional per SYNTHESIS_ROUTINE.md itself ("omitting is a
+normal, correct outcome"). Nothing is permanently lost: routing is
+re-decided fresh on every wake, so an entity that grows past the
+threshold next time gets the full curator treatment then.
 
 No queue, no separate storage shape: this writes through the exact same
 ws.create_extraction / ws.upsert_synthesis primitives the real curator
@@ -182,6 +184,25 @@ def compute_new_evidence_bytes(entity_type: str, entity_id: str) -> int:
     return len(full_text)
 
 
+def _prior_open_claims_context(member_ids: list[str]) -> str:
+    """Review point #1 (2026-08-11): repeat_signals/resolution_signals both
+    require reading "this issue's prior asks/decisions/commitments first"
+    (SYNTHESIS_ROUTINE.md step 3's own prerequisite for each) - the heavy
+    curator does this via its own live GET /api/workgraph/issues/{id} read;
+    this one-shot, non-agentic call has no tool access to do the same, so
+    the equivalent context is gathered here and folded into the prompt
+    instead. list_open_claims_for_issue is the same store primitive
+    workgraph_nba.py already uses for this shape of read."""
+    lines = []
+    for member_id in member_ids:
+        for claim in ws.list_open_claims_for_issue(member_id):
+            if claim.get("claim_type") in ("ask", "decision", "commitment"):
+                text = (claim.get("text") or "").strip()
+                if text:
+                    lines.append(f"- ({claim['claim_type']}) {text}")
+    return "\n".join(lines) if lines else "(none currently open)"
+
+
 _LIGHT_SYNTHESIS_PROMPT_TEMPLATE = """You are doing lightweight synthesis maintenance for one real business {entity_type} ("{entity_name}") in a procurement/vendor-negotiation tracker.
 
 PRIOR SUMMARY (may be empty if this is the first synthesis):
@@ -189,6 +210,9 @@ PRIOR SUMMARY (may be empty if this is the first synthesis):
 
 EXISTING TRACKED NEXT STEPS (for context only, do not just repeat these):
 {previous_next_steps}
+
+PRIOR OPEN ASKS/DECISIONS/COMMITMENTS ON THIS {entity_type} (read these before judging repeat_signals/resolution_signals below - this is the same prerequisite read a fuller review would do first):
+{prior_open_claims}
 
 NEW COMMUNICATIONS SINCE THE PRIOR SUMMARY (read all of it):
 {new_evidence}
@@ -201,6 +225,9 @@ Do two things.
    - dates_mentioned: each as {{"text": "...", "kind": "hard"|"soft", "whose": "marc"|"counterparty"|"shared"|"unclear"}} - "hard" only for a real binding deadline with a nameable consequence for missing it, "soft" for an aspirational/target date; "whose" is who the date actually binds per the sentence, never who sent the message
    - commitments: commitments made in this item
    - key_facts: other material facts worth remembering
+   - repeat_signals: only when a NEW ask/commitment/decision on this raw_item is genuinely restating one already listed in PRIOR OPEN ASKS/DECISIONS/COMMITMENTS above - never a guess. Each entry: {{"ask_text": "... (the new restatement, verbatim - same field name regardless of ask/commitment/decision)", "days_since_first_ask": <real arithmetic from this raw_item's occurred_ts minus the first occurrence's, never estimated>, "escalated": true only if this came from a different/more senior/new sender than the original, "escalation_note": "..." (only when escalated is true)}}. Omitting this entirely is the normal, correct outcome most of the time.
+   - resolution_signals: only when THIS raw_item's own content directly and unambiguously states that a SPECIFIC earlier open item from PRIOR OPEN ASKS/DECISIONS/COMMITMENTS above was fulfilled - never a guess. Each entry: {{"claim_type": "ask"|"decision"|"commitment", "claim_text": "... (the EARLIER claim's own text verbatim, not this raw_item's restatement of it)", "resolution_note": "short, specific reason - what/where the confirmation is"}}. If you're not confident a specific earlier item was actually fulfilled, omit the entry - a missed resolution costs nothing, a wrong one costs trust in the ledger.
+   - dependency_signals: only when THIS raw_item's content explicitly and specifically states that this {entity_type}'s own project depends on, is blocked by, or enables another SPECIFIC, real, already-existing project whose exact project_id you can name (e.g. because it was mentioned by that exact id somewhere in the evidence above) - never a topical-similarity guess, never an id you are not certain of. Each entry: {{"relationship": "depends_on"|"blocks"|"enables" (from THIS project's own point of view), "target_project_id": "...", "reason": "short quote/paraphrase of what actually said so"}}. If you can't name the real other project's exact id, omit the entry entirely.
    Any list may be empty - never pad with something not actually there.
 
 2. Write one synthesis for the WHOLE {entity_type}, informed by the prior summary plus everything new:
@@ -210,7 +237,7 @@ Do two things.
    - suggested_actions: each {{"task_id": null, "label": "2-5 word imperative", "rationale": "the why, with specifics (PR/PO number, supplier, dollar amount) where you have them"}}
 
 Output EXACTLY one JSON object, nothing before or after it, in this shape:
-{{"extractions": {{"<raw_item_id>": {{"asks": [...], "decisions": [...], "dates_mentioned": [...], "commitments": [...], "key_facts": [...]}}, ...}},
+{{"extractions": {{"<raw_item_id>": {{"asks": [...], "decisions": [...], "dates_mentioned": [...], "commitments": [...], "key_facts": [...], "repeat_signals": [...], "resolution_signals": [...], "dependency_signals": [...]}}, ...}},
   "synthesis": {{"summary": "...", "derived_title": "...", "next_steps": [...], "suggested_actions": [...]}}}}
 """
 
@@ -286,10 +313,12 @@ def run_light_synthesis(entity_type: str, entity_id: str, *, model: str | None =
     existing = ws.get_synthesis(entity_type, entity_id)
     previous_summary = (existing or {}).get("summary") or "(none yet - first synthesis)"
     previous_next_steps = json.dumps((existing or {}).get("next_steps") or [])
+    prior_open_claims = _prior_open_claims_context(member_ids)
 
     prompt = _LIGHT_SYNTHESIS_PROMPT_TEMPLATE.format(
         entity_type=entity_type, entity_name=entity.get("title") or entity.get("name") or entity_id,
         previous_summary=previous_summary, previous_next_steps=previous_next_steps,
+        prior_open_claims=prior_open_claims,
         new_evidence=full_text[:_PROMPT_MAX_CHARS],
     )
     try:
@@ -313,6 +342,16 @@ def run_light_synthesis(entity_type: str, entity_id: str, *, model: str | None =
             "asks": entry.get("asks") or [], "decisions": entry.get("decisions") or [],
             "dates_mentioned": entry.get("dates_mentioned") or [],
             "commitments": entry.get("commitments") or [], "key_facts": entry.get("key_facts") or [],
+            # Review point #1 (2026-08-11): these three used to be omitted
+            # entirely on the light path (see module docstring's original
+            # framing) - now populated exactly like the heavy path, so
+            # workgraph_claims.materialize_claims_for_raw_item's repeat-
+            # dedup/resolution-suggestion/project_links wiring (already
+            # called below, previously always a no-op here for want of
+            # these fields) actually has something to read.
+            "repeat_signals": entry.get("repeat_signals") or [],
+            "resolution_signals": entry.get("resolution_signals") or [],
+            "dependency_signals": entry.get("dependency_signals") or [],
         })
         ws.create_extraction(item["id"], extracted_json)
         # Same live-wiring side effects api_raw_item_extraction_write applies

@@ -271,3 +271,118 @@ def test_run_light_synthesis_no_new_evidence_still_reports_parties_key(ws_db):
     assert result["action"] == "no_new_evidence"
     assert "parties" in result
     assert ws_db.list_parties_for_issue(iid)[0]["company"] == "Acmesupplier"
+
+
+# --- repeat_signals/resolution_signals/dependency_signals parity (review point #1, 2026-08-11) --
+# These three used to be entirely omitted from the light path's extraction
+# schema (see module docstring's prior framing) - now populated exactly like
+# the heavy path, so workgraph_claims.materialize_claims_for_raw_item's
+# already-existing repeat-dedup/resolution-suggestion/project_links wiring
+# (already called by run_light_synthesis) has something real to read.
+
+def test_prior_open_claims_context_reports_none_when_empty(ws_db):
+    iid = _issue(ws_db)
+    assert wsl._prior_open_claims_context([iid]) == "(none currently open)"
+
+
+def test_prior_open_claims_context_lists_open_ask_decision_commitment(ws_db, monkeypatch):
+    iid = _issue(ws_db, "Renewal thread")
+    rid = _raw_item(ws_db, iid, "k1", "Please confirm pricing by Friday.")
+    reply = json.loads(_LIGHT_REPLY)
+    reply["extractions"][str(rid)] = {
+        "asks": ["confirm pricing by Friday"], "decisions": [], "dates_mentioned": [],
+        "commitments": [], "key_facts": [],
+    }
+    monkeypatch.setattr(wsl, "_run_headless_claude", lambda prompt, timeout, model=None: _FakeProc(json.dumps(reply)))
+    wsl.run_light_synthesis("issue", iid)  # materializes the ask into an open claim
+
+    context = wsl._prior_open_claims_context([iid])
+
+    assert "(ask)" in context
+    assert "confirm pricing by Friday" in context
+
+
+def test_run_light_synthesis_stores_repeat_resolution_dependency_signals(ws_db, monkeypatch):
+    iid = _issue(ws_db, "Renewal thread")
+    rid = _raw_item(ws_db, iid, "k1", "Following up again on the same ask.")
+
+    reply = json.loads(_LIGHT_REPLY)
+    reply["extractions"][str(rid)] = {
+        "asks": ["confirm pricing"], "decisions": [], "dates_mentioned": [],
+        "commitments": [], "key_facts": [],
+        "repeat_signals": [{"ask_text": "confirm pricing", "days_since_first_ask": 3,
+                             "escalated": False}],
+        "resolution_signals": [{"claim_type": "ask", "claim_text": "an earlier open ask",
+                                 "resolution_note": "confirmed in this message"}],
+        "dependency_signals": [{"relationship": "depends_on", "target_project_id": "proj-999",
+                                 "reason": "mentioned as a prerequisite"}],
+    }
+    captured_blob = {}
+    real_materialize = wsl.workgraph_claims.materialize_claims_for_raw_item
+
+    def spy_materialize(raw_item_id):
+        extraction = ws_db.get_extraction(raw_item_id)
+        captured_blob.update(extraction["extracted_json"])
+        return real_materialize(raw_item_id)
+
+    monkeypatch.setattr(wsl, "_run_headless_claude", lambda prompt, timeout, model=None: _FakeProc(json.dumps(reply)))
+    monkeypatch.setattr(wsl.workgraph_claims, "materialize_claims_for_raw_item", spy_materialize)
+
+    result = wsl.run_light_synthesis("issue", iid)
+
+    assert result["action"] == "synthesized_light"
+    assert captured_blob["repeat_signals"][0]["ask_text"] == "confirm pricing"
+    assert captured_blob["resolution_signals"][0]["claim_type"] == "ask"
+    assert captured_blob["dependency_signals"][0]["target_project_id"] == "proj-999"
+
+
+def test_run_light_synthesis_dependency_signal_writes_a_real_project_link(ws_db, monkeypatch):
+    """End-to-end: a dependency_signal naming a REAL, already-confirmed
+    other project must produce a real project_links row via the exact same
+    workgraph_claims._write_project_link_signals wiring the heavy path
+    already relies on - not a new, parallel mechanism."""
+    target_project = ws_db.create_project_with_new_id(name="Other Project", category="other")
+    this_project = ws_db.create_project_with_new_id(name="This Project", category="other")
+    iid = _issue(ws_db, "Dependent thread")
+    ws_db.assign_issue_to_project(iid, this_project, reason="test")
+    rid = _raw_item(ws_db, iid, "k1", "This depends on the other project finishing first.")
+
+    reply = json.loads(_LIGHT_REPLY)
+    reply["extractions"][str(rid)] = {
+        "asks": [], "decisions": [], "dates_mentioned": [], "commitments": [], "key_facts": [],
+        "dependency_signals": [{"relationship": "depends_on", "target_project_id": target_project,
+                                 "reason": "explicitly stated"}],
+    }
+    monkeypatch.setattr(wsl, "_run_headless_claude", lambda prompt, timeout, model=None: _FakeProc(json.dumps(reply)))
+
+    result = wsl.run_light_synthesis("issue", iid)
+
+    assert result["action"] == "synthesized_light"
+    links = ws_db.list_project_links_for_project(this_project)
+    assert len(links) == 1
+    assert links[0]["to_project_id"] == target_project
+    assert links[0]["link_type"] == "depends_on"
+
+
+def test_run_light_synthesis_dependency_signal_to_nonexistent_project_is_dropped(ws_db, monkeypatch):
+    """A hallucinated/nonexistent target_project_id must be silently
+    dropped, never written - the same real-project existence check
+    workgraph_claims._write_project_link_signals already applies for the
+    heavy path."""
+    this_project = ws_db.create_project_with_new_id(name="This Project", category="other")
+    iid = _issue(ws_db, "Dependent thread")
+    ws_db.assign_issue_to_project(iid, this_project, reason="test")
+    rid = _raw_item(ws_db, iid, "k1", "This depends on some other project.")
+
+    reply = json.loads(_LIGHT_REPLY)
+    reply["extractions"][str(rid)] = {
+        "asks": [], "decisions": [], "dates_mentioned": [], "commitments": [], "key_facts": [],
+        "dependency_signals": [{"relationship": "depends_on", "target_project_id": "proj-does-not-exist",
+                                 "reason": "hallucinated"}],
+    }
+    monkeypatch.setattr(wsl, "_run_headless_claude", lambda prompt, timeout, model=None: _FakeProc(json.dumps(reply)))
+
+    result = wsl.run_light_synthesis("issue", iid)
+
+    assert result["action"] == "synthesized_light"
+    assert ws_db.list_project_links_for_project(this_project) == []

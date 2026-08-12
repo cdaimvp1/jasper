@@ -266,10 +266,24 @@ def resolve_authoritative_closure_signals(*, limit: int | None = None) -> dict:
     inference auto-closing a claim) never applies to it.
 
     Auto-resolves ONLY when there is EXACTLY ONE open ask/commitment claim
-    on the same issue - more than one and which claim this closure
-    actually refers to is genuinely ambiguous, so nothing is touched here
-    (any real match still goes through the existing suggest-only path via
-    whatever the LLM's own resolution_signals separately produce for it).
+    on the same issue AND that claim's own originating signal type is the
+    real request counterpart of this closure (external-review finding
+    #359, 2026-08-13 - tightened correlation): the earlier version treated
+    "exactly one open claim" alone as sufficient, which could auto-close a
+    genuinely unrelated claim - e.g. a signature_fully_executed
+    notification landing on an issue whose one open claim is "send Jane
+    the implementation status" (never a signature request at all). Uses
+    workgraph_signals.REQUEST_TO_CLOSURE_SIGNAL (already built for
+    recompute_issue_state's "done" branch) as the correlation: the ONE
+    open claim's own raw_item.signal_type must map, via that table, to
+    THIS specific closure signal_type - not just any claim, any closure.
+    A claim with no resolvable originating signal_type (missing
+    raw_item_id, or a raw_item whose signal_type doesn't appear in
+    REQUEST_TO_CLOSURE_SIGNAL at all) is conservatively treated as
+    uncorrelated, never guessed as a match.
+
+    Any real match still goes through the existing suggest-only path via
+    whatever the LLM's own resolution_signals separately produce for it.
     Reuses the exact same ws.update_claim_status/ws.log_claim_event calls
     workgraph_reconcile.confirm_claim_suggestion already uses for a human-
     confirmed resolution - never a second, parallel way to close a claim.
@@ -288,6 +302,7 @@ def resolve_authoritative_closure_signals(*, limit: int | None = None) -> dict:
     resolved = 0
     skipped_ambiguous = 0
     skipped_no_issue = 0
+    skipped_uncorrelated = 0
     for rid in raw_item_ids:
         raw_item = ws.get_raw_item(rid)
         issue_id = (raw_item or {}).get("issue_id")
@@ -301,16 +316,24 @@ def resolve_authoritative_closure_signals(*, limit: int | None = None) -> dict:
                 skipped_ambiguous += 1
             continue
         claim = open_claims[0]
+        closure_signal_type = raw_item.get("signal_type")
+        claim_raw_item = ws.get_raw_item(claim["raw_item_id"]) if claim.get("raw_item_id") else None
+        claim_signal_type = (claim_raw_item or {}).get("signal_type")
+        if workgraph_signals.REQUEST_TO_CLOSURE_SIGNAL.get(claim_signal_type) != closure_signal_type:
+            skipped_uncorrelated += 1
+            continue
         ws.update_claim_status(claim["id"], "done", actor="system")
         ws.log_claim_event(
             claim["id"], "complete", actor="system",
-            note=f"auto-resolved: deterministic closure signal ({raw_item.get('signal_type')}) on raw_item {rid}",
+            note=f"auto-resolved: deterministic closure signal ({closure_signal_type}) on raw_item {rid} "
+                 f"correlated to request signal ({claim_signal_type})",
             raw_item_id=rid,
         )
         resolved += 1
     return {
         "closure_raw_items_scanned": len(raw_item_ids), "auto_resolved": resolved,
         "skipped_ambiguous": skipped_ambiguous, "skipped_no_issue_id": skipped_no_issue,
+        "skipped_uncorrelated": skipped_uncorrelated,
     }
 
 

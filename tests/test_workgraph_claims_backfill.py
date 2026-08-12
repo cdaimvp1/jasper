@@ -228,8 +228,12 @@ def _open_claim(ws_db, issue_id, raw_item_id, claim_type, text):
 
 
 def test_resolve_authoritative_closure_signals_resolves_the_single_open_claim(ws_db):
+    """External-review finding #359 (2026-08-13): the claim's own
+    originating raw_item must carry the REAL request signal_type
+    (ariba_pr_approval_needed) that REQUEST_TO_CLOSURE_SIGNAL maps to this
+    closure (ariba_pr_fully_approved) - correlation, not just claim count."""
     iid = _issue(ws_db, "PR approval thread")
-    ask_rid = _raw_item_with_extraction(ws_db, iid, "ask1", None)
+    ask_rid = _raw_item_with_signal_type(ws_db, iid, "ask1", "ariba_pr_approval_needed")
     claim_id = _open_claim(ws_db, iid, ask_rid, "ask", "please approve the PR")
     _raw_item_with_signal_type(ws_db, iid, "closure1", "ariba_pr_fully_approved")
 
@@ -237,6 +241,44 @@ def test_resolve_authoritative_closure_signals_resolves_the_single_open_claim(ws
 
     assert result["auto_resolved"] == 1
     assert ws_db.get_claim(claim_id)["status"] == "done"
+
+
+def test_resolve_authoritative_closure_signals_skips_when_uncorrelated(ws_db):
+    """The exact real failure mode the review flagged: exactly one open
+    claim exists on the issue, and a real closure signal lands on it, but
+    the claim's own originating signal_type has no REQUEST_TO_CLOSURE_
+    SIGNAL relationship to this specific closure - e.g. the one open claim
+    is an unrelated "send Jane the status" ask (no signal_type at all),
+    and a signature_fully_executed notification lands on the same issue.
+    Must be left alone, never guessed as a match."""
+    iid = _issue(ws_db, "Unrelated ask plus a real closure signal")
+    ask_rid = _raw_item_with_extraction(ws_db, iid, "ask_unrelated", None)  # no signal_type at all
+    claim_id = _open_claim(ws_db, iid, ask_rid, "ask", "send Jane the implementation status")
+    _raw_item_with_signal_type(ws_db, iid, "closure_unrelated", "signature_fully_executed")
+
+    result = backfill.resolve_authoritative_closure_signals()
+
+    assert result["auto_resolved"] == 0
+    assert result["skipped_uncorrelated"] == 1
+    assert ws_db.get_claim(claim_id)["status"] == "open"
+
+
+def test_resolve_authoritative_closure_signals_skips_when_correlated_to_a_different_closure_type(ws_db):
+    """A claim whose own request signal_type DOES map to a real closure
+    counterpart, but not THIS one, must still be left alone - e.g. a
+    signature_requested ask claim sitting on an issue that also happens to
+    receive an ariba_pr_fully_approved notification (a different real
+    transaction's closure, not this claim's own)."""
+    iid = _issue(ws_db, "Wrong closure type for this request")
+    ask_rid = _raw_item_with_signal_type(ws_db, iid, "ask_sig", "signature_requested")
+    claim_id = _open_claim(ws_db, iid, ask_rid, "ask", "please sign the agreement")
+    _raw_item_with_signal_type(ws_db, iid, "closure_wrong_type", "ariba_pr_fully_approved")
+
+    result = backfill.resolve_authoritative_closure_signals()
+
+    assert result["auto_resolved"] == 0
+    assert result["skipped_uncorrelated"] == 1
+    assert ws_db.get_claim(claim_id)["status"] == "open"
 
 
 def test_resolve_authoritative_closure_signals_skips_when_ambiguous(ws_db):
@@ -271,7 +313,7 @@ def test_resolve_authoritative_closure_signals_ignores_non_closure_signal_types(
 
 def test_resolve_authoritative_closure_signals_is_idempotent(ws_db):
     iid = _issue(ws_db, "Idempotent")
-    ask_rid = _raw_item_with_extraction(ws_db, iid, "ask4", None)
+    ask_rid = _raw_item_with_signal_type(ws_db, iid, "ask4", "ariba_pr_approval_needed")
     _open_claim(ws_db, iid, ask_rid, "ask", "please approve")
     _raw_item_with_signal_type(ws_db, iid, "closure3", "ariba_pr_fully_approved")
 
@@ -316,7 +358,7 @@ def test_resolve_authoritative_closure_signals_respects_live_treatment_override(
 
 def test_resolve_authoritative_closure_signals_logs_claim_event(ws_db):
     iid = _issue(ws_db, "Audit trail for auto-resolve")
-    ask_rid = _raw_item_with_extraction(ws_db, iid, "ask6", None)
+    ask_rid = _raw_item_with_signal_type(ws_db, iid, "ask6", "signature_requested")
     claim_id = _open_claim(ws_db, iid, ask_rid, "ask", "please approve")
     closure_rid = _raw_item_with_signal_type(ws_db, iid, "closure6", "signature_fully_executed")
 

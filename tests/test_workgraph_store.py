@@ -3692,3 +3692,205 @@ def test_init_workgraph_skips_evidence_view_when_evidence_is_still_a_table(ws_db
         assert triggers == []  # correctly skipped - never created against a table
     finally:
         conn.close()
+
+
+# --- Track C.9: prepared_actions/pending_actions lifecycle hardening (review point #10) ---
+
+def _make_pending_action(ws_db, issue_id=None):
+    if issue_id is None:
+        issue_id = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    pid = ws_db.create_pending_action(
+        issue_id=issue_id, action_kind="draft_reply", worker="bridge",
+        instructions=None, message_id=None,
+    )
+    return issue_id, pid
+
+
+def test_get_pending_action_returns_none_for_unknown_id(ws_db):
+    assert ws_db.get_pending_action(999999) is None
+
+
+def test_get_pending_action_returns_the_row(ws_db):
+    issue_id, pid = _make_pending_action(ws_db)
+    row = ws_db.get_pending_action(pid)
+    assert row["id"] == pid
+    assert row["issue_id"] == issue_id
+    assert row["status"] == "requested"
+
+
+def test_update_pending_action_status_logs_a_transition_with_correct_from_and_to(ws_db):
+    _, pid = _make_pending_action(ws_db)
+
+    ws_db.update_pending_action_status(pid, "in_progress")
+
+    transitions = ws_db.list_action_transitions("pending_actions", pid)
+    assert len(transitions) == 1
+    assert transitions[0]["from_state"] == "requested"
+    assert transitions[0]["to_state"] == "in_progress"
+    assert ws_db.get_pending_action(pid)["status"] == "in_progress"
+
+
+def test_update_pending_action_status_records_note_and_accumulates_history(ws_db):
+    _, pid = _make_pending_action(ws_db)
+
+    ws_db.update_pending_action_status(pid, "in_progress")
+    ws_db.update_pending_action_status(pid, "done", note="closed by test")
+
+    transitions = ws_db.list_action_transitions("pending_actions", pid)
+    assert len(transitions) == 2
+    assert transitions[1]["from_state"] == "in_progress"
+    assert transitions[1]["to_state"] == "done"
+    assert transitions[1]["note"] == "closed by test"
+
+
+def test_list_action_transitions_is_scoped_to_table_name_and_action_id(ws_db):
+    """The transitions table is shared between pending_actions and
+    prepared_actions (review point #10's design) - a lookup for one must
+    never surface the other's history, even if their ids collide."""
+    _, pending_id = _make_pending_action(ws_db)
+    prepared_id = ws_db.create_prepared_action(
+        claim_id=None, action_type="draft_reply", proposed_parameters_json="{}",
+        evidence_refs_json="[]", rationale="test", risk_class="low",
+        idempotency_key="c9-shared-id-test",
+    )
+    ws_db.update_pending_action_status(pending_id, "in_progress")
+    ws_db.update_prepared_action_state(prepared_id, "executing")
+
+    pending_transitions = ws_db.list_action_transitions("pending_actions", pending_id)
+    prepared_transitions = ws_db.list_action_transitions("prepared_actions", prepared_id)
+
+    assert len(pending_transitions) == 1
+    assert pending_transitions[0]["to_state"] == "in_progress"
+    assert len(prepared_transitions) == 1
+    assert prepared_transitions[0]["to_state"] == "executing"
+
+
+def test_increment_pending_action_retry_count_starts_at_zero_and_increments(ws_db):
+    _, pid = _make_pending_action(ws_db)
+    assert ws_db.get_pending_action(pid)["retry_count"] == 0
+
+    ws_db.increment_pending_action_retry_count(pid)
+    ws_db.increment_pending_action_retry_count(pid)
+
+    assert ws_db.get_pending_action(pid)["retry_count"] == 2
+
+
+def test_set_pending_action_output_ref_stores_the_pointer(ws_db):
+    _, pid = _make_pending_action(ws_db)
+    assert ws_db.get_pending_action(pid)["output_ref"] is None
+
+    ws_db.set_pending_action_output_ref(pid, "evidence:42")
+
+    assert ws_db.get_pending_action(pid)["output_ref"] == "evidence:42"
+
+
+def test_increment_prepared_action_retry_count_starts_at_zero_and_increments(ws_db):
+    pid = ws_db.create_prepared_action(
+        claim_id=None, action_type="draft_reply", proposed_parameters_json="{}",
+        evidence_refs_json="[]", rationale="test", risk_class="low",
+        idempotency_key="c9-prepared-retry",
+    )
+    assert ws_db.get_prepared_action(pid)["retry_count"] == 0
+
+    ws_db.increment_prepared_action_retry_count(pid)
+
+    assert ws_db.get_prepared_action(pid)["retry_count"] == 1
+
+
+def test_update_prepared_action_state_logs_a_transition(ws_db):
+    pid = ws_db.create_prepared_action(
+        claim_id=None, action_type="draft_reply", proposed_parameters_json="{}",
+        evidence_refs_json="[]", rationale="test", risk_class="low",
+        idempotency_key="c9-prepared-transition",
+    )
+
+    ws_db.update_prepared_action_state(pid, "executing")
+    ws_db.update_prepared_action_state(pid, "succeeded", policy_result="ok")
+
+    transitions = ws_db.list_action_transitions("prepared_actions", pid)
+    assert len(transitions) == 2
+    assert transitions[0]["from_state"] == "proposed"
+    assert transitions[0]["to_state"] == "executing"
+    assert transitions[1]["from_state"] == "executing"
+    assert transitions[1]["to_state"] == "succeeded"
+
+
+def test_reconcile_stale_pending_actions_resolves_exact_single_match_to_done(ws_db):
+    issue_id, pid = _make_pending_action(ws_db)
+    ws_db.update_pending_action_status(pid, "in_progress")
+    ws_db.add_evidence(issue_id=issue_id, type="worker_action", summary="here is the draft reply")
+
+    result = ws_db.reconcile_stale_pending_actions()
+
+    assert result == {"pending_actions_scanned": 1, "auto_resolved": 1, "skipped_ambiguous": 0}
+    row = ws_db.get_pending_action(pid)
+    assert row["status"] == "done"
+    assert row["output_ref"] is not None and row["output_ref"].startswith("evidence:")
+
+
+def test_reconcile_stale_pending_actions_resolves_failed_prefixed_evidence_to_failed(ws_db):
+    issue_id, pid = _make_pending_action(ws_db)
+    ws_db.update_pending_action_status(pid, "in_progress")
+    ws_db.add_evidence(issue_id=issue_id, type="worker_action", summary="FAILED: could not draft, missing document")
+
+    result = ws_db.reconcile_stale_pending_actions()
+
+    assert result["auto_resolved"] == 1
+    assert ws_db.get_pending_action(pid)["status"] == "failed"
+
+
+def test_reconcile_stale_pending_actions_skips_ambiguous_multiple_matches(ws_db):
+    """Two or more new worker_action rows on the same issue since
+    requested_ts is left alone as genuinely ambiguous - same discipline as
+    the evidence-tiered claim resolution and identity-conflict work this
+    session, never guess across an ambiguous match."""
+    issue_id, pid = _make_pending_action(ws_db)
+    ws_db.update_pending_action_status(pid, "in_progress")
+    ws_db.add_evidence(issue_id=issue_id, type="worker_action", summary="draft attempt one")
+    ws_db.add_evidence(issue_id=issue_id, type="worker_action", summary="draft attempt two")
+
+    result = ws_db.reconcile_stale_pending_actions()
+
+    assert result == {"pending_actions_scanned": 1, "auto_resolved": 0, "skipped_ambiguous": 1}
+    assert ws_db.get_pending_action(pid)["status"] == "in_progress"
+
+
+def test_reconcile_stale_pending_actions_ignores_evidence_older_than_requested_ts(ws_db):
+    """Evidence that predates the request (e.g. leftover from a prior,
+    already-closed action on the same issue) must never be mistaken for
+    this request's own deliverable."""
+    issue_id = ws_db.create_issue_with_new_id(title="A", state="active", category="other")
+    ws_db.add_evidence(issue_id=issue_id, type="worker_action", summary="old, unrelated worker action")
+    time.sleep(0.01)
+    pid = ws_db.create_pending_action(
+        issue_id=issue_id, action_kind="draft_reply", worker="bridge",
+        instructions=None, message_id=None,
+    )
+    ws_db.update_pending_action_status(pid, "in_progress")
+
+    result = ws_db.reconcile_stale_pending_actions()
+
+    assert result == {"pending_actions_scanned": 1, "auto_resolved": 0, "skipped_ambiguous": 0}
+    assert ws_db.get_pending_action(pid)["status"] == "in_progress"
+
+
+def test_reconcile_stale_pending_actions_ignores_non_in_progress_rows(ws_db):
+    issue_id, pid = _make_pending_action(ws_db)  # stays at 'requested'
+    ws_db.add_evidence(issue_id=issue_id, type="worker_action", summary="unrelated evidence")
+
+    result = ws_db.reconcile_stale_pending_actions()
+
+    assert result == {"pending_actions_scanned": 0, "auto_resolved": 0, "skipped_ambiguous": 0}
+
+
+def test_run_pending_action_reconciliation_daily_if_due_runs_once_per_day(ws_db):
+    issue_id, pid = _make_pending_action(ws_db)
+    ws_db.update_pending_action_status(pid, "in_progress")
+    ws_db.add_evidence(issue_id=issue_id, type="worker_action", summary="the draft")
+
+    first = ws_db.run_pending_action_reconciliation_daily_if_due(now=1_800_000_000.0)
+    second = ws_db.run_pending_action_reconciliation_daily_if_due(now=1_800_000_000.0 + 3600)
+
+    assert first is not None
+    assert first["auto_resolved"] == 1
+    assert second is None  # already claimed for that same day, second call is a no-op

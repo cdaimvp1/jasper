@@ -421,6 +421,41 @@ def init_workgraph() -> None:
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_pending_actions_issue ON pending_actions(issue_id, requested_ts DESC)")
 
+            # Review point #10 (2026-08-11): pending_actions is a deliberate,
+            # kept mechanism (task #321 already reviewed and confirmed this -
+            # see get_or_create_relationship_by_name's own note elsewhere in
+            # this file for a different table's analogous history), but its
+            # real gap was always a self-closing lifecycle - update_pending_
+            # action_status had zero automated callers, so every transition
+            # required a human to run a python -c one-liner per ACTION_
+            # BRIDGE_ROUTINE.md, and a bridge-worker that died mid-action left
+            # its row stuck at 'in_progress' forever. retry_count/output_ref
+            # give this table the same basic tracking prepared_actions
+            # already has (a resolved artifact pointer, a retry counter);
+            # reconcile_stale_pending_actions below (and its daily-if-due
+            # wrapper) is the actual automated resolver.
+            try:
+                conn.execute("ALTER TABLE pending_actions ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass  # already added by a prior init_workgraph() call
+            try:
+                conn.execute("ALTER TABLE pending_actions ADD COLUMN output_ref TEXT")
+            except sqlite3.OperationalError:
+                pass
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS action_transitions (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    table_name   TEXT NOT NULL CHECK (table_name IN ('pending_actions', 'prepared_actions')),
+                    action_id    INTEGER NOT NULL,
+                    from_state   TEXT,
+                    to_state     TEXT NOT NULL,
+                    ts           REAL NOT NULL,
+                    note         TEXT
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_action_transitions_lookup ON action_transitions(table_name, action_id, ts)")
+
             # Part E2 of the grouping/NBA redesign (2026-07-30): the first
             # real "what did we offer vs. what did Marc actually do" audit
             # trail - feeds a later learning step once enough real data
@@ -1708,6 +1743,16 @@ def init_workgraph() -> None:
                 # it (he's the one who clicked), so nothing here back-fills
                 # this for those.
                 conn.execute("ALTER TABLE prepared_actions ADD COLUMN acknowledged_ts REAL")
+            except sqlite3.OperationalError:
+                pass  # already added by a prior init_workgraph() call
+
+            try:
+                # Review point #10 (2026-08-11): same retry_count parity as
+                # pending_actions above - not auto-incremented by any state
+                # transition (guessing at what counts as a "retry" risks being
+                # wrong); callers that genuinely retry an execution bump it
+                # explicitly via increment_prepared_action_retry_count.
+                conn.execute("ALTER TABLE prepared_actions ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0")
             except sqlite3.OperationalError:
                 pass  # already added by a prior init_workgraph() call
 
@@ -4846,14 +4891,89 @@ def create_pending_action(*, issue_id: str, action_kind: str, worker: str, instr
             conn.close()
 
 
-def update_pending_action_status(id: int, status: str) -> None:
+def get_pending_action(id: int) -> Optional[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute("SELECT * FROM pending_actions WHERE id = ?", (id,)).fetchone()
+        finally:
+            conn.close()
+    return dict(row) if row else None
+
+
+def create_action_transition(table_name: str, action_id: int, from_state: Optional[str], to_state: str, *,
+                              note: Optional[str] = None, now: Optional[float] = None) -> None:
+    """Review point #10 (2026-08-11) - the shared audit-trail primitive for
+    BOTH pending_actions and prepared_actions, rather than a transitions
+    table duplicated per source table. Called by update_pending_action_
+    status/update_prepared_action_state themselves, in addition to (not
+    instead of) their existing single-column update - callers never write
+    here directly."""
+    now = now if now is not None else time.time()
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                """INSERT INTO action_transitions (table_name, action_id, from_state, to_state, ts, note)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (table_name, action_id, from_state, to_state, now, note),
+            )
+        finally:
+            conn.close()
+
+
+def list_action_transitions(table_name: str, action_id: int) -> list[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM action_transitions WHERE table_name = ? AND action_id = ? ORDER BY ts ASC",
+                (table_name, action_id),
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def update_pending_action_status(id: int, status: str, *, note: Optional[str] = None) -> None:
+    """Logs the transition via create_action_transition in the same call -
+    review point #10's real point: this used to have zero automated
+    callers (only a human's manual python -c one-liner per ACTION_BRIDGE_
+    ROUTINE.md), leaving no record of when/why a status actually changed
+    beyond the single updated_ts column. See reconcile_stale_pending_
+    actions below for the new automated caller."""
+    existing = get_pending_action(id)
+    from_state = existing["status"] if existing else None
+    now = time.time()
     with _lock:
         conn = _connect()
         try:
             conn.execute(
                 "UPDATE pending_actions SET status = ?, updated_ts = ? WHERE id = ?",
-                (status, time.time(), id),
+                (status, now, id),
             )
+        finally:
+            conn.close()
+    create_action_transition("pending_actions", id, from_state, status, note=note, now=now)
+
+
+def increment_pending_action_retry_count(id: int) -> None:
+    """Never auto-inferred from a state transition (guessing at what
+    counts as a "retry" risks being wrong) - a caller that genuinely
+    re-attempts a dispatch bumps this explicitly."""
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute("UPDATE pending_actions SET retry_count = retry_count + 1 WHERE id = ?", (id,))
+        finally:
+            conn.close()
+
+
+def set_pending_action_output_ref(id: int, output_ref: str) -> None:
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute("UPDATE pending_actions SET output_ref = ? WHERE id = ?", (output_ref, id))
         finally:
             conn.close()
 
@@ -4872,6 +4992,63 @@ def list_pending_actions(issue_id: Optional[str] = None) -> list[dict]:
         finally:
             conn.close()
     return [dict(r) for r in rows]
+
+
+def reconcile_stale_pending_actions(*, now: Optional[float] = None) -> dict:
+    """Review point #10 (2026-08-11): automates the exact manual check
+    ACTION_BRIDGE_ROUTINE.md's own 'reconciliation guard' step already
+    describes by hand - "check for a worker_action evidence row on this
+    issue, newer than this pending_actions row's requested_ts... before
+    regenerating anything." A bridge-worker that died between writing its
+    evidence and closing out the pending_actions row used to stay stuck
+    at 'in_progress' forever until a human happened to notice and re-run
+    that one-liner.
+
+    Deliberately conservative, same "never guess across an ambiguous
+    match" discipline used elsewhere this session (evidence-tiered claim
+    resolution, identity-conflict detection): only resolves when there is
+    EXACTLY ONE new worker_action evidence row on the issue since
+    requested_ts - the routine's own model is one bridge-worker wake per
+    pending action, so a single match is the expected, unambiguous case.
+    Two or more new worker_action rows is left untouched (genuinely
+    ambiguous which one is this request's own deliverable - a human
+    decides, same as the routine's own manual path still allows).
+    Resolves to 'failed' when that one evidence row's summary carries the
+    routine's own existing 'FAILED:' prefix convention (ACTION_BRIDGE_
+    ROUTINE.md step 6), 'done' otherwise - never a third, invented
+    verdict."""
+    if now is None:
+        now = time.time()
+    stuck = [p for p in list_pending_actions() if p["status"] == "in_progress"]
+    resolved = 0
+    skipped_ambiguous = 0
+    for pending in stuck:
+        new_worker_action_evidence = [
+            e for e in list_evidence(pending["issue_id"])
+            if e["type"] == "worker_action" and e["ts"] > pending["requested_ts"]
+        ]
+        if len(new_worker_action_evidence) != 1:
+            if len(new_worker_action_evidence) > 1:
+                skipped_ambiguous += 1
+            continue
+        evidence = new_worker_action_evidence[0]
+        failed = (evidence.get("summary") or "").upper().startswith("FAILED:")
+        update_pending_action_status(
+            pending["id"], "failed" if failed else "done",
+            note=f"auto-reconciled: matched worker_action evidence #{evidence.get('id')}",
+        )
+        set_pending_action_output_ref(pending["id"], f"evidence:{evidence.get('id')}")
+        resolved += 1
+    return {"pending_actions_scanned": len(stuck), "auto_resolved": resolved, "skipped_ambiguous": skipped_ambiguous}
+
+
+def run_pending_action_reconciliation_daily_if_due(now: Optional[float] = None) -> Optional[dict]:
+    if now is None:
+        now = time.time()
+    today = time.strftime("%Y-%m-%d", time.localtime(now))
+    if not claim_daily_run("pending_action_reconciliation", today):
+        return None
+    return reconcile_stale_pending_actions(now=now)
 
 
 # --- prepared_actions (design doc Section 12.4) -----------------------------
@@ -4989,10 +5166,19 @@ def find_prepared_action_by_idempotency_key(idempotency_key: str) -> Optional[di
     return dict(row) if row else None
 
 
-def update_prepared_action_state(id: int, state: str, *, policy_result: Optional[str] = None) -> None:
+def update_prepared_action_state(id: int, state: str, *, policy_result: Optional[str] = None,
+                                  note: Optional[str] = None) -> None:
     """resolved_ts is stamped once the state reaches a terminal one - never
     overwritten by a later call, mirroring resolve_project_suggestion's own
-    'first resolution wins' convention."""
+    'first resolution wins' convention.
+
+    Logs the transition via create_action_transition (review point #10,
+    2026-08-11) in addition to (not instead of) the state/policy_result/
+    resolved_ts columns above - the same shared audit-trail primitive
+    update_pending_action_status now uses, so both action lifecycles get
+    one consistent transition history rather than two divergent ones."""
+    existing = get_prepared_action(id)
+    from_state = existing["state"] if existing else None
     now = time.time()
     resolved_ts = now if state in PREPARED_ACTION_TERMINAL_STATES else None
     with _lock:
@@ -5008,6 +5194,19 @@ def update_prepared_action_state(id: int, state: str, *, policy_result: Optional
                     "UPDATE prepared_actions SET state = ?, policy_result = ? WHERE id = ?",
                     (state, policy_result, id),
                 )
+        finally:
+            conn.close()
+    create_action_transition("prepared_actions", id, from_state, state, note=note, now=now)
+
+
+def increment_prepared_action_retry_count(id: int) -> None:
+    """Never auto-inferred from a state transition, same discipline as
+    increment_pending_action_retry_count - a caller that genuinely
+    re-attempts an execution bumps this explicitly."""
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute("UPDATE prepared_actions SET retry_count = retry_count + 1 WHERE id = ?", (id,))
         finally:
             conn.close()
 

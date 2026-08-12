@@ -526,6 +526,18 @@ def run() -> dict:
     except Exception as e:
         prepared_action_expiry_result = {"error": str(e)}
 
+    # Review point #10 (2026-08-11): automates ACTION_BRIDGE_ROUTINE.md's
+    # own manual "check for a newer worker_action evidence row before
+    # regenerating anything" step - a bridge-worker that died mid-action
+    # used to leave its pending_actions row stuck at 'in_progress' forever
+    # until a human happened to notice. See workgraph_store.reconcile_
+    # stale_pending_actions's own docstring for the exact, deliberately
+    # conservative matching rule.
+    try:
+        pending_action_reconciliation_result = ws.run_pending_action_reconciliation_daily_if_due()
+    except Exception as e:
+        pending_action_reconciliation_result = {"error": str(e)}
+
     # 15. Phase 3 claims/FTS/resolution-signal daily safety net (task #248) -
     # same once/day gate as every other periodic sweep above. Wasn't wired
     # into the live cadence before this - backfill_claims/backfill_
@@ -664,6 +676,7 @@ def run() -> dict:
         "choice_log_expiry": choice_log_expiry_result,
         "identity_backfill": identity_backfill_result,
         "prepared_action_expiry": prepared_action_expiry_result,
+        "pending_action_reconciliation": pending_action_reconciliation_result,
         "claims_backfill": claims_backfill_result,
         "discovery_monthly": discovery_monthly_result,
         "proactive_actions": proactive_actions_result,

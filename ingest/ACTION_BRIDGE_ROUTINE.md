@@ -160,3 +160,16 @@ the cockpit UI should treat a stale `in_progress` (no update for a long time) as
 prompt, not a silent hang. There's no partial-write hazard: the evidence row and the status update
 are independent writes: if you crash after step 5 but before step 6, the draft is already visible
 as evidence, only the pending-action bookkeeping is stale.
+
+**Automated backstop (2026-08-11, review point #10):** the manual check in step 2's
+"reconciliation guard" above is still the right thing to do on a live wake — but it no longer has
+to be a human's only recourse if a dead worker's row is ever missed. `ingest/scheduled_refresh.py`'s
+daily cycle now also runs `workgraph_store.reconcile_stale_pending_actions()`, which applies the
+exact same rule automatically: any `pending_actions` row stuck at `'in_progress'` with EXACTLY ONE
+new `worker_action` evidence row on the same issue since `requested_ts` gets closed out on its own
+(`'failed'` if that evidence's summary starts with `FAILED:`, `'done'` otherwise, `output_ref` set
+to point at the matching evidence row). Deliberately conservative: two or more new `worker_action`
+rows is left alone as genuinely ambiguous, same as a human would have to decide by hand. Every
+transition this makes (and every transition step 2/6's own manual calls make) is now logged to
+`action_transitions` via `update_pending_action_status`, so there's a real audit trail of what
+closed a row and when — not just the single `updated_ts` column this used to rely on.

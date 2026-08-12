@@ -244,6 +244,53 @@ def merge_stray_same_reference_clusters() -> dict:
     }
 
 
+def list_identity_conflicts_across_grouped_projects() -> list[dict]:
+    """Review point #3 (2026-08-11): a targeted, narrow answer to "process_
+    new_item never reconsiders an already-grouped item even when new
+    identity evidence arrives" - deliberately conservative per #333's own
+    documented caution against a blanket re-litigation policy (see
+    test_no_permanent_veto_only_protects_not_yet_grouped_items_not_
+    already_grouped_ones's own docstring in that test file). Read-only and
+    live-computed every call, same discipline as list_relationships_
+    needing_review above - nothing stored, nothing that goes stale,
+    nothing a human has to explicitly dismiss to make it stop reappearing
+    (it stops the moment the underlying evidence is no longer ambiguous,
+    e.g. once a human merges the two projects by hand or one is
+    confirmed genuinely unrelated).
+
+    Reuses list_pr_number_base_groups_spanning_multiple_open_work_objects
+    - the exact same deterministic pr_number_base grouping merge_stray_
+    same_reference_clusters (above) already trusts enough to auto-merge
+    on sight for its own single-real-issue case. That sweep's own
+    docstring explicitly calls the 2+-real-issue case "a different,
+    riskier duplicate-ISSUE case, not this sweep's job" and skips it
+    silently - THIS is that case, surfaced for a human instead of
+    silently dropped. Never reassigns or merges anything itself - this
+    only ever informs, matching the "no permanent veto, no silent auto-
+    move" philosophy workgraph_pipeline2.py already applies everywhere
+    else in the grouping pipeline."""
+    groups = ws.list_pr_number_base_groups_spanning_multiple_open_work_objects()
+    conflicts = []
+    for pr_number_base, members in groups.items():
+        real_issue_ids = [m["id"] for m in members if not m["is_raw_cluster"]]
+        if len(real_issue_ids) < 2:
+            continue
+        by_project: dict[str, list[str]] = {}
+        for issue_id in real_issue_ids:
+            issue = ws.get_issue(issue_id)
+            project_id = (issue or {}).get("project_id")
+            if project_id:
+                by_project.setdefault(project_id, []).append(issue_id)
+        if len(by_project) < 2:
+            continue  # all real issues resolve to the same project (or none grouped yet) - not a conflict
+        conflicts.append({
+            "pr_number_base": pr_number_base,
+            "projects": [{"project_id": pid, "issue_ids": iids} for pid, iids in by_project.items()],
+        })
+    conflicts.sort(key=lambda c: len(c["projects"]), reverse=True)
+    return conflicts
+
+
 # --- signature-confirmation stray-cluster sweep (task #284) -----------------
 # Closes the specific gap merge_stray_same_reference_clusters' own docstring
 # flagged as unfixed: an Adobe Sign/DocuSign confirmation carries no

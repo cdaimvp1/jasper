@@ -2962,6 +2962,20 @@ async def api_relationship_audit():
     return JSONResponse({"relationships": sanitize_surrogates(workgraph_relationships.list_relationships_needing_review())})
 
 
+@app.get("/api/workgraph/identity-conflict-audit")
+async def api_identity_conflict_audit():
+    """Review point #3 (2026-08-11) - same scoping call as the relationship
+    audit route above (chat/MCP tool only, no cockpit UI): every deterministic
+    pr_number_base shared across 2+ already-grouped, DIFFERENT projects - the
+    "process_new_item never revisits an already-grouped item, so did two
+    separate groupings quietly end up sharing the same real reference number?"
+    question, on demand. Not folded into /api/workgraph/review-queue for the
+    same reason the relationship audit isn't - this isn't a clean confirmed/
+    rejected proposal, just a surfaced fact for a human to look at. Read-only,
+    computed fresh every call."""
+    return JSONResponse({"conflicts": sanitize_surrogates(workgraph_reconcile.list_identity_conflicts_across_grouped_projects())})
+
+
 @app.post("/api/workgraph/status-report")
 async def api_workgraph_status_report(body: StatusReportBody):
     """"Workload Status Update Report" skill (2026-08-11): regenerates

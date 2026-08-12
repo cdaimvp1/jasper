@@ -413,6 +413,89 @@ def test_merge_stray_clusters_skips_ambiguous_groups_with_two_real_issues(ws_db)
     assert result["clusters_absorbed"] == 0
 
 
+# --- list_identity_conflicts_across_grouped_projects (review point #3, 2026-08-11) --
+# This is exactly the "two real issues sharing a pr_number_base" case the
+# test above confirms merge_stray_same_reference_clusters deliberately
+# skips - here that same skipped case is surfaced for a human instead of
+# silently dropped, but ONLY once each issue is grouped into a DIFFERENT
+# real project (two ungrouped issues sharing a reference is normal pre-
+# grouping state, not a conflict between two already-settled decisions).
+
+def test_identity_conflict_flagged_when_shared_reference_spans_two_projects(ws_db):
+    project_a = ws_db.create_project_with_new_id(name="Project A", category="other")
+    project_b = ws_db.create_project_with_new_id(name="Project B", category="other")
+    issue_a = _issue(ws_db, state="active")
+    issue_b = _issue(ws_db, state="active")
+    ws_db.assign_issue_to_project(issue_a, project_a, reason="test")
+    ws_db.assign_issue_to_project(issue_b, project_b, reason="test")
+    _classified_raw_item(ws_db, issue_a, "k1", pr_number_base="PR777")
+    _classified_raw_item(ws_db, issue_b, "k2", pr_number_base="PR777")
+
+    conflicts = wr.list_identity_conflicts_across_grouped_projects()
+
+    assert len(conflicts) == 1
+    assert conflicts[0]["pr_number_base"] == "PR777"
+    flagged_project_ids = {p["project_id"] for p in conflicts[0]["projects"]}
+    assert flagged_project_ids == {project_a, project_b}
+
+
+def test_identity_conflict_not_flagged_when_both_issues_in_the_same_project(ws_db):
+    project = ws_db.create_project_with_new_id(name="Same project", category="other")
+    issue_a = _issue(ws_db, state="active")
+    issue_b = _issue(ws_db, state="active")
+    ws_db.assign_issue_to_project(issue_a, project, reason="test")
+    ws_db.assign_issue_to_project(issue_b, project, reason="test")
+    _classified_raw_item(ws_db, issue_a, "k1", pr_number_base="PR888")
+    _classified_raw_item(ws_db, issue_b, "k2", pr_number_base="PR888")
+
+    assert wr.list_identity_conflicts_across_grouped_projects() == []
+
+
+def test_identity_conflict_not_flagged_when_only_one_issue_is_grouped(ws_db):
+    """One issue already in a project, the other still ungrouped - this is
+    the common, unremarkable case (an item that will naturally become a
+    real candidate for that same project once it's processed), not a
+    conflict between two independently-settled decisions."""
+    project = ws_db.create_project_with_new_id(name="Project", category="other")
+    issue_a = _issue(ws_db, state="active")
+    issue_b = _issue(ws_db, state="active")
+    ws_db.assign_issue_to_project(issue_a, project, reason="test")
+    _classified_raw_item(ws_db, issue_a, "k1", pr_number_base="PR999")
+    _classified_raw_item(ws_db, issue_b, "k2", pr_number_base="PR999")
+
+    assert wr.list_identity_conflicts_across_grouped_projects() == []
+
+
+def test_identity_conflict_not_flagged_for_a_single_ungrouped_pair(ws_db):
+    """Baseline: two ungrouped issues sharing a reference is exactly the
+    case merge_stray_same_reference_clusters's own skip test above covers
+    from the OTHER angle - normal pre-grouping state, never a conflict."""
+    issue_a = _issue(ws_db, state="active")
+    issue_b = _issue(ws_db, state="active")
+    _classified_raw_item(ws_db, issue_a, "k1", pr_number_base="PR000")
+    _classified_raw_item(ws_db, issue_b, "k2", pr_number_base="PR000")
+
+    assert wr.list_identity_conflicts_across_grouped_projects() == []
+
+
+def test_identity_conflict_never_reassigns_or_merges_anything(ws_db):
+    """Read-only by construction - confirms the projects/issues themselves
+    are completely untouched by calling this."""
+    project_a = ws_db.create_project_with_new_id(name="Project A", category="other")
+    project_b = ws_db.create_project_with_new_id(name="Project B", category="other")
+    issue_a = _issue(ws_db, state="active")
+    issue_b = _issue(ws_db, state="active")
+    ws_db.assign_issue_to_project(issue_a, project_a, reason="test")
+    ws_db.assign_issue_to_project(issue_b, project_b, reason="test")
+    _classified_raw_item(ws_db, issue_a, "k1", pr_number_base="PR555")
+    _classified_raw_item(ws_db, issue_b, "k2", pr_number_base="PR555")
+
+    wr.list_identity_conflicts_across_grouped_projects()
+
+    assert ws_db.get_issue(issue_a)["project_id"] == project_a
+    assert ws_db.get_issue(issue_b)["project_id"] == project_b
+
+
 def test_merge_stray_clusters_skips_groups_with_only_clusters(ws_db):
     """Two clusters sharing a reference with no promoted issue yet is
     normal pre-promotion state, not this sweep's job - leave it for

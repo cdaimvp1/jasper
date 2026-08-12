@@ -55,6 +55,65 @@ shipping.
 
 ---
 
+## Track C.11 — labeled judgment corpus + end-to-end simulation test (HELD)
+
+Originally scoped in the 2026-08-11 design plan (`goofy-jingling-owl.md`,
+point 11) alongside Tracks A/B/C.9, but explicitly held back on Marc's own
+repeated, direct instruction the same session ("do not run c.11 yet",
+"we will hold on that for now") — moved here from the active task list
+(was task #352) on 2026-08-13 per Marc's own request, specifically so the
+full scope survives even though it's off the queue.
+
+**Problem this addresses:** existing tests (`test_workgraph_pipeline2.py`,
+`test_workgraph_regression_corpus.py`) mock the LLM entirely — they prove
+"Jasper handles a given verdict correctly," never "Claude actually
+produces the right verdict on real, messy business traffic." No test in
+this codebase measures real semantic-judgment accuracy.
+
+**Full original scope:**
+
+- `tests/fixtures/labeled_judgment_corpus.jsonl`: 300–500 hand-labeled
+  evidence pairs across categories: same-Project-across-unrelated-threads,
+  same-supplier-different-Project, overlapping-stakeholders-unrelated-work,
+  a new reference appearing late, forwarded chains, attachment-only-
+  identity, Teams+email combinations, prime/subcontractor cases, amount
+  changes, malformed/noisy correspondence, sparse evidence, true
+  ambiguity — sourced from real (anonymized) historical evidence where
+  possible, synthetic where not.
+- `tests/test_judgment_accuracy.py`: runs the real `judge_candidates`
+  against the corpus with real model calls, computes precision/recall/
+  false-merge-rate/false-split-rate/abstention-rate, asserts a floor and
+  logs actual numbers to a tracked file so drift across model/prompt
+  changes is visible over time. Gated behind an explicit marker/env var —
+  cost and latency mean this must never run in the default fast test loop.
+- `tests/test_e2e_chronological_simulation.py`: feeds a scripted month (or
+  30–90 days) of evidence through the full ingest→classify→pipeline2→
+  synthesis→NBA pipeline in timestamp order against a scratch DB, using a
+  comprehensive canned-verdict table (matching the labeled corpus) at the
+  LLM boundary — validates pipeline wiring/ordering (e.g. would have
+  caught the point-7/settlement-pass staleness gap directly), distinct
+  from and complementary to the accuracy test above, not a duplicate of it.
+
+**Agreed cost-control design** (ready to apply the moment this is
+unblocked): small corpus (~20–30 pairs to start, sourced from real
+anonymized cases) rather than the full 300–500 immediately; an opt-in
+pytest marker so it never runs by default; Haiku-tier model by default
+for the accuracy test; the e2e simulation test fully mocked (no real LLM
+calls at all) since it's testing wiring, not judgment quality.
+
+**Why this matters going forward:** the 2026-08-13 external architecture
+review (see "External architecture review findings" below) independently
+arrived at the same conclusion — a real semantic-accuracy evaluation is
+one of the highest-leverage remaining investments, now that Jasper has
+"a lot of capabilities" and the open question is whether its
+representation of reality can be trusted, not whether more capability is
+needed. That review's "semantic-accuracy evaluation" hardening item and
+this track are the same piece of work — do not build twice.
+
+**Trigger to revisit:** Marc's own explicit go-ahead. Not before.
+
+---
+
 ## UI / integration parity items (2026-08-11)
 
 Deferred during the Phase 1 build-queue pass. Each is a real, scoped gap;

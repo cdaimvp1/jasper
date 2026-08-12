@@ -225,8 +225,8 @@ They already share {match_count} real data point(s): {matched_signals}.
 {precedent_line}
 Read both fully, then choose EXACTLY one of these three outcomes - decide only from the evidence above, using the historical note (if any) only as context, never as the answer itself:
 
-- SAME_PROJECT: these describe the same underlying deal/workstream (even if they cover different individual transactions within one overall relationship).
-- RELATED_DIFFERENT_PROJECT: same vendor/counterparty/relationship, but a genuinely distinct piece of work (a different SOW, a different renewal cycle, a different initiative).
+- SAME_PROJECT: the evidence concerns the same underlying project/workstream, even if it appears in different threads, channels, phases, or sub-issues.
+- RELATED_DIFFERENT_PROJECT: the same relationship/counterparty is involved, but the evidence concerns a distinct transaction, SOW, renewal cycle, initiative, implementation, engagement, or other independently trackable body of work.
 - UNRELATED: the shared signal is coincidental; these are unrelated.
 
 Respond with EXACTLY one line, nothing else:

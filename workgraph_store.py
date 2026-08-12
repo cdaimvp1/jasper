@@ -3462,6 +3462,40 @@ def project_ids_for_conversation_id(conversation_id: str) -> list[str]:
     return ordered_project_ids
 
 
+def find_project_ids_by_recipient_emails(emails: list[str]) -> list[str]:
+    """Task #367: compose-mode project matching, recipient half. Given a
+    compose draft's To/Cc addresses, finds every DISTINCT, still-OPEN
+    Project any of them is already a tracked party on - via issue_parties
+    -> parties.primary_email, same identity join project_id_for_
+    conversation_id uses work_objects.parent_id for. Restricted to
+    active/waiting projects (a done/archived/dismissed project isn't a
+    useful compose-time surface). Ordered by project updated_at DESC -
+    most recently active project first. Empty list, never None, when
+    nothing matches or emails is empty."""
+    normalized = sorted({e.strip().lower() for e in emails if e and e.strip()})
+    if not normalized:
+        return []
+    with _lock:
+        conn = _connect()
+        try:
+            placeholders = ", ".join("?" for _ in normalized)
+            rows = conn.execute(
+                f"""SELECT DISTINCT wo.parent_id AS project_id, projects.updated_at
+                    FROM parties
+                    JOIN issue_parties ON issue_parties.party_id = parties.id
+                    JOIN work_objects wo ON wo.id = issue_parties.issue_id
+                    JOIN projects ON projects.id = wo.parent_id
+                    WHERE parties.primary_email IN ({placeholders})
+                      AND wo.parent_id IS NOT NULL
+                      AND projects.status IN ('active', 'waiting')
+                    ORDER BY projects.updated_at DESC""",
+                normalized,
+            ).fetchall()
+        finally:
+            conn.close()
+    return [r["project_id"] for r in rows]
+
+
 # --- issues ---------------------------------------------------------------
 
 def create_issue(

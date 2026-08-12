@@ -1020,3 +1020,32 @@ def test_extract_issue_from_project_rejects_unknown_claim_id(ws_db):
     pid = ws_db.create_project_with_new_id(name="P", category="other")
     with pytest.raises(ValueError):
         wp.extract_issue_from_project(pid, title="X", claim_ids=[999999])
+
+
+# --- task #367: compose-mode subject matching ------------------------------
+
+def test_find_project_ids_by_subject_fragment_matches_a_real_open_project(ws_db):
+    ws_db.create_project_with_new_id(name="Veeva CRM press release renewal", category="other")
+
+    result = wp.find_project_ids_by_subject_fragment("RE: Veeva CRM press release renewal - final terms")
+
+    assert len(result) == 1
+
+
+def test_find_project_ids_by_subject_fragment_returns_empty_for_no_match(ws_db):
+    ws_db.create_project_with_new_id(name="Veeva CRM press release renewal", category="other")
+
+    assert wp.find_project_ids_by_subject_fragment("Totally unrelated lunch plans") == []
+
+
+def test_find_project_ids_by_subject_fragment_returns_empty_for_short_subject(ws_db):
+    ws_db.create_project_with_new_id(name="Veeva CRM press release renewal", category="other")
+
+    assert wp.find_project_ids_by_subject_fragment("hi") == []
+
+
+def test_find_project_ids_by_subject_fragment_excludes_closed_projects(ws_db):
+    pid = ws_db.create_project_with_new_id(name="Veeva CRM press release renewal", category="other")
+    ws_db.set_project_status(pid, "archived")
+
+    assert wp.find_project_ids_by_subject_fragment("Veeva CRM press release renewal - final terms") == []

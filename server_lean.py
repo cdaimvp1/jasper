@@ -2580,6 +2580,52 @@ async def api_addin_focus_email(conversation_id: str):
     return SafeJSONResponse({"matched": True, "card": card})
 
 
+class FocusComposeBody(BaseModel):
+    subject: str = ""
+    recipient_emails: list[str] = Field(default_factory=list)
+
+
+@app.post("/api/addin/focus-compose")
+async def api_addin_focus_compose(body: FocusComposeBody):
+    """Task #367: the real "does this compose draft match an open Project"
+    lookup focusOnComposeDraft() punted on when task #289 first built
+    compose-mode support - see that function's own former docstring.
+
+    Two independent signals, unioned: recipient-email overlap against
+    parties already tracked on an open Project (wg.find_project_ids_by_
+    recipient_emails - the stronger signal, a real identity match) and a
+    fuzzy subject-line match against open Projects' own titles
+    (workgraph_projects.find_project_ids_by_subject_fragment). Recipient
+    matches are listed first (ordered by project recency within each
+    signal) since a shared party is a firmer signal than a fuzzy subject
+    fragment. Same "one match -> render its card, several -> let Marc
+    pick, none -> honest empty state" shape as /api/addin/focus-email -
+    never a silent auto-pick between plausible candidates."""
+    recipient_matches = wg.find_project_ids_by_recipient_emails(body.recipient_emails)
+    subject_matches = workgraph_projects.find_project_ids_by_subject_fragment(body.subject)
+    project_ids = list(recipient_matches)
+    for pid in subject_matches:
+        if pid not in project_ids:
+            project_ids.append(pid)
+    if not project_ids:
+        return JSONResponse({"matched": False})
+    if len(project_ids) > 1:
+        candidates = []
+        for pid in project_ids:
+            card = _build_addin_focus_card(pid)
+            if card is not None:
+                candidates.append({"id": pid, "title": card["project"].get("title") or "Untitled project"})
+        if not candidates:
+            return JSONResponse({"matched": False})
+        return SafeJSONResponse({"matched": True, "ambiguous": True, "projects": candidates})
+    project_id = project_ids[0]
+    card = _build_addin_focus_card(project_id)
+    if card is None:
+        return JSONResponse({"matched": False})
+    _record_referenced_project(project_id, card["project"]["title"])
+    return SafeJSONResponse({"matched": True, "card": card})
+
+
 _DISCOVERY_VOCABULARY_CAP = workgraph_discovery._VOCABULARY_CAP
 
 

@@ -3961,3 +3961,41 @@ def test_project_ids_for_conversation_id_dedupes_same_project_across_issues(ws_d
     ws_db.link_raw_item_to_issue(rid_b, issue_b)
 
     assert ws_db.project_ids_for_conversation_id("conv-3") == [project_id]
+
+
+# --- task #367: compose-mode recipient matching ----------------------------
+
+def test_find_project_ids_by_recipient_emails_returns_empty_for_no_match(ws_db):
+    assert ws_db.find_project_ids_by_recipient_emails(["nobody@example.com"]) == []
+
+
+def test_find_project_ids_by_recipient_emails_returns_empty_for_no_emails(ws_db):
+    assert ws_db.find_project_ids_by_recipient_emails([]) == []
+
+
+def test_find_project_ids_by_recipient_emails_matches_a_tracked_party(ws_db):
+    project_id = ws_db.create_project_with_new_id(name="Veeva Renewal", category="other")
+    issue_id = ws_db.create_issue_with_new_id(title="Issue", state="active", category="other")
+    ws_db.assign_issue_to_project(issue_id, project_id)
+    ws_db.upsert_party(id="party-1", primary_email="rep@acme.com", display_name="Rep",
+                        affiliation="external", affiliation_confidence="H",
+                        affiliation_source="domain", company="Acme")
+    ws_db.link_party_to_issue(issue_id, "party-1")
+
+    # case-insensitive, and a real project must survive alongside a
+    # completely unrelated address in the same recipient list.
+    result = ws_db.find_project_ids_by_recipient_emails(["REP@acme.com", "nobody@example.com"])
+    assert result == [project_id]
+
+
+def test_find_project_ids_by_recipient_emails_excludes_closed_projects(ws_db):
+    project_id = ws_db.create_project_with_new_id(name="Done Deal", category="other")
+    ws_db.set_project_status(project_id, "done")
+    issue_id = ws_db.create_issue_with_new_id(title="Issue", state="active", category="other")
+    ws_db.assign_issue_to_project(issue_id, project_id)
+    ws_db.upsert_party(id="party-2", primary_email="rep@acme.com", display_name="Rep",
+                        affiliation="external", affiliation_confidence="H",
+                        affiliation_source="domain", company="Acme")
+    ws_db.link_party_to_issue(issue_id, "party-2")
+
+    assert ws_db.find_project_ids_by_recipient_emails(["rep@acme.com"]) == []

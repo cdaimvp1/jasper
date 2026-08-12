@@ -457,6 +457,34 @@ def _topic_key_for_signature(issue: dict, sig: dict) -> str:
     return key if len(key) >= MIN_TOPIC_KEY_LEN else ""
 
 
+def find_project_ids_by_subject_fragment(subject: str) -> list[str]:
+    """Task #367: compose-mode project matching, subject half. Same
+    normalize-then-longest-common-substring approach _topic_key_for_
+    signature/_matched_data_points already use (MIN_TOPIC_KEY_LEN=15),
+    applied between the compose draft's own subject line and each OPEN
+    Project's display title - there's no work_object_signature to compare
+    against yet since the draft isn't a tracked item. Deliberately
+    project-title-only, not a full-corpus scan: a compose draft's subject
+    is usually still close to whatever it would end up filed under, and
+    this keeps the check cheap enough to run on every compose-pane focus.
+    Ordered by project updated_at DESC (list_projects' own order) - empty
+    list, never None, when nothing matches or subject is empty/too short."""
+    norm_subject = ws.normalize_topic_key(subject or "")
+    if len(norm_subject) < MIN_TOPIC_KEY_LEN:
+        return []
+    matches = []
+    for project in ws.list_projects(status=["active", "waiting"]):
+        title = project.get("display_title") or project.get("name") or ""
+        norm_title = ws.normalize_topic_key(title)
+        if len(norm_title) < MIN_TOPIC_KEY_LEN:
+            continue
+        m = SequenceMatcher(None, norm_subject, norm_title).find_longest_match(
+            0, len(norm_subject), 0, len(norm_title))
+        if m.size >= MIN_TOPIC_KEY_LEN:
+            matches.append(project["id"])
+    return matches
+
+
 # --- Task #331: datapoint_value -> work_object_ids index --------------------
 #
 # Marc's own engineering-direction doc, Section 16's confirmed gap:

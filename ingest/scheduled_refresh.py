@@ -50,6 +50,7 @@ import workgraph_proactive
 import workgraph_relationships
 import workgraph_noise
 import workgraph_lifecycle
+import workgraph_self_audit
 import config
 
 from paths import DATA_DIR
@@ -622,6 +623,18 @@ def run() -> dict:
     except Exception as e:
         dormant_sweep_result = {"error": str(e)}
 
+    # Self-audit sweep (task #370, 2026-08-12) - "Jasper auditing its own
+    # representation of reality." Same once/day gate as noise_sweep/
+    # dormant_sweep above; genuinely distinct from both (and from
+    # health_check.py) - see workgraph_self_audit.py's own module docstring.
+    # Strictly read-only: flags findings into self_audit_findings for a
+    # human to review/dismiss, never changes a project/issue/claim/action
+    # itself.
+    try:
+        self_audit_result = workgraph_self_audit.run_self_audit_sweep_daily_if_due()
+    except Exception as e:
+        self_audit_result = {"error": str(e)}
+
     # Task #318 - same once/day gate as choice_log_expiry above. Tries to
     # correlate each pending hero-draft-reply's captured suggested_text
     # against a real, later Sent Items row on the same issue (only shows up
@@ -704,6 +717,7 @@ def run() -> dict:
         "supplier_entity_sweep": supplier_entity_sweep_result,
         "noise_sweep": noise_sweep_result,
         "dormant_sweep": dormant_sweep_result,
+        "self_audit_sweep": self_audit_result,
         "nba_rewrite_judgment": nba_rewrite_judgment_result,
         "settlement_pass": settlement_pass_result,
         "alerts_settlement": alerts_settlement_result,

@@ -3047,6 +3047,56 @@ def init_workgraph() -> None:
                 )
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_sequence_patterns_category ON sequence_patterns(category)")
+
+            # --- self_audit_findings (task #370, 2026-08-12): "Jasper
+            # auditing its own representation of reality" - a periodic,
+            # READ-ONLY sweep over the graph's own structural consistency
+            # (see workgraph_self_audit.py for the seven checks and the
+            # full persistence-decision reasoning). Genuinely distinct from
+            # health_check.py's system/process-health checks (cursors
+            # advancing, disk growth, DB integrity) - this is about whether
+            # Jasper's OWN DATA about the business is internally consistent,
+            # never about whether the pipeline itself is running.
+            #
+            # PERSISTED, unlike the two nearest UI-less review precedents
+            # (workgraph_relationships.list_relationships_needing_review,
+            # workgraph_reconcile.list_identity_conflicts_across_grouped_
+            # projects) - both of those are pull-only, computed fresh on
+            # each on-demand chat/MCP/API ask, so recomputing live costs
+            # nothing. This sweep is instead wired into scheduled_refresh.py's
+            # unattended periodic cadence (task #370's own requirement) -
+            # without persistence, an identical finding would silently
+            # recompute and (if ever surfaced) re-report itself every cycle
+            # forever, with no way for a human to ever mark one reviewed and
+            # have it stay that way. Same dedupe-then-touch shape as
+            # pending_claim_suggestions/capability_suggestions: a currently-
+            # true finding is inserted once per (check_name, dedupe_key) and
+            # only ever touched (description/detail_json/last_seen_ts) while
+            # still status='open' - never silently reopened once a human
+            # dismisses it, even if the identical underlying condition is
+            # still true on the next sweep (see record_self_audit_finding's
+            # own docstring).
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS self_audit_findings (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    check_name       TEXT NOT NULL,
+                    dedupe_key       TEXT NOT NULL,
+                    subject_type     TEXT NOT NULL,
+                    subject_id       TEXT NOT NULL,
+                    description      TEXT NOT NULL,
+                    detail_json      TEXT,
+                    status           TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','dismissed','resolved')),
+                    first_seen_ts    REAL NOT NULL,
+                    last_seen_ts     REAL NOT NULL,
+                    resolved_ts      REAL,
+                    resolved_by      TEXT,
+                    resolution_note  TEXT,
+                    UNIQUE(check_name, dedupe_key)
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_self_audit_findings_status ON self_audit_findings(check_name, status)"
+            )
         finally:
             conn.close()
 
@@ -8212,6 +8262,233 @@ def list_all_open_claims() -> list[dict]:
         finally:
             conn.close()
     return [dict(r) for r in rows]
+
+
+# --- self-audit sweep support (task #370) -----------------------------------
+# Pure persistence, same split as every other review-queue table in this file
+# (pending_claim_suggestions, capability_suggestions) - the real check logic
+# lives in workgraph_self_audit.py, this is just the read/write layer under it.
+
+def list_prepared_actions_by_state(states: list[str]) -> list[dict]:
+    """Every prepared_action currently in one of `states`, DB-wide - unlike
+    list_prepared_actions_for_claim (scoped to one claim's own actions).
+    Needed by workgraph_self_audit's 'succeeded action, no evidence' check,
+    which has to scan every succeeded action across the whole install, not
+    just one claim's."""
+    if not states:
+        return []
+    with _lock:
+        conn = _connect()
+        try:
+            placeholders = ",".join("?" * len(states))
+            rows = conn.execute(
+                f"SELECT * FROM prepared_actions WHERE state IN ({placeholders}) ORDER BY created_ts ASC",
+                states,
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def list_orphaned_claims() -> list[dict]:
+    """Every claim whose issue_id resolves to NO real work_objects row at
+    all. Never enforced by SQLite - `PRAGMA foreign_keys` is never turned
+    on anywhere in this file - and genuinely reachable: the INSTEAD OF
+    DELETE triggers on the `issues`/`projects` views (trg_issues_delete/
+    trg_projects_delete, see init_workgraph) do a bare `DELETE FROM
+    work_objects WHERE id = OLD.id` with no cascade into claims/evidence_
+    unit_links/raw_items at all, so any future caller of a real DELETE
+    against either view would leave exactly this kind of orphan behind. A
+    claim pointing at a `dismissed` issue (e.g. the loser side of merge_
+    issue_into, which never deletes the loser row) is NOT orphaned by this
+    definition - that row still exists, just quietly parked; a genuinely
+    missing row is a different, rarer problem."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM claims WHERE issue_id NOT IN (SELECT id FROM work_objects)"
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def list_orphaned_evidence() -> dict:
+    """Two distinct orphan shapes over the evidence_units/evidence_unit_
+    links split (Section 12.2) - neither is visible through the normal
+    `evidence` view, which INNER JOINs the two tables and so silently
+    hides exactly the rows that would matter here:
+
+      unlinked_evidence_units - a real evidence_units row with ZERO rows
+        in evidence_unit_links pointing to it (never attached to any work
+        object at all).
+      dangling_links - an evidence_unit_links row pointing at a
+        work_object_id that no longer exists in work_objects at all (same
+        never-enforced-FK / no-cascade-on-view-DELETE gap list_orphaned_
+        claims documents)."""
+    with _lock:
+        conn = _connect()
+        try:
+            unlinked = conn.execute(
+                """SELECT * FROM evidence_units
+                   WHERE id NOT IN (SELECT evidence_unit_id FROM evidence_unit_links)"""
+            ).fetchall()
+            dangling = conn.execute(
+                """SELECT * FROM evidence_unit_links
+                   WHERE work_object_id NOT IN (SELECT id FROM work_objects)"""
+            ).fetchall()
+        finally:
+            conn.close()
+    return {
+        "unlinked_evidence_units": [dict(r) for r in unlinked],
+        "dangling_links": [dict(r) for r in dangling],
+    }
+
+
+def record_self_audit_finding(*, check_name: str, dedupe_key: str, subject_type: str,
+                               subject_id: str, description: str,
+                               detail_json: Optional[str] = None,
+                               now: Optional[float] = None) -> int:
+    """Dedupe-then-insert-OR-touch, same shape as create_claim_suggestion:
+    a currently-true finding already on record for this exact (check_name,
+    dedupe_key) pair is reused (its id returned), never duplicated. Unlike
+    create_claim_suggestion, an existing row IS updated in place
+    (description/detail_json/last_seen_ts) - but ONLY while it is still
+    status='open'. The sweep re-detecting the same real condition should
+    show today's actual detail (e.g. the current list of open commitment
+    claim ids), not a frozen snapshot from whenever it first appeared. An
+    existing row that is already 'dismissed' or 'resolved' is deliberately
+    left completely untouched - re-detecting an identical condition a human
+    already reviewed must never silently reopen it; only
+    dismiss_self_audit_finding (a human action) or auto_resolve_missing_
+    self_audit_findings (this same sweep's own honest "this is no longer
+    true" bookkeeping) ever change status."""
+    now = now if now is not None else time.time()
+    with _lock:
+        conn = _connect()
+        try:
+            existing = conn.execute(
+                "SELECT id, status FROM self_audit_findings WHERE check_name = ? AND dedupe_key = ?",
+                (check_name, dedupe_key),
+            ).fetchone()
+            if existing:
+                if existing["status"] == "open":
+                    conn.execute(
+                        """UPDATE self_audit_findings
+                           SET description = ?, detail_json = ?, last_seen_ts = ?
+                           WHERE id = ?""",
+                        (description, detail_json, now, existing["id"]),
+                    )
+                return existing["id"]
+            cur = conn.execute(
+                """INSERT INTO self_audit_findings
+                   (check_name, dedupe_key, subject_type, subject_id, description,
+                    detail_json, status, first_seen_ts, last_seen_ts)
+                   VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?)""",
+                (check_name, dedupe_key, subject_type, subject_id, description, detail_json, now, now),
+            )
+            return cur.lastrowid
+        finally:
+            conn.close()
+
+
+def auto_resolve_missing_self_audit_findings(check_name: str, active_dedupe_keys: set,
+                                              *, now: Optional[float] = None) -> int:
+    """Bookkeeping only on THIS meta-table, never on the real graph - closes
+    an 'open' finding as status='resolved' when the current sweep no longer
+    detects that exact (check_name, dedupe_key) condition. This is not the
+    "never auto-correct" line being crossed anywhere: nothing about the
+    underlying project/claim/action/etc changes, only the audit table's own
+    record of whether a past finding is still current. A 'dismissed'
+    finding is left alone either way - a human already closed the book on
+    it, and whether the condition happens to still be true isn't this
+    function's call to make (dismiss_self_audit_finding is the only real,
+    human-facing way a finding's status changes)."""
+    now = now if now is not None else time.time()
+    with _lock:
+        conn = _connect()
+        try:
+            open_rows = conn.execute(
+                "SELECT id, dedupe_key FROM self_audit_findings WHERE check_name = ? AND status = 'open'",
+                (check_name,),
+            ).fetchall()
+            resolved = 0
+            for row in open_rows:
+                if row["dedupe_key"] not in active_dedupe_keys:
+                    conn.execute(
+                        """UPDATE self_audit_findings
+                           SET status = 'resolved', resolved_ts = ?, resolved_by = 'system',
+                               resolution_note = 'condition no longer detected on a later sweep'
+                           WHERE id = ?""",
+                        (now, row["id"]),
+                    )
+                    resolved += 1
+            return resolved
+        finally:
+            conn.close()
+
+
+def list_self_audit_findings(*, status: Optional[str] = "open", check_name: Optional[str] = None) -> list[dict]:
+    """status=None returns every finding regardless of status - the default
+    (status='open') is the real review-queue view, same convention as
+    list_capability_suggestions/list_pending_claim_suggestions."""
+    sql = "SELECT * FROM self_audit_findings"
+    clauses = []
+    args: list[Any] = []
+    if status is not None:
+        clauses.append("status = ?")
+        args.append(status)
+    if check_name is not None:
+        clauses.append("check_name = ?")
+        args.append(check_name)
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY last_seen_ts DESC"
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(sql, args).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_self_audit_finding(finding_id: int) -> Optional[dict]:
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute("SELECT * FROM self_audit_findings WHERE id = ?", (finding_id,)).fetchone()
+        finally:
+            conn.close()
+    return dict(row) if row else None
+
+
+def dismiss_self_audit_finding(finding_id: int, *, actor: str, note: Optional[str] = None) -> bool:
+    """The one human-facing resolution path (mirrors reject_claim_
+    suggestion's shape) - a dismissed finding never reappears even if the
+    exact same condition is detected again, since record_self_audit_
+    finding's own dedupe-then-touch explicitly only ever updates a row
+    that's still status='open'. Returns False if the finding doesn't exist
+    or is already dismissed/resolved."""
+    now = time.time()
+    with _lock:
+        conn = _connect()
+        try:
+            existing = conn.execute(
+                "SELECT status FROM self_audit_findings WHERE id = ?", (finding_id,)
+            ).fetchone()
+            if existing is None or existing["status"] != "open":
+                return False
+            conn.execute(
+                """UPDATE self_audit_findings
+                   SET status = 'dismissed', resolved_ts = ?, resolved_by = ?, resolution_note = ?
+                   WHERE id = ?""",
+                (now, actor, note, finding_id),
+            )
+            return True
+        finally:
+            conn.close()
 
 
 def reconcile_extraction_claims(*, issue_id: str, raw_item_id: int, to_insert: list[dict],

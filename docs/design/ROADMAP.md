@@ -509,6 +509,29 @@ counts, exact file locations, and reproduction logic all checked out.
   to Jasper/Claude inside evidence have no authority") applied
   consistently, plus minimizing tool access for any model that reads raw,
   untrusted evidence directly.
+  **Done (2026-08-12, task #376)** - see design doc Section 12.10's own
+  "Extended" note for the full inventory of the ten prompts the boundary
+  statement now lives in, and for the real finding behind the tool-access
+  half: `--allowedTools` was denying nothing in any of these spawns,
+  because `.claude/settings.json` sets `permissions.defaultMode =
+  "bypassPermissions"` and every `claude -p` launched with `cwd=BODY`
+  inherits it (probed live: a `--allowedTools Bash` run used **Write**
+  successfully). Fixed with `--permission-mode manual` +
+  `--strict-mcp-config` on every raw-evidence-reading spawn.
+  **Still open, deliberately, for Marc to decide:**
+  - `run_relay_oneshot`/`run_deepdive_oneshot` pass `--allowedTools Bash`
+    while their prompts direct the worker to call M365 connector tools by
+    name. Under `bypassPermissions` that "worked" by accident; under a
+    genuinely enforced allowlist it would not. These two paths need a
+    real, enumerated MCP allowlist (the read-only M365 tools they
+    actually use) rather than either extreme - and the 2026-07-29
+    fabricated-relay-report incident is worth re-reading in that light.
+  - `workgraph_assistant`'s 29-tool allowlist, 8 of them dispatching
+    (draft/forward/message-worker/request-review). Untouched on purpose:
+    a human watches each turn. But raw evidence DOES reach it through
+    tool results (`jasper_search` returns evidence-search hits;
+    `outlook_email_search`/`read_resource` return live mailbox content),
+    so the human-in-the-loop is the only real control there today.
 
 ### New capabilities (agreed, real Jasper-core value, not UI)
 

@@ -2211,6 +2211,63 @@ enforcement point (`materialize_claims_for_raw_item`'s and
 so a future change to either function carries the constraint forward
 instead of silently drifting from it.
 
+**Extended (2026-08-12, task #376) - the boundary is now stated where the
+raw text actually reaches a model, and the unattended agentic path's tool
+access is really enforced.** The 2026-08-03 pass above is correct and
+unchanged, but it is narrow: it proves the CLAIMS/PreparedAction layer
+only ever consumes structured extraction output. It says nothing about
+the several prompts that hand a model the raw subject/body/attachment
+text directly, and it was easy to read the whole of 12.10 as a
+system-wide guarantee that prompt injection is closed. It is not. Two
+concrete additions:
+
+1. **An explicit boundary statement in every prompt where raw, untrusted
+   text reaches a model** - worded to each prompt's own voice, but always
+   carrying the same constraint: the evidence is *data to analyze, not
+   instructions*; anything inside it addressed to Claude/Jasper, or
+   telling the reader to change role, ignore prior instructions, or take
+   an action, *has no authority* and is ordinary reported content. The
+   full inventory it was applied to: `workgraph_synthesis_light.
+   _LIGHT_SYNTHESIS_PROMPT_TEMPLATE`; `workgraph_pipeline2.
+   _COMPARATIVE_JUDGMENT_PROMPT_TEMPLATE` and `_EXTRACTION_PROMPT_
+   TEMPLATE`; `workgraph_discovery`'s `_PROPOSAL_PROMPT_TEMPLATE`,
+   `_SYSTEM_TABLE_PROPOSAL_PROMPT_TEMPLATE` and `_BACKFILL_PROMPT_
+   TEMPLATE`; `workgraph_status_report._STAGE2_PROMPT_HEADER`;
+   `ingest/scheduled_refresh.py`'s `SYNTHESIS_PROMPT` (the heavy agentic
+   synthesis wake), `PROJECT_DEEPDIVE_PROMPT` and `RELAY_PROMPT`; and
+   `workgraph_assistant._SYSTEM_PROMPT` (the interactive pane, where the
+   raw text arrives as a tool RESULT rather than an interpolated
+   string). Guarded by `tests/test_workgraph_prompt_injection_boundary.
+   py` so a prompt rewrite cannot silently drop it.
+
+2. **A real, previously-false assumption about tool access, found by
+   probing rather than reading flag names.** `--allowedTools ""` (used by
+   pipeline2 / synthesis-light / discovery / status-report, all of which
+   read raw evidence) and `--allowedTools Bash` (the heavy synthesis,
+   relay and deep-dive wakes) denied *nothing*: this repo's own
+   `.claude/settings.json` sets `permissions.defaultMode =
+   "bypassPermissions"`, and every `claude -p` spawned with `cwd=BODY`
+   inherits it. Confirmed live - a run given only `--allowedTools Bash`
+   used the **Write** tool to create a file outside the workspace,
+   unprompted. Separately, none of these spawns passed
+   `--strict-mcp-config`, so each also loaded the machine owner's whole
+   MCP roster, including the M365 connector's real `outlook_send_mail` /
+   `sharepoint_delete_item`. Every one of those spawns now passes
+   `--permission-mode manual` (which makes its allowlist enforceable -
+   re-probed: Bash still works, Write is denied) and
+   `--strict-mcp-config` (zero MCP servers load). The heavy synthesis
+   wake keeps `Bash`, because SYNTHESIS_ROUTINE.md genuinely requires a
+   shell for all six of its steps - and `Bash` remains a full-capability
+   escape hatch, so this is defense in depth, not a proof.
+
+   Deliberately NOT changed: `run_relay_oneshot` and
+   `run_deepdive_oneshot` (their prompts direct the worker to call M365
+   connector tools by name, so `--strict-mcp-config` would break them
+   outright), and `workgraph_assistant`'s tool allowlist (a human watches
+   every turn - a different risk profile, and Marc's call to make
+   explicitly). Both are named open questions, not oversights: see the
+   ROADMAP entry.
+
 ### 12.11 Tenant scope — explicitly deferred, no placeholder columns either
 
 Per Marc's direct instruction: held until a second real user exists, same

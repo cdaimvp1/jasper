@@ -2469,41 +2469,85 @@ def init_workgraph() -> None:
                     except sqlite3.OperationalError:
                         pass
 
-            conn.execute("""
-                CREATE VIEW IF NOT EXISTS evidence AS
-                SELECT eu.id AS id, eul.work_object_id AS issue_id, eu.raw_item_id,
-                       eu.type, eu.summary, eu.ts
-                FROM evidence_units eu JOIN evidence_unit_links eul ON eul.evidence_unit_id = eu.id
-            """)
-            conn.execute("""
-                CREATE TRIGGER IF NOT EXISTS trg_evidence_insert INSTEAD OF INSERT ON evidence
-                BEGIN
-                    INSERT INTO evidence_units (raw_item_id, type, summary, ts)
-                    VALUES (NEW.raw_item_id, NEW.type, NEW.summary, NEW.ts);
-                    INSERT INTO evidence_unit_links (evidence_unit_id, work_object_id)
-                    VALUES (last_insert_rowid(), NEW.issue_id);
-                END
-            """)
-            conn.execute("""
-                CREATE TRIGGER IF NOT EXISTS trg_evidence_update INSTEAD OF UPDATE ON evidence
-                BEGIN
-                    UPDATE evidence_units SET
-                        raw_item_id = NEW.raw_item_id, type = NEW.type,
-                        summary = NEW.summary, ts = NEW.ts
-                    WHERE id = OLD.id;
-                    UPDATE evidence_unit_links SET work_object_id = NEW.issue_id
-                    WHERE evidence_unit_id = OLD.id AND work_object_id = OLD.issue_id;
-                END
-            """)
-            conn.execute("""
-                CREATE TRIGGER IF NOT EXISTS trg_evidence_delete INSTEAD OF DELETE ON evidence
-                BEGIN
-                    DELETE FROM evidence_unit_links
+            # Real, confirmed race under heavy concurrency (task #340,
+            # 2026-08-11, same failure family as #339's work_objects fix, a
+            # different specific mechanism): `evidence_units_exists` above is
+            # checked ONCE, before evidence_units itself is even created - on
+            # a fresh/heavily-concurrent DB, every racing process can see it
+            # as False and enter the migration block above, regardless of
+            # whether another process already finished (or is mid-way
+            # through) the real migration. Whichever process's own migration
+            # attempt exits early for ANY reason the broad `except
+            # OperationalError` above catches (lock contention on BEGIN
+            # IMMEDIATE, "no such table: evidence" because another process
+            # already renamed it away, anything) still fell through
+            # UNCONDITIONALLY to the CREATE VIEW/TRIGGER calls below. `CREATE
+            # VIEW IF NOT EXISTS evidence` is a silent no-op if `evidence`
+            # already exists as EITHER a view or a plain table (SQLite
+            # treats the name as taken either way) - so that call alone
+            # never errors. But if the REAL migrating process hasn't
+            # committed its rename yet at the exact moment this process
+            # reaches the very next statement, `evidence` is still a plain
+            # TABLE right then, and `CREATE TRIGGER ... INSTEAD OF INSERT ON
+            # evidence` raises `OperationalError: cannot create INSTEAD OF
+            # trigger on table: evidence` - uncaught (these are all bare
+            # conn.execute() calls, no try/except), crashing this process's
+            # whole init_workgraph() call. Confirmed live: reproduced under
+            # 22-process combined load (this test's own 16 plus a separately
+            # running 6-worker backfill), did not reproduce under the test's
+            # normal 16-process design point in isolation - real, but rare
+            # enough this codebase's existing test suite never caught it
+            # until an unusually heavy concurrent-load day surfaced it.
+            #
+            # Fixed the same way #339 was: check right before acting, don't
+            # trust a decision made earlier in this same call. If `evidence`
+            # is CURRENTLY still a real table, some other process is
+            # presumably mid-migration (or this process's own attempt above
+            # is about to complete once it retries) - skip creating the
+            # view/triggers this round entirely rather than risk the crash;
+            # this self-heals on the very next init_workgraph() call, the
+            # same "eventually consistent, never a partial crash" tolerance
+            # this codebase's other rebuild-and-copy migrations already rely
+            # on elsewhere in this function.
+            _evidence_still_a_table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='evidence'"
+            ).fetchone() is not None
+            if not _evidence_still_a_table:
+                conn.execute("""
+                    CREATE VIEW IF NOT EXISTS evidence AS
+                    SELECT eu.id AS id, eul.work_object_id AS issue_id, eu.raw_item_id,
+                           eu.type, eu.summary, eu.ts
+                    FROM evidence_units eu JOIN evidence_unit_links eul ON eul.evidence_unit_id = eu.id
+                """)
+                conn.execute("""
+                    CREATE TRIGGER IF NOT EXISTS trg_evidence_insert INSTEAD OF INSERT ON evidence
+                    BEGIN
+                        INSERT INTO evidence_units (raw_item_id, type, summary, ts)
+                        VALUES (NEW.raw_item_id, NEW.type, NEW.summary, NEW.ts);
+                        INSERT INTO evidence_unit_links (evidence_unit_id, work_object_id)
+                        VALUES (last_insert_rowid(), NEW.issue_id);
+                    END
+                """)
+                conn.execute("""
+                    CREATE TRIGGER IF NOT EXISTS trg_evidence_update INSTEAD OF UPDATE ON evidence
+                    BEGIN
+                        UPDATE evidence_units SET
+                            raw_item_id = NEW.raw_item_id, type = NEW.type,
+                            summary = NEW.summary, ts = NEW.ts
+                        WHERE id = OLD.id;
+                        UPDATE evidence_unit_links SET work_object_id = NEW.issue_id
                         WHERE evidence_unit_id = OLD.id AND work_object_id = OLD.issue_id;
-                    DELETE FROM evidence_units WHERE id = OLD.id
-                        AND NOT EXISTS (SELECT 1 FROM evidence_unit_links WHERE evidence_unit_id = OLD.id);
-                END
-            """)
+                    END
+                """)
+                conn.execute("""
+                    CREATE TRIGGER IF NOT EXISTS trg_evidence_delete INSTEAD OF DELETE ON evidence
+                    BEGIN
+                        DELETE FROM evidence_unit_links
+                            WHERE evidence_unit_id = OLD.id AND work_object_id = OLD.issue_id;
+                        DELETE FROM evidence_units WHERE id = OLD.id
+                            AND NOT EXISTS (SELECT 1 FROM evidence_unit_links WHERE evidence_unit_id = OLD.id);
+                    END
+                """)
 
             # Socrates-for-Jasper (#see workgraph_socrates.py): one row per TIER
             # consulted per question, not one row per question - this is what

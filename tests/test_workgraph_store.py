@@ -3551,3 +3551,67 @@ def test_init_workgraph_repair_is_a_noop_when_nothing_is_stale(ws_db):
     # (a byte-identical recreation would look the same either way), it's
     # that nothing raised and the healthy state stayed healthy.
     assert before_by_name == after_by_name
+
+
+# --- task #340: evidence/evidence_units migration race ---------------------
+# Real, confirmed bug, same failure family as the two tests above but a
+# different specific mechanism: `evidence_units_exists` is checked ONCE,
+# before evidence_units itself is created, so under heavy concurrency a
+# racing process can fall through unconditionally to CREATE VIEW/TRIGGER
+# while `evidence` is still a genuine TABLE (the real migrating process
+# hasn't committed its rename yet) - `CREATE TRIGGER ... INSTEAD OF INSERT
+# ON evidence` then raises OperationalError uncaught, since INSTEAD OF
+# triggers are only valid on views. Reproduced live under 22-process
+# combined load (this file's own multiprocess stress test running
+# alongside a separate 6-worker backfill); did not reproduce at the stress
+# test's own normal 16-process design point in isolation.
+
+def test_init_workgraph_skips_evidence_view_when_evidence_is_still_a_table(ws_db):
+    """Forges the exact moment this race exposes: `evidence` resolves to a
+    real table (as it would mid-migration, before the real migrating
+    process's rename has committed). init_workgraph() must not raise, and
+    must leave the view/triggers uncreated this round rather than force
+    the issue.
+
+    Deliberately does NOT also assert a later call "self-heals" this
+    forged state back into a view: `evidence` has its own separate,
+    unconditional `CREATE TABLE IF NOT EXISTS evidence` bootstrap far
+    earlier in this same function (for genuinely fresh installs, before
+    evidence_units existed as a concept) - if `evidence` is found absent
+    under that exact name at the START of a call, that bootstrap refills
+    it as a fresh empty table before this gate ever runs, and since
+    evidence_units already exists in this test's fixture (from the
+    ws_db fixture's own earlier init), the one-time migration block never
+    re-fires to rename it away again. That's a real, pre-existing, and
+    separate design nuance (not reachable in practice, since the real
+    migrating process's own rename is always immediately followed by
+    view creation within that SAME call, never left dangling across a
+    call boundary) - out of this fix's scope, which is specifically
+    to never crash, not to recover from any hand-forged absence."""
+    conn = ws_db._connect()
+    try:
+        conn.execute("DROP TRIGGER IF EXISTS trg_evidence_insert")
+        conn.execute("DROP TRIGGER IF EXISTS trg_evidence_update")
+        conn.execute("DROP TRIGGER IF EXISTS trg_evidence_delete")
+        conn.execute("DROP VIEW IF EXISTS evidence")
+        conn.execute("""
+            CREATE TABLE evidence (
+                id INTEGER PRIMARY KEY, issue_id TEXT, raw_item_id INTEGER,
+                type TEXT, summary TEXT, ts REAL
+            )
+        """)
+    finally:
+        conn.close()
+
+    ws_db.init_workgraph()  # must not raise
+
+    conn = ws_db._connect()
+    try:
+        kind = conn.execute("SELECT type FROM sqlite_master WHERE name='evidence'").fetchone()["type"]
+        assert kind == "table"  # correctly left alone this round, not forced
+        triggers = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'trg_evidence_%'"
+        ).fetchall()
+        assert triggers == []  # correctly skipped - never created against a table
+    finally:
+        conn.close()

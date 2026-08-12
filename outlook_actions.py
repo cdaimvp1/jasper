@@ -11,7 +11,10 @@ for /api/cockpit/refresh, task #42).
 """
 from __future__ import annotations
 
+import json
+import os
 import subprocess
+import tempfile
 from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent / "ingest"
@@ -53,7 +56,37 @@ def _run_powershell(args: list[str]) -> dict:
         raise RuntimeError(f"timed out after {_TIMEOUT_SECONDS}s - Outlook may be busy or showing a prompt")
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr.strip() or f"exit code {proc.returncode}")
-    return {"ok": True}
+    # External-review finding #356 (2026-08-13): this used to return a bare
+    # {"ok": True} unconditionally, discarding the real JSON every one of
+    # this module's PowerShell scripts already emits on success (confirmed
+    # by reading all five scripts - each ends in `Write-Output (... |
+    # ConvertTo-Json -Compress)` or the plain '{"ok":true}' literal).
+    # compose_new()'s own docstring already promised callers could inspect
+    # a real "missing_attachments" list - that promise was never kept,
+    # since this function threw the PowerShell script's real stdout away.
+    # Falls back to {"ok": True} only if stdout is genuinely empty/
+    # unparseable - defensive, not expected to trigger against any of the
+    # five scripts this module actually calls today.
+    try:
+        return json.loads(proc.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return {"ok": True}
+
+
+def _write_temp_body_file(body: str) -> str:
+    """Writes drafted body text to a private temp file and returns its
+    path. External-review finding #358 (2026-08-13): draft_reply/
+    compose_new used to pass `body` as a plain -Body PowerShell
+    command-line argument - Windows' CreateProcess has a hard ~32K
+    character total-command-line limit, and an unbounded drafted body (a
+    full status report, a long stakeholder update - exactly the kind of
+    content this system is being asked to generate more of) could hit
+    it. Caller is responsible for deleting the returned path once the
+    subprocess call has finished (success or failure)."""
+    fd, path = tempfile.mkstemp(suffix=".txt", prefix="jasper_body_")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(body)
+    return path
 
 
 def open_email(entry_id: str) -> dict:
@@ -111,11 +144,17 @@ def draft_reply(entry_id: str, reply_all: bool = False, ref_tag: str | None = No
         args.append("-ReplyAll")
     if ref_tag:
         args.extend(["-RefTag", ref_tag])
+    body_file = None
     if body:
-        args.extend(["-Body", body])
+        body_file = _write_temp_body_file(body)
+        args.extend(["-BodyFile", body_file])
     if save_only:
         args.append("-SaveOnly")
-    return _run_powershell(args)
+    try:
+        return _run_powershell(args)
+    finally:
+        if body_file:
+            os.unlink(body_file)
 
 
 def draft_forward(entry_id: str, ref_tag: str | None = None) -> dict:
@@ -158,8 +197,14 @@ def compose_new(to_emails: list[str], subject: str, body: str = "",
         raise ValueError("to_emails is required")
     to_field = ";".join(to_emails)
     args = ["powershell", "-NoProfile", "-File", str(_DRAFT_COMPOSE_SCRIPT), "-To", to_field, "-Subject", subject or ""]
+    body_file = None
     if body:
-        args.extend(["-Body", body])
+        body_file = _write_temp_body_file(body)
+        args.extend(["-BodyFile", body_file])
     if attachment_paths:
         args.extend(["-AttachmentPaths", ";".join(attachment_paths)])
-    return _run_powershell(args)
+    try:
+        return _run_powershell(args)
+    finally:
+        if body_file:
+            os.unlink(body_file)

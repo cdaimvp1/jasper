@@ -12,23 +12,30 @@
 # workgraph_signals.JASPER_REF_RE picks it back up as a real fallback
 # matching signal (workgraph_classify.cluster_and_link).
 #
-# -Body/-SaveOnly (task #287, proactive drafting): -Body prepends real
-# drafted text above the quoted thread, same HTMLBody-prepend mechanism as
-# -RefTag. -SaveOnly calls MailItem.Save() instead of Display() - the draft
-# lands in the Drafts folder without a visible window popping up, for a
-# proactive (unattended) call specifically.
+# -BodyFile/-SaveOnly (task #287, proactive drafting; -BodyFile replaces the
+# original -Body string argument 2026-08-13, external-review finding #358:
+# Windows' CreateProcess has a hard ~32K character total-command-line
+# limit, and an unbounded drafted body - a full status report, a long
+# stakeholder update - could hit it passed directly as an argument. The
+# caller (outlook_actions.py) writes the body to a private temp UTF-8 file
+# and passes its path instead): -BodyFile's content prepends real drafted
+# text above the quoted thread, same HTMLBody-prepend mechanism as -RefTag.
+# -SaveOnly calls MailItem.Save() instead of Display() - the draft lands in
+# the Drafts folder without a visible window popping up, for a proactive
+# (unattended) call specifically.
 #
 # Usage:
-#   powershell -File outlook_draft_reply.ps1 -EntryID "<entry id>" [-ReplyAll] [-RefTag "JW-marc-308"] [-Body "..."] [-SaveOnly]
+#   powershell -File outlook_draft_reply.ps1 -EntryID "<entry id>" [-ReplyAll] [-RefTag "JW-marc-308"] [-BodyFile "C:\path\to\body.txt"] [-SaveOnly]
 param(
     [Parameter(Mandatory=$true)][string]$EntryID,
     [switch]$ReplyAll,
     [string]$RefTag,
-    [string]$Body,
+    [string]$BodyFile,
     [switch]$SaveOnly
 )
 
 try {
+    $Body = if ($BodyFile) { Get-Content -LiteralPath $BodyFile -Raw -Encoding UTF8 } else { $null }
     $outlook = New-Object -ComObject Outlook.Application
     $ns = $outlook.GetNamespace("MAPI")
     $item = $ns.GetItemFromID($EntryID)

@@ -5,30 +5,33 @@
 # never calls Send(). Display() puts it on screen exactly like a person
 # clicking New Email themselves; nothing here transmits anything.
 #
-# Body/AttachmentPaths (task #35 follow-on, 2026-08-08): the real path to
-# "share this output with stakeholders and ask them to review" - Marc's
-# own question was whether this needs new M365/Graph write permissions
-# (SharePoint sharing); it doesn't. This is the same local COM automation
-# already used for draft_reply/draft_forward/mark_read, just given a body
-# and a real file to attach. AttachmentPaths is semicolon-separated (same
-# convention as -To) since a review request may carry more than one file.
-# A missing attachment path is reported back, never silently dropped -
-# same "always report reality" discipline as body_capture_failures
-# elsewhere in this codebase - so a caller never believes a doc was
-# attached when it wasn't.
+# BodyFile/AttachmentPaths (task #35 follow-on, 2026-08-08; -BodyFile
+# replaces the original -Body string argument 2026-08-13, external-review
+# finding #358 - see outlook_draft_reply.ps1's own comment for why): the
+# real path to "share this output with stakeholders and ask them to
+# review" - Marc's own question was whether this needs new M365/Graph
+# write permissions (SharePoint sharing); it doesn't. This is the same
+# local COM automation already used for draft_reply/draft_forward/
+# mark_read, just given a body and a real file to attach.
+# AttachmentPaths is semicolon-separated (same convention as -To) since a
+# review request may carry more than one file. A missing attachment path
+# is reported back, never silently dropped - same "always report reality"
+# discipline as body_capture_failures elsewhere in this codebase - so a
+# caller never believes a doc was attached when it wasn't.
 #
 # Usage:
 #   powershell -File outlook_draft_compose.ps1 -To "a@x.com;b@y.com" -Subject "..." `
-#       -Body "Please review and let me know your thoughts." `
+#       -BodyFile "C:\path\to\body.txt" `
 #       -AttachmentPaths "C:\path\to\redline.docx"
 param(
     [Parameter(Mandatory=$true)][string]$To,
     [Parameter(Mandatory=$true)][string]$Subject,
-    [string]$Body = "",
+    [string]$BodyFile = "",
     [string]$AttachmentPaths = ""
 )
 
 try {
+    $Body = if ($BodyFile) { Get-Content -LiteralPath $BodyFile -Raw -Encoding UTF8 } else { "" }
     $outlook = New-Object -ComObject Outlook.Application
     $mail = $outlook.CreateItem(0)
     $mail.To = $To

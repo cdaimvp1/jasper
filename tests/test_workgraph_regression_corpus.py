@@ -1,11 +1,11 @@
 """Regression corpus for workgraph_pipeline2.py's grouping/candidate-judgment
 logic (task #333) - tricky, real-world-shaped cases that go beyond the
 mechanical unit tests in test_workgraph_pipeline2.py. That file proves each
-piece (find_candidates, judge_candidate, process_new_item, run_project_
+piece (find_candidates, judge_candidates, process_new_item, run_project_
 extraction) does what its own docstring says in isolation; this file's job is
 to pin down the SCENARIOS that have actually bitten (or nearly bitten) this
 pipeline in practice - forwarded mail, subject drift, attachment-only
-identity, chained matches across separate pairwise comparisons, and the
+identity, chained matches across separate comparative candidate sets, and the
 recovery mechanisms for when grouping gets it wrong in either direction.
 
 Deliberately incremental (per task #333's own framing): this is a first real
@@ -18,7 +18,7 @@ detection and orchestration logic runs for real, only the LLM judgment
 itself is a controlled fake. Company/person names below are all invented
 for these fixtures (the Scriptly/Sodalis pairing carries over from the
 already-anonymized real case that motivated the related_different_project
-verdict in the first place - see workgraph_pipeline2.judge_candidate's own
+verdict in the first place - see workgraph_pipeline2.judge_candidates' own
 docstring and test_workgraph_pipeline2.py's existing coverage of that exact
 pair)."""
 from __future__ import annotations
@@ -106,13 +106,19 @@ def _mock_claude(monkeypatch, stdout: str):
     monkeypatch.setattr(p2.subprocess, "Popen", fake_popen)
 
 
-def _mock_claude_by_marker(monkeypatch, rules: dict, default: str = "VERDICT: unrelated\n"):
+def _mock_claude_choosing_marker(monkeypatch, marker: str, verdict: str):
     """For a single process_new_item call that judges MULTIPLE candidates
-    in one pass, each needing a DIFFERENT verdict - real production shape
-    whenever an item has more than one genuine 2+-point candidate. `rules`
-    maps a short substring unique to one candidate's own title/body (so it
-    only ever appears in that candidate's half of the judgment prompt) to
-    the exact VERDICT line that candidate should get."""
+    in ONE comparative pass (2026-08-11 rewrite, review point #8) - real
+    production shape whenever an item has more than one genuine 2+-point
+    candidate. `marker` is a short substring unique to exactly one
+    candidate's own CANDIDATE block (so it appears in that candidate's
+    block only, never elsewhere in the prompt); the fake finds which
+    numbered CANDIDATE block actually contains it and responds "MATCH:
+    <that number>\\nVERDICT: <verdict>" - the comparative call can only
+    ever choose ONE candidate, unlike the old per-candidate independent
+    calls this replaced."""
+    import re
+
     class _MarkerProcess(_FakeProcess):
         def __init__(self):
             super().__init__("")
@@ -120,10 +126,13 @@ def _mock_claude_by_marker(monkeypatch, rules: dict, default: str = "VERDICT: un
         def communicate(self, input=None, timeout=None):
             self.sent_input = input
             text = input or ""
-            for marker, verdict in rules.items():
-                if marker in text:
-                    return verdict, ""
-            return default, ""
+            parts = re.split(r"CANDIDATE (\d+) \(already tracked", text)
+            for i in range(1, len(parts), 2):
+                num = parts[i]
+                block = parts[i + 1] if i + 1 < len(parts) else ""
+                if marker in block:
+                    return f"MATCH: {num}\nVERDICT: {verdict}\n", ""
+            return "MATCH: NONE\n", ""
 
     def fake_popen(*a, **kw):
         return _MarkerProcess()
@@ -136,21 +145,27 @@ def _mock_claude_by_marker(monkeypatch, rules: dict, default: str = "VERDICT: un
 # test_workgraph_pipeline2.py already covers the base Scriptly/Sodalis case
 # (one candidate, verdict related_different_project, item falls through to
 # its own new project). The real gap: production items routinely have
-# MULTIPLE candidates at once, and a genuine same_project match must still
-# merge correctly even while a DIFFERENT candidate on the same call is
-# simultaneously getting the related-but-different treatment - the two
-# mechanisms (merge decision, relationship bookkeeping) have to co-exist
-# within one process_new_item call, not just in isolation.
+# MULTIPLE candidates at once. Under the comparative-judgment redesign
+# (review point #8, 2026-08-11), the model sees every candidate in one call
+# and picks the single best match - the case below confirms it correctly
+# picks the genuine duplicate over the subcontractor candidate, and that
+# the non-chosen candidate gets no bookkeeping this call.
 
-def test_mixed_verdicts_merges_the_real_match_and_still_records_the_relationship(ws_db, isolated_paths, monkeypatch):
+def test_comparative_call_picks_the_real_match_over_a_related_different_project_candidate(ws_db, isolated_paths, monkeypatch):
     """New item has two 2+-point candidates: one is a genuine duplicate of
     the SAME underlying deal (thread drift - same vendor, same named
     contact, just a later message), the other is a related subcontractor
     engagement under a different prime relationship (the Scriptly/Sodalis
-    shape). A same_project verdict on the first must merge, AND a
-    related_different_project verdict on the second must still write its
-    relationship row, in the same call - neither should crowd out the
-    other."""
+    shape). Rewritten 2026-08-11 for the comparative-judgment redesign
+    (review point #8): ONE call now sees both candidates at once and must
+    choose the single best match, rather than two independent pairwise
+    calls each free to reach their own verdict. Confirms the genuine
+    duplicate is correctly merged, and - the direct behavior change from
+    the old design - the OTHER (non-chosen) candidate gets no relationship
+    write and no other effect from THIS call; that signal only fires on a
+    call where the subcontractor candidate is itself the one chosen (see
+    test_process_new_item_related_different_project_writes_relationship_
+    signal in test_workgraph_pipeline2.py for that case in isolation)."""
     n = _issue(ws_db, "Renewal terms for the Northwind Analytics subscription")
     _link_party(ws_db, n, "party_kim", "kim@northwind-analytics.example", company="Northwind Analytics")
 
@@ -168,21 +183,15 @@ def test_mixed_verdicts_merges_the_real_match_and_still_records_the_relationship
     project_sub = ws_db.create_project_with_new_id(name="Halyard Data Services subcontract", category="other")
     ws_db.assign_issue_to_project(sub, project_sub)
 
-    _mock_claude_by_marker(monkeypatch, {
-        "follow-up on pricing": "VERDICT: same_project\n",
-        "Halyard Data Services": "VERDICT: related_different_project\n",
-    })
+    _mock_claude_choosing_marker(monkeypatch, "follow-up on pricing", "same_project")
 
     result = p2.process_new_item(n)
 
     assert result["action"] == "merged"
     assert result["project_id"] == project_dup
-    relationships = ws_db.list_work_object_relationships_by_type("rejected")
-    assert len(relationships) == 1
-    assert {relationships[0]["from_id"], relationships[0]["to_id"]} == {n, sub}
-    # The subcontractor project must stay untouched - a related_different_
-    # project verdict is a "these are genuinely separate" signal, not a
-    # partial merge.
+    # The subcontractor candidate was not chosen this call - no
+    # relationship write, and its own project stays untouched.
+    assert ws_db.list_work_object_relationships_by_type("rejected") == []
     assert ws_db.get_issue(sub)["project_id"] == project_sub
 
 
@@ -200,7 +209,7 @@ def test_related_different_project_is_not_a_permanent_veto_unlike_a_manual_split
     _link_party(ws_db, b, "party_pat", "pat@scriptly-sodalis.example", company="Scriptly")
     project_b = ws_db.create_project_with_new_id(name="Sodalis MSA project", category="other")
     ws_db.assign_issue_to_project(b, project_b)
-    _mock_claude(monkeypatch, "VERDICT: related_different_project\n")
+    _mock_claude(monkeypatch, "MATCH: 1\nVERDICT: related_different_project\n")
 
     result = p2.process_new_item(n)
     assert result["action"] == "new_project"
@@ -246,7 +255,7 @@ def test_forwarded_mail_with_broken_threading_still_matches_on_company_and_subje
     assert "supplier" in candidates[0]["matched_signals"]
     assert "subject_entity" in candidates[0]["matched_signals"]
 
-    _mock_claude(monkeypatch, "VERDICT: same_project\n")
+    _mock_claude(monkeypatch, "MATCH: 1\nVERDICT: same_project\n")
     result = p2.process_new_item(original)
     assert result["action"] == "merged"
 
@@ -278,7 +287,7 @@ def test_subject_line_change_across_a_thread_still_matches_on_reference_and_vend
     assert set(candidates[0]["matched_signals"]) >= {"supplier", "reference"}
     assert "subject_entity" not in candidates[0]["matched_signals"]
 
-    _mock_claude(monkeypatch, "VERDICT: same_project\n")
+    _mock_claude(monkeypatch, "MATCH: 1\nVERDICT: same_project\n")
     result = p2.process_new_item(early)
     assert result["action"] == "merged"
 
@@ -315,10 +324,10 @@ def test_attachment_only_reference_plus_vendor_becomes_a_real_candidate(ws_db, i
     assert candidates[0]["candidate_id"] == b
     assert set(candidates[0]["matched_signals"]) >= {"reference", "supplier"}
 
-    _mock_claude(monkeypatch, "VERDICT: same_project\n")
+    _mock_claude(monkeypatch, "MATCH: 1\nVERDICT: same_project\n")
     result = p2.process_new_item(a)
     assert result["action"] == "merged"
-    # judge_candidate must have actually been given the attachment text,
+    # judge_candidates must have actually been given the attachment text,
     # not just the email bodies - full_text_for_work_object's own real job.
 
 
@@ -376,7 +385,7 @@ def test_chained_matches_transitively_join_via_the_middle_item_not_a_direct_link
     assert p2.find_candidates(c) == [{"candidate_id": b, "matched_signals": ["reference", "amount"]}] or \
         {cand["candidate_id"] for cand in p2.find_candidates(c)} == {b}
 
-    _mock_claude(monkeypatch, "VERDICT: same_project\n")
+    _mock_claude(monkeypatch, "MATCH: 1\nVERDICT: same_project\n")
     first = p2.process_new_item(a)
     assert first["action"] == "merged"
     project_id = first["project_id"]
@@ -405,13 +414,13 @@ def test_split_issue_from_project_is_exercised_and_prevents_pipeline2_from_re_me
     process_new_item, run again exactly as the next scheduled sweep would,
     does NOT drift the same two items back together - the cannot_link veto
     in _matched_data_points removes the sibling from find_candidates
-    entirely, before judge_candidate (the LLM) is ever consulted again."""
+    entirely, before judge_candidates (the LLM) is ever consulted again."""
     a = _issue(ws_db, "Renewal question for a large shared vendor account")
     _link_party(ws_db, a, "party_shared", "contact@omniforge-vendor.example", company="Omniforge Vendor Corp")
     b = _issue(ws_db, "Unrelated renewal question, same big vendor account")
     _link_party(ws_db, b, "party_shared", "contact@omniforge-vendor.example", company="Omniforge Vendor Corp")
 
-    _mock_claude(monkeypatch, "VERDICT: same_project\n")
+    _mock_claude(monkeypatch, "MATCH: 1\nVERDICT: same_project\n")
     first = p2.process_new_item(a)
     assert first["action"] == "merged"
     old_project_id = first["project_id"]
@@ -459,7 +468,7 @@ def test_no_permanent_veto_only_protects_not_yet_grouped_items_not_already_group
     _link_party(ws_db, a, "party_x", "rep@driftwood-vendor.example", company="Driftwood Vendor Inc")
     b = _issue(ws_db, "Renewal notice v2", category="contract")
     _link_party(ws_db, b, "party_x", "rep@driftwood-vendor.example", company="Driftwood Vendor Inc")
-    _mock_claude(monkeypatch, "VERDICT: unrelated\n")
+    _mock_claude(monkeypatch, "MATCH: NONE\n")
 
     first = p2.process_new_item(a)
     assert first["action"] == "new_project"
@@ -469,7 +478,7 @@ def test_no_permanent_veto_only_protects_not_yet_grouped_items_not_already_group
     # later attachment proving these really are the same deal. Even with
     # a mock that would now say "yes," re-running process_new_item on the
     # ALREADY-fallen-through item cannot pick this up.
-    _mock_claude(monkeypatch, "VERDICT: same_project\n")
+    _mock_claude(monkeypatch, "MATCH: 1\nVERDICT: same_project\n")
     second = p2.process_new_item(a)
 
     assert second == {"work_object_id": a, "action": "already_grouped", "project_id": a_project_id}
@@ -483,20 +492,23 @@ def test_no_permanent_veto_only_protects_not_yet_grouped_items_not_already_group
 
 
 # ===========================================================================
-# 7. Ambiguous verdict mixed with a simultaneous related_different_project
-#    verdict on a third, distinct candidate.
+# 7. Ambiguous/uncertain outcome vs. a confident pick among several
+#    candidates, one of which is a related_different_project shape.
 # ===========================================================================
 
-def test_ambiguous_outcome_still_records_a_separate_related_different_project_relationship(ws_db, isolated_paths, monkeypatch):
-    """test_workgraph_pipeline2.py's existing ambiguous-outcome test only
-    ever has same_project candidates in play. Real production data can
-    just as easily hand the pipeline THREE candidates in one pass: two
-    already-established, DIFFERENT projects both reading as a genuine
-    same_project match (the real ambiguity - never picked arbitrarily) and
-    a third, wholly separate candidate that's a related-but-different-
-    project subcontractor relationship. The relationship bookkeeping for
-    that third candidate must still fire even though the overall action is
-    'ambiguous,' not 'merged' - the two mechanisms are independent."""
+def test_uncertain_outcome_among_several_plausible_candidates_writes_no_relationship_signal(ws_db, isolated_paths, monkeypatch):
+    """Rewritten 2026-08-11 for the comparative-judgment redesign (review
+    point #8): a genuinely ambiguous read is now the model itself saying
+    "uncertain" over the whole candidate set in one call, not two
+    independent same_project verdicts on different existing projects
+    colliding after the fact. With three real candidates in play - two
+    already-established, DIFFERENT projects that could each plausibly be
+    the match, and a third, wholly separate related-but-different-project
+    subcontractor candidate - an "uncertain" read means NO candidate was
+    chosen at all, so unlike the old design, no relationship bookkeeping
+    fires either: the two mechanisms (merge/park decision, relationship
+    write) are no longer independent per call, since both now depend on
+    the SAME single chosen candidate."""
     a = _issue(ws_db, "Requested approval for Cascade Robotics services")
     _link_party(ws_db, a, "shared_party", "rep@cascade-robotics.example", company="Cascade Robotics")
     b = _issue(ws_db, "REVIEW REQUESTED: Cascade Robotics services quote")
@@ -516,18 +528,51 @@ def test_ambiguous_outcome_still_records_a_separate_related_different_project_re
     project_z = ws_db.create_project_with_new_id(name="Project Z (subcontractor)", category="other")
     ws_db.assign_issue_to_project(d, project_z)
 
-    _mock_claude_by_marker(monkeypatch, {
-        "Northgate Fabrication": "VERDICT: related_different_project\n",
-    }, default="VERDICT: same_project\n")
+    _mock_claude(monkeypatch, "MATCH: UNCERTAIN\n")
 
     result = p2.process_new_item(a)
 
     assert result["action"] == "ambiguous"
-    assert set(result["candidate_project_ids"]) == {project_x, project_y}
     assert ws_db.get_issue(a)["project_id"] is None
+    assert ws_db.list_work_object_relationships_by_type("rejected") == []
+
+
+def test_comparative_call_can_choose_the_subcontractor_candidate_and_write_its_relationship(ws_db, isolated_paths, monkeypatch):
+    """Same three-candidate shape as the uncertain case above, but here the
+    model confidently chooses the subcontractor candidate as the best
+    match (e.g. because the other two are themselves too ambiguous to
+    even mention) - the relationship write fires for exactly that chosen
+    candidate, and the two other, non-chosen candidates' projects are
+    left untouched."""
+    a = _issue(ws_db, "Requested approval for Cascade Robotics services")
+    _link_party(ws_db, a, "shared_party", "rep@cascade-robotics.example", company="Cascade Robotics")
+    b = _issue(ws_db, "REVIEW REQUESTED: Cascade Robotics services quote")
+    _link_party(ws_db, b, "shared_party", "rep@cascade-robotics.example", company="Cascade Robotics")
+    project_x = ws_db.create_project_with_new_id(name="Project X", category="other")
+    ws_db.assign_issue_to_project(b, project_x)
+
+    c = _issue(ws_db, "Please review Cascade Robotics services terms")
+    _link_party(ws_db, c, "shared_party", "rep@cascade-robotics.example", company="Cascade Robotics")
+    project_y = ws_db.create_project_with_new_id(name="Project Y", category="other")
+    ws_db.assign_issue_to_project(c, project_y)
+
+    d = _issue(ws_db, "Northgate Fabrication subcontract under Cascade Robotics")
+    _link_party(ws_db, d, "shared_party", "rep@cascade-robotics.example", company="Cascade Robotics")
+    _raw_item(ws_db, d, "Northgate Fabrication subcontract under Cascade Robotics", "d-1",
+              body_preview="Northgate Fabrication is a separate subcontractor engagement.")
+    project_z = ws_db.create_project_with_new_id(name="Project Z (subcontractor)", category="other")
+    ws_db.assign_issue_to_project(d, project_z)
+
+    _mock_claude_choosing_marker(monkeypatch, "Northgate Fabrication", "related_different_project")
+
+    result = p2.process_new_item(a)
+
+    assert result["action"] == "new_project"
     relationships = ws_db.list_work_object_relationships_by_type("rejected")
     assert len(relationships) == 1
     assert {relationships[0]["from_id"], relationships[0]["to_id"]} == {a, d}
+    assert ws_db.get_issue(b)["project_id"] == project_x
+    assert ws_db.get_issue(c)["project_id"] == project_y
 
 
 # ===========================================================================
@@ -567,16 +612,16 @@ def test_all_candidates_timing_out_should_not_write_a_false_rejected_precedent(w
             workgraph_lessons.record_confirmed_or_rejected(issue_id_a=work_object_id, status="rejected")
 
     which fired whenever `judged` was non-empty - but `judged` collects
-    EVERY (candidate, verdict) pair regardless of what judge_candidate
+    EVERY (candidate, verdict) pair regardless of what judge_candidates
     actually returned, including None (a timeout or an unparseable reply -
-    see judge_candidate's own docstring: 'the caller treats it exactly like
+    see judge_candidates' own docstring: 'the caller treats it exactly like
     unrelated'). That equivalence is fine for the immediate grouping
     decision (no match either way), but it was NOT fine for Total Recall:
     a None verdict means the LLM was never successfully consulted at all,
     yet this wrote a genuine 'rejected' lesson for this item's category+
     company situation_key exactly as if a real, deliberate 'unrelated'
     read had happened. That false negative precedent then flowed into every
-    FUTURE judge_candidate call for the same situation via _precedent_
+    FUTURE judge_candidates call for the same situation via _precedent_
     context_line's 'previously turned out NOT to match' framing - a
     self-inflicted bias seeded by nothing more than a subprocess timeout.
 
@@ -604,7 +649,7 @@ def test_all_candidates_timing_out_should_not_write_a_false_rejected_precedent(w
             workgraph_lessons.situation_key("contract", "Driftglass Vendor Inc"), "rejected")
     assert lesson is None, (
         "process_new_item recorded a 'rejected' Total Recall precedent from a "
-        "candidate set where every judge_candidate call timed out (verdict "
+        "candidate set where every judge_candidates call timed out (verdict "
         "None) - no real LLM judgment ever happened, so no precedent should "
         "have been written. See this test's own docstring."
     )

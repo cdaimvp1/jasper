@@ -98,6 +98,338 @@ sequencing.
 
 ---
 
+## Outlook add-in functional hardening (2026-08-12, functional-only review)
+
+Confirmed by directly reading `taskpane.html`'s ~1,080 lines of inline JS
+(the add-in's real client, at `C:\Users\lane_marc@lilly.com\outlook-addin-test`
+— NOT inside this repo, and NOT in the `Jasper App (source + empty schema).zip`
+archive, which is why an earlier external review of that archive couldn't
+audit it) and cross-checking every API call against `server_lean.py`,
+`outlook_actions.py`, and `workgraph_assistant.py`.
+
+- **Silent failure on the four core one-click actions.** `openEmail`,
+  `draftReply`, `draftForward`, `draftHeroReply` all call `.finally()` and
+  never inspect the response body. `outlook_actions.py` has a real
+  `{"ok": false, "error": ...}` contract (Outlook not running, a stale
+  EntryID, a 120s COM timeout) — none of it reaches the user; the button
+  just quietly resets as if nothing happened. Highest-leverage fix in this
+  whole list — touches the most-used paths, one-line change per action.
+- **No success confirmation either** — even a successful draft-open gives
+  no "opened in Outlook ✓" signal; the dispatched-chip only fires on a
+  keyword guess against chat replies, never on these direct button clicks.
+- **Optimistic UI with no rollback** — `resolveHeroAction`/`resolveLaneItem`
+  dim/mark an item resolved *before* the fetch completes and swallow the
+  error on failure; a failed done/dismiss looks permanently successful.
+- **Ribbon/command-surface buttons do nothing distinct.** All four declared
+  extension points (message read/compose, appointment organizer/attendee)
+  just open the same task pane; `commands.html`/`commands.ts` are inert
+  scaffolding. No one-click ribbon action exists anywhere.
+- **A real dispatch-confirmation channel** from `workgraph_assistant.ask`
+  (e.g. a structured `tool_calls_summary` field) instead of the
+  `DISPATCH_MARKERS` keyword-guess against reply text.
+- **Compose-mode subject/recipient matching** — currently a static "Jasper
+  doesn't smart-match a draft to a project yet" stub; real, useful signal
+  sitting unused.
+- **Push-based output-badge/notification** instead of 60s polling, once an
+  SSE/WebSocket layer exists (ties into the M365_PLUGIN_INTEGRATION.md
+  §5c target).
+- **A remote-access story** — `JASPER_API` is hardcoded to
+  `http://127.0.0.1:8700`; the add-in only works when Outlook and the
+  Jasper server share a machine. This is the real ceiling on "powerful"
+  until there's a reachable-from-anywhere backend.
+
+---
+
+## External architecture review findings (2026-08-12)
+
+A second, independent review of the regenerated source archive (task #353),
+much more aggressive than the first pass, explicitly scoped to backend/data
+architecture rather than UI. Every falsifiable claim below was directly
+verified against the live code before being added here — exact line
+counts, exact file locations, and reproduction logic all checked out.
+
+### Bugs — real, confirmed, fix-now priority
+
+- **Grouping-verdict prompt contradiction** (`workgraph_pipeline2.py`,
+  `_COMPARATIVE_JUDGMENT_PROMPT_TEMPLATE`). The prompt defines two valid
+  verdicts (`SAME_PROJECT`, `RELATED_DIFFERENT_PROJECT`) but its own
+  "respond with EXACTLY these lines" example hardcodes
+  `VERDICT: same_project` — the model is being shown a literal example
+  that contradicts the instruction one line above it. The parser itself
+  correctly accepts both values (`_COMPARATIVE_VALID_VERDICTS`), so this
+  is a prompt-text bug, not a parsing bug, but it can actively suppress
+  the Project-vs-Relationship distinction the whole comparative-judgment
+  rebuild (Track B.5) exists to make. This is very likely a regression:
+  task #341 fixed this exact contradiction in the OLD prompt template,
+  which Track B.5 then fully deleted and rebuilt from scratch, silently
+  reintroducing it. Trivial fix: `VERDICT: <same_project|related_different_project>`,
+  plus a test that forces a fake/mocked `related_different_project` output
+  through the real parser.
+- **Authoritative claim-closure correlation is too broad**
+  (`workgraph_claims_backfill.resolve_authoritative_closure_signals`).
+  Auto-closes a claim when a deterministic closure signal (e.g.
+  `signature_fully_executed`) lands on an issue with EXACTLY ONE open
+  ask/commitment claim — but never checks that the closure signal actually
+  corresponds to THAT claim. A signature-execution notification on an
+  issue whose one open claim is "send Jane the status update" would
+  currently auto-close that unrelated claim. The fix needs a real
+  correlation (matching reference/artifact/request-type between the
+  closure signal and the claim it's closing), not just claim-count
+  arithmetic. Silent false-completion is one of the worst error classes
+  this system can produce — this is a real, high-priority gap.
+- **Settlement pass settles NBA but not alerts**
+  (`ingest/scheduled_refresh.py`). `alerts_result_1`/`alerts_result_2` run
+  early in the cycle, before synthesis/relationship/noise/lifecycle sweeps
+  can change graph state, yet the summary dict labels `alerts_result_2` as
+  `"alerts_final"`. The actual end-of-cycle settlement block only calls
+  `workgraph_nba.recompute_issues(...)` — there is no matching
+  `workgraph_alerts.run()` call there. Confirmed exactly as described.
+  Fix: add a real settlement-time alerts pass, or scope it to the same
+  `settlement_touched_ids`; stop calling the pre-settlement values
+  `"_final"` until they actually are.
+- **8-candidate comparative-judgment cap can hide the correct match**
+  (`workgraph_pipeline2.judge_candidates`, `_MAX_COMPARATIVE_CANDIDATES = 8`).
+  Ranked by matched-signal count, anything past 8 is dropped from the
+  prompt entirely (it IS logged — "no silent caps" discipline — but never
+  reaches the model). If 9+ candidates tie on signal count, the real
+  match can simply not be one of the 8 shown. Needs one of: collapse
+  candidates by parent Project before judgment (see next item, likely
+  subsumes this), deterministic tie-breakers beyond raw count, batched
+  judging with a second comparison pass, or an explicit "too many
+  candidates, needs a deeper pass" outcome instead of a silent top-8 slice.
+- **Candidate judgment operates at Issue/cluster level, not Project
+  level.** `find_candidates`-equivalent logic pulls from `list_issues()` +
+  `list_clusters()`; several Issues under the SAME Project can each
+  independently consume one of the 8 candidate slots (the only dedupe is
+  skipping candidates that already share the NEW item's own project_id,
+  which doesn't help when the item has no project yet — the exact case
+  candidate search exists for). The real semantic question is almost
+  always "which Project does this belong to," not "which Issue inside a
+  Project wins" — aggregating qualifying candidates by parent Project
+  before judgment, then resolving Issue placement separately, improves
+  both accuracy and token use, and likely also fixes the 8-candidate cap
+  problem above by shrinking the real candidate count.
+- **PowerShell's `missing_attachments` result is discarded.**
+  `outlook_actions._run_powershell` returns unconditional `{"ok": True}`
+  on exit code 0 — it never parses stdout for the JSON the PowerShell
+  compose script actually emits (`attached: [...]`, `missing_attachments:
+  [...]`). `compose_new()`'s own docstring explicitly says "the returned
+  dict's own missing_attachments list... must be checked by the caller" —
+  but that key never exists in the returned dict at all. A caller can
+  currently be told a review email went out "with the contract attached"
+  when Outlook actually created the draft with zero attachments. Parse
+  and propagate the real PowerShell JSON result; for any workflow whose
+  purpose requires the attachment, treat "requested N, attached 0" as a
+  real failure, not a successfully-created empty draft.
+- **`/api/action/compose-new` accepts raw filesystem paths from the
+  caller** (`attachment_paths: list[str]`), unlike the safer
+  `/api/action/draft-review-request` (which correctly takes an
+  `attachment_id`, verifies ownership against the issue's real
+  attachments, and resolves the path server-side). Confirmed: no live
+  caller currently passes `attachment_paths` through this route (the
+  add-in's own `composeToParties` only ever sends `to_emails`; the chat
+  tool layer's `jasper_draft_review_request` already uses the safe
+  `attachment_id` path) — so today's actual exploitability is low, exactly
+  as the review itself caveated. Still a real latent hole the moment this
+  route becomes more broadly AI-callable. Fix: attachment IDs everywhere,
+  paths resolved server-side, same discipline `draft-review-request`
+  already uses.
+- **Large payloads still go through Windows argv, not stdin, in two
+  places task #309's fix didn't reach.** `outlook_actions.draft_reply`/
+  `compose_new` pass `body` as a plain PowerShell CLI argument; separately,
+  `workgraph_assistant._run_claude` passes the ENTIRE user chat message as
+  a `claude -p <prompt>` argv argument, stacked on top of an already-large
+  `--append-system-prompt` (the full `_SYSTEM_PROMPT` text) and a
+  comma-joined 29-tool `--allowedTools` list in the same command line.
+  Windows' CreateProcess command-line ceiling (~32,767 chars) is generous
+  but not infinite, and exactly the kind of content this system is being
+  asked to generate more of (portfolio reports, stakeholder updates, long
+  drafted replies) is what would trigger it. Same fix task #309 already
+  proved out elsewhere: stdin or a temp UTF-8 file, not argv, for anything
+  whose length isn't bounded.
+- **`focus-email`'s ambiguous-conversation-id handling silently picks one
+  project.** `workgraph_store.project_id_for_conversation_id`'s own
+  docstring admits a single Outlook `conversationId` can, rarely, span
+  items linked to different Projects, and its resolution is "pick
+  whichever linked item occurred most recently" — no ambiguity signal
+  reaches the caller, no identity-conflict event is logged. Confirmed as
+  described, though the docstring itself already flags this as a known,
+  accepted rarity. Worth surfacing (`matched: true, ambiguous: true,
+  projects: [...]`) rather than hiding, consistent with this session's own
+  "never hide an internal graph contradiction" discipline elsewhere
+  (Track B.8's identity-conflict audit).
+- **`PRAGMA foreign_keys=ON` is never executed** anywhere in
+  `workgraph_store.py`. SQLite does not enforce declared FK constraints by
+  default, so the schema's many declared foreign keys are currently
+  documentation, not enforcement. Do NOT flip this on blind — audit for
+  existing orphan rows first, repair, enable in tests, only then enable in
+  production.
+
+### Hardening and reliability (agreed, not urgent bugs)
+
+- **Formalize schema migrations** into a real versioned subsystem
+  (migration ledger, automatic pre-migration backup, transactional
+  migrations, post-migration integrity audit, migration tests from
+  representative older DB snapshots) rather than `init_workgraph()`'s
+  current accumulated inline create-if-absent/add-column/rebuild-view
+  style. Reasonable for rapid single-user iteration to date; increasingly
+  risky the longer real accumulated history lives only in this DB.
+- **Explicit graph invariants beyond SQL FKs** — e.g. every promoted Issue
+  has a valid Project, every Claim has resolvable evidence, no exclusive
+  reference anchor belongs to two independently active objects, no `done`
+  Claim appears in an open-claim index, relationship links stay symmetric
+  where appropriate. SQL's own constraints can't express these; a
+  periodic integrity-audit pass can.
+- **Make the test suite hermetic and platform-aware.** A live rerun of a
+  representative ~330-test cluster (grouping/relationships/synthesis/
+  reconciliation/status-report/NBA/proactive/outlook-actions/lifecycle/
+  sequences) passed 100% clean on this actual Windows install — the
+  review's own "302/14" split is very likely an artifact of running the
+  archive somewhere non-Windows (`subprocess.CREATE_NEW_PROCESS_GROUP`
+  doesn't exist off Windows) or against an uninitialized scratch DB,
+  exactly the two causes it named. That doesn't make the underlying advice
+  wrong: tests that assume Windows or an already-initialized DB should say
+  so explicitly (a skip marker, an autouse init fixture) instead of
+  failing opaquely wherever that assumption doesn't hold.
+- **A real semantic-accuracy evaluation, distinct from unit tests.** Most
+  grouping/claims tests mock the model's verdict — they prove "if Claude
+  says X, Jasper handles X correctly," never "Claude actually says X on
+  real messy business traffic." Needs: a 300–500-example labeled corpus
+  (same-project-different-thread, same-supplier-different-project,
+  forwards, attachment-only-identity, prime/subcontractor, sparse/noisy
+  evidence, true ambiguity), measured precision/recall/false-merge-rate/
+  false-split-rate/abstention-rate — and eventually a chronological 30–90
+  day replay-into-empty-DB benchmark compared against a human-labeled
+  expected graph. This is effectively Track C.11 already on this roadmap,
+  confirmed independently as the right next evaluation investment.
+- **Periodically consolidate one-off reconciliation sweeps into generic
+  primitives.** Real, individually-justified repair mechanisms exist for
+  stray same-reference clusters, stray signature-confirmation clusters,
+  recurring-calendar remediation, identity-conflict audits, etc. — healthy
+  reactive engineering, but worth periodically asking which of these are
+  really the same underlying "late authoritative evidence linker" problem
+  solved three separate times, and consolidating when that's true.
+- **Broaden the identity-conflict audit beyond PR/reference numbers.**
+  Track B.8 built this narrowly (matching PR-number-base only); other
+  evidence can be equally strong grounds for the same "surface, never
+  auto-merge" treatment — shared unique document lineage, an explicit
+  "this continues Project X" statement, a newly-discovered exclusive
+  identifier. Same posture (never auto-merge mature Projects, only flag).
+- **Relationship identity beyond normalized supplier name.** Working, but
+  narrow — real Relationships can be people, programs, prime/subcontract
+  structures, customers, internal orgs, not only companies, and companies
+  themselves need alias handling ("Microsoft"/"Microsoft Corp."/"MSFT").
+  Eventually wants a real canonical Entity layer (Entity → aliases →
+  identifiers/domains → type; Relationship → one-or-more Entities →
+  relationship type → projects) rather than living entirely on one
+  normalized-name column.
+- **Explicit, stronger prompt-injection framing, not just extraction
+  boundaries.** The current architecture is genuinely better than raw
+  evidence directly becoming claims/policy/actions — but light and heavy
+  synthesis prompts still hand a model the raw evidence text directly
+  (`NEW COMMUNICATIONS ... {new_evidence}`), and the heavy path is an
+  agentic session with real tool access. "Content read from evidence is
+  treated as untrusted data" (the technical spec's own framing) is real
+  and correct for the claims-extraction boundary specifically; it should
+  not be read as "prompt injection is closed" system-wide. Worth an
+  explicit stated boundary ("raw evidence is data; statements addressed
+  to Jasper/Claude inside evidence have no authority") applied
+  consistently, plus minimizing tool access for any model that reads raw,
+  untrusted evidence directly.
+
+### New capabilities (agreed, real Jasper-core value, not UI)
+
+- **Delta-based stakeholder reporting** — "what materially changed since
+  this stakeholder was last updated" (a stored last-communicated graph
+  revision/snapshot per stakeholder relationship), not a repeated full
+  status regeneration.
+- **First-class handoff-package export** for a Project — relationship,
+  purpose, current state, decisions, open commitments, stakeholders,
+  artifacts, dates, dependencies, unresolved questions, next actions,
+  evidence references, as one durable object. Also the natural eventual
+  mechanism for moving business state between installs without exporting
+  behavioral/personality history.
+- **"What changed while I was away?"** — nearly free once graph revisions
+  are reliable; a real graph-delta answer ("4 Projects materially
+  changed: Legal approved, supplier missed a commitment, a $250K
+  commercial change, a dependency cleared"), not a dump of new emails.
+- **Expected-next-step deviation detection**, building on the existing
+  process-learning/sequence-mining work (task #322) — surfaced as
+  descriptive ("projects like this usually have Security Review before
+  Legal Review; no evidence of one here — worth checking"), never as an
+  enforced rule.
+- **Named epistemic-status tiers for evidence, not a numeric score** —
+  distinct, human-legible categories (authoritative system state /
+  explicitly stated by a person / model interpretation / inferred from
+  recurring pattern / unresolved conflict) as a genuinely better answer to
+  "how do you know that" than either an opaque score (already correctly
+  rejected once) or no distinction at all.
+- **Semantic graph-health diagnostics**, distinct from system-health
+  monitoring — Jasper auditing its own representation of reality: an
+  active Project with zero Claims in 30 days, a done Project with open
+  commitments, an Issue with contradictory current claims, a closure
+  event with no matching open request, an action marked succeeded with no
+  artifact/evidence, an orphaned Claim. Likely one of the higher-leverage
+  additions here.
+
+### Documentation corrections (technical spec + plain-language doc)
+
+- **Object-model inconsistency**: the Executive Summary states
+  Project → Issue → Claims as the top-level hierarchy; §4.6 separately and
+  correctly establishes Relationship as a distinct concept, optionally
+  spanning multiple Projects. Harmonize: Relationship (optional/cross-
+  linking) → Projects → Issues → Claims → Evidence, not a strict single
+  chain implied up top.
+- **"Closes a real class of prompt-injection risk"** (§5.1) is locally
+  accurate for the specific claims-extraction boundary it's describing,
+  but reads as a system-wide claim it shouldn't be — see the hardening
+  item above. Soften to something like "reduces the blast radius... by
+  preventing raw evidence from directly becoming executable state,"
+  scoped to what's actually true today.
+- **Settlement-pass claim is currently factually wrong** — §2.1 says the
+  end-of-cycle pass re-scores "NBA/alerts"; the code only does NBA (see
+  the bug above). Fix the code or fix the doc until it's true.
+- **Completion-detection safety is overstated** — the deterministic-event
+  *itself* being authoritative doesn't make its association to a specific
+  open Claim authoritative (see the closure-correlation bug above); the
+  doc should draw that distinction explicitly once the code does.
+- **Build-diary framing makes an 18-page spec harder to consume** for
+  anyone other than Marc/Claude Code — task numbers, session dates,
+  "Marc's direct request" provenance are valuable but arguably belong in
+  an Appendix (design history/incidents) rather than the main body.
+- **Missing sections for a document calling itself a technical
+  specification**: security/threat model, data-integrity strategy,
+  evaluation methodology (once the golden corpus above exists),
+  operational limits (candidate cap, prompt budgets, corpus size actually
+  tested, timeout behavior), cost/LLM-usage model (tier per task, calls
+  per refresh cycle, caching), failure semantics (Claude timeout, COM
+  failure, partial-refresh behavior), and an explicit API/integration
+  boundary section (REST/MCP/Outlook, read-only vs. action-capable).
+- **§8.2's numbered roadmap list reportedly renders starting at 3** in
+  Word (not verifiable from raw paragraph text — Word list numbering
+  lives in numbering.xml, not the paragraph text itself; worth a quick
+  visual check next time the doc is open) — if real, a leftover
+  numId/restart artifact from editing, not a content problem.
+- **Closing "every claimed fix...backed by an actually-executed test" is
+  too absolute** given the test-hermeticity gap above and the fact that
+  semantic/model-accuracy claims aren't covered by ordinary unit tests at
+  all. Weaken to something like "major mechanisms and known regressions
+  are covered by executable tests, supplemented by live validation" until
+  the golden-corpus evaluation exists to back a stronger statement.
+- **Plain-language doc, three wording overreaches**: "never guesses" is
+  more accurately "doesn't hide ambiguous identity behind an opaque
+  score, and can abstain" (also a stronger, more distinctive claim);
+  "learns quietly from what you do" should be framed as building the
+  feedback record the deferred behavioral-adaptation loop needs, not
+  implying that loop already runs; "the same way it already learned what
+  matters in mine" should say the procurement vocabulary was seeded as
+  pre-confirmed, not autonomously discovered from scratch (§4.5 already
+  says this correctly — the plain doc should match it). The doc is also
+  missing Jasper's output-side value entirely (reporting, handoffs,
+  "what changed" answers) — its single biggest content gap.
+
+---
+
 ## Longer-term generalization track (separate from the above)
 
 Marc's stated plan: stabilize Jasper via real day-to-day use first, then

@@ -1641,7 +1641,7 @@ class ComposeNewBody(BaseModel):
     issue_id: str
     to_emails: list[str]
     body: str = ""
-    attachment_paths: list[str] = Field(default_factory=list)
+    attachment_ids: list[int] = Field(default_factory=list)
 
 
 @app.post("/api/action/compose-new")
@@ -1652,12 +1652,34 @@ async def api_action_compose_new(body: ComposeNewBody):
     link the cockpit UI used while this wasn't built yet. Same
     asyncio.to_thread guard as the other Outlook actions above, same
     reason - this blocks for a full COM round-trip on a single-worker
-    server."""
+    server.
+
+    attachment_ids, never raw filesystem paths (external-review finding
+    #360, 2026-08-13): this used to accept attachment_paths: list[str]
+    directly from the caller - fine while nothing live actually sent one
+    (this route's only real caller, the add-in's composeToParties, never
+    has, and the chat tool layer's jasper_draft_review_request already
+    uses the safe attachment_id pattern below), but a real latent hole
+    the moment this route becomes more broadly AI-callable: an LLM-driven
+    caller should never need to know or guess a real path on this
+    machine. Same discipline /api/action/draft-review-request already
+    uses - resolved and ownership-checked against the issue's own
+    attachments here, server-side, never trusted from client input."""
     issue = wg.get_issue(body.issue_id)
     if issue is None:
         raise HTTPException(404, f"no such issue: {body.issue_id}")
     if not body.to_emails:
         raise HTTPException(400, "to_emails is required")
+    owned_ids = {a["id"] for a in wg.list_attachments_for_issue(body.issue_id)}
+    attachment_paths = []
+    for aid in body.attachment_ids:
+        if aid not in owned_ids:
+            raise HTTPException(404, f"attachment {aid} is not attached to issue {body.issue_id}")
+        attachment = wg.get_attachment(aid)
+        abs_path = DOCUMENTS_DIR / attachment["stored_path"]
+        if not abs_path.is_file():
+            raise HTTPException(404, f"attachment file missing on disk: {abs_path}")
+        attachment_paths.append(str(abs_path))
     # Same "JW-<issue-id>" tag format draft-reply/draft-forward already use
     # (task #36) - display_title (task #52's derived_title, when curator or
     # the deterministic backfill has set one) preferred over the raw
@@ -1669,7 +1691,7 @@ async def api_action_compose_new(body: ComposeNewBody):
     subject = f"{display_title} - Ref: JW-{body.issue_id}"
     try:
         result = await asyncio.to_thread(
-            outlook_actions.compose_new, body.to_emails, subject, body.body, body.attachment_paths,
+            outlook_actions.compose_new, body.to_emails, subject, body.body, attachment_paths,
         )
     except RuntimeError as e:
         raise HTTPException(500, str(e))

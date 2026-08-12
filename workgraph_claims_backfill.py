@@ -51,6 +51,19 @@ for Phase 3 (design doc Section 9):
                               with_open_claims_contradictions, the second
                               (issue-state-side) half of task #155, run in
                               the same daily sweep below.
+  resolve_authoritative_closure_signals() — sweep (2026-08-11, review
+                              point #2, evidence-tiered claim resolution)
+                              that AUTO-resolves (not suggest-only) a
+                              claim when a deterministic, non-LLM system
+                              event (workgraph_signals.classify_signal's
+                              own "closure"-treatment signal_types) leaves
+                              exactly one open ask/commitment claim on the
+                              same issue. Additive to, not a reversal of,
+                              #319's suggest-only rule - that rule's real
+                              concern (an unconfirmed SEMANTIC inference
+                              auto-closing a claim) never applies to a
+                              deterministic system event in the first
+                              place.
 
 Same "one-time backfill, then a daily-if-due sweep for anything that landed
 since" shape as workgraph_identity.backfill_identity_anchors /
@@ -66,7 +79,10 @@ import time
 import text_extract
 import workgraph_claims
 import workgraph_reconcile
+import workgraph_signals
 import workgraph_store as ws
+
+_CLOSURE_TREATMENT = "closure"
 
 
 def backfill_claims(*, limit: int | None = None) -> dict:
@@ -233,6 +249,71 @@ def backfill_resolution_signal_suggestions(*, limit: int | None = None) -> dict:
     return {"raw_items_scanned": len(raw_item_ids), "signals_matched": matched}
 
 
+def resolve_authoritative_closure_signals(*, limit: int | None = None) -> dict:
+    """Review point #2 (2026-08-11, evidence-tiered claim resolution):
+    every claim-resolution signal has been suggest-only since the #319
+    walk-back - correct for a SEMANTIC signal (an LLM's read of prose,
+    which is all resolution_signals ever is - see SYNTHESIS_ROUTINE.md's
+    own "only when THIS raw_item's own content directly and unambiguously
+    states..." framing), but overly conservative for a genuinely
+    deterministic, non-LLM system event. workgraph_signals.classify_signal
+    is a pure regex/sender-domain classifier - no LLM judgment involved
+    at all - so a raw_item whose signal_type carries "closure" treatment
+    (ariba_pr_fully_approved, signature_fully_executed, signature_
+    completed_docusign, and any future rule/live override marked
+    "closure") is as authoritative a "this is done" signal as this
+    codebase has, and #319's real concern (an unconfirmed SEMANTIC
+    inference auto-closing a claim) never applies to it.
+
+    Auto-resolves ONLY when there is EXACTLY ONE open ask/commitment claim
+    on the same issue - more than one and which claim this closure
+    actually refers to is genuinely ambiguous, so nothing is touched here
+    (any real match still goes through the existing suggest-only path via
+    whatever the LLM's own resolution_signals separately produce for it).
+    Reuses the exact same ws.update_claim_status/ws.log_claim_event calls
+    workgraph_reconcile.confirm_claim_suggestion already uses for a human-
+    confirmed resolution - never a second, parallel way to close a claim.
+
+    Idempotent by construction: once a claim is resolved its status is no
+    longer 'open', so list_open_claims_for_issue naturally excludes it
+    from being matched again on a later run - no separate tracking marker
+    needed, same discipline backfill_claims' own has_claims_for_raw_item
+    guard already relies on."""
+    raw_item_ids = ws.list_raw_item_ids_with_signal_type_in(
+        [t for t in workgraph_signals.known_signal_types()
+         if workgraph_signals.treatment_for_signal_type(t) == _CLOSURE_TREATMENT]
+    )
+    if limit is not None:
+        raw_item_ids = raw_item_ids[:limit]
+    resolved = 0
+    skipped_ambiguous = 0
+    skipped_no_issue = 0
+    for rid in raw_item_ids:
+        raw_item = ws.get_raw_item(rid)
+        issue_id = (raw_item or {}).get("issue_id")
+        if not issue_id:
+            skipped_no_issue += 1
+            continue
+        open_claims = [c for c in ws.list_open_claims_for_issue(issue_id)
+                       if c["claim_type"] in ("ask", "commitment")]
+        if len(open_claims) != 1:
+            if len(open_claims) > 1:
+                skipped_ambiguous += 1
+            continue
+        claim = open_claims[0]
+        ws.update_claim_status(claim["id"], "done", actor="system")
+        ws.log_claim_event(
+            claim["id"], "complete", actor="system",
+            note=f"auto-resolved: deterministic closure signal ({raw_item.get('signal_type')}) on raw_item {rid}",
+            raw_item_id=rid,
+        )
+        resolved += 1
+    return {
+        "closure_raw_items_scanned": len(raw_item_ids), "auto_resolved": resolved,
+        "skipped_ambiguous": skipped_ambiguous, "skipped_no_issue_id": skipped_no_issue,
+    }
+
+
 def backfill_evidence_fts(*, limit: int | None = None) -> dict:
     raw_item_ids = ws.list_all_raw_item_ids()
     if limit is not None:
@@ -269,6 +350,7 @@ def run_backfill_daily_if_due(now: float | None = None) -> dict | None:
         "claims": backfill_claims(),
         "evidence_fts": backfill_evidence_fts(),
         "resolution_signal_suggestions": backfill_resolution_signal_suggestions(),
+        "authoritative_closure_resolutions": resolve_authoritative_closure_signals(),
         "issue_closed_contradictions": workgraph_reconcile.detect_issue_closed_with_open_claims_contradictions(),
         "issues_appear_resolved": workgraph_reconcile.detect_issues_appear_resolved_but_still_open(),
         "stray_reference_clusters_merged": workgraph_reconcile.merge_stray_same_reference_clusters(),

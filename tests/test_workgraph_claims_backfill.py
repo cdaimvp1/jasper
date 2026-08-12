@@ -205,6 +205,128 @@ def test_backfill_absorbed_claim_marked_superseded_with_audit_trail(ws_db):
     assert absorbed_claim["superseded_by"] == canonical_id
 
 
+# --- resolve_authoritative_closure_signals (review point #2, 2026-08-11) --
+
+def _raw_item_with_signal_type(ws_db, issue_id, key, signal_type):
+    rid = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key=key, thread_key=key, dedupe_key=key,
+        occurred_ts=time.time(), subject="s", from_actor="a@example.com", participants_json="[]",
+    )
+    ws_db.link_raw_item_to_issue(rid, issue_id)
+    conn = ws_db._connect()
+    conn.execute("UPDATE raw_items SET signal_type = ? WHERE id = ?", (signal_type, rid))
+    conn.commit()
+    conn.close()
+    return rid
+
+
+def _open_claim(ws_db, issue_id, raw_item_id, claim_type, text):
+    return ws_db.insert_claim(
+        issue_id=issue_id, raw_item_id=raw_item_id, claim_type=claim_type, text=text,
+        author="marc", author_basis="direction", owner="counterparty",
+    )
+
+
+def test_resolve_authoritative_closure_signals_resolves_the_single_open_claim(ws_db):
+    iid = _issue(ws_db, "PR approval thread")
+    ask_rid = _raw_item_with_extraction(ws_db, iid, "ask1", None)
+    claim_id = _open_claim(ws_db, iid, ask_rid, "ask", "please approve the PR")
+    _raw_item_with_signal_type(ws_db, iid, "closure1", "ariba_pr_fully_approved")
+
+    result = backfill.resolve_authoritative_closure_signals()
+
+    assert result["auto_resolved"] == 1
+    assert ws_db.get_claim(claim_id)["status"] == "done"
+
+
+def test_resolve_authoritative_closure_signals_skips_when_ambiguous(ws_db):
+    iid = _issue(ws_db, "Multiple open claims")
+    ask_rid = _raw_item_with_extraction(ws_db, iid, "ask2", None)
+    claim_a = _open_claim(ws_db, iid, ask_rid, "ask", "please approve PR A")
+    claim_b = _open_claim(ws_db, iid, ask_rid, "commitment", "will approve PR B")
+    _raw_item_with_signal_type(ws_db, iid, "closure2", "signature_completed_docusign")
+
+    result = backfill.resolve_authoritative_closure_signals()
+
+    assert result["auto_resolved"] == 0
+    assert result["skipped_ambiguous"] == 1
+    assert ws_db.get_claim(claim_a)["status"] == "open"
+    assert ws_db.get_claim(claim_b)["status"] == "open"
+
+
+def test_resolve_authoritative_closure_signals_ignores_non_closure_signal_types(ws_db):
+    """ariba_pr_approval_needed is 'actionable' treatment, not 'closure' -
+    the whole point of tiering: an ask being outstanding is not evidence
+    it was fulfilled."""
+    iid = _issue(ws_db, "Approval needed")
+    ask_rid = _raw_item_with_extraction(ws_db, iid, "ask3", None)
+    claim_id = _open_claim(ws_db, iid, ask_rid, "ask", "please approve the PR")
+    _raw_item_with_signal_type(ws_db, iid, "notclosure1", "ariba_pr_approval_needed")
+
+    result = backfill.resolve_authoritative_closure_signals()
+
+    assert result["auto_resolved"] == 0
+    assert ws_db.get_claim(claim_id)["status"] == "open"
+
+
+def test_resolve_authoritative_closure_signals_is_idempotent(ws_db):
+    iid = _issue(ws_db, "Idempotent")
+    ask_rid = _raw_item_with_extraction(ws_db, iid, "ask4", None)
+    _open_claim(ws_db, iid, ask_rid, "ask", "please approve")
+    _raw_item_with_signal_type(ws_db, iid, "closure3", "ariba_pr_fully_approved")
+
+    first = backfill.resolve_authoritative_closure_signals()
+    second = backfill.resolve_authoritative_closure_signals()
+
+    assert first["auto_resolved"] == 1
+    assert second["auto_resolved"] == 0
+
+
+def test_resolve_authoritative_closure_signals_skips_orphan_with_no_issue(ws_db):
+    rid = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key="closure4", thread_key="closure4", dedupe_key="closure4",
+        occurred_ts=time.time(), subject="s", from_actor="a@example.com", participants_json="[]",
+    )
+    conn = ws_db._connect()
+    conn.execute("UPDATE raw_items SET signal_type = ? WHERE id = ?", ("ariba_pr_fully_approved", rid))
+    conn.commit()
+    conn.close()
+
+    result = backfill.resolve_authoritative_closure_signals()
+
+    assert result["auto_resolved"] == 0
+    assert result["skipped_no_issue_id"] == 1
+
+
+def test_resolve_authoritative_closure_signals_respects_live_treatment_override(ws_db):
+    """A live signal_treatment_override (Marc's Settings UI) demoting a
+    signal_type away from 'closure' must be honored immediately, not just
+    at original classification time."""
+    iid = _issue(ws_db, "Override test")
+    ask_rid = _raw_item_with_extraction(ws_db, iid, "ask5", None)
+    claim_id = _open_claim(ws_db, iid, ask_rid, "ask", "please approve")
+    _raw_item_with_signal_type(ws_db, iid, "closure5", "ariba_pr_fully_approved")
+    ws_db.set_signal_treatment("ariba_pr_fully_approved", "fyi", reason="test override", set_by="marc")
+
+    result = backfill.resolve_authoritative_closure_signals()
+
+    assert result["auto_resolved"] == 0
+    assert ws_db.get_claim(claim_id)["status"] == "open"
+
+
+def test_resolve_authoritative_closure_signals_logs_claim_event(ws_db):
+    iid = _issue(ws_db, "Audit trail for auto-resolve")
+    ask_rid = _raw_item_with_extraction(ws_db, iid, "ask6", None)
+    claim_id = _open_claim(ws_db, iid, ask_rid, "ask", "please approve")
+    closure_rid = _raw_item_with_signal_type(ws_db, iid, "closure6", "signature_fully_executed")
+
+    backfill.resolve_authoritative_closure_signals()
+
+    events = ws_db.list_claim_events_for_claim(claim_id)
+    assert any(e["event_type"] == "complete" and e["actor"] == "system" and e["raw_item_id"] == closure_rid
+               for e in events)
+
+
 def test_run_backfill_daily_if_due_returns_none_on_second_call_same_day(ws_db, monkeypatch):
     import workgraph_claims_backfill as b
     monkeypatch.setattr(b, "ws", ws_db)

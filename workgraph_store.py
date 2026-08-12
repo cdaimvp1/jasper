@@ -8020,6 +8020,29 @@ def list_all_raw_item_ids() -> list[int]:
     return [r["id"] for r in rows]
 
 
+def list_raw_item_ids_with_signal_type_in(signal_types: list[str]) -> list[int]:
+    """Review point #2 (2026-08-11, evidence-tiered claim resolution) -
+    a closure-treatment signal_type (workgraph_signals.classify_signal's
+    own deterministic classification, no extraction/LLM involved) doesn't
+    require an extraction row to exist at all, unlike list_raw_item_ids_
+    with_extractions - this is a separate, purpose-built query rather than
+    reusing that one and risking silently missing a closure notification
+    that was never itself extracted."""
+    if not signal_types:
+        return []
+    placeholders = ", ".join("?" for _ in signal_types)
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                f"SELECT id FROM raw_items WHERE signal_type IN ({placeholders}) ORDER BY id ASC",
+                signal_types,
+            ).fetchall()
+        finally:
+            conn.close()
+    return [r["id"] for r in rows]
+
+
 # --- claims (design doc Section 9 / Phase 3) --------------------------
 # Materialized, typed, deduped, actor-attributed rows over the ask/decision/
 # commitment/date fields raw_item_extractions already carries. See

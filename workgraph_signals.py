@@ -609,6 +609,25 @@ def known_signal_types() -> list[str]:
     return [rule[0] for rule in _RULES]
 
 
+def treatment_for_signal_type(signal_type: Optional[str]) -> Optional[str]:
+    """Reverse-lookup companion to classify_signal (2026-08-11, review
+    point #2, evidence-tiered claim resolution) - a signal_type's
+    treatment (noise|fyi|actionable|closure), including the same live
+    signal_treatment_overrides check classify_signal itself applies, so a
+    later correction to a signal_type's treatment (Marc's Settings UI) is
+    honored immediately here too, not just at the original classification
+    moment. Returns None for an unrecognized/blank signal_type."""
+    if not signal_type:
+        return None
+    for rule_signal_type, _domain, _pattern, default_treatment in _RULES:
+        if rule_signal_type == signal_type:
+            try:
+                return ws.get_signal_treatment(signal_type, default_treatment)
+            except Exception:
+                return default_treatment
+    return None
+
+
 def classify_signal(*, subject: str, from_actor: str) -> Optional[dict]:
     """Returns {signal_type, treatment, pr_number, pr_number_base} for a
     recognized automated signal email, or None when nothing matches (the

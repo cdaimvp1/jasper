@@ -691,6 +691,52 @@ counts, exact file locations, and reproduction logic all checked out.
 
 ---
 
+## Add-in skill-invocation parity: scoped, not started (2026-08-13)
+
+Marc's question, considered and recorded per his own explicit "add this to
+the backlog/roadmap" instruction — nothing built: can the add-in call any
+of Marc's registered skills, the way it can request a contract review?
+
+**What's actually wired today:** exactly one skill, `contract_review`,
+end to end — a real button (`taskpane.html`'s `requestContractReview`)
+that appears when the server sets `hero.kind === "contract_review"` /
+`item.action_kind === "contract_review"`, dispatching a real POST to
+`/api/cockpit/actions` (`action_kind: "review_contract", worker: "bridge"`).
+This is not a generic skill-runner - it's the one skill that got a
+dedicated design-and-build effort (tasks #45/#50, "AI-native SME panel +
+synthesis layer for contract_review"), backed by a real, demonstrated
+docx-redline PoC.
+
+**Why "fully wire the remaining ~26+ skills the same way" is a much
+bigger effort than it sounds, not a repeat-the-button task:** for each
+other registered skill, replicating contract_review's treatment means:
+- A real trigger-detection rule for when that specific skill applies -
+  contract_review's is real server-side logic (`hero.kind`); every other
+  skill needs its own equivalent, not a shared generic condition.
+- A dispatch action wired to the backend with that skill's own
+  `action_kind`/payload shape - contract_review's shape doesn't
+  generalize to a supplier scorecard's or a clause-diff's inputs.
+- Confirming the skill's underlying execution actually works end to end -
+  the real catch. Task #14 named the other 27 skills "registered-but-
+  inert": cataloged with a name/description, but - unlike contract_review
+  - never proven to actually run successfully once a worker picks them
+  up. Wiring a button to an unproven execution path just moves the
+  discovery of "this doesn't actually work yet" from build-time to a
+  live click.
+- Some way to display that skill's *result* once done - a supplier
+  scorecard, a clause-diff, a dollar-conflict flag, and a meeting-prep
+  draft each need a genuinely different result UI, not one generic
+  "done" state the way a fire-and-forget dispatch can get away with.
+
+So this isn't one wiring pattern applied 26 more times - it's closer to
+26 separate small projects, several of which start by discovering
+whether the skill even works before any UI work makes sense. Not
+scoped into a single task number on purpose; if picked up, it should be
+tackled skill-by-skill (starting with whichever ones are confirmed to
+actually execute), not as one "wire the rest" ticket.
+
+---
+
 ## Longer-term generalization track (separate from the above)
 
 Marc's stated plan: stabilize Jasper via real day-to-day use first, then

@@ -1,0 +1,457 @@
+"""Deterministic ambiguity + context-confidence measurement (tasks #393, #394).
+
+WHAT THIS IS
+------------
+A measurement instrument. Given a project, it reports how well-supported
+Jasper's understanding of that project currently is, and - more usefully -
+WHERE specifically the understanding is thin. Nothing here decides anything.
+
+Sourced from the cd\\ai blueprint corpus, Appendix B (Ambiguity & Context
+Engine), reviewed 2026-08-20. The math and the component decomposition are
+the blueprint's; the data bindings are Jasper's. Deliberately NOT taken:
+that corpus's governance machinery (Compliance Cortex, GSAL, the MCP cycle,
+capability lifecycle). This is an epistemic instrument, not a governance
+kernel - see task #406 and #411.
+
+THE INVARIANT THAT MATTERS (task #410)
+--------------------------------------
+SIGNAL ONLY. This module measures; it never resolves, gates, routes, or
+mutates. It takes no write path to the database. Callers may consume its
+output; nothing here obliges them to. The reason is not ceremony: it is that
+the part of a system which is unsure must never be the part that signs off,
+and Jasper already reached this independently via suggest-only claim
+resolution (#155/#319) and the no-write `ambiguous` verdict.
+
+Corollary, and the reason ABSTENTION is the centrepiece rather than a
+footnote: a component with no data source MUST abstain, not return 0.0.
+Returning 0.0 for contradiction would read as "no contradictions found"
+when the truth is "we have never looked." The blueprint's own failure-mode
+table says halt and emit telemetry on missing input, never guess. Jasper has
+the same discipline elsewhere as "no silent caps."
+
+WHAT IS ACTUALLY COMPUTABLE TODAY
+---------------------------------
+Verified against the live schema 2026-08-20, not assumed from the presence
+of code:
+
+  freshness              COMPUTABLE - raw_items.occurred_ts
+  provenance_reliability COMPUTABLE - raw_items.source + declared trust map
+  referential_ambiguity  COMPUTABLE - identity_anchors(anchor_type='reference')
+                                      + raw_items.pr_number
+  context_coverage       ABSTAINS    - Jasper has no required-context
+                                      declaration; data_point_definitions has
+                                      no category->required mapping. Inventing
+                                      one silently would be worse than
+                                      abstaining. See #394.
+  contradiction          ABSTAINS    - claim_edges is EMPTY (0 rows): the #314
+  internal_consistency   ABSTAINS      reconciliation taxonomy has never fired.
+                                      See #412.
+  semantic_polysemy      ABSTAINS    - needs embeddings; no sanctioned provider
+  embedding_dispersion   ABSTAINS      (cdai-kernel's is OpenAI-only, which is
+  relevance              ABSTAINS      not viable for Lilly content). See #405.
+
+Three of nine compute. That is a real answer, not a partial failure: the
+blueprint's aggregation is equal-weighted, so an aggregate over the computable
+subset is well-defined as long as the abstentions travel with it - which they
+do, in `abstained`.
+
+DETERMINISM
+-----------
+Same inputs -> same outputs, always. `now_ts` is an explicit parameter and is
+echoed back in the result, so a stored result can be recomputed and compared
+exactly. Nothing here samples, learns, adapts, or calls a model. There is no
+LLM cost to running this.
+"""
+from __future__ import annotations
+
+import math
+import time
+from dataclasses import dataclass, field
+from typing import Optional
+
+import workgraph_store as ws
+
+# ---------------------------------------------------------------- constants --
+
+#: Blueprint Appendix B 5.11.5 canonical decay constant, in days. Note this
+#: happens to suit Jasper's corpus well - the live evidence window is roughly
+#: 100 days (2026-05-12..2026-08-20 at the 5th percentile), so a 90-day decay
+#: puts the bulk of real evidence on the informative part of the curve rather
+#: than saturated at either end.
+FRESHNESS_TAU_DAYS = 90.0
+
+#: Blueprint Appendix B 5.12.2 canonical volatility saturation.
+VOLATILITY_V_MAX = 0.25
+
+#: DECLARED source trust. The blueprint is explicit that trust is assigned
+#: externally and that the engine must never INFER it (B.5.11.6, and the
+#: prohibited-behaviours list names "infer trust" as a hard stop). So these are
+#: a policy input, stated here to be visible and reviewable rather than buried.
+#:
+#: PROVISIONAL - these specific numbers are my proposed defaults and want Marc's
+#: sign-off. The ordering follows the blueprint's own worked example, where an
+#: executed document outranks stated intent in correspondence, which outranks
+#: informal chat. Calendar sits high because a calendar entry is a
+#: system-recorded fact about an occurrence rather than a claim about the world.
+#: Override via the `source_trust` argument rather than editing this.
+DEFAULT_SOURCE_TRUST: dict[str, float] = {
+    "sharepoint": 0.90,     # documents / artifacts
+    "calendar": 0.80,       # system-recorded occurrence
+    "outlook_mail": 0.60,   # correspondence; stated intent
+    "teams_chat": 0.40,     # informal
+}
+
+#: Trust for a source not present in the map. Deliberately low but non-zero,
+#: and it is recorded as an explicit gap so an unknown source shows up rather
+#: than quietly dragging the mean.
+UNKNOWN_SOURCE_TRUST = 0.30
+
+
+# ------------------------------------------------------------------ results --
+
+@dataclass(frozen=True)
+class Component:
+    """One measured component, or a recorded abstention.
+
+    `value` is None exactly when `abstained_reason` is set. There is no third
+    state and no default-to-zero.
+    """
+    name: str
+    value: Optional[float]
+    abstained_reason: Optional[str] = None
+    detail: dict = field(default_factory=dict)
+
+    @property
+    def abstained(self) -> bool:
+        return self.value is None
+
+    @classmethod
+    def measured(cls, name: str, value: float, **detail) -> "Component":
+        return cls(name=name, value=_clamp(value), detail=detail)
+
+    @classmethod
+    def abstain(cls, name: str, reason: str, **detail) -> "Component":
+        return cls(name=name, value=None, abstained_reason=reason, detail=detail)
+
+
+@dataclass(frozen=True)
+class Gap:
+    """A specific, named hole in the understanding - the useful output.
+
+    `kind` is a stable machine token. `what` says what is missing in Marc's
+    terms. `fillable_by` names where the answer could come from, which is what
+    turns a measurement into either a targeted question (#397) or a line in an
+    escalation package (#399). It is deliberately NOT a decision about truth.
+    """
+    kind: str
+    what: str
+    fillable_by: str
+    ref: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class AmbiguitySignal:
+    project_id: str
+    ambiguity_score: Optional[float]      # None when everything abstained
+    components: tuple[Component, ...]
+    gaps: tuple[Gap, ...]
+    now_ts: float
+    n_claims: int
+    n_raw_items: int
+
+    @property
+    def abstained(self) -> tuple[str, ...]:
+        return tuple(c.name for c in self.components if c.abstained)
+
+    @property
+    def measured(self) -> tuple[str, ...]:
+        return tuple(c.name for c in self.components if not c.abstained)
+
+    def as_dict(self) -> dict:
+        """Plain-dict form for storage/telemetry. Round-trippable."""
+        return {
+            "project_id": self.project_id,
+            "ambiguity_score": self.ambiguity_score,
+            "now_ts": self.now_ts,
+            "n_claims": self.n_claims,
+            "n_raw_items": self.n_raw_items,
+            "measured": list(self.measured),
+            "abstained": list(self.abstained),
+            "components": [
+                {"name": c.name, "value": c.value,
+                 "abstained_reason": c.abstained_reason, "detail": c.detail}
+                for c in self.components
+            ],
+            "gaps": [
+                {"kind": g.kind, "what": g.what, "fillable_by": g.fillable_by, "ref": g.ref}
+                for g in self.gaps
+            ],
+        }
+
+
+# ------------------------------------------------------------------ helpers --
+
+def _clamp(v: float, lo: float = 0.0, hi: float = 1.0) -> float:
+    return max(lo, min(hi, v))
+
+
+def _read_project_evidence(project_id: str) -> tuple[list, list]:
+    """Read-only. Returns (claims, raw_items) for every member of the project.
+
+    Narrow SQL lives here rather than in workgraph_store.py deliberately: this
+    module is additive and self-contained so it can be reviewed and reverted as
+    one unit, and it takes no write path. If this becomes load-bearing these
+    two queries should migrate into workgraph_store.py alongside the other
+    readers.
+    """
+    conn = ws._connect()
+    try:
+        member_ids = [
+            r["id"] for r in conn.execute(
+                "SELECT id FROM work_objects WHERE parent_id = ?", (project_id,)
+            ).fetchall()
+        ]
+        if not member_ids:
+            return [], []
+        q = ",".join("?" for _ in member_ids)
+        claims = conn.execute(
+            f"SELECT id, raw_item_id, claim_type, status, text FROM claims WHERE issue_id IN ({q})",
+            member_ids,
+        ).fetchall()
+        raw_ids = sorted({c["raw_item_id"] for c in claims if c["raw_item_id"]})
+        raw_items = []
+        if raw_ids:
+            rq = ",".join("?" for _ in raw_ids)
+            raw_items = conn.execute(
+                f"SELECT id, source, occurred_ts, pr_number FROM raw_items WHERE id IN ({rq})",
+                raw_ids,
+            ).fetchall()
+        return list(claims), list(raw_items)
+    finally:
+        conn.close()
+
+
+def _read_reference_anchors(project_id: str) -> set:
+    """Active reference-type identity anchors reachable from this project."""
+    conn = ws._connect()
+    try:
+        rows = conn.execute(
+            """SELECT DISTINCT a.normalized_value
+                 FROM identity_anchors a
+                 JOIN work_objects w ON a.issue_id = w.id
+                WHERE w.parent_id = ?
+                  AND a.anchor_type = 'reference'
+                  AND a.status = 'active'""",
+            (project_id,),
+        ).fetchall()
+        return {r["normalized_value"] for r in rows if r["normalized_value"]}
+    finally:
+        conn.close()
+
+
+# --------------------------------------------------------------- components --
+
+def compute_freshness(raw_items: list, now_ts: float) -> Component:
+    """Blueprint B.5.11.5: freshness_i = exp(-dt_i / tau); aggregate = mean.
+
+    Reported as FRESHNESS (1.0 = fresh). The aggregate below inverts it, since
+    ambiguity rises as evidence goes stale.
+    """
+    ages = [
+        (now_ts - r["occurred_ts"]) / 86400.0
+        for r in raw_items
+        if r["occurred_ts"] is not None
+    ]
+    ages = [a for a in ages if a >= 0]  # future-dated rows are not "fresh", they're bad data
+    if not ages:
+        return Component.abstain(
+            "freshness", "no raw_items with a usable occurred_ts",
+            n_considered=len(raw_items),
+        )
+    vals = [math.exp(-a / FRESHNESS_TAU_DAYS) for a in ages]
+    return Component.measured(
+        "freshness", sum(vals) / len(vals),
+        n=len(vals), median_age_days=round(sorted(ages)[len(ages) // 2], 1),
+    )
+
+
+def compute_provenance_reliability(
+    raw_items: list, source_trust: Optional[dict] = None
+) -> Component:
+    """Blueprint B.5.11.6: mean of ASSIGNED per-source trust. Never inferred."""
+    trust_map = DEFAULT_SOURCE_TRUST if source_trust is None else source_trust
+    if not raw_items:
+        return Component.abstain("provenance_reliability", "no raw_items on this project")
+    scores, unknown = [], {}
+    for r in raw_items:
+        src = r["source"]
+        if src in trust_map:
+            scores.append(trust_map[src])
+        else:
+            scores.append(UNKNOWN_SOURCE_TRUST)
+            unknown[src] = unknown.get(src, 0) + 1
+    return Component.measured(
+        "provenance_reliability", sum(scores) / len(scores),
+        n=len(scores), unknown_sources=unknown,
+    )
+
+
+def compute_referential_ambiguity(raw_items: list, resolved_refs: set) -> Component:
+    """Blueprint B.8: U / max(R, 1) over references appearing on this project.
+
+    R = distinct reference tokens mentioned. U = those with no active
+    reference-type identity anchor, i.e. mentioned but never resolved to
+    anything Jasper tracks.
+    """
+    mentioned = {str(r["pr_number"]).strip() for r in raw_items if r["pr_number"]}
+    if not mentioned:
+        # Per spec this is 0.0 ambiguity, but say so explicitly so a consumer
+        # can tell "0 of 0" from "0 of many".
+        return Component.measured("referential_ambiguity", 0.0, n_referenced=0, n_unresolved=0)
+    normalized_resolved = {str(v).strip() for v in resolved_refs}
+    unresolved = sorted(m for m in mentioned if m not in normalized_resolved)
+    return Component.measured(
+        "referential_ambiguity", len(unresolved) / max(len(mentioned), 1),
+        n_referenced=len(mentioned), n_unresolved=len(unresolved),
+        unresolved=unresolved[:20],
+    )
+
+
+def _abstaining_components() -> list[Component]:
+    """The six components with no viable data source today.
+
+    Each records WHY, and which task would unblock it. They are returned as
+    real components rather than omitted so that a consumer sees the full
+    nine-component contract and cannot mistake a partial score for a whole one.
+    """
+    return [
+        Component.abstain(
+            "context_coverage",
+            "no required-context declaration exists; data_point_definitions has "
+            "no category->required mapping. Would have to be invented. See #394.",
+            unblocked_by="#394 required-context declaration",
+        ),
+        Component.abstain(
+            "contradiction",
+            "claim_edges is empty - the #314 reconciliation taxonomy has never "
+            "produced an edge, so 0.0 would falsely mean 'no contradictions'.",
+            unblocked_by="#412",
+        ),
+        Component.abstain(
+            "internal_consistency",
+            "derived from contradiction, which has no data source. See #412.",
+            unblocked_by="#412",
+        ),
+        Component.abstain(
+            "semantic_polysemy", "requires embeddings; no sanctioned provider.",
+            unblocked_by="#405",
+        ),
+        Component.abstain(
+            "embedding_dispersion", "requires embeddings; no sanctioned provider.",
+            unblocked_by="#405",
+        ),
+        Component.abstain(
+            "relevance", "requires embeddings; no sanctioned provider.",
+            unblocked_by="#405",
+        ),
+    ]
+
+
+# --------------------------------------------------------- gap localization --
+
+def localize_gaps(components: list, raw_items: list, claims: list) -> list:
+    """Task #393 - the actually useful output.
+
+    Turns measurements into named, addressable holes. Each gap says what is
+    missing and where the answer could come from; it never says what is true.
+    Deliberately conservative: only emits a gap it can point at concretely.
+    """
+    gaps: list[Gap] = []
+    by_name = {c.name: c for c in components}
+
+    ref = by_name.get("referential_ambiguity")
+    if ref and not ref.abstained:
+        for token in ref.detail.get("unresolved", []):
+            gaps.append(Gap(
+                kind="unresolved_reference",
+                what=f"reference {token} is mentioned but resolves to nothing Jasper tracks",
+                fillable_by="search the source systems for this reference, or ask the sender",
+                ref=token,
+            ))
+
+    fresh = by_name.get("freshness")
+    if fresh and not fresh.abstained and fresh.value < 0.25:
+        gaps.append(Gap(
+            kind="stale_evidence",
+            what=(f"the newest evidence here is old (median age "
+                  f"{fresh.detail.get('median_age_days')} days) - current state may have moved"),
+            fillable_by="ask the people involved whether anything has changed",
+        ))
+
+    prov = by_name.get("provenance_reliability")
+    if prov and not prov.abstained:
+        for src, n in (prov.detail.get("unknown_sources") or {}).items():
+            gaps.append(Gap(
+                kind="unknown_source_trust",
+                what=f"{n} item(s) come from source '{src}', which has no declared trust level",
+                fillable_by="declare a trust level for this source",
+                ref=src,
+            ))
+
+    if claims and not raw_items:
+        gaps.append(Gap(
+            kind="claims_without_evidence",
+            what=f"{len(claims)} claim(s) here trace to no retrievable source item",
+            fillable_by="re-check ingestion for the underlying items",
+        ))
+
+    return gaps
+
+
+# ------------------------------------------------------------------ measure --
+
+def measure_project(
+    project_id: str,
+    *,
+    now_ts: Optional[float] = None,
+    source_trust: Optional[dict] = None,
+) -> AmbiguitySignal:
+    """Measure one project. Read-only, deterministic, no LLM, no writes.
+
+    `ambiguity_score` aggregates the COMPUTABLE components with equal weight
+    (blueprint B.9 keeps all components equally weighted so that none can
+    dominate or suppress another), and is None if every component abstained.
+    Freshness and provenance are inverted on the way in, since both are
+    reported as goodness while the aggregate is badness.
+    """
+    if now_ts is None:
+        now_ts = time.time()
+
+    claims, raw_items = _read_project_evidence(project_id)
+    resolved_refs = _read_reference_anchors(project_id)
+
+    components = [
+        compute_freshness(raw_items, now_ts),
+        compute_provenance_reliability(raw_items, source_trust),
+        compute_referential_ambiguity(raw_items, resolved_refs),
+    ] + _abstaining_components()
+
+    # Components reported as goodness must be inverted to contribute to an
+    # ambiguity (badness) aggregate.
+    inverted = {"freshness", "provenance_reliability"}
+    contributions = [
+        (1.0 - c.value) if c.name in inverted else c.value
+        for c in components
+        if not c.abstained
+    ]
+    score = round(sum(contributions) / len(contributions), 4) if contributions else None
+
+    return AmbiguitySignal(
+        project_id=project_id,
+        ambiguity_score=score,
+        components=tuple(components),
+        gaps=tuple(localize_gaps(components, raw_items, claims)),
+        now_ts=now_ts,
+        n_claims=len(claims),
+        n_raw_items=len(raw_items),
+    )

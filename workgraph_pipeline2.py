@@ -794,6 +794,55 @@ Output nothing else.
 """
 
 
+def _build_claims_text(all_claims: list, char_budget: int = _MAX_TEXT_CHARS) -> tuple:
+    """Task #408. Assembles the CLAIMS block whole-claim-at-a-time and returns
+    (text, shown_claims, n_omitted).
+
+    Replaces a blind `claims_text[:_MAX_TEXT_CHARS]` slice, which cut wherever
+    12,000 characters happened to land - potentially mid-sentence - and gave the
+    model no indication anything was missing. Two concrete harms from that: the
+    model reasons over a fragment it cannot tell is a fragment, and (worse) the
+    caller used to validate citations against EVERY claim on the project, so a
+    claim that fell past the cut could still be cited despite never being shown.
+
+    DELIBERATELY NOT lineage-preserving consolidation (the Phi_chunk pattern
+    from the cd\\ai blueprint's Appendix J, which was #408's original scope).
+    Measured against the live corpus 2026-08-20: claims_text is 447 chars at the
+    median, 3,266 at p99, 7,316 at the maximum, against a 12,000 cap - ZERO of
+    1,105 projects have ever exceeded it and the largest uses 61% of budget.
+    Building a consolidation operator for a condition that has never occurred
+    would be speculative machinery. This makes the existing cap HONEST instead,
+    which is the part that actually needed doing. If the cap ever does start
+    biting - most likely if non-mail ingestion is restored (#413) and claim
+    volume per project rises - the omission notice below is what will make that
+    visible, and Appendix J is the design to reach for then.
+    """
+    lines: list[str] = []
+    shown: list = []
+    used = 0
+    # Reserve room for the omission notice so adding it can never itself
+    # overflow the budget.
+    reserve = 160
+    for c in all_claims:
+        line = f"{c['id']} | {c['claim_type']} | {c['status']} | {c['text']}"
+        if used + len(line) + 1 > char_budget - reserve and shown:
+            break
+        lines.append(line)
+        shown.append(c)
+        used += len(line) + 1
+
+    n_omitted = len(all_claims) - len(shown)
+    if n_omitted:
+        # State the omission plainly. Deliberately does NOT list the omitted
+        # ids: an id the model cannot read is an id it must not cite, and the
+        # caller now validates against shown claims only.
+        lines.append(
+            f"[NOTE: {n_omitted} further claim(s) on this project exceeded this "
+            f"pass's size budget and are NOT shown above. Do not cite them.]"
+        )
+    return "\n".join(lines), shown, n_omitted
+
+
 def _parse_extraction_output(stdout: str) -> dict:
     issues = []
     summary = None
@@ -883,12 +932,12 @@ def run_project_extraction(project_id: str, *, model: Optional[str] = None) -> d
     if not all_claims:
         return {"project_id": project_id, "action": "no_claims_yet"}
 
-    claims_text = "\n".join(f"{c['id']} | {c['claim_type']} | {c['status']} | {c['text']}" for c in all_claims)
+    claims_text, shown_claims, n_omitted = _build_claims_text(all_claims)
     existing = ws.list_issues_for_project(project_id)
     existing_text = "\n".join(f"- {i['title']}" for i in existing) or "(none yet)"
 
     prompt = _EXTRACTION_PROMPT_TEMPLATE.format(
-        claims_text=claims_text[:_MAX_TEXT_CHARS], existing_items=existing_text,
+        claims_text=claims_text, existing_items=existing_text,
     )
     try:
         proc = _run_headless_claude(prompt, timeout=_EXTRACTION_TIMEOUT_SECONDS, model=model)
@@ -896,7 +945,11 @@ def run_project_extraction(project_id: str, *, model: Optional[str] = None) -> d
         return {"project_id": project_id, "action": "timeout"}
 
     parsed = _parse_extraction_output(proc.stdout)
-    valid_claim_ids = {c["id"] for c in all_claims}
+    # Task #408: validate against the claims actually SHOWN, not every claim on
+    # the project. The old `{c["id"] for c in all_claims}` would have accepted a
+    # citation of a claim the model never saw - i.e. citing evidence it could
+    # not read - in exactly the case where the budget had dropped something.
+    valid_claim_ids = {c["id"] for c in shown_claims}
     already_cited: set = set()
     created = []
     for entry in parsed["issues"]:

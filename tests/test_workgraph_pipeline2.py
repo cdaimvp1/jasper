@@ -1068,3 +1068,64 @@ def test_run_project_extraction_no_claims_yet(ws_db, isolated_paths):
 
 def test_run_project_extraction_not_found(ws_db, isolated_paths):
     assert p2.run_project_extraction("proj-does-not-exist")["action"] == "not_found"
+
+
+# --- claims-text budget assembly (task #408) --------------------------------
+
+def _claim(cid, text, ctype="ask", status="open"):
+    return {"id": cid, "claim_type": ctype, "status": status, "text": text}
+
+
+def test_build_claims_text_shows_everything_when_it_fits():
+    claims = [_claim(1, "alpha"), _claim(2, "beta")]
+    text, shown, omitted = p2._build_claims_text(claims)
+    assert omitted == 0
+    assert [c["id"] for c in shown] == [1, 2]
+    assert "alpha" in text and "beta" in text
+    assert "NOTE:" not in text
+
+
+def test_build_claims_text_never_cuts_mid_claim():
+    """The old blind slice cut wherever the char count landed. Every line in
+    the output must be a COMPLETE claim line."""
+    claims = [_claim(i, "x" * 200) for i in range(1, 40)]
+    text, shown, omitted = p2._build_claims_text(claims, char_budget=1200)
+    assert omitted > 0
+    body = [ln for ln in text.split("\n") if not ln.startswith("[NOTE:")]
+    for ln in body:
+        assert ln.endswith("x" * 200), "a claim line was truncated mid-text"
+    assert len(body) == len(shown)
+
+
+def test_build_claims_text_states_omissions_explicitly():
+    claims = [_claim(i, "y" * 300) for i in range(1, 30)]
+    text, shown, omitted = p2._build_claims_text(claims, char_budget=1500)
+    assert omitted == len(claims) - len(shown)
+    assert f"{omitted} further claim(s)" in text
+    assert "Do not cite them." in text
+
+
+def test_build_claims_text_does_not_list_omitted_ids():
+    """An id the model cannot read is an id it must not cite - so the notice
+    deliberately withholds them rather than inviting a blind citation."""
+    claims = [_claim(1, "z" * 400), _claim(2, "z" * 400), _claim(9999, "z" * 400)]
+    text, shown, omitted = p2._build_claims_text(claims, char_budget=700)
+    assert omitted > 0
+    note = [ln for ln in text.split("\n") if ln.startswith("[NOTE:")][0]
+    assert "9999" not in note
+
+
+def test_build_claims_text_always_shows_at_least_one_claim():
+    """Even a single claim larger than the whole budget must be shown rather
+    than yielding an empty CLAIMS block."""
+    text, shown, omitted = p2._build_claims_text([_claim(1, "q" * 5000)], char_budget=100)
+    assert len(shown) == 1
+    assert "q" * 5000 in text
+    assert omitted == 0
+
+
+def test_build_claims_text_stays_within_budget_when_it_can():
+    claims = [_claim(i, "w" * 100) for i in range(1, 100)]
+    text, shown, omitted = p2._build_claims_text(claims, char_budget=2000)
+    assert len(text) <= 2000
+    assert omitted > 0

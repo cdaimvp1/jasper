@@ -83,28 +83,34 @@ FRESHNESS_TAU_DAYS = 90.0
 #: Blueprint Appendix B 5.12.2 canonical volatility saturation.
 VOLATILITY_V_MAX = 0.25
 
-#: DECLARED source trust. The blueprint is explicit that trust is assigned
-#: externally and that the engine must never INFER it (B.5.11.6, and the
-#: prohibited-behaviours list names "infer trust" as a hard stop). So these are
-#: a policy input, stated here to be visible and reviewable rather than buried.
+#: NOTE ON SOURCE TRUST - deliberately absent, and this is a design decision
+#: rather than a missing feature.
 #:
-#: PROVISIONAL - these specific numbers are my proposed defaults and want Marc's
-#: sign-off. The ordering follows the blueprint's own worked example, where an
-#: executed document outranks stated intent in correspondence, which outranks
-#: informal chat. Calendar sits high because a calendar entry is a
-#: system-recorded fact about an occurrence rather than a claim about the world.
-#: Override via the `source_trust` argument rather than editing this.
-DEFAULT_SOURCE_TRUST: dict[str, float] = {
-    "sharepoint": 0.90,     # documents / artifacts
-    "calendar": 0.80,       # system-recorded occurrence
-    "outlook_mail": 0.60,   # correspondence; stated intent
-    "teams_chat": 0.40,     # informal
-}
-
-#: Trust for a source not present in the map. Deliberately low but non-zero,
-#: and it is recorded as an explicit gap so an unknown source shows up rather
-#: than quietly dragging the mean.
-UNKNOWN_SOURCE_TRUST = 0.30
+#: The blueprint's provenance_reliability component is a mean over externally
+#: ASSIGNED per-source trust scores. An earlier draft of this module shipped a
+#: default map (sharepoint 0.90 / calendar 0.80 / outlook_mail 0.60 /
+#: teams_chat 0.40). That was wrong on three counts and has been removed:
+#:
+#:   1. It is an authority model - a declared precedence over evidence classes,
+#:      expressed per channel instead of per claim type. Marc explicitly
+#:      abandoned that design: Jasper does not arbitrate which source wins. It
+#:      measures what is unclear, seeks the missing context, and where it still
+#:      cannot be settled it hands the determination to the human WITH the
+#:      evidence assembled.
+#:   2. It grades the transport, not the content. A signed contract attached to
+#:      an email is 'outlook_mail'; an offhand remark in a SharePoint comment is
+#:      'sharepoint'. The channel carries almost no evidentiary weight.
+#:   3. It violated this module's own abstention rule - inventing values for a
+#:      component with no real data source is exactly what abstention exists to
+#:      prevent. Empirically it also produced a flat 0.6 on every project
+#:      measured, contributing a uniform constant to every score.
+#:
+#: In this design provenance is CARRIED, not SCORED: it travels with evidence
+#: and with gaps so a human can weigh it. Weighing is the human's job.
+#:
+#: If Lilly ever declares real per-source trust as policy, this component can
+#: be revived - it would then be a genuine external input rather than a number
+#: invented here.
 
 
 # ------------------------------------------------------------------ results --
@@ -158,6 +164,10 @@ class AmbiguitySignal:
     now_ts: float
     n_claims: int
     n_raw_items: int
+    #: Provenance CARRIED, not scored - counts of evidence per source, so a
+    #: human can weigh where this understanding came from. Deliberately not
+    #: folded into ambiguity; see the source-trust note at the top of this file.
+    source_mix: dict = field(default_factory=dict)
 
     @property
     def abstained(self) -> tuple[str, ...]:
@@ -175,6 +185,7 @@ class AmbiguitySignal:
             "now_ts": self.now_ts,
             "n_claims": self.n_claims,
             "n_raw_items": self.n_raw_items,
+            "source_mix": dict(self.source_mix),
             "measured": list(self.measured),
             "abstained": list(self.abstained),
             "components": [
@@ -275,25 +286,19 @@ def compute_freshness(raw_items: list, now_ts: float) -> Component:
     )
 
 
-def compute_provenance_reliability(
-    raw_items: list, source_trust: Optional[dict] = None
-) -> Component:
-    """Blueprint B.5.11.6: mean of ASSIGNED per-source trust. Never inferred."""
-    trust_map = DEFAULT_SOURCE_TRUST if source_trust is None else source_trust
-    if not raw_items:
-        return Component.abstain("provenance_reliability", "no raw_items on this project")
-    scores, unknown = [], {}
+def compute_source_mix(raw_items: list) -> dict:
+    """NOT a score. Plain provenance, carried so a human can weigh it.
+
+    Returns the count of evidence items per source. This is descriptive
+    metadata attached to the signal - it is deliberately not folded into
+    ambiguity, because ranking sources against each other is a judgment about
+    authority and Jasper does not make those (see the source-trust note above).
+    """
+    mix: dict = {}
     for r in raw_items:
-        src = r["source"]
-        if src in trust_map:
-            scores.append(trust_map[src])
-        else:
-            scores.append(UNKNOWN_SOURCE_TRUST)
-            unknown[src] = unknown.get(src, 0) + 1
-    return Component.measured(
-        "provenance_reliability", sum(scores) / len(scores),
-        n=len(scores), unknown_sources=unknown,
-    )
+        src = r["source"] or "unknown"
+        mix[src] = mix.get(src, 0) + 1
+    return mix
 
 
 def compute_referential_ambiguity(raw_items: list, resolved_refs: set) -> Component:
@@ -325,6 +330,14 @@ def _abstaining_components() -> list[Component]:
     nine-component contract and cannot mistake a partial score for a whole one.
     """
     return [
+        Component.abstain(
+            "provenance_reliability",
+            "EXCLUDED BY DESIGN, not a data gap. Scoring per-source trust is an "
+            "authority model - it would have Jasper rank which source wins, and "
+            "Jasper does not arbitrate truth. Provenance is carried with the "
+            "evidence and the gaps so the human can weigh it.",
+            unblocked_by="design decision, not data - revive only if Lilly declares real per-source trust as policy",
+        ),
         Component.abstain(
             "context_coverage",
             "no required-context declaration exists; data_point_definitions has "
@@ -388,16 +401,6 @@ def localize_gaps(components: list, raw_items: list, claims: list) -> list:
             fillable_by="ask the people involved whether anything has changed",
         ))
 
-    prov = by_name.get("provenance_reliability")
-    if prov and not prov.abstained:
-        for src, n in (prov.detail.get("unknown_sources") or {}).items():
-            gaps.append(Gap(
-                kind="unknown_source_trust",
-                what=f"{n} item(s) come from source '{src}', which has no declared trust level",
-                fillable_by="declare a trust level for this source",
-                ref=src,
-            ))
-
     if claims and not raw_items:
         gaps.append(Gap(
             kind="claims_without_evidence",
@@ -414,7 +417,6 @@ def measure_project(
     project_id: str,
     *,
     now_ts: Optional[float] = None,
-    source_trust: Optional[dict] = None,
 ) -> AmbiguitySignal:
     """Measure one project. Read-only, deterministic, no LLM, no writes.
 
@@ -432,13 +434,12 @@ def measure_project(
 
     components = [
         compute_freshness(raw_items, now_ts),
-        compute_provenance_reliability(raw_items, source_trust),
         compute_referential_ambiguity(raw_items, resolved_refs),
     ] + _abstaining_components()
 
     # Components reported as goodness must be inverted to contribute to an
     # ambiguity (badness) aggregate.
-    inverted = {"freshness", "provenance_reliability"}
+    inverted = {"freshness"}
     contributions = [
         (1.0 - c.value) if c.name in inverted else c.value
         for c in components
@@ -454,4 +455,5 @@ def measure_project(
         now_ts=now_ts,
         n_claims=len(claims),
         n_raw_items=len(raw_items),
+        source_mix=compute_source_mix(raw_items),
     )

@@ -49,34 +49,41 @@ def test_freshness_ignores_future_dated_rows():
     assert c.abstained
 
 
-# ------------------------------------------------------- provenance / trust
+# --------------------------------------- provenance is CARRIED, not SCORED
 
-def test_provenance_uses_declared_trust_not_inference():
+def test_no_source_trust_table_exists_anywhere():
+    """REGRESSION GUARD. A per-source trust map is an authority model - a
+    declared precedence over evidence classes - and Jasper does not arbitrate
+    which source wins. An earlier draft shipped one; it was removed. If this
+    test fails, someone has reintroduced a scored authority model."""
+    for attr in ("DEFAULT_SOURCE_TRUST", "UNKNOWN_SOURCE_TRUST", "SOURCE_TRUST"):
+        assert not hasattr(amb, attr), f"{attr} reintroduces a source-authority model"
+    assert not hasattr(amb, "compute_provenance_reliability")
+
+
+def test_provenance_reliability_is_excluded_by_design_not_missing_data():
+    c = next(c for c in amb._abstaining_components() if c.name == "provenance_reliability")
+    assert c.abstained
+    assert "design" in c.abstained_reason.lower()
+    assert "authority" in c.abstained_reason.lower()
+
+
+def test_source_mix_is_carried_as_plain_counts():
+    """Provenance travels with the signal so a human can weigh it - as counts,
+    with no ranking implied between sources."""
     now = 1_700_000_000.0
-    c = amb.compute_provenance_reliability([_raw("a", "sharepoint", now)])
-    assert c.value == pytest.approx(amb.DEFAULT_SOURCE_TRUST["sharepoint"])
+    mix = amb.compute_source_mix([
+        _raw("a", "outlook_mail", now), _raw("b", "outlook_mail", now),
+        _raw("c", "teams_chat", now),
+    ])
+    assert mix == {"outlook_mail": 2, "teams_chat": 1}
 
 
-def test_provenance_averages_across_mixed_sources():
+def test_source_mix_never_returns_a_score():
+    """Counts only. Any float here would be a weighting in disguise."""
     now = 1_700_000_000.0
-    items = [_raw("a", "sharepoint", now), _raw("b", "teams_chat", now)]
-    expected = (amb.DEFAULT_SOURCE_TRUST["sharepoint"] + amb.DEFAULT_SOURCE_TRUST["teams_chat"]) / 2
-    assert amb.compute_provenance_reliability(items).value == pytest.approx(expected)
-
-
-def test_provenance_records_unknown_source_rather_than_hiding_it():
-    now = 1_700_000_000.0
-    c = amb.compute_provenance_reliability([_raw("a", "carrier_pigeon", now)])
-    assert c.value == pytest.approx(amb.UNKNOWN_SOURCE_TRUST)
-    assert c.detail["unknown_sources"] == {"carrier_pigeon": 1}
-
-
-def test_provenance_trust_map_is_overridable():
-    now = 1_700_000_000.0
-    c = amb.compute_provenance_reliability(
-        [_raw("a", "outlook_mail", now)], source_trust={"outlook_mail": 0.99}
-    )
-    assert c.value == pytest.approx(0.99)
+    mix = amb.compute_source_mix([_raw("a", "sharepoint", now)])
+    assert all(isinstance(v, int) for v in mix.values())
 
 
 # ------------------------------------------------------------- referential
@@ -114,11 +121,12 @@ def test_referential_is_a_ratio_over_distinct_tokens():
 
 # -------------------------------------------------------------- abstentions
 
-def test_the_six_unavailable_components_all_abstain_with_a_reason():
+def test_the_unavailable_components_all_abstain_with_a_reason():
     names = {c.name for c in amb._abstaining_components()}
     assert names == {
-        "context_coverage", "contradiction", "internal_consistency",
-        "semantic_polysemy", "embedding_dispersion", "relevance",
+        "provenance_reliability", "context_coverage", "contradiction",
+        "internal_consistency", "semantic_polysemy", "embedding_dispersion",
+        "relevance",
     }
     for c in amb._abstaining_components():
         assert c.abstained
@@ -137,19 +145,18 @@ def test_abstention_never_degrades_to_zero():
 # ------------------------------------------------------------- aggregation
 
 def test_aggregate_inverts_goodness_components():
-    """freshness/provenance are reported as goodness; ambiguity is badness."""
+    """freshness is reported as goodness; ambiguity is badness."""
     now = 1_700_000_000.0
     comps = [
-        amb.compute_freshness([_raw("a", "outlook_mail", now)], now),          # 1.0 good
-        amb.compute_provenance_reliability([_raw("a", "outlook_mail", now)]),  # 0.6 good
+        amb.compute_freshness([_raw("a", "outlook_mail", now)], now),                # 1.0 good
         amb.compute_referential_ambiguity([_raw("a", "outlook_mail", now)], set()),  # 0.0 bad
     ]
-    inverted = {"freshness", "provenance_reliability"}
+    inverted = {"freshness"}
     contributions = [
         (1.0 - c.value) if c.name in inverted else c.value for c in comps if not c.abstained
     ]
-    # perfectly fresh -> 0 ambiguity; mail trust 0.6 -> 0.4 ambiguity; no refs -> 0
-    assert contributions == pytest.approx([0.0, 0.4, 0.0])
+    # perfectly fresh -> 0 ambiguity; no references -> 0 ambiguity
+    assert contributions == pytest.approx([0.0, 0.0])
 
 
 # ---------------------------------------------------------- gap localization
@@ -176,11 +183,13 @@ def test_stale_evidence_becomes_a_gap_only_when_actually_stale():
     assert any(g.kind == "stale_evidence" for g in amb.localize_gaps([ancient], [], []))
 
 
-def test_unknown_source_becomes_a_gap():
+def test_no_gap_is_ever_raised_about_source_trust():
+    """REGRESSION GUARD. An unfamiliar source is not a gap in Jasper's
+    understanding - it is only a gap if you believe sources must be ranked,
+    which is the authority model this design rejects."""
     items = [_raw("a", "smoke_signal", 1.0)]
-    comps = [amb.compute_provenance_reliability(items)]
-    gaps = amb.localize_gaps(comps, items, [])
-    assert any(g.kind == "unknown_source_trust" and g.ref == "smoke_signal" for g in gaps)
+    gaps = amb.localize_gaps([], items, [])
+    assert not any("trust" in g.kind for g in gaps)
 
 
 def test_claims_with_no_retrievable_evidence_becomes_a_gap():
@@ -197,7 +206,6 @@ def test_every_gap_names_where_the_answer_could_come_from():
     items = [_raw("a", "pigeon", now - 86400.0 * 400, pr_number="PR1")]
     comps = [
         amb.compute_freshness(items, now),
-        amb.compute_provenance_reliability(items),
         amb.compute_referential_ambiguity(items, set()),
     ]
     gaps = amb.localize_gaps(comps, items, claims=[])

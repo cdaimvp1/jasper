@@ -365,3 +365,73 @@ def test_trend_ignores_null_scores_in_history():
 def test_trend_is_deterministic():
     hist = [_obs(0.3), _obs(0.7), _obs(0.5)]
     assert amb.compute_uncertainty_trend(hist, 0.4) == amb.compute_uncertainty_trend(hist, 0.4)
+
+
+# ------------------------------------------------ pass forecast (task #409)
+
+def test_forecast_no_history_warrants_a_first_pass():
+    """You cannot forecast from no data - and that must be said, not silently
+    defaulted to 'spend'."""
+    f = amb.forecast_next_pass([], 0.5)
+    assert f.recommendation == "no_history"
+    assert f.projected_passes is None
+
+
+def test_forecast_null_current_score_is_no_history():
+    assert amb.forecast_next_pass([_obs(0.4)], None).recommendation == "no_history"
+
+
+def test_forecast_surfaces_conflict_instead_of_spending():
+    """Rising ambiguity means contradictory context arrived. More passes over
+    the same contradiction will not resolve it - a person will."""
+    f = amb.forecast_next_pass([_obs(0.30)], 0.60)
+    assert f.recommendation == "surface_conflict"
+    assert "contradictory" in f.reason
+
+
+def test_forecast_detects_spinning_after_two_flat_passes():
+    f = amb.forecast_next_pass([_obs(0.500), _obs(0.505)], 0.500)
+    assert f.recommendation == "spinning"
+    assert "nothing left to add" in f.reason
+
+
+def test_forecast_one_flat_pass_is_not_yet_spinning():
+    """One flat pass can mean the single source consulted had nothing - not
+    that nothing remains to learn."""
+    f = amb.forecast_next_pass([_obs(0.50)], 0.50)
+    assert f.recommendation != "spinning"
+
+
+def test_forecast_spend_while_converging_and_projects_passes():
+    f = amb.forecast_next_pass([_obs(0.80), _obs(0.64)], 0.51)
+    assert f.recommendation == "spend"
+    assert f.contraction_ratio is not None and f.contraction_ratio < 1.0
+    assert f.projected_passes and f.projected_passes >= 1
+
+
+def test_forecast_spinning_when_ratio_at_or_above_one():
+    """A ratio >= 1 means ambiguity is not shrinking, so do not keep paying."""
+    f = amb.forecast_next_pass([_obs(0.40), _obs(0.30)], 0.44)
+    assert f.recommendation in ("spinning", "surface_conflict")
+
+
+def test_forecast_no_projection_once_at_target():
+    f = amb.forecast_next_pass([_obs(0.30), _obs(0.20)], 0.10)
+    assert f.recommendation == "spend"
+    assert f.projected_passes is None
+    assert "at or below target" in f.reason
+
+
+def test_forecast_is_advisory_only_and_carries_a_reason():
+    """PCM Theorem G.9.1: it cannot authorize or execute. Every outcome must
+    explain itself so a caller can override it knowingly."""
+    for hist, cur in (([], 0.5), ([_obs(0.3)], 0.6), ([_obs(0.5), _obs(0.5)], 0.5),
+                      ([_obs(0.8), _obs(0.6)], 0.4)):
+        f = amb.forecast_next_pass(hist, cur)
+        assert f.reason
+        assert f.recommendation in ("spend", "spinning", "surface_conflict", "no_history")
+
+
+def test_forecast_is_deterministic_and_calls_no_model():
+    hist = [_obs(0.7), _obs(0.6)]
+    assert amb.forecast_next_pass(hist, 0.5) == amb.forecast_next_pass(hist, 0.5)

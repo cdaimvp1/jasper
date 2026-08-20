@@ -565,6 +565,113 @@ def _volatility(scores: list) -> Optional[float]:
     return _clamp(statistics.stdev(window) / VOLATILITY_V_MAX)
 
 
+#: How many consecutive no-movement passes before we call it spinning. Two is
+#: deliberately conservative: one flat pass can happen because the ONE source
+#: consulted had nothing, which is not the same as nothing being left to learn.
+SPINNING_AFTER_FLAT_PASSES = 2
+
+#: Ambiguity below this is treated as "good enough to act on" for the purpose
+#: of projecting passes remaining. Not a gate - #400 is deferred and this
+#: module gates nothing; it is only the target the projection aims at.
+CONVERGENCE_TARGET = 0.15
+
+
+@dataclass(frozen=True)
+class Forecast:
+    """Task #409, the PCM pattern (cd\\ai blueprint Appendix G).
+
+    The property that makes this worth having is Appendix G's own line: "No
+    model invocation required." This is pure arithmetic over a bounded history
+    window, so asking "is another pass likely to pay?" costs nothing, while the
+    pass it might save costs a real LLM call. Given how much of Jasper's
+    backlog is LLM-cost-gated, a free forecast is worth real money.
+
+    ADVISORY ONLY, exactly as PCM specifies (Theorem G.9.1: "PCM cannot
+    authorize or execute"). This returns a recommendation and a reason. It
+    does not gate, does not skip, does not decide. A caller is free to spend
+    anyway - and should, if it has a reason this does not know about.
+    """
+    recommendation: str        # spend | spinning | surface_conflict | no_history
+    reason: str
+    contraction_ratio: Optional[float]   # <1.0 = converging, >=1.0 = not
+    projected_passes: Optional[int]      # to reach CONVERGENCE_TARGET
+    n_observations: int
+
+
+def forecast_next_pass(history: list, current_score: Optional[float]) -> Forecast:
+    """`history` newest-first, as ws.list_ambiguity_observations returns it.
+    Deterministic, no I/O, no model call.
+    """
+    scores = [h["ambiguity_score"] for h in history if h.get("ambiguity_score") is not None]
+    n = len(scores)
+
+    if current_score is None or n == 0:
+        # Never looked, or nothing measurable. You must look at least once -
+        # you cannot forecast from no data. Labelled honestly rather than
+        # silently defaulting to "spend".
+        return Forecast(recommendation="no_history",
+                        reason="no prior observations to forecast from - a first pass is warranted",
+                        contraction_ratio=None, projected_passes=None, n_observations=n)
+
+    trend = compute_uncertainty_trend(history, current_score)
+
+    if trend.state == "conflict":
+        # Rising ambiguity means contradictory context arrived. More passes
+        # over the same contradiction will not resolve it - a person will.
+        return Forecast(recommendation="surface_conflict",
+                        reason=(f"ambiguity rose by {trend.delta} - contradictory context was "
+                                f"acquired, which is a finding to surface rather than grind on"),
+                        contraction_ratio=None, projected_passes=None, n_observations=n)
+
+    # Spinning: the last N transitions all sat inside the dead-band.
+    series = [current_score] + scores
+    flat_run = 0
+    for newer, older in zip(series, series[1:]):
+        if abs(newer - older) <= TREND_DEADBAND:
+            flat_run += 1
+        else:
+            break
+    if flat_run >= SPINNING_AFTER_FLAT_PASSES:
+        return Forecast(recommendation="spinning",
+                        reason=(f"{flat_run} consecutive passes moved ambiguity by no more than "
+                                f"{TREND_DEADBAND} - the sources being consulted have nothing left "
+                                f"to add; change modality or stop"),
+                        contraction_ratio=1.0, projected_passes=None, n_observations=n)
+
+    # Appendix G.2.1 contraction estimate, over the same bounded window.
+    ratios = [newer / older for newer, older in zip(series, series[1:]) if older > 0]
+    if not ratios:
+        return Forecast(recommendation="spend",
+                        reason="no usable contraction estimate; one more pass is reasonable",
+                        contraction_ratio=None, projected_passes=None, n_observations=n)
+    r = sum(ratios) / len(ratios)
+
+    if r >= 1.0:
+        # Same minimum-evidence bar as the flat-run check above, deliberately.
+        # Without it the two paths contradict each other: the flat-run guard
+        # says one non-moving pass is not enough to conclude anything, and then
+        # this would immediately conclude it anyway from that same single data
+        # point. Erring toward one more pass is the cheaper mistake - wrongly
+        # abandoning a project costs more than one call.
+        if len(ratios) < SPINNING_AFTER_FLAT_PASSES:
+            return Forecast(recommendation="spend",
+                            reason=(f"contraction ratio {round(r, 3)} is not yet shrinking, but "
+                                    f"{len(ratios)} observation(s) is too little to call it spinning"),
+                            contraction_ratio=round(r, 3), projected_passes=None, n_observations=n)
+        return Forecast(recommendation="spinning",
+                        reason=f"contraction ratio {round(r, 3)} >= 1.0 - ambiguity is not shrinking",
+                        contraction_ratio=round(r, 3), projected_passes=None, n_observations=n)
+
+    projected = None
+    if current_score > CONVERGENCE_TARGET and 0 < r < 1.0:
+        projected = max(1, math.ceil(math.log(CONVERGENCE_TARGET / current_score) / math.log(r)))
+    return Forecast(recommendation="spend",
+                    reason=(f"contraction ratio {round(r, 3)} - ambiguity is shrinking"
+                            + (f", ~{projected} pass(es) to reach {CONVERGENCE_TARGET}"
+                               if projected else ", already at or below target")),
+                    contraction_ratio=round(r, 3), projected_passes=projected, n_observations=n)
+
+
 def measure_project(
     project_id: str,
     *,

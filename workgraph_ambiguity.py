@@ -65,6 +65,7 @@ LLM cost to running this.
 from __future__ import annotations
 
 import math
+import statistics
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -492,6 +493,77 @@ def localize_gaps(components: list, raw_items: list, claims: list) -> list:
 
 
 # ------------------------------------------------------------------ measure --
+
+#: Below this absolute change, an acquisition is treated as having taught us
+#: nothing. Blueprint Appendix B does not name a dead-band (it emits the raw
+#: delta), but Jasper needs one to tell "source exhausted" apart from "moved a
+#: little", which is the whole point of the three-way split below.
+TREND_DEADBAND = 0.02
+
+
+@dataclass(frozen=True)
+class Trend:
+    """Task #395. NOT just the blueprint's scalar delta.
+
+    Blueprint Appendix B 5.12.1 emits uncertainty_trend = clamp(A_t - A_t-1)
+    and stops there. That is sufficient for cd\\ai, where the artifact is fixed
+    and rising ambiguity means the remediation loop is diverging - a problem.
+    It is NOT sufficient for Jasper, where the only way to reduce ambiguity is
+    to ACQUIRE more context, and where three situations a scalar conflates
+    demand opposite responses:
+
+      improving  - ambiguity fell: the right context arrived. Continue.
+      conflict   - ambiguity ROSE: contradictory context arrived. This is a
+                   real disagreement DISCOVERED, not a failure. Surface it;
+                   do NOT keep grinding. Under cd\\ai's semantics this would
+                   read as divergence and trigger a halt-as-failure, which
+                   would suppress exactly the finding Jasper most wants.
+      exhausted  - ambiguity unchanged within the dead-band: that source had
+                   nothing to add. Switch modality or stop.
+      unknown    - fewer than 2 observations, or a null score in the pair.
+
+    `delta` is still reported raw so the blueprint-conformant number is
+    available; `state` is the Jasper-specific interpretation.
+    """
+    state: str                      # improving | conflict | exhausted | unknown
+    delta: Optional[float]          # A_t - A_t-1, clamped to [-1, 1]
+    volatility: Optional[float]     # [0,1], None with < 3 observations
+    n_observations: int
+
+
+def compute_uncertainty_trend(history: list, current_score: Optional[float]) -> Trend:
+    """`history` is newest-first (as returned by ws.list_ambiguity_observations)
+    and is the history BEFORE `current_score`. Deterministic; no I/O.
+    """
+    scores = [h["ambiguity_score"] for h in history if h.get("ambiguity_score") is not None]
+
+    # Blueprint missing-history rule: fewer than 2 points -> no trend. A null
+    # current score also yields unknown rather than a fabricated delta.
+    if current_score is None or not scores:
+        return Trend(state="unknown", delta=None,
+                     volatility=_volatility(scores), n_observations=len(scores))
+
+    delta = _clamp(current_score - scores[0], -1.0, 1.0)
+    if delta < -TREND_DEADBAND:
+        state = "improving"
+    elif delta > TREND_DEADBAND:
+        state = "conflict"
+    else:
+        state = "exhausted"
+    return Trend(state=state, delta=round(delta, 4),
+                 volatility=_volatility([current_score] + scores),
+                 n_observations=len(scores))
+
+
+def _volatility(scores: list) -> Optional[float]:
+    """Blueprint 5.12.2: stddev over the last min(5, N), normalised by V_max.
+    Missing-history rule: fewer than 3 observations -> None (not 0.0, which
+    would read as 'measured, and stable')."""
+    window = scores[:5]
+    if len(window) < 3:
+        return None
+    return _clamp(statistics.stdev(window) / VOLATILITY_V_MAX)
+
 
 def measure_project(
     project_id: str,

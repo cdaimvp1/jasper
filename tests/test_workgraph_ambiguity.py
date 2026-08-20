@@ -289,3 +289,79 @@ def test_no_coherence_gap_when_fully_coherent():
     comps = [amb.compute_state_coherence([{"id": 1}], [])]
     gaps = amb.localize_gaps(comps, [], [{"id": 1}])
     assert not any(g.kind == "closed_issue_with_open_claims" for g in gaps)
+
+
+# ------------------------------------------- trend / volatility (task #395)
+
+def _obs(score):
+    return {"ambiguity_score": score}
+
+
+def test_trend_unknown_with_no_history():
+    """Blueprint missing-history rule: no trend from a single point."""
+    t = amb.compute_uncertainty_trend([], 0.5)
+    assert t.state == "unknown"
+    assert t.delta is None
+
+
+def test_trend_unknown_when_current_score_is_null():
+    """Every component abstained - must not fabricate a delta."""
+    t = amb.compute_uncertainty_trend([_obs(0.4)], None)
+    assert t.state == "unknown"
+    assert t.delta is None
+
+
+def test_trend_improving_when_ambiguity_falls():
+    t = amb.compute_uncertainty_trend([_obs(0.60)], 0.40)
+    assert t.state == "improving"
+    assert t.delta == pytest.approx(-0.20)
+
+
+def test_trend_conflict_when_ambiguity_rises():
+    """THE case a scalar conflates. Rising ambiguity in Jasper means
+    contradictory context arrived - a real disagreement discovered, which must
+    be surfaced, NOT treated as loop divergence the way cd\ai would."""
+    t = amb.compute_uncertainty_trend([_obs(0.30)], 0.55)
+    assert t.state == "conflict"
+    assert t.delta == pytest.approx(0.25)
+
+
+def test_trend_exhausted_when_effectively_unchanged():
+    t = amb.compute_uncertainty_trend([_obs(0.500)], 0.505)
+    assert t.state == "exhausted"
+
+
+def test_deadband_boundary_is_not_conflict():
+    """A change smaller than the dead-band is source-exhaustion, not a
+    discovered conflict - otherwise noise would look like disagreement."""
+    t = amb.compute_uncertainty_trend([_obs(0.50)], 0.50 + amb.TREND_DEADBAND - 0.001)
+    assert t.state == "exhausted"
+
+
+def test_volatility_none_below_three_observations():
+    """None, never 0.0 - 0.0 would read as 'measured, and stable'."""
+    assert amb.compute_uncertainty_trend([_obs(0.4)], 0.5).volatility is None
+
+
+def test_volatility_computed_from_three_or_more():
+    t = amb.compute_uncertainty_trend([_obs(0.1), _obs(0.9), _obs(0.2)], 0.8)
+    assert t.volatility is not None
+    assert 0.0 <= t.volatility <= 1.0
+
+
+def test_volatility_window_is_capped_at_five():
+    hist = [_obs(v) for v in (0.5,) * 20]
+    t = amb.compute_uncertainty_trend(hist, 0.5)
+    assert t.volatility == pytest.approx(0.0)  # all identical -> no oscillation
+
+
+def test_trend_ignores_null_scores_in_history():
+    hist = [{"ambiguity_score": None}, _obs(0.6)]
+    t = amb.compute_uncertainty_trend(hist, 0.3)
+    assert t.state == "improving"
+    assert t.n_observations == 1
+
+
+def test_trend_is_deterministic():
+    hist = [_obs(0.3), _obs(0.7), _obs(0.5)]
+    assert amb.compute_uncertainty_trend(hist, 0.4) == amb.compute_uncertainty_trend(hist, 0.4)

@@ -1114,6 +1114,31 @@ def init_workgraph() -> None:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_claim_edges_from ON claim_edges(from_claim_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_claim_edges_to ON claim_edges(to_claim_id)")
 
+            # ambiguity_observations (task #395): append-only history of the
+            # ambiguity measurement, so uncertainty_trend and volatility can be
+            # computed at all. Deliberately a separate table rather than columns
+            # on synthesis: the whole point is a SERIES, and overwriting a
+            # single value would destroy exactly the history being measured.
+            #
+            # This is the measurement's own telemetry, NOT graph state - nothing
+            # here changes what Jasper believes about the work. workgraph_
+            # ambiguity.measure_project stays read-only and pure; persisting an
+            # observation is a separate, explicit call by the caller, which
+            # keeps that module's signal-only invariant (#410) intact.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS ambiguity_observations (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    entity_type     TEXT NOT NULL CHECK (entity_type IN ('issue','project')),
+                    entity_id       TEXT NOT NULL,
+                    ambiguity_score REAL,              -- NULL when every component abstained
+                    measured_at     REAL NOT NULL,
+                    evidence_marker TEXT,              -- fingerprint the score was measured against
+                    components_json TEXT               -- full per-component detail, for replay
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_ambiguity_obs_entity "
+                         "ON ambiguity_observations(entity_type, entity_id, measured_at)")
+
             # claim_events (design doc Section 12.3): right-sized against the
             # Blueprint's full 14-event work-state taxonomy (REQUEST_WORK/
             # COMMIT_WORK/.../REOPEN_WORK) - that full taxonomy needs curator
@@ -10550,6 +10575,59 @@ def set_derived_title(entity_type: str, entity_id: str, derived_title: str) -> N
             )
         finally:
             conn.close()
+
+
+def record_ambiguity_observation(
+    *, entity_type: str, entity_id: str, ambiguity_score: Optional[float],
+    measured_at: float, evidence_marker: Optional[str] = None,
+    components_json: Optional[str] = None,
+) -> int:
+    """Task #395: append one ambiguity observation to the history.
+
+    Append-only on purpose - trend and volatility ARE the series, so an upsert
+    would destroy the thing being measured. `ambiguity_score` may legitimately
+    be None (every component abstained); that is recorded rather than skipped,
+    because "we could not measure this at all" is itself a real observation and
+    silently dropping it would make a gap in the series look like stability.
+
+    `measured_at` is supplied by the caller, never time.time() here, so a
+    recorded series stays reproducible.
+    """
+    with _lock:
+        conn = _connect()
+        try:
+            cur = conn.execute(
+                """INSERT INTO ambiguity_observations
+                   (entity_type, entity_id, ambiguity_score, measured_at,
+                    evidence_marker, components_json)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (entity_type, entity_id, ambiguity_score, measured_at,
+                 evidence_marker, components_json),
+            )
+            return int(cur.lastrowid)
+        finally:
+            conn.close()
+
+
+def list_ambiguity_observations(entity_type: str, entity_id: str, limit: int = 5) -> list[dict]:
+    """Most recent observations first (newest at index 0), capped at `limit`.
+
+    Default 5 matches the blueprint's volatility window (Appendix B 5.12.2 uses
+    min(5, number_of_cycles)). Returns [] for an entity never measured, which
+    callers must treat as "no history", not as "stable" - see
+    workgraph_ambiguity.compute_uncertainty_trend's missing-history rule.
+    """
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            """SELECT * FROM ambiguity_observations
+                WHERE entity_type = ? AND entity_id = ?
+                ORDER BY measured_at DESC, id DESC LIMIT ?""",
+            (entity_type, entity_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
 
 
 def record_extraction_marker(entity_type: str, entity_id: str, marker: str) -> None:

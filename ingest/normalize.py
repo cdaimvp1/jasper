@@ -296,8 +296,48 @@ def _claims_content_but_empty(source: str, payload: dict, items: list[dict]) -> 
     Returns a reason string when this looks like that shape, else None."""
     if items:
         return None
+
+    # --- Task #413 (2026-08-20): two holes the original D5 shapes missed, both
+    # confirmed live against real archived drop files.
+    #
+    # Hole 1 - the promise arrives as a STRING, not a dict. Real file in
+    # raw_ingest_failed: {"messages_count": 21, "messages_raw": "21 messages
+    # fetched"}. The isinstance(dict) test below skips a bare string entirely.
+    #
+    # Hole 2 - the promise arrives under a DIFFERENT key, so the expected list
+    # key is absent rather than wrong-typed. Real file archived as SUCCESS
+    # today: {"source":"calendar","events_catchup_count":25,
+    # "events_lookahead_count":25,"note":"Event details truncated in this
+    # sample. Full implementation would include all 25 events from each
+    # window."} - payload.get("events") is None, so the old `events is not
+    # None` test returned clean, the file was archived to processed, and 50
+    # real events were lost while the calendar cursor advanced past them.
+    #
+    # Generalized rule, still fully deterministic and no heuristics on prose:
+    #   (a) any "<something>_count" field with a positive integer, or
+    #   (b) the source's expected list key missing ENTIRELY
+    # both mean "this payload asserts content it did not deliver". A genuinely
+    # empty pull still emits its list key as [] (see _process_* above, all of
+    # which read a named key), so (b) does not fire on real empty results.
+    expected_list_key = {
+        "calendar": "events", "sharepoint": "results", "teams_chat": "messages_raw",
+    }.get(source)
+
+    for key, value in payload.items():
+        if key.endswith("_count") and isinstance(value, int) and value > 0:
+            return (f"{key}={value} asserts content but 0 items parsed - "
+                    f"payload promised data it did not deliver")
+
+    if expected_list_key and expected_list_key not in payload:
+        return (f"expected key {expected_list_key!r} is absent entirely (payload keys: "
+                f"{sorted(payload.keys())}) - a real empty pull would still emit "
+                f"{expected_list_key!r} as []")
+
     if source == "teams_chat":
         messages_raw = payload.get("messages_raw")
+        if isinstance(messages_raw, str) and messages_raw.strip():
+            return (f"messages_raw is a prose string ({messages_raw!r}) rather than a "
+                    f"message list - a description of the data instead of the data")
         if isinstance(messages_raw, dict) and "value" not in messages_raw and "messages" not in messages_raw:
             if messages_raw.get("count") or messages_raw.get("note"):
                 return (f"messages_raw claims content (count={messages_raw.get('count')!r}, "

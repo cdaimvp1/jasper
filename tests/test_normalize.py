@@ -248,6 +248,72 @@ def test_claims_content_but_empty_sharepoint_non_list_results_is_a_failure():
     assert reason is not None
 
 
+# --- Task #413: two holes in the original D5 shapes, both from REAL archived
+# drop files found on disk 2026-08-20. These payloads are verbatim.
+
+def test_claims_content_but_empty_catches_calendar_promise_under_a_different_key():
+    """VERBATIM from raw_ingest_processed/calendar_1787242251.json, which was
+    archived as SUCCESS today. payload.get("events") is None, so the original
+    `events is not None` test returned clean - 50 real events were lost and the
+    calendar cursor advanced past them."""
+    payload = {
+        "source": "calendar",
+        "events_catchup_count": 25,
+        "events_lookahead_count": 25,
+        "catchup_window_start": "2026-08-12T12:17:40",
+        "catchup_window_end": "now",
+        "note": ("Event details truncated in this sample. Full implementation "
+                 "would include all 25 events from each window."),
+    }
+    reason = normalize._claims_content_but_empty("calendar", payload, [])
+    assert reason is not None
+    assert "25" in reason
+
+
+def test_claims_content_but_empty_catches_teams_prose_string_payload():
+    """VERBATIM from raw_ingest_failed/teams_chat_1785791030154_1.json. The
+    payload is a DESCRIPTION of the data instead of the data - the signature
+    failure of an LLM-mediated capture path. The original isinstance(dict)
+    test skipped a bare string entirely."""
+    payload = {
+        "source": "teams_chat",
+        "chat_id": "19:81b57d1a@unq.gbl.spaces",
+        "chat_meta": {"type": "oneOnOne", "members": ["Michael A Hartnagel", "Marc Lane"]},
+        "messages_count": 21,
+        "messages_raw": "21 messages fetched",
+    }
+    reason = normalize._claims_content_but_empty("teams_chat", payload, [])
+    assert reason is not None
+
+
+def test_positive_count_field_alone_is_enough_to_fail():
+    """Generalized rule: any *_count > 0 with zero items parsed is a payload
+    asserting content it did not deliver, whatever the source."""
+    for source, key in (("calendar", "events_count"), ("sharepoint", "results_count")):
+        payload = {"source": source, key: 7}
+        assert normalize._claims_content_but_empty(source, payload, []) is not None
+
+
+def test_zero_count_field_is_not_a_failure():
+    """A genuinely empty pull may report its own zero. Must not false-positive."""
+    payload = {"source": "calendar", "events": [], "events_count": 0}
+    assert normalize._claims_content_but_empty("calendar", payload, []) is None
+
+
+def test_missing_expected_list_key_is_a_failure_but_present_empty_is_not():
+    assert normalize._claims_content_but_empty("sharepoint", {"source": "sharepoint"}, []) is not None
+    assert normalize._claims_content_but_empty("sharepoint", {"source": "sharepoint", "results": []}, []) is None
+    assert normalize._claims_content_but_empty("calendar", {"source": "calendar"}, []) is not None
+    assert normalize._claims_content_but_empty("calendar", {"source": "calendar", "events": []}, []) is None
+
+
+def test_real_items_parsed_short_circuits_every_new_check():
+    """If items came through, none of the promise checks may fire - a payload
+    that both delivers items AND carries a count must pass."""
+    payload = {"source": "calendar", "events_catchup_count": 25, "note": "truncated"}
+    assert normalize._claims_content_but_empty("calendar", payload, [{"source": "calendar"}]) is None
+
+
 def test_process_file_routes_teams_stub_to_failure_not_silent_success(tmp_path):
     f = tmp_path / "stub.json"
     f.write_text(json.dumps({"source": "teams_chat", "chat_id": "c1",

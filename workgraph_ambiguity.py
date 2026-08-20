@@ -242,6 +242,31 @@ def _read_project_evidence(project_id: str) -> tuple[list, list]:
         conn.close()
 
 
+def _read_state_incoherences(project_id: str) -> list:
+    """Read-only. Claims on this project flagged as inconsistent with their own
+    issue's recorded state - currently the 'issue is closed but this claim is
+    still open' case produced by the existing reconciliation sweep.
+
+    NOTE this is NOT the blueprint's contradiction signal. See the long note on
+    compute_state_coherence for why they are different measurements.
+    """
+    conn = ws._connect()
+    try:
+        rows = conn.execute(
+            """SELECT p.claim_id, p.evidence_type, p.evidence_note, c.issue_id
+                 FROM pending_claim_suggestions p
+                 JOIN claims c ON c.id = p.claim_id
+                 JOIN work_objects w ON w.id = c.issue_id
+                WHERE w.parent_id = ?
+                  AND p.suggestion_kind = 'contradiction'
+                  AND p.status = 'pending'""",
+            (project_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
 def _read_reference_anchors(project_id: str) -> set:
     """Active reference-type identity anchors reachable from this project."""
     conn = ws._connect()
@@ -322,6 +347,42 @@ def compute_referential_ambiguity(raw_items: list, resolved_refs: set) -> Compon
     )
 
 
+def compute_state_coherence(claims: list, incoherences: list) -> Component:
+    """Task #412. NOT a blueprint component - a tenth, Jasper-specific one,
+    named honestly rather than borrowing a blueprint label it does not match.
+
+    WHY IT IS SEPARATE. The blueprint's `contradiction` evaluates all
+    declarative statement PAIRS and asks whether two statements conflict
+    semantically ("the contract renews Oct 31" vs "we're covered through
+    December"). Jasper has no source for that: claim_edges is empty, and
+    deliberately so - the store's own schema comment records that none of its
+    four edge types has a production writer, following an explicit "don't build
+    a producer nothing calls yet" discipline, with Evidence Assembly's conflict
+    detection named as the intended future producer. That has not changed, so
+    `contradiction` and `internal_consistency` still abstain.
+
+    WHAT IS REAL. A different inconsistency IS already detected, populated, and
+    deterministic: an issue recorded as closed while claims on it remain open.
+    43 such rows exist live, all evidence_type='issue_closed_with_open_claims'.
+    That is a genuine incoherence in the graph's own recorded state - and it is
+    directly actionable, because each one is a precise question ("this issue is
+    closed but three commitments on it are still open - did they complete, or
+    should the issue reopen?").
+
+    Reported as COHERENCE (1.0 = coherent), inverted by the aggregate like
+    freshness. Denominator is claims, not pairs - stated plainly here so nobody
+    later mistakes this for the blueprint's C/P ratio.
+    """
+    if not claims:
+        return Component.abstain("state_coherence", "no claims on this project")
+    flagged = {r["claim_id"] for r in incoherences}
+    issues = sorted({r["issue_id"] for r in incoherences})
+    return Component.measured(
+        "state_coherence", 1.0 - (len(flagged) / len(claims)),
+        n_claims=len(claims), n_flagged=len(flagged), issues=issues[:20],
+    )
+
+
 def _abstaining_components() -> list[Component]:
     """The six components with no viable data source today.
 
@@ -346,14 +407,22 @@ def _abstaining_components() -> list[Component]:
         ),
         Component.abstain(
             "contradiction",
-            "claim_edges is empty - the #314 reconciliation taxonomy has never "
-            "produced an edge, so 0.0 would falsely mean 'no contradictions'.",
-            unblocked_by="#412",
+            "no source for pairwise SEMANTIC contradiction. claim_edges is empty "
+            "BY DESIGN (the store's schema comment records that none of its four "
+            "edge types has a production writer, deliberately, with Evidence "
+            "Assembly conflict detection as the intended future producer), so 0.0 "
+            "would falsely mean 'no contradictions found'. The 43 live "
+            "'contradiction' claim-suggestions are a DIFFERENT thing - lifecycle "
+            "state incoherence - and are measured as state_coherence instead of "
+            "being mislabelled as this.",
+            unblocked_by="Evidence Assembly conflict detection (Section 8.1)",
         ),
         Component.abstain(
             "internal_consistency",
-            "derived from contradiction, which has no data source. See #412.",
-            unblocked_by="#412",
+            "blueprint-defined as 1 - contradiction(context only); inherits "
+            "contradiction's missing source. See state_coherence for the real, "
+            "narrower signal Jasper does have.",
+            unblocked_by="Evidence Assembly conflict detection (Section 8.1)",
         ),
         Component.abstain(
             "semantic_polysemy", "requires embeddings; no sanctioned provider.",
@@ -401,6 +470,17 @@ def localize_gaps(components: list, raw_items: list, claims: list) -> list:
             fillable_by="ask the people involved whether anything has changed",
         ))
 
+    coh = by_name.get("state_coherence")
+    if coh and not coh.abstained and coh.detail.get("n_flagged"):
+        for issue_id in coh.detail.get("issues", []):
+            gaps.append(Gap(
+                kind="closed_issue_with_open_claims",
+                what=(f"issue {issue_id} is recorded as closed while claims on it are "
+                      f"still open - its recorded state contradicts its own contents"),
+                fillable_by="confirm whether those claims completed, or reopen the issue",
+                ref=issue_id,
+            ))
+
     if claims and not raw_items:
         gaps.append(Gap(
             kind="claims_without_evidence",
@@ -435,11 +515,12 @@ def measure_project(
     components = [
         compute_freshness(raw_items, now_ts),
         compute_referential_ambiguity(raw_items, resolved_refs),
+        compute_state_coherence(claims, _read_state_incoherences(project_id)),
     ] + _abstaining_components()
 
     # Components reported as goodness must be inverted to contribute to an
     # ambiguity (badness) aggregate.
-    inverted = {"freshness"}
+    inverted = {"freshness", "state_coherence"}
     contributions = [
         (1.0 - c.value) if c.name in inverted else c.value
         for c in components

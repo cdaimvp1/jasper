@@ -235,3 +235,57 @@ def test_signal_dict_roundtrip_shape():
     assert d["measured"] == ["freshness"]
     assert d["abstained"] == []
     assert d["gaps"][0]["fillable_by"] == "f"
+
+
+# ------------------------------------------------- state coherence (#412)
+
+def test_state_coherence_is_one_when_nothing_flagged():
+    c = amb.compute_state_coherence([{"id": 1}, {"id": 2}], [])
+    assert c.value == pytest.approx(1.0)
+    assert c.detail["n_flagged"] == 0
+
+
+def test_state_coherence_drops_with_flagged_claims():
+    claims = [{"id": i} for i in range(1, 5)]
+    inc = [{"claim_id": 1, "issue_id": "marc-1", "evidence_type": "issue_closed_with_open_claims",
+            "evidence_note": "x"}]
+    c = amb.compute_state_coherence(claims, inc)
+    assert c.value == pytest.approx(0.75)
+    assert c.detail["issues"] == ["marc-1"]
+
+
+def test_state_coherence_counts_distinct_claims_not_rows():
+    claims = [{"id": 1}, {"id": 2}]
+    inc = [{"claim_id": 1, "issue_id": "marc-1"}, {"claim_id": 1, "issue_id": "marc-1"}]
+    assert amb.compute_state_coherence(claims, inc).value == pytest.approx(0.5)
+
+
+def test_state_coherence_abstains_with_no_claims():
+    assert amb.compute_state_coherence([], []).abstained
+
+
+def test_contradiction_still_abstains_and_says_why_it_is_not_state_coherence():
+    """#412's real finding: claim_edges is empty BY DESIGN, and the 43 live
+    'contradiction' suggestions are lifecycle incoherence, not semantic
+    contradiction. The abstention reason must keep those distinct so nobody
+    later wires the wrong signal into the wrong component."""
+    c = next(x for x in amb._abstaining_components() if x.name == "contradiction")
+    assert c.abstained
+    assert "BY DESIGN" in c.abstained_reason
+    assert "state_coherence" in c.abstained_reason
+
+
+def test_closed_issue_with_open_claims_becomes_a_named_gap():
+    claims = [{"id": 1}, {"id": 2}]
+    inc = [{"claim_id": 1, "issue_id": "marc-4221"}]
+    comps = [amb.compute_state_coherence(claims, inc)]
+    gaps = amb.localize_gaps(comps, [], claims)
+    g = next(g for g in gaps if g.kind == "closed_issue_with_open_claims")
+    assert g.ref == "marc-4221"
+    assert g.fillable_by
+
+
+def test_no_coherence_gap_when_fully_coherent():
+    comps = [amb.compute_state_coherence([{"id": 1}], [])]
+    gaps = amb.localize_gaps(comps, [], [{"id": 1}])
+    assert not any(g.kind == "closed_issue_with_open_claims" for g in gaps)

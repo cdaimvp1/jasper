@@ -1129,3 +1129,56 @@ def test_build_claims_text_stays_within_budget_when_it_can():
     text, shown, omitted = p2._build_claims_text(claims, char_budget=2000)
     assert len(text) <= 2000
     assert omitted > 0
+
+
+# --- extraction catch-up sweep (task #387) ----------------------------------
+
+def test_sweep_defaults_to_dry_run(monkeypatch):
+    """Calling this without thinking must cost nothing. Spending requires an
+    explicit dry_run=False - a decision someone makes on purpose."""
+    monkeypatch.setattr(p2, "find_projects_needing_extraction", lambda limit=None: [])
+    assert p2.run_extraction_catchup_sweep()["dry_run"] is True
+
+
+def test_sweep_respects_the_per_cycle_limit(monkeypatch):
+    calls = {}
+
+    def fake_due(limit=None):
+        calls["limit"] = limit
+        return [{"project_id": f"proj-{i}", "marker": "m"} for i in range(limit or 0)]
+
+    monkeypatch.setattr(p2, "find_projects_needing_extraction", fake_due)
+    r = p2.run_extraction_catchup_sweep(limit=4)
+    assert calls["limit"] == 4
+    assert r["due_considered"] == 4
+
+
+def test_sweep_never_spends_in_dry_run(monkeypatch):
+    """The LLM entry point must not be reached at all when dry_run is on."""
+    monkeypatch.setattr(p2, "find_projects_needing_extraction",
+                        lambda limit=None: [{"project_id": "proj-1", "marker": "m"}])
+
+    def boom(*a, **k):
+        raise AssertionError("run_project_extraction must not be called in a dry run")
+
+    monkeypatch.setattr(p2, "run_project_extraction", boom)
+    r = p2.run_extraction_catchup_sweep(limit=1)
+    assert r["extracted"][0]["would_extract"] is True
+
+
+def test_sweep_isolates_a_failing_project(monkeypatch):
+    """One project's failure must never abort the sweep - same discipline as
+    every other sweep in this codebase."""
+    monkeypatch.setattr(p2, "find_projects_needing_extraction",
+                        lambda limit=None: [{"project_id": "bad", "marker": "m"},
+                                            {"project_id": "good", "marker": "m"}])
+
+    def flaky(pid, **k):
+        if pid == "bad":
+            raise RuntimeError("boom")
+        return {"project_id": pid, "action": "extracted"}
+
+    monkeypatch.setattr(p2, "run_project_extraction", flaky)
+    r = p2.run_extraction_catchup_sweep(limit=2, dry_run=False)
+    assert len(r["errors"]) == 1 and r["errors"][0]["project_id"] == "bad"
+    assert any(e.get("project_id") == "good" for e in r["extracted"])

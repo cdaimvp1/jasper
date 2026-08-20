@@ -794,6 +794,103 @@ Output nothing else.
 """
 
 
+#: Per-cycle ceiling on extraction passes for the catch-up sweep (#387).
+#: Bounded on purpose: an unbounded first run would fire on every project whose
+#: extraction marker differs, and this is the one sweep in this module that
+#: spends real LLM money per item. The backlog drains over consecutive cycles
+#: instead of arriving as one large bill.
+_EXTRACTION_SWEEP_LIMIT = 25
+
+
+def find_projects_needing_extraction(limit: Optional[int] = None) -> list:
+    """Task #387: projects whose claims have CHANGED since extraction last
+    looked at them. Deterministic, read-only, no LLM.
+
+    CHANGE-triggered, not level-triggered, and that distinction is the whole
+    finding behind this task. The obvious design - "fire when a project has
+    more than N uncited claims" - was measured against the live corpus on
+    2026-08-20 and is wrong: of 5,642 claims sitting uncited on raw clusters,
+    4,952 (88%) are on projects a real model had just read and deliberately
+    declined to cite. Leftover ambient claims staying on a cluster is the
+    normal resting state, not a backlog. A level trigger would therefore
+    re-pay for ~635 already-declined projects every single cycle to reproduce
+    the same "already covered" verdict.
+
+    So the comparison is extracted_from_marker (#402) against the project's
+    current evidence fingerprint. A NULL marker means never looked, which is
+    correctly due. Note this reads extraction's OWN marker, never
+    synthesized_from_marker - see #402 for why conflating them starves
+    curator's narrative pass.
+    """
+    # Only projects that actually HAVE claims. compute_evidence_marker returns
+    # a non-None fingerprint even for a claimless project, so without this the
+    # sweep burns slots on projects where run_project_extraction can only
+    # return "no_claims_yet" - measured 2026-08-20: 965 "due" without this
+    # filter versus 459 real ones, i.e. more than half the queue was noise.
+    # (Those calls cost no LLM money, since run_project_extraction returns
+    # before the model call when there are no claims - but they do consume the
+    # per-cycle limit, which is the scarce thing here.)
+    with_claims = ws.list_project_ids_with_claims()
+
+    due = []
+    for pid in with_claims:
+        current = workgraph_synthesis.compute_evidence_marker("project", pid)
+        if current is None:
+            continue  # nothing to extract from
+        if ws.get_extraction_marker("project", pid) != current:
+            due.append({"project_id": pid, "marker": current})
+            if limit is not None and len(due) >= limit:
+                break
+    return due
+
+
+def run_extraction_catchup_sweep(limit: int = _EXTRACTION_SWEEP_LIMIT,
+                                 *, model: Optional[str] = None,
+                                 dry_run: bool = True) -> dict:
+    """Task #387. THE ONE SWEEP IN THIS MODULE THAT SPENDS LLM MONEY.
+
+    Defaults to dry_run=True deliberately: calling this without thinking
+    reports what it WOULD do and costs nothing. A caller must pass
+    dry_run=False to actually spend, which is a decision someone has to make
+    on purpose.
+
+    For each due project (see find_projects_needing_extraction), consults
+    workgraph_ambiguity.forecast_next_pass first and skips projects the
+    forecast says are spinning or carry an unresolved conflict - a free
+    deterministic check that can prevent a paid call.
+
+    NOTE the forecast is currently INERT: ambiguity_observations is empty, so
+    every project returns "no_history" -> a first pass is warranted, and
+    nothing gets pruned. That is correct rather than useless - it becomes a
+    real saving as history accumulates, and wiring it now means the saving
+    arrives without another change here.
+    """
+    import workgraph_ambiguity as amb  # local import: keeps this module importable without it
+
+    due = find_projects_needing_extraction(limit=limit)
+    skipped, extracted, errors = [], [], []
+    for entry in due:
+        pid = entry["project_id"]
+        history = ws.list_ambiguity_observations("project", pid)
+        signal = amb.measure_project(pid)
+        forecast = amb.forecast_next_pass(history, signal.ambiguity_score)
+        if forecast.recommendation in ("spinning", "surface_conflict"):
+            skipped.append({"project_id": pid, "why": forecast.recommendation,
+                            "reason": forecast.reason})
+            continue
+        if dry_run:
+            extracted.append({"project_id": pid, "would_extract": True,
+                              "forecast": forecast.recommendation})
+            continue
+        try:
+            extracted.append(run_project_extraction(pid, model=model))
+        except Exception as e:  # never let one project abort the sweep
+            errors.append({"project_id": pid, "error": str(e)})
+
+    return {"dry_run": dry_run, "due_considered": len(due), "limit": limit,
+            "extracted": extracted, "skipped_by_forecast": skipped, "errors": errors}
+
+
 def _build_claims_text(all_claims: list, char_budget: int = _MAX_TEXT_CHARS) -> tuple:
     """Task #408. Assembles the CLAIMS block whole-claim-at-a-time and returns
     (text, shown_claims, n_omitted).

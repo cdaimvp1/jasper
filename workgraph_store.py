@@ -10577,6 +10577,27 @@ def set_derived_title(entity_type: str, entity_id: str, derived_title: str) -> N
             conn.close()
 
 
+def list_project_ids_with_claims() -> list[str]:
+    """Project ids that have at least one claim on some member work object.
+
+    Read-only. Used by #387's catch-up sweep to avoid queueing projects where
+    extraction can only return "no_claims_yet" - those cost no LLM call but do
+    consume the sweep's per-cycle limit, which is the scarce resource.
+    """
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            """SELECT DISTINCT w.parent_id AS pid
+                 FROM claims c
+                 JOIN work_objects w ON w.id = c.issue_id
+                WHERE w.parent_id IS NOT NULL
+                ORDER BY w.parent_id"""
+        ).fetchall()
+        return [r["pid"] for r in rows]
+    finally:
+        conn.close()
+
+
 def record_ambiguity_observation(
     *, entity_type: str, entity_id: str, ambiguity_score: Optional[float],
     measured_at: float, evidence_marker: Optional[str] = None,

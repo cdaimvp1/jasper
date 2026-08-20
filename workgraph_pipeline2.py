@@ -912,8 +912,19 @@ def run_project_extraction(project_id: str, *, model: Optional[str] = None) -> d
         already_cited.update(claim_ids)
         created.append(result["issue_id"])
 
+    marker = workgraph_synthesis.compute_evidence_marker("project", project_id)
+
+    # Task #402: record that extraction LOOKED, on every successful pass -
+    # including a legitimate zero-issue "everything here is already covered"
+    # verdict, which frequently comes back with no SUMMARY line. This is
+    # extraction's OWN marker; it deliberately does not touch
+    # synthesized_from_marker, so it can never make this project read
+    # "already synthesized" to curator's staleness check (see this function's
+    # docstring above for why that starvation matters, and the column's
+    # schema comment in workgraph_store.py for the full reasoning).
+    ws.record_extraction_marker("project", project_id, marker)
+
     if parsed["summary"]:
-        marker = workgraph_synthesis.compute_evidence_marker("project", project_id)
         ws.upsert_synthesis(
             entity_type="project", entity_id=project_id, summary=parsed["summary"],
             next_steps_json=json.dumps([]), suggested_actions_json=json.dumps([]),

@@ -990,6 +990,28 @@ def init_workgraph() -> None:
                 conn.execute("ALTER TABLE synthesis ADD COLUMN estimated_completion TEXT")
             except sqlite3.OperationalError:
                 pass  # already added by a prior init_workgraph() call
+            try:
+                # Task #402: extraction's OWN staleness marker, deliberately separate
+                # from synthesized_from_marker above.
+                #
+                # One column was serving two consumers asking different questions:
+                # curator's "does this project need a fresh narrative summary?" and
+                # claims->issue citation's "have this project's claims been reviewed
+                # for citation since revision N?" Satisfying one starves the other -
+                # the same class of conflation task #93 fixed for D9/D10, and exactly
+                # the hazard run_project_extraction's own docstring records ("a project
+                # could permanently read 'already synthesized' the moment this
+                # ungrounded pass ran, starving curator's real pass").
+                #
+                # Concretely: an extraction pass that returns a legitimate zero-issue
+                # "everything here is already covered" verdict often comes back terse
+                # with no SUMMARY line, so it wrote no marker at all and the project
+                # read permanently stale. Harmless while extraction only fires once per
+                # grouping, but on the recurring cadence of #387 it means re-paying for
+                # the same already-covered verdict every cycle.
+                conn.execute("ALTER TABLE synthesis ADD COLUMN extracted_from_marker TEXT")
+            except sqlite3.OperationalError:
+                pass  # already added by a prior init_workgraph() call
 
             # --- Phase 3 (design doc Section 9): claims materialize the ask/
             # decision/commitment/date fields already sitting in
@@ -10528,6 +10550,58 @@ def set_derived_title(entity_type: str, entity_id: str, derived_title: str) -> N
             )
         finally:
             conn.close()
+
+
+def record_extraction_marker(entity_type: str, entity_id: str, marker: str) -> None:
+    """Task #402: records that a claims->issue extraction pass HAS looked at
+    this entity up to `marker`, without touching synthesized_from_marker.
+
+    Deliberately different from touch_synthesis_marker in two ways, both of
+    which matter:
+
+      - it writes extracted_from_marker, NOT synthesized_from_marker, so an
+        extraction pass can never make a project read "already synthesized"
+        to curator's staleness check and starve curator's real narrative pass
+        (the hazard run_project_extraction's own docstring records);
+      - it INSERTs when no synthesis row exists yet, rather than silently
+        no-opping. touch_synthesis_marker is a bare UPDATE and is correct to
+        no-op, because a never-synthesized entity SHOULD stay material for
+        curator. Extraction has the opposite requirement: a brand-new project
+        whose first extraction found nothing new to cite must still record
+        that it was looked at, or #387's recurring sweep re-pays for it every
+        cycle forever.
+
+    Leaves summary/next_steps/derived_title strictly alone.
+    """
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                """INSERT INTO synthesis (entity_type, entity_id, extracted_from_marker)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(entity_type, entity_id) DO UPDATE SET
+                       extracted_from_marker = excluded.extracted_from_marker""",
+                (entity_type, entity_id, marker),
+            )
+        finally:
+            conn.close()
+
+
+def get_extraction_marker(entity_type: str, entity_id: str) -> Optional[str]:
+    """The marker a claims->issue extraction pass last recorded for this
+    entity, or None if none ever has. #387's recurring sweep compares this
+    against workgraph_synthesis.compute_evidence_marker to decide whether new
+    claims have arrived since the last look - a None means never looked, which
+    is correctly treated as due."""
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT extracted_from_marker FROM synthesis WHERE entity_type = ? AND entity_id = ?",
+            (entity_type, entity_id),
+        ).fetchone()
+        return row["extracted_from_marker"] if row else None
+    finally:
+        conn.close()
 
 
 # --- attachments -------------------------------------------------------------

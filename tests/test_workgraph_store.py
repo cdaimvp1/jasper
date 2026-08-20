@@ -3999,3 +3999,67 @@ def test_find_project_ids_by_recipient_emails_excludes_closed_projects(ws_db):
     ws_db.link_party_to_issue(issue_id, "party-2")
 
     assert ws_db.find_project_ids_by_recipient_emails(["rep@acme.com"]) == []
+
+
+# --- extraction marker (task #402) ------------------------------------------
+
+def test_extraction_marker_inserts_when_no_synthesis_row_exists(ws_db):
+    """The whole reason this is not touch_synthesis_marker: that one is a bare
+    UPDATE and no-ops with no row. A brand-new project whose FIRST extraction
+    found nothing new to cite must still record that it was looked at, or
+    #387's recurring sweep re-pays for it every cycle forever."""
+    assert ws_db.get_extraction_marker("project", "proj-new") is None
+    ws_db.record_extraction_marker("project", "proj-new", "rev:7")
+    assert ws_db.get_extraction_marker("project", "proj-new") == "rev:7"
+
+
+def test_extraction_marker_advances_on_repeat(ws_db):
+    ws_db.record_extraction_marker("project", "proj-x", "rev:1")
+    ws_db.record_extraction_marker("project", "proj-x", "rev:9")
+    assert ws_db.get_extraction_marker("project", "proj-x") == "rev:9"
+
+
+def test_extraction_marker_never_touches_synthesized_from_marker(ws_db):
+    """THE point of #402. One column was serving two consumers asking
+    different questions; satisfying one starved the other. An extraction pass
+    must never make a project read 'already synthesized' to curator."""
+    ws_db.upsert_synthesis(
+        entity_type="project", entity_id="proj-y", summary="curator's real summary",
+        next_steps_json="[]", suggested_actions_json="[]",
+        synthesized_from_marker="rev:3",
+    )
+    ws_db.record_extraction_marker("project", "proj-y", "rev:11")
+
+    conn = ws_db._connect()
+    row = conn.execute(
+        "SELECT summary, synthesized_from_marker, extracted_from_marker FROM synthesis "
+        "WHERE entity_type='project' AND entity_id='proj-y'"
+    ).fetchone()
+    conn.close()
+    assert row["synthesized_from_marker"] == "rev:3"       # untouched
+    assert row["extracted_from_marker"] == "rev:11"        # advanced
+    assert row["summary"] == "curator's real summary"      # prose preserved
+
+
+def test_extraction_marker_does_not_clobber_derived_title(ws_db):
+    ws_db.set_derived_title("project", "proj-z", "UneeQ pricing negotiation")
+    ws_db.record_extraction_marker("project", "proj-z", "rev:2")
+    conn = ws_db._connect()
+    row = conn.execute(
+        "SELECT derived_title, extracted_from_marker FROM synthesis "
+        "WHERE entity_type='project' AND entity_id='proj-z'"
+    ).fetchone()
+    conn.close()
+    assert row["derived_title"] == "UneeQ pricing negotiation"
+    assert row["extracted_from_marker"] == "rev:2"
+
+
+def test_get_extraction_marker_is_none_for_never_extracted_entity(ws_db):
+    """None must mean 'never looked', which #387 correctly treats as due -
+    distinct from a stored marker that merely equals the current fingerprint."""
+    ws_db.upsert_synthesis(
+        entity_type="project", entity_id="proj-q", summary="s",
+        next_steps_json="[]", suggested_actions_json="[]",
+        synthesized_from_marker="rev:5",
+    )
+    assert ws_db.get_extraction_marker("project", "proj-q") is None

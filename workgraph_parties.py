@@ -95,10 +95,67 @@ def _looks_like_email(s: str) -> bool:
     return domain not in NON_PERSON_DOMAINS
 
 
+#: Second-to-last labels that are part of a multi-part public suffix rather
+#: than a company name, so the registrable label sits one further left
+#: ("example.co.uk" -> example, not co). Deliberately a short explicit list,
+#: not a real Public Suffix List: this repo installs packages only from the
+#: enterprise mirror, and an incomplete-but-honest heuristic that documents
+#: its own limit is better here than a new dependency. A domain under a
+#: suffix not listed here degrades to the old behaviour for that suffix
+#: only - it does not fail.
+_MULTIPART_SUFFIX_LABELS = {"co", "com", "net", "org", "gov", "edu", "ac", "or", "ne"}
+
+
 def _company_from_domain(domain: str) -> str:
     """A readable guess only - e.g. 'acmecorp.com' -> 'Acmecorp'. Not
-    authoritative, just better than a bare domain string in the UI."""
-    label = domain.split(".")[0]
+    authoritative, just better than a bare domain string in the UI.
+
+    Task #415 (2026-08-21): this used to take domain.split(".")[0], the
+    LEFTMOST label, which is correct only when there is no subdomain. On real
+    data it produced company names that were not companies:
+        joanna.sykes@us.dlapiper.com -> "Us"      (should be DLA Piper)
+        deltaairlines@t.delta.com    -> "T"       (should be Delta)
+        deltaairlines@o.delta.com    -> "O"
+        ...@alumni.iu.edu            -> "Alumni"
+    Measured live: 71 work_objects carried a supplier value produced this way,
+    and because these feed dp-fasttrack-supplier they are a real matching
+    signal for EVERY source (workgraph_projects._matched_data_points' supplier
+    point), not just a cosmetic label. 34 work_objects shared the value "us".
+
+    Now takes the REGISTRABLE label - the one immediately left of the public
+    suffix - so a subdomain no longer masquerades as the company. Single-label
+    domains are unaffected, which matters: "you.com" -> You and "ind.com" ->
+    Ind are CORRECT and were wrongly on my first junk list; this must not
+    "fix" them into anything else.
+
+    Note the grouping effect is a relabel, not a regroup: every bad value
+    mapped 1:1 to one domain, so the same items stay together, now under the
+    real company name.
+
+    MEASURED against all 158 live party domains: 18 labels change, 16 of them
+    clearly for the better (Us->Dlapiper, T/O->Delta, Mail->Anthropic,
+    Email->Zs, Smtp/Network->Lilly, Ansmtp->Ariba, Camail/Eumail->Docusign,
+    Mg->Ironcladapp, Reply->Nintex, Tc->Rocketmortgage, Mailva->Evite,
+    Online->Procaresoftware, Alumni->Iu).
+
+    TWO KNOWN REGRESSIONS, recorded rather than hidden, because the heuristic
+    above genuinely cannot resolve them without a real Public Suffix List:
+      - cpcsc.k12.in.us  'Cpcsc' -> 'In'   ("k12.in.us" is itself a suffix;
+                                            the district WAS the right answer)
+      - engage.mail.microsoft 'Engage' -> 'Mail'  (brand TLD; both old and new
+                                            are wrong, new is no better)
+    Both are single non-supplier senders (a school district and a Microsoft
+    marketing relay), so the net is strongly positive. Deliberately NOT
+    special-cased: one-off entries for these would be whack-a-mole against
+    the PSL, and a wrong label on a non-counterparty costs nothing that the
+    16 real fixes don't repay."""
+    parts = [p for p in domain.split(".") if p]
+    if len(parts) <= 2:
+        label = parts[0] if parts else ""
+    elif parts[-2] in _MULTIPART_SUFFIX_LABELS:
+        label = parts[-3]
+    else:
+        label = parts[-2]
     return label.replace("-", " ").title()
 
 

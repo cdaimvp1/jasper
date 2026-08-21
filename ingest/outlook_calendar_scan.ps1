@@ -62,6 +62,14 @@ try {
     $filter = "[Start] >= '" + $windowStart.ToString("g") + "' AND [Start] <= '" + $windowEnd.ToString("g") + "'"
     $restricted = $items.Restrict($filter)
 
+    # DN/name -> SMTP cache. Resolving an AddressEntry goes out to AD, and the
+    # same people recur across the whole window (the calendar owner appears on
+    # literally every event), so without this the scan makes thousands of
+    # lookups and exceeds its timeout - measured: a 1,302-event window did not
+    # finish in 540s uncached. An empty string is cached as "tried and failed"
+    # so a genuinely unresolvable recipient is not retried on every occurrence.
+    $smtpCache = @{}
+
     $events = @()
     $count = 0
     foreach ($appt in $restricted) {
@@ -70,17 +78,84 @@ try {
             # Recipients -> plain address list, matching what the relay shape
             # used (attendees is a flat list of strings; attendees_detailed
             # carries the richer form when available - see normalize.py E7).
+            # CORRECTION (task #413, 2026-08-21): this used to take $r.Address
+            # directly. For an INTERNAL Exchange recipient that returns the
+            # X.500 legacyExchangeDN, not an SMTP address - measured live, all
+            # 1,302 scanned events carried attendees like
+            # "/o=ExchangeLabs/ou=Exchange Administrative Group
+            # (FYDIBOHF23SPDLT)/cn=Recipients/cn=3c7639ae...".
+            #
+            # That broke two things downstream. (1) workgraph_signals.
+            # is_personal_calendar_block compares the organizer against the
+            # participants as strings, so a solo hold whose organizer is
+            # "Marc Lane" and whose only attendee is his own X.500 DN never
+            # matched - which is why a 166-event "HOLD" series and 160 more
+            # School Drop off/Pick up events sailed through the noise gate
+            # (only 62 of 1,302 were filtered). (2) A DN has no parseable
+            # domain, so internal party/affiliation resolution got nothing.
+            # External attendees were unaffected (non-Exchange recipients do
+            # return real SMTP in .Address), which is why the external-company
+            # counts still looked sane.
+            #
+            # Resolve through AddressEntry to real SMTP, falling back to
+            # .Address then .Name so a recipient we cannot resolve is still
+            # reported rather than dropped.
             $attendees = @()
             $attendeesDetailed = @()
             foreach ($r in $appt.Recipients) {
                 $addr = $null
-                try { $addr = $r.Address } catch { $addr = $null }
+                $rawAddr = $null
+                try { $rawAddr = $r.Address } catch { $rawAddr = $null }
+                $cacheKey = $(if ($rawAddr) { $rawAddr } else { $r.Name })
+                if ($cacheKey -and $smtpCache.ContainsKey($cacheKey)) {
+                    $addr = $smtpCache[$cacheKey]
+                } else {
+                    try {
+                        $ae = $r.AddressEntry
+                        if ($ae) {
+                            try {
+                                $eu = $ae.GetExchangeUser()
+                                if ($eu) { $addr = $eu.PrimarySmtpAddress }
+                            } catch { }
+                            if (-not $addr) {
+                                try { $addr = $ae.GetContact().Email1Address } catch { }
+                            }
+                            if (-not $addr) {
+                                # PR_SMTP_ADDRESS - works for recipient types the
+                                # typed accessors above do not cover.
+                                try { $addr = $ae.PropertyAccessor.GetProperty(
+                                    "http://schemas.microsoft.com/mapi/proptag/0x39FE001E") } catch { }
+                            }
+                        }
+                    } catch { }
+                    if ($cacheKey) { $smtpCache[$cacheKey] = $addr }
+                }
+                if (-not $addr) { $addr = $rawAddr }
                 if (-not $addr) { $addr = $r.Name }
                 if ($addr) {
                     $attendees += $addr
                     $attendeesDetailed += @{ name = $r.Name; address = $addr }
                 }
             }
+
+            # The organizer is a DISPLAY NAME ($appt.Organizer), which cannot be
+            # compared against SMTP attendees. Resolve it to an address too, so
+            # is_personal_calendar_block has like-for-like values; keep the name
+            # separately since normalize.py's series key uses it.
+            $organizerAddr = $null
+            try {
+                $ae = $appt.GetOrganizer()
+                if ($ae) {
+                    try {
+                        $eu = $ae.GetExchangeUser()
+                        if ($eu) { $organizerAddr = $eu.PrimarySmtpAddress }
+                    } catch { }
+                    if (-not $organizerAddr) {
+                        try { $organizerAddr = $ae.PropertyAccessor.GetProperty(
+                            "http://schemas.microsoft.com/mapi/proptag/0x39FE001E") } catch { }
+                    }
+                }
+            } catch { }
 
             $isRecurring = $false
             try { $isRecurring = [bool]$appt.IsRecurring } catch { $isRecurring = $false }
@@ -101,7 +176,10 @@ try {
                 id                   = $appt.EntryID
                 series_id            = $(try { $appt.GlobalAppointmentID } catch { $null })
                 subject              = $appt.Subject
-                organizer            = $appt.Organizer
+                # SMTP when resolvable, display name otherwise - see the
+                # organizer-resolution note above.
+                organizer            = $(if ($organizerAddr) { $organizerAddr } else { $appt.Organizer })
+                organizer_name       = $appt.Organizer
                 attendees            = $attendees
                 attendees_detailed   = $attendeesDetailed
                 start                = @{ dateTime = $appt.Start.ToString("yyyy-MM-ddTHH:mm:ss"); timeZone = "local" }

@@ -49,3 +49,33 @@ def test_machine_signal_domain_never_gets_a_company_name():
     assert workgraph_signals._is_machine_signal_domain("no-reply@ansmtp.ariba.com") is True
     assert workgraph_signals._is_machine_signal_domain("EmailReminderService@concursolutions.com") is True
     assert workgraph_signals._is_machine_signal_domain("real.person@acme.com") is False
+
+
+# --- Task #415 Bug A: registrable label, not the leftmost -------------------
+
+def test_company_from_domain_uses_registrable_label_not_subdomain():
+    """The real defect: a subdomained sender yielded the SUBDOMAIN as the
+    company name, and because these feed dp-fasttrack-supplier they are a
+    live matching signal, not a cosmetic label. 34 work_objects shared the
+    value "us" (all from us.dlapiper.com)."""
+    assert wp._company_from_domain("us.dlapiper.com") == "Dlapiper"
+    assert wp._company_from_domain("t.delta.com") == "Delta"
+    assert wp._company_from_domain("o.delta.com") == "Delta"
+    assert wp._company_from_domain("mail.anthropic.com") == "Anthropic"
+    assert wp._company_from_domain("email.zs.com") == "Zs"
+
+
+def test_company_from_domain_keeps_single_label_domains_intact():
+    """Regression floor. "you.com" -> You and "ind.com" -> Ind are CORRECT;
+    I wrongly listed both as junk when first triaging #415 purely because
+    they were short. The fix must not "correct" them into anything else."""
+    assert wp._company_from_domain("you.com") == "You"
+    assert wp._company_from_domain("ind.com") == "Ind"
+    assert wp._company_from_domain("kinaxis.com") == "Kinaxis"
+    assert wp._company_from_domain("authenticx.com") == "Authenticx"
+
+
+def test_company_from_domain_handles_multipart_public_suffix():
+    """"example.co.uk" must not become "Co"."""
+    assert wp._company_from_domain("example.co.uk") == "Example"
+    assert wp._company_from_domain("foo.example.co.uk") == "Example"

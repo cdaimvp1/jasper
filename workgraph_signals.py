@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import re
 from typing import Optional
+from urllib.parse import unquote, urlparse
 
 import workgraph_store as ws
 
@@ -519,6 +520,100 @@ def cross_mention_match(text: str, known_companies: set) -> Optional[tuple]:
                 if keyword in window:
                     return company, keyword
             idx = lowered.find(company, idx + 1)
+    return None
+
+
+#: Task #414: shortest normalized company name this will match as a whole
+#: path segment or filename token. The live supplier vocabulary (228 distinct
+#: dp-fasttrack-supplier values, measured 2026-08-21) carries real short names
+#: worth keeping - esko, gong, moxo, skai - alongside domain-derived junk that
+#: is NOT a supplier at all: "you", "ind", "us", "qty", "mail", "name", "list".
+#: A floor of 4 keeps the former and drops every one of the latter except
+#: "list"/"name"/"mail" at exactly 4, which whole-token matching then makes
+#: near-harmless anyway (it takes a path segment or filename token that IS
+#: literally "list", not a filename that merely contains it).
+_DOC_PATH_MIN_COMPANY_LEN = 4
+
+#: Separators that break a SharePoint filename into whole tokens. Deliberately
+#: includes "." so an extension is its own token rather than fusing with the
+#: last word ("Sodalis_LILLY_PV1_SOW_Proposal.docx" -> ..., "proposal", "docx").
+_DOC_TOKEN_SPLIT_RE = re.compile(r"[^a-z0-9]+")
+
+
+def document_path_company_match(
+    name: Optional[str], web_url: Optional[str], known_companies: set
+) -> Optional[tuple]:
+    """Task #414 (2026-08-21): the one signal a SharePoint DOCUMENT actually
+    carries, for the standalone-FYI gate that today cannot see it at all.
+
+    THE MEASURED GAP. workgraph_classify._fyi_item_has_a_real_signal decides
+    whether an unmatched FYI-EVIDENCE item is real enough to earn a cluster of
+    its own. Its three checks read a PR/PO reference, an external company on
+    the sender's or a participant's email domain, or Ariba fields on the
+    subject. A document row has from_actor NULL and participants [] by
+    construction (ingest/normalize.py::_process_sharepoint hardcodes both -
+    the SharePoint search payload carries no author field to populate them
+    from; verified against all 40 archived drop files, whose result keys are
+    only id/driveId/name/webUrl/lastModifiedDateTime/summary). So all three
+    checks are structurally dead for this source and all 100 live unlinked
+    SharePoint items failed the gate - not on judgment, on having no input.
+
+    WHAT IS REAL. The counterparty is in the path, as a whole segment, because
+    that is how the filing is organized: ".../Shared Documents/General/
+    Sodalis/Sodalis_LILLY_PV1_SOW_Proposal.docx", ".../Electronic Documents/
+    Litmus/...", ".../IT Contracts for AI Pilots/Veeva/...". It is often in
+    the filename as a whole token too.
+
+    WHY WHOLE-TOKEN EQUALITY, NOT SUBSTRING. A bare case-insensitive substring
+    search against this vocabulary is unusable: it contains "you", "ind",
+    "us", "quid", "sita", which hit inside "your", "index", "plus", "liquid",
+    and so on. Requiring the company to equal an ENTIRE path segment or an
+    ENTIRE filename token removes that whole class of false positive by
+    construction rather than by a tuned threshold. Note this is why it cannot
+    reuse cross_mention_match: that one requires relationship LANGUAGE
+    ("subcontract", "flow-down") within 200 chars, which is right for the
+    prime/sub bridge it was built for (#335) and absent from every filename.
+    Loosening it would break its deliberate narrowness; this is a sibling.
+
+    WHY THE BAR IS LOW AND NOT SCORED. Passing this gate does not merge the
+    document into anything. It buys the item a cluster of its own and
+    eligibility for the normal pass-2 data-point matching, which still has to
+    clear its own 2-point bar. So a false positive costs one extra singleton
+    cluster - which is materially the state these 100 items are in TODAY,
+    only visible instead of silently dropped - while a false negative keeps a
+    real supplier contract permanently invisible. The asymmetry is what
+    justifies a plain boolean here rather than a confidence number, and there
+    is deliberately no weighting: this reports WHICH name matched WHERE, and
+    the caller records that verbatim.
+
+    Returns (company, where) with `where` one of "path_segment"/"filename",
+    or None. Never invents a name - only ever matches names the caller
+    already pulled from the existing supplier vocabulary."""
+    if not known_companies:
+        return None
+    candidates = {
+        c for c in known_companies
+        if c and len(c) >= _DOC_PATH_MIN_COMPANY_LEN
+    }
+    if not candidates:
+        return None
+
+    # Path segments first: a folder named exactly for the counterparty is the
+    # stronger and more deliberate of the two signals - somebody filed it there.
+    if web_url:
+        try:
+            path = unquote(urlparse(web_url).path)
+        except Exception:
+            path = web_url  # never let a malformed URL cost the filename check
+        for segment in path.split("/"):
+            seg = normalize_company_name(segment.strip())
+            if seg and seg in candidates:
+                return seg, "path_segment"
+
+    if name:
+        for token in _DOC_TOKEN_SPLIT_RE.split(name.lower()):
+            if token and token in candidates:
+                return token, "filename"
     return None
 
 

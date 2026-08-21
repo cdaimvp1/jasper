@@ -296,3 +296,62 @@ def test_is_automated_sender_covers_sap_alert_domain():
     a real @sap.com person address must stay a genuine party signal."""
     assert sig.is_automated_sender("sapcloudsupport@alerts.ondemand.com") is True
     assert sig.is_automated_sender("real.rep@sap.com") is False
+
+
+# --- Task #414: document path/filename supplier match (SharePoint) ----------
+
+def test_document_path_company_match_finds_whole_folder_segment():
+    """The real live shape: Marc's filing puts the counterparty in its own
+    folder, and the document itself carries no sender at all."""
+    hit = sig.document_path_company_match(
+        "Sodalis_LILLY_PV1_SOW_Proposal.docx",
+        "https://collab.lilly.com/sites/FY24LPSContracting/Shared%20Documents/General/Sodalis/Sodalis_LILLY_PV1_SOW_Proposal.docx",
+        {"sodalis", "kinaxis"})
+    assert hit == ("sodalis", "path_segment")
+
+
+def test_document_path_company_match_finds_whole_filename_token():
+    hit = sig.document_path_company_match(
+        "WO_Metaimpact CCC Immunology SO 013 19Mar2026 FE.pdf", None,
+        {"metaimpact"})
+    assert hit == ("metaimpact", "filename")
+
+
+def test_document_path_company_match_prefers_path_over_filename():
+    """A folder somebody deliberately filed this under outranks a filename
+    token, so the reported provenance is the stronger of the two."""
+    hit = sig.document_path_company_match(
+        "kinaxis_notes.docx",
+        "https://collab.lilly.com/sites/X/General/Sodalis/kinaxis_notes.docx",
+        {"sodalis", "kinaxis"})
+    assert hit == ("sodalis", "path_segment")
+
+
+def test_document_path_company_match_is_whole_token_never_substring():
+    """The guard that makes this safe against the live vocabulary's junk
+    entries ("you", "ind", "us", "quid", "sita" are all really in
+    dp-fasttrack-supplier). A substring matcher would fire on every one of
+    these; whole-token equality fires on none."""
+    known = {"you", "ind", "us", "quid", "sita", "list"}
+    assert sig.document_path_company_match("your_index_plus_liquid.xlsx", None, known) is None
+    assert sig.document_path_company_match(
+        "notes.docx", "https://collab.lilly.com/sites/Positional/Industry/notes.docx", known) is None
+
+
+def test_document_path_company_match_respects_min_company_length():
+    """Names below the floor are not searched for at all - "sap"/"pwc" as a
+    bare token is too generic to earn a cluster on its own."""
+    assert sig.document_path_company_match("sap_export.xlsx", None, {"sap"}) is None
+    assert sig.document_path_company_match("esko_order.pdf", None, {"esko"}) == ("esko", "filename")
+
+
+def test_document_path_company_match_abstains_with_no_vocabulary():
+    assert sig.document_path_company_match("Sodalis_SOW.docx", None, set()) is None
+    assert sig.document_path_company_match(None, None, {"sodalis"}) is None
+
+
+def test_document_path_company_match_survives_malformed_url():
+    """A bad webUrl must not cost the filename check - the whole point of
+    this function is that documents have little enough signal already."""
+    assert sig.document_path_company_match(
+        "Sodalis_SOW.docx", "::not a url::", {"sodalis"}) == ("sodalis", "filename")

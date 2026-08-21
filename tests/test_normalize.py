@@ -383,3 +383,26 @@ def test_process_sharepoint_thread_key_is_item_identity_not_folder():
     assert out[0]["thread_key"] != out[1]["thread_key"]
     assert out[0]["thread_key"] == out[0]["stable_key"] == "drive1:item1"
     assert out[1]["thread_key"] == out[1]["stable_key"] == "drive1:item2"
+
+
+def test_process_sharepoint_persists_web_url_in_meta():
+    """Task #414: webUrl used to be read and discarded, leaving meta_json
+    NULL - which is why every SharePoint item reached classify with no
+    signal of any kind. thread_key stays item identity (D18 above); the path
+    is carried as SIGNAL only."""
+    payload = {"source": "sharepoint", "results": [
+        {"id": "item1", "driveId": "drive1", "name": "Sodalis_SOW.docx",
+         "webUrl": "https://collab.lilly.com/sites/Foo/General/Sodalis/Sodalis_SOW.docx"},
+    ]}
+    out = normalize._process_sharepoint(payload)
+    assert out[0]["meta"]["web_url"] == (
+        "https://collab.lilly.com/sites/Foo/General/Sodalis/Sodalis_SOW.docx")
+    assert out[0]["meta"]["drive_id"] == "drive1"
+    assert out[0]["thread_key"] == "drive1:item1"  # D18 unchanged
+
+
+def test_process_sharepoint_meta_is_none_when_no_web_url():
+    """No fabricated meta - a result without webUrl or driveId carries none,
+    matching the normalizer's convention elsewhere."""
+    payload = {"source": "sharepoint", "results": [{"id": "i", "name": "a.xlsx"}]}
+    assert normalize._process_sharepoint(payload)[0]["meta"] is None

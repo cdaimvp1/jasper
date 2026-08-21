@@ -752,7 +752,7 @@ def recompute_issue_state(issue_id: str, *, new_item_is_actionable: bool = True)
     return target
 
 
-def _fyi_item_has_a_real_signal(item: dict) -> bool:
+def _fyi_item_has_a_real_signal(item: dict, known_companies: Optional[set] = None) -> bool:
     """Corrected pipeline Phase E (2026-08-05): the gate on whether a
     standalone FYI-EVIDENCE item (no thread/container match, no reference/
     jasper-ref/subject-match attach) is real signal worth a cluster of its
@@ -793,10 +793,33 @@ def _fyi_item_has_a_real_signal(item: dict) -> bool:
         stakeholder/product_service/amount vocabulary compute_work_object_
         signature already derives from an issue's title, here read straight
         off the raw item's own subject instead.
+      - a known supplier name as a whole folder segment or filename token on
+        a DOCUMENT (workgraph_signals.document_path_company_match) - added by
+        task #414, and only consulted when the caller supplies
+        `known_companies`; see below.
 
     Zero of the above is treated as real noise, same as before this phase -
     not every FYI-EVIDENCE item becomes a cluster, only ones carrying an
-    actual identifiable data point."""
+    actual identifiable data point.
+
+    Task #414 (2026-08-21): the fourth check exists because the first three
+    are structurally unreachable for source == "sharepoint". Measured live:
+    every one of 100 unlinked SharePoint raw_items failed this gate, and all
+    100 failed for want of any input at all - from_actor is NULL and
+    participants is [] for that source by construction (the search payload
+    carries no author field), so the domain check can never fire, and a
+    document filename does not parse as an Ariba subject. A supplier contract
+    was therefore indistinguishable from noise here. See
+    document_path_company_match's own docstring for why the match is
+    whole-token equality rather than a substring or a score.
+
+    `known_companies` is an OPTIONAL parameter rather than a lookup inside
+    this function on purpose: the paragraph above notes that classify_
+    affiliation is a pure domain heuristic with no DB read, which is what
+    makes this safe to call on a not-yet-linked item. Keeping the vocabulary
+    an argument preserves that property (and lets the caller load it once for
+    the whole loop instead of per item). Omitted or empty, this behaves
+    exactly as it did before #414."""
     if item.get("pr_number_base"):
         return True
     emails = [item.get("from_actor") or ""] + (_parse_participants(item) or [])
@@ -807,7 +830,20 @@ def _fyi_item_has_a_real_signal(item: dict) -> bool:
         if affiliation.get("affiliation") == "external" and affiliation.get("company"):
             return True
     ariba_fields = workgraph_signals.extract_ariba_requisition_fields(item.get("subject") or "")
-    return bool(ariba_fields and (ariba_fields.get("requester") or ariba_fields.get("descriptor")))
+    if ariba_fields and (ariba_fields.get("requester") or ariba_fields.get("descriptor")):
+        return True
+    if known_companies:
+        meta = item.get("meta_json")
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except Exception:
+                meta = None
+        web_url = (meta or {}).get("web_url") if isinstance(meta, dict) else None
+        if workgraph_signals.document_path_company_match(
+                item.get("subject"), web_url, known_companies):
+            return True
+    return False
 
 
 def _sender_domain_seen_on_issue(issue_id: str, from_actor: Optional[str]) -> bool:
@@ -1087,6 +1123,21 @@ def cluster_and_link(limit: int = 500) -> dict:
     if any(i.get("source") == "teams_chat" for i in with_pending):
         teams_sender_index = _build_teams_sender_email_index()
         teams_by_display_name, teams_by_local_part = workgraph_parties._build_party_indexes()
+    # Task #414: the supplier vocabulary the standalone-FYI gate's fourth check
+    # matches document folder segments/filename tokens against. Loaded once for
+    # the whole run rather than per item, and - same discipline as the two Teams
+    # indexes above - only when there is actually a document in this batch to
+    # use it on. This is the SAME vocabulary pass-2 matching already uses for
+    # its "supplier" point (workgraph_projects._matched_data_points reads
+    # dp-fasttrack-supplier), not a second parallel notion of who a supplier is.
+    known_companies: set[str] = set()
+    if any(i.get("source") == "sharepoint" for i in with_pending):
+        known_companies = {
+            (row.get("value") or "").strip().lower()
+            for row in ws.list_data_point_values_for_definition(
+                workgraph_discovery.FASTTRACK_SUPPLIER_ID)
+        }
+        known_companies.discard("")
     created = 0
     linked = 0
     skipped_noise = 0
@@ -1186,7 +1237,7 @@ def cluster_and_link(limit: int = 500) -> dict:
                         # instead of being dropped - it gets a real
                         # signature and becomes eligible for pass-2 matching
                         # on the next wake.
-                        if not _fyi_item_has_a_real_signal(item):
+                        if not _fyi_item_has_a_real_signal(item, known_companies):
                             skipped_fyi_standalone += 1
                             ws.mark_link_checked(item["id"], now)
                             continue

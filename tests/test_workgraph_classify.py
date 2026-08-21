@@ -1645,3 +1645,51 @@ def test_backfill_project_aggregates_parties_across_member_issues(ws_db):
 def test_titlecase_name_preserves_mc_surnames():
     assert wc._titlecase_name("CORRINA MCCORKLE") == "Corrina McCorkle"
     assert wc._titlecase_name("MARY MASON") == "Mary Mason"
+
+
+# --- Task #414: the standalone-FYI gate can finally see a document ---------
+
+def _sp_item(name, web_url=None):
+    """A SharePoint raw_item as it really arrives: no sender, no
+    participants, no reference. That shape is the whole bug - all three of
+    the gate's original checks read one of those three fields."""
+    return {
+        "source": "sharepoint", "item_class": "FYI-EVIDENCE",
+        "subject": name, "from_actor": None, "participants": "[]",
+        "pr_number_base": None,
+        "meta_json": json.dumps({"web_url": web_url}) if web_url else None,
+    }
+
+
+def test_fyi_gate_still_drops_a_document_when_no_vocabulary_supplied():
+    """Regression floor: omitting known_companies must behave exactly as the
+    gate did before #414, so nothing about the mail/calendar paths moved."""
+    item = _sp_item("Sodalis_LILLY_PV1_SOW_Proposal.docx",
+                    "https://collab.lilly.com/sites/X/General/Sodalis/a.docx")
+    assert wc._fyi_item_has_a_real_signal(item) is False
+
+
+def test_fyi_gate_recovers_a_supplier_document_via_folder():
+    item = _sp_item("Sodalis_LILLY_PV1_SOW_Proposal.docx",
+                    "https://collab.lilly.com/sites/X/General/Sodalis/a.docx")
+    assert wc._fyi_item_has_a_real_signal(item, {"sodalis"}) is True
+
+
+def test_fyi_gate_recovers_a_supplier_document_via_filename():
+    item = _sp_item("WO_Kinaxis_Sustainment Services Extension.pdf")
+    assert wc._fyi_item_has_a_real_signal(item, {"kinaxis"}) is True
+
+
+def test_fyi_gate_still_drops_a_generic_data_dump():
+    """The 68 of 100 live items that SHOULD stay dropped - internal
+    spreadsheets and exports with no counterparty in name or path."""
+    for name in ("projects_data_prioritized.xlsx", "air_submissions_21Jan.xlsx",
+                 "repository (2).xlsx", "Contracting Master Report (Analytics COE).csv"):
+        item = _sp_item(name, "https://collab.lilly.com/sites/LEAP/Shared Documents/" + name)
+        assert wc._fyi_item_has_a_real_signal(item, {"kinaxis", "sodalis"}) is False, name
+
+
+def test_fyi_gate_tolerates_malformed_meta_json():
+    item = _sp_item("Sodalis_SOW.docx")
+    item["meta_json"] = "{not json"
+    assert wc._fyi_item_has_a_real_signal(item, {"sodalis"}) is True  # falls back to filename

@@ -265,6 +265,32 @@ def _process_sharepoint(payload: dict) -> list[dict]:
         modified = r.get("lastModifiedDateTime") or ""
         occurred_ts = _parse_iso_to_epoch(modified) if modified else time.time()
         source_ref = f"{drive_id}:{item_id}"
+        # Task #414 (2026-08-21): webUrl used to be read and thrown away -
+        # nothing but stable_key/thread_key/subject survived, so a SharePoint
+        # raw_item reached classify with from_actor NULL, participants [], and
+        # raw_ref/meta_json NULL. Measured live: ALL 100 unlinked SharePoint
+        # items failed workgraph_classify._fyi_item_has_a_real_signal, and all
+        # 100 failed for want of ANY input - that gate's three checks read a
+        # reference, a sender/participant email domain, or an Ariba subject, and
+        # a document row carries none of the three. It could never pass.
+        #
+        # The signal was in the discarded field the whole time: Marc's own
+        # filing puts the counterparty in a PATH SEGMENT - collab.lilly.com/
+        # sites/FY24LPSContracting/Shared Documents/General/Sodalis/..., .../
+        # Electronic Documents/Litmus/..., .../IT Contracts for AI Pilots/
+        # Veeva/... Persisting web_url is what makes that readable downstream.
+        #
+        # This does NOT reopen D18: thread_key stays drive_id:item_id and the
+        # folder is still not artifact identity. The path is carried here as
+        # SIGNAL only, which is precisely the demotion D18's own docstring
+        # deferred ("the parent folder becomes a `contains` relation at the
+        # identity-anchor layer once that exists"). Storing it is a
+        # prerequisite for that layer; it is not that layer.
+        meta = {}
+        if r.get("webUrl"):
+            meta["web_url"] = r["webUrl"]
+        if drive_id:
+            meta["drive_id"] = drive_id
         out.append({
             "source": "sharepoint",
             "stable_key": source_ref,
@@ -275,6 +301,7 @@ def _process_sharepoint(payload: dict) -> list[dict]:
             "from_actor": None,
             "participants": [],
             "body_preview": (r.get("summary") or "")[:500],
+            "meta": meta or None,
         })
     return out
 

@@ -444,3 +444,48 @@ def test_process_calendar_recurring_without_start_falls_back_to_id():
          "attendees": [], "recurrence": {"isRecurring": True}},
     ]})
     assert out[0]["stable_key"] == "ENTRY3"
+
+
+def test_process_teams_chat_accepts_string_members():
+    """Real dead-lettered payloads carry chat_meta.members as a list of plain
+    display-name STRINGS, not dicts. The dict-only comprehension raised
+    AttributeError: 'str' object has no attribute 'get', which process_file
+    caught as "processor raised" - so three files sat in raw_ingest_failed for
+    22 days diagnosed as a code fault when the actual problem was that the
+    relay had delivered no messages at all."""
+    payload = {"source": "teams_chat", "chat_id": "19:abc@thread.v2",
+               "chat_meta": {"chatType": "group",
+                             "members": ["Megan J Hartkorn", "Marc Lane", "Ping Fu"]},
+               "messages_raw": {"value": [
+                   {"id": "m1", "from": "Marc Lane", "createdDateTime": "2026-05-01T09:00:00Z",
+                    "bodyPreview": "hello", "messageType": "message"}]}}
+    out = normalize._process_teams_chat(payload)
+    assert len(out) == 1
+    assert "Marc Lane" in out[0]["participants"]
+
+
+def test_process_teams_chat_still_accepts_dict_members():
+    """The original shape must keep working - both are real."""
+    payload = {"source": "teams_chat", "chat_id": "19:def@thread.v2",
+               "chat_meta": {"members": [{"email": "a@lilly.com", "displayName": "A"},
+                                         {"displayName": "B"}]},
+               "messages_raw": {"value": [
+                   {"id": "m1", "from": "A", "createdDateTime": "2026-05-01T09:00:00Z",
+                    "bodyPreview": "hi", "messageType": "message"}]}}
+    out = normalize._process_teams_chat(payload)
+    assert "a@lilly.com" in out[0]["participants"]
+    assert "B" in out[0]["participants"]
+
+
+def test_count_and_note_without_messages_is_reported_honestly():
+    """The five live dead letters are ALL relay data loss, not recoverable
+    content: 96 messages claimed across them, 0 delivered. With string members
+    tolerated, the guard now names the real reason instead of the payload
+    crashing first."""
+    payload = {"source": "teams_chat", "chat_id": "19:x@thread.v2",
+               "chat_meta": {"members": ["Marc Lane", "Liza Stultz"]},
+               "messages_raw": {"count": 21, "note": "Messages fetched from read_resource"}}
+    items = normalize._process_teams_chat(payload)
+    assert items == []
+    reason = normalize._claims_content_but_empty("teams_chat", payload, items)
+    assert reason and "count=21" in reason

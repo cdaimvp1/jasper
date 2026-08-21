@@ -207,7 +207,23 @@ def _process_teams_chat(payload: dict) -> list[dict]:
     chat_id + message id form the stable_key; chat_id alone is the thread_key."""
     chat_id = payload.get("chat_id") or ""
     chat_meta = payload.get("chat_meta") or {}
-    members = [m.get("email") or m.get("displayName") or "" for m in (chat_meta.get("members") or [])]
+    # Members arrive in TWO shapes from the relay, confirmed against real
+    # dead-lettered payloads: a list of dicts ({email, displayName}), and a
+    # plain list of display-name STRINGS (["Megan J Hartkorn", "Marc Lane",
+    # "Ping Fu"]). The dict-only version raised
+    # AttributeError: 'str' object has no attribute 'get', which process_file
+    # caught as "processor raised" - so three files sat in raw_ingest_failed
+    # for 22 days diagnosed as a code fault when the real problem was that the
+    # relay had sent no messages at all. Tolerating both shapes lets
+    # _claims_content_but_empty run and report the ACTUAL reason
+    # ("messages_raw claims content (count=21) but has no value/messages
+    # list"). Same failure, honest diagnosis.
+    members = []
+    for m in (chat_meta.get("members") or []):
+        if isinstance(m, dict):
+            members.append(m.get("email") or m.get("displayName") or "")
+        elif isinstance(m, str):
+            members.append(m)
     messages_raw = payload.get("messages_raw") or {}
 
     if isinstance(messages_raw, list):

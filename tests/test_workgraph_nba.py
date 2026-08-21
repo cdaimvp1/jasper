@@ -1295,3 +1295,29 @@ def test_candidate_actions_capped_at_four():
     synthesis = {"suggested_actions": [{"label": "d", "rationale": "r"}, {"label": "e", "rationale": "r"}]}
     result = nba.candidate_actions(issue, evidence, synthesis)
     assert len(result) == 4
+
+
+def test_extract_item_candidates_survives_bare_comma_amount():
+    r"""Task #414 (2026-08-21): real live crash. _DOLLAR_RE's amount group is
+    [\d,]+, which matches a BARE COMMA, so "total $, TBD" produced
+    group(1) == "," and ",".replace(",", "") == "" -> float("") -> ValueError.
+    The old guard only skipped `is None`.
+
+    This mattered well beyond NBA: value_amount_for_issue is called from
+    workgraph_projects.compute_work_object_signature, which find_candidates
+    calls for every candidate, so one such string in any raw_item body or
+    attachment extracted_text crashed GROUPING for that work object. Empty
+    currency cells in text extracted from PDF/DOCX tables render exactly
+    this way."""
+    for text in ("total $, TBD", "$ , pending", "$,, blank", "$ ,"):
+        assert nba._extract_item_candidates({"subject": text, "body_preview": "", "id": None}) == [], text
+
+
+def test_extract_item_candidates_still_parses_real_amounts():
+    """The guard must not swallow genuine values."""
+    got = nba._extract_item_candidates(
+        {"subject": "Contract value $1,200,000 firm", "body_preview": "", "id": None})
+    assert [round(c[0]) for c in got] == [1200000]
+    got = nba._extract_item_candidates(
+        {"subject": "$2.5 million ceiling", "body_preview": "", "id": None})
+    assert [round(c[0]) for c in got] == [2500000]

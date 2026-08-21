@@ -169,9 +169,22 @@ def _extract_item_candidates(item: dict) -> list[tuple[float, bool, bool]]:
         preferred = bool(_PREFER_CUE.search(window))
         downweighted = bool(_DOWNWEIGHT_CUE.search(window))
         for group in (match.group(1), match.group(2)):
-            if group is None:
+            # Task #414 (2026-08-21): `is None` was not enough and this raised
+            # ValueError on real data. _DOLLAR_RE's amount group is [\d,]+, which
+            # matches a BARE COMMA, so "total $, TBD" yields group(1) == "," and
+            # ",".replace(",", "") == "" -> float("") -> crash. Hit live while
+            # computing a work_object signature: value_amount_for_issue is called
+            # from compute_work_object_signature, which find_candidates calls for
+            # every candidate, so one such string anywhere in a raw_item body or
+            # an attachment's extracted_text (empty currency cells in extracted
+            # PDF/DOCX tables render exactly this way) took down grouping for
+            # that object. Guard on the post-strip digits, not on None: an empty
+            # or punctuation-only capture carries no amount, which is the same
+            # nothing as an absent group.
+            digits = (group or "").replace(",", "").strip()
+            if not digits:
                 continue
-            candidates.append((float(group.replace(",", "")) * multiplier, preferred, downweighted))
+            candidates.append((float(digits) * multiplier, preferred, downweighted))
     if key is not None:
         _value_cache[key] = candidates
     return candidates

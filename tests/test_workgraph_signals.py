@@ -355,3 +355,27 @@ def test_document_path_company_match_survives_malformed_url():
     this function is that documents have little enough signal already."""
     assert sig.document_path_company_match(
         "Sodalis_SOW.docx", "::not a url::", {"sodalis"}) == ("sodalis", "filename")
+
+
+# --- Task #415: a labeled-party value must not BE a table header ------------
+
+def test_extract_labeled_party_field_rejects_header_as_value():
+    """The regex already refuses to let the value RUN INTO one of Ariba's
+    known next-field words, but that negative lookahead only guards words
+    after the first - so the value could still START with one. Measured live:
+    "Supplier Name Qty Account, Client ID" (a bare header row) yielded
+    "Qty Account, Client ID", and that string is in dp-fasttrack-supplier."""
+    assert sig.extract_labeled_party_field("Supplier Name Qty Account, Client ID") is None
+    assert sig.extract_labeled_party_field("Vendor Amount Due") is None
+    assert sig.extract_labeled_party_field("Supplier Description of work") is None
+
+
+def test_extract_labeled_party_field_header_guard_keeps_real_values():
+    """The guard must not cost any of the shapes this function exists for -
+    including the no-colon Ariba-table form, which measured 61% accurate on
+    live data versus 10% for the colon form, so it carries the real signal."""
+    assert sig.extract_labeled_party_field("Supplier: Kinaxis Inc") == "Kinaxis Inc"
+    assert sig.extract_labeled_party_field("Supplier Sodalis") == "Sodalis"
+    assert sig.extract_labeled_party_field("Vendor: SHI International Corp") == "SHI International Corp"
+    assert sig.extract_labeled_party_field("Supplier Acme Vendor Co") == "Acme Vendor Co"
+    assert sig.extract_labeled_party_field("Supplier Workday") == "Workday"

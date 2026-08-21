@@ -460,6 +460,12 @@ _LABELED_PARTY_FIELD_RE = re.compile(
 _NON_PARTY_NAMES = {"ariba", "sap", "sap ariba", "sap ariba buying", "adobe sign",
                     "docusign", "contractpodai", "concur"}
 
+#: Task #415: the same next-field vocabulary above, anchored so it can reject a
+#: value that IS a table header rather than only one that runs into it. See
+#: extract_labeled_party_field's own note for why this reuses that list.
+_VALUE_IS_TABLE_HEADER_RE = re.compile(
+    r"\s*(?:" + _ARIBA_TABLE_NEXT_FIELD_RE + r")\b", re.I)
+
 _COMPANY_SUFFIX_RE = re.compile(
     r"\b(?:inc|incorporated|llc|l\.l\.c|ltd|limited|corp|corporation|co)\.?\s*$", re.I)
 
@@ -526,12 +532,18 @@ def cross_mention_match(text: str, known_companies: set) -> Optional[tuple]:
 #: Task #414: shortest normalized company name this will match as a whole
 #: path segment or filename token. The live supplier vocabulary (228 distinct
 #: dp-fasttrack-supplier values, measured 2026-08-21) carries real short names
-#: worth keeping - esko, gong, moxo, skai - alongside domain-derived junk that
-#: is NOT a supplier at all: "you", "ind", "us", "qty", "mail", "name", "list".
-#: A floor of 4 keeps the former and drops every one of the latter except
-#: "list"/"name"/"mail" at exactly 4, which whole-token matching then makes
-#: near-harmless anyway (it takes a path segment or filename token that IS
-#: literally "list", not a filename that merely contains it).
+#: worth keeping - esko, gong, moxo, skai - alongside genuinely bad values:
+#: "us" (from us.dlapiper.com), "t"/"o" (t.delta.com/o.delta.com), "mail",
+#: "qty", "name", "list". A floor of 4 keeps the good ones and drops most of
+#: the bad; "list"/"name"/"mail" survive at exactly 4, which whole-token
+#: matching then makes near-harmless anyway (it takes a path segment or
+#: filename token that IS literally "list", not one that merely contains it).
+#:
+#: CORRECTION (same day): an earlier version of this note also listed "you"
+#: and "ind" as junk. They are NOT - they come from you.com and ind.com, real
+#: single-label domains the extractor handled correctly. I had flagged them
+#: purely for being short. See task #415, which fixes the two producers that
+#: create the genuinely bad values rather than filtering them here.
 _DOC_PATH_MIN_COMPANY_LEN = 4
 
 #: Separators that break a SharePoint filename into whole tokens. Deliberately
@@ -635,6 +647,20 @@ def extract_labeled_party_field(body_text: str) -> Optional[str]:
         return None
     value = m.group("value").strip(" -–—")
     if not value or normalize_company_name(value) in _NON_PARTY_NAMES:
+        return None
+    # Task #415 (2026-08-21): the value must not BE a table header. The regex
+    # already refuses to let the value RUN INTO one of Ariba's known next-field
+    # words (_ARIBA_TABLE_NEXT_FIELD_RE, applied as a negative lookahead), but
+    # that lookahead only guards words AFTER the first, so the value could still
+    # START with one. Measured live: "Supplier Name Qty Account, Client ID"
+    # (a bare header row) extracted "Qty Account, Client ID" as the supplier,
+    # and that string is sitting in dp-fasttrack-supplier today.
+    #
+    # Deliberately reuses the SAME vocabulary rather than adding a second list -
+    # a word that cannot legitimately follow the value cannot legitimately BE
+    # the value either. This adds no new policy and no new judgment; it applies
+    # an existing rule to the position it was missing from.
+    if _VALUE_IS_TABLE_HEADER_RE.match(value):
         return None
     return value
 

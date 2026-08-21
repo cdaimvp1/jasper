@@ -28,9 +28,18 @@ from __future__ import annotations
 import json
 
 import pytest
-from fastapi.testclient import TestClient
 
-import server_lean
+# Task #385 (2026-08-21): the environment note above describes this file failing
+# to COLLECT when fastapi is absent. That is an ERROR, not a skip, and it aborts
+# the whole run - which is why the suite had to be invoked with --ignore for this
+# file and tests/test_jasper_mcp_server.py. importorskip converts it to the
+# correct outcome: a clean skip when the optional dependency is missing, a real
+# run when it is present. Must precede the fastapi/server_lean imports.
+pytest.importorskip("fastapi", reason="optional fastapi dependency not installed")
+
+from fastapi.testclient import TestClient  # noqa: E402
+
+import server_lean  # noqa: E402
 
 
 @pytest.fixture

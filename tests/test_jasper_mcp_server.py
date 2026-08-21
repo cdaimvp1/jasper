@@ -8,6 +8,18 @@ from __future__ import annotations
 
 import os
 
+import pytest
+
+# Task #385 (2026-08-21): jasper_mcp_server imports `mcp` at module level, an
+# optional dependency that is not installed in every environment this repo runs
+# in. Without this guard the whole module fails to COLLECT
+# ("ModuleNotFoundError: No module named 'mcp'"), which pytest reports as an
+# ERROR and which aborts the run before any other test executes - so the entire
+# suite had to be invoked with --ignore for this file and one other. Skipping is
+# the correct outcome: the dependency's absence is an environment fact, not a
+# test failure. importorskip must run BEFORE the import below.
+pytest.importorskip("mcp", reason="optional MCP dependency not installed")
+
 import jasper_mcp_server as jms
 
 

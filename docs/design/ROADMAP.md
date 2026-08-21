@@ -749,3 +749,65 @@ design (Phase 6 is the code-level expression of this same intent).
 
 **Trigger to revisit:** Marc's explicit signal that the stabilization
 period is over.
+
+---
+
+## Non-mail ingestion: what the sources can and cannot do (2026-08-21)
+
+Recorded here because this was learned expensively — a SharePoint backfill
+produced 33 singleton fragments that had to be rolled back (commit `ff32863`)
+before the underlying rule was understood.
+
+**The rule: an item links only if it can reach 2 data points, and almost
+every data point in `_matched_data_points` is reached through PARTIES.**
+`external_orgs` is derived from external parties, `stakeholder` compares
+party ids, and `_topic_key_for_signature` returns `""` unless
+`participant_roles` contains an external party — which silently disables
+`subject_entity` too. A source with no parties is therefore structurally
+unmatchable, no matter how much real content it carries.
+
+**SharePoint documents have no parties.** The search payload carries no
+author field (verified against all 40 archived drop files: keys are only
+`id`/`driveId`/`name`/`webUrl`/`lastModifiedDateTime`/`summary`), so
+`_process_sharepoint` hardcodes `from_actor=None, participants=[]`. Measured:
+33 of 33 became new singleton projects; 23 of 33 had **zero** data points,
+max 1. Even injecting the folder-derived supplier only got 2 of 33 to 2+
+points, and those two only via `cross_mention` because their filenames
+happened to contain the word "Subcontract". See #417 — the remaining fix is a
+party-precondition change plus a candidate-pool cost problem, and it is
+parked as poor value for ~2% of the corpus.
+
+**Calendar events do have parties, and they link.** Same pipeline, opposite
+result: a 25-event pilot produced real merges into existing projects with
+multi-signal matches (`supplier` + `stakeholder` + `subject_entity`). This is
+the single clearest confirmation that the party precondition — not content
+richness — is what governs linkability.
+
+**Calendar funnel, measured over a real 210-day COM scan (1,302 events):**
+
+| stage | count |
+|---|---|
+| scanned | 1,302 |
+| personal blocks (`is_personal_calendar_block`) | −384 |
+| OOO subjects (`is_ooo_subject`) | −76 |
+| no external company at all | −455 |
+| external company not known to the graph | −130 |
+| known-junk vocabulary value only | −6 |
+| **eligible to stage** | **251** |
+
+The 455 internal-only events are the trap: they would orphan exactly as the
+documents did. `ingest/calendar_backfill.py` encodes this funnel so a future
+batch cannot accidentally widen it.
+
+**Operational constraint that governs any backfill:** staging is not inert.
+`ingest/scheduled_refresh.py` runs ~5x/day and its cycle normalizes the
+drop-file inbox, classifies, then calls `run_pipeline_for_ungrouped_items()`
+with no limit (default 500). Writing a drop file therefore triggers real,
+unattended LLM judgment within hours. There is no "stage now, decide later."
+
+**Teams** remains without a credential-free path (no COM interface); see
+`jasper-no-graph-api-credentials-ever` — Graph is permanently unavailable, so
+this is not a blocked task awaiting approval.
+
+**Trigger to revisit:** Marc's go-ahead on the remaining ~226 calendar
+events, and separately on #417 if documents ever become worth the cost.

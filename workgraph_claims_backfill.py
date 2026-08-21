@@ -268,7 +268,7 @@ def resolve_authoritative_closure_signals(*, limit: int | None = None) -> dict:
     Auto-resolves ONLY when there is EXACTLY ONE open ask/commitment claim
     on the same issue AND that claim's own originating signal type is the
     real request counterpart of this closure (external-review finding
-    #359, 2026-08-13 - tightened correlation): the earlier version treated
+    #359, 2026-08-12 - tightened correlation): the earlier version treated
     "exactly one open claim" alone as sufficient, which could auto-close a
     genuinely unrelated claim - e.g. a signature_fully_executed
     notification landing on an issue whose one open claim is "send Jane

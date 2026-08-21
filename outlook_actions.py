@@ -56,7 +56,7 @@ def _run_powershell(args: list[str]) -> dict:
         raise RuntimeError(f"timed out after {_TIMEOUT_SECONDS}s - Outlook may be busy or showing a prompt")
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr.strip() or f"exit code {proc.returncode}")
-    # External-review finding #356 (2026-08-13): this used to return a bare
+    # External-review finding #356 (2026-08-12): this used to return a bare
     # {"ok": True} unconditionally, discarding the real JSON every one of
     # this module's PowerShell scripts already emits on success (confirmed
     # by reading all five scripts - each ends in `Write-Output (... |
@@ -75,7 +75,7 @@ def _run_powershell(args: list[str]) -> dict:
 
 def _write_temp_body_file(body: str) -> str:
     """Writes drafted body text to a private temp file and returns its
-    path. External-review finding #358 (2026-08-13): draft_reply/
+    path. External-review finding #358 (2026-08-12): draft_reply/
     compose_new used to pass `body` as a plain -Body PowerShell
     command-line argument - Windows' CreateProcess has a hard ~32K
     character total-command-line limit, and an unbounded drafted body (a

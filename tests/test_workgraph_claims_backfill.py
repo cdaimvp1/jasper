@@ -228,7 +228,7 @@ def _open_claim(ws_db, issue_id, raw_item_id, claim_type, text):
 
 
 def test_resolve_authoritative_closure_signals_resolves_the_single_open_claim(ws_db):
-    """External-review finding #359 (2026-08-13): the claim's own
+    """External-review finding #359 (2026-08-12): the claim's own
     originating raw_item must carry the REAL request signal_type
     (ariba_pr_approval_needed) that REQUEST_TO_CLOSURE_SIGNAL maps to this
     closure (ariba_pr_fully_approved) - correlation, not just claim count."""

@@ -184,7 +184,7 @@ _SYSTEM_PROMPT = (
 
 
 def _run_claude(prompt: str, *, session_id: str, is_new: bool, timeout: int) -> subprocess.CompletedProcess:
-    # prompt goes over STDIN, never as a command-line argument (2026-08-13,
+    # prompt goes over STDIN, never as a command-line argument (2026-08-12,
     # external-review finding #358) - same fix task #309/workgraph_pipeline2.
     # _run_headless_claude already proved out: Windows' CreateProcess has a
     # hard ~32K character total-command-line limit, and this call already
@@ -199,7 +199,7 @@ def _run_claude(prompt: str, *, session_id: str, is_new: bool, timeout: int) -> 
     # exact same CLI behavior _run_headless_claude already relies on.
     # --output-format stream-json (+ --verbose, required alongside --print
     # for it), not the single-result "json" format (external-review
-    # finding #363, 2026-08-13): the single-result format's final JSON
+    # finding #363, 2026-08-12): the single-result format's final JSON
     # object has no record of which tools were actually called during the
     # turn, only the final text - which is exactly why the client used to
     # fall back to keyword-guessing the reply text for "did something get

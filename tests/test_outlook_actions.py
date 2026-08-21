@@ -164,7 +164,7 @@ def test_draft_reply_body_and_save_only_are_additive(monkeypatch):
     """task #287: with neither passed, behaves exactly as before (no
     -BodyFile/-SaveOnly noise); both are real, separate flags when given.
 
-    External-review finding #358 (2026-08-13): body used to be passed as a
+    External-review finding #358 (2026-08-12): body used to be passed as a
     literal -Body <text> command-line argument - Windows' CreateProcess
     has a hard ~32K character total-command-line limit, and an unbounded
     drafted body could hit it. Now written to a private temp file and
@@ -365,7 +365,7 @@ def test_compose_new_body_and_attachment_paths_are_additive(monkeypatch):
     review' ask): body/attachment_paths are optional and additive - with
     neither, the args list must be identical to the pre-existing bare
     to/subject call (no accidental -BodyFile "" or -AttachmentPaths ""
-    noise). External-review finding #358 (2026-08-13): body now goes via
+    noise). External-review finding #358 (2026-08-12): body now goes via
     a temp file (-BodyFile), never as a raw argv element - see
     test_draft_reply_body_and_save_only_are_additive's own docstring for
     why."""
@@ -393,7 +393,7 @@ def test_compose_new_body_and_attachment_paths_are_additive(monkeypatch):
 
 
 def test_compose_new_returns_real_missing_attachments_from_powershell(monkeypatch):
-    """External-review finding #356 (2026-08-13): _run_powershell used to
+    """External-review finding #356 (2026-08-12): _run_powershell used to
     return a bare {"ok": True} unconditionally, discarding the real
     attached/missing_attachments JSON outlook_draft_compose.ps1 already
     emits on success. compose_new()'s own docstring promises callers can

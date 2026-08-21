@@ -845,7 +845,7 @@ def run() -> dict:
     except Exception as e:
         settlement_pass_result = {"error": str(e)}
 
-    # External-review finding #357 (2026-08-13): the settlement pass above
+    # External-review finding #357 (2026-08-12): the settlement pass above
     # only ever recomputed NBA - workgraph_alerts.run() had no matching
     # end-of-cycle call, even though the summary dict below called
     # alerts_result_2 "alerts_final" despite every graph-changing step from
@@ -867,7 +867,7 @@ def run() -> dict:
         "alerts_after_mail": alerts_result_1,
         "relay": relay_result,
         "classify_after_relay": classify_result_2,
-        # Renamed from nba_final/alerts_final (2026-08-13, external-review
+        # Renamed from nba_final/alerts_final (2026-08-12, external-review
         # finding #357): these two run BEFORE pipeline2_grouping through
         # dormant_sweep below, so calling them "final" was never accurate -
         # settlement_pass/alerts_settlement below are the real end-of-cycle

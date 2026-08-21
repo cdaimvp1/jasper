@@ -3503,7 +3503,7 @@ def project_ids_for_conversation_id(conversation_id: str) -> list[str]:
     """Like project_id_for_conversation_id, but surfaces every DISTINCT
     project this conversation_id's linked raw_items actually resolve to,
     not just the most recent one (external-review finding #361,
-    2026-08-13): silently picking "most recent" when a conversation
+    2026-08-12): silently picking "most recent" when a conversation
     genuinely spans two different Projects hid a real identity
     contradiction from the caller instead of surfacing it - the exact
     "notify, never silently pick" discipline Track B.8's identity-conflict

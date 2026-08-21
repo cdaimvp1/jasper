@@ -22,7 +22,7 @@ import workgraph_assistant
 
 
 def test_run_claude_sends_prompt_via_stdin_not_argv():
-    """External-review finding #358 (2026-08-13): the prompt used to be a
+    """External-review finding #358 (2026-08-12): the prompt used to be a
     literal `claude -p <prompt>` command-line argument, stacked on top of
     an already-large --append-system-prompt and a 29-tool --allowedTools
     list in the same Windows command line - the exact crash class task
@@ -50,7 +50,7 @@ def _stream_json_line(obj):
 
 
 def test_parse_stream_json_extracts_result_and_tool_names():
-    """Schema confirmed live (2026-08-13, external-review finding #363)
+    """Schema confirmed live (2026-08-12, external-review finding #363)
     against a real `claude -p --output-format stream-json --verbose`
     call before writing this parser - not assumed from documentation."""
     lines = [

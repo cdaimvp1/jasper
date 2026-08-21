@@ -422,7 +422,7 @@ def test_candidate_set_hash_changes_when_evidence_changes(ws_db, isolated_paths)
 # --- judge_candidates / _parse_comparative_verdict (step 4) ---------------
 
 def test_comparative_prompt_example_does_not_hardcode_same_project():
-    """External-review finding #354 (2026-08-13): the prompt's own
+    """External-review finding #354 (2026-08-12): the prompt's own
     "respond with EXACTLY these lines" example used to hardcode
     "VERDICT: same_project" verbatim, one line after defining
     SAME_PROJECT and RELATED_DIFFERENT_PROJECT as two equally valid

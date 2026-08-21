@@ -428,7 +428,7 @@ MATCH: <candidate number, or NONE if none of them match, or UNCERTAIN if you gen
 VERDICT: <same_project or related_different_project - whichever real relationship you decided above>
 (include the VERDICT line only when MATCH is a candidate number - omit it entirely for NONE or UNCERTAIN)
 """
-# External-review finding #354 (2026-08-13): the example line above used to
+# External-review finding #354 (2026-08-12): the example line above used to
 # hardcode "VERDICT: same_project" verbatim, one line after defining
 # SAME_PROJECT and RELATED_DIFFERENT_PROJECT as two equally valid verdicts -
 # a real contradiction that could suppress the Project-vs-Relationship

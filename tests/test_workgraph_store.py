@@ -3896,7 +3896,7 @@ def test_run_pending_action_reconciliation_daily_if_due_runs_once_per_day(ws_db)
     assert second is None  # already claimed for that same day, second call is a no-op
 
 
-# --- project_ids_for_conversation_id (external-review finding #361, 2026-08-13) ---
+# --- project_ids_for_conversation_id (external-review finding #361, 2026-08-12) ---
 
 def test_project_ids_for_conversation_id_returns_empty_for_unknown_conversation(ws_db):
     assert ws_db.project_ids_for_conversation_id("no-such-conversation") == []

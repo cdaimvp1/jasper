@@ -123,7 +123,7 @@ Originally scoped in the 2026-08-11 design plan (`goofy-jingling-owl.md`,
 point 11) alongside Tracks A/B/C.9, but explicitly held back on Marc's own
 repeated, direct instruction the same session ("do not run c.11 yet",
 "we will hold on that for now") — moved here from the active task list
-(was task #352) on 2026-08-13 per Marc's own request, specifically so the
+(was task #352) on 2026-08-12 per Marc's own request, specifically so the
 full scope survives even though it's off the queue.
 
 **Problem this addresses:** existing tests (`test_workgraph_pipeline2.py`,
@@ -163,7 +163,7 @@ pytest marker so it never runs by default; Haiku-tier model by default
 for the accuracy test; the e2e simulation test fully mocked (no real LLM
 calls at all) since it's testing wiring, not judgment quality.
 
-**Why this matters going forward:** the 2026-08-13 external architecture
+**Why this matters going forward:** the 2026-08-12 external architecture
 review (see "External architecture review findings" below) independently
 arrived at the same conclusion — a real semantic-accuracy evaluation is
 one of the highest-leverage remaining investments, now that Jasper has
@@ -691,7 +691,7 @@ counts, exact file locations, and reproduction logic all checked out.
 
 ---
 
-## Add-in skill-invocation parity: scoped, not started (2026-08-13)
+## Add-in skill-invocation parity: scoped, not started (2026-08-12)
 
 Marc's question, considered and recorded per his own explicit "add this to
 the backlog/roadmap" instruction — nothing built: can the add-in call any

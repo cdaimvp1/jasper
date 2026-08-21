@@ -1655,7 +1655,7 @@ async def api_action_compose_new(body: ComposeNewBody):
     server.
 
     attachment_ids, never raw filesystem paths (external-review finding
-    #360, 2026-08-13): this used to accept attachment_paths: list[str]
+    #360, 2026-08-12): this used to accept attachment_paths: list[str]
     directly from the caller - fine while nothing live actually sent one
     (this route's only real caller, the add-in's composeToParties, never
     has, and the chat tool layer's jasper_draft_review_request already
@@ -2553,7 +2553,7 @@ async def api_addin_focus_email(conversation_id: str):
     COM writes into raw_items.stable_key (ingest/outlook_scan.ps1),
     so this is a direct, ground-truth lookup, not a guess.
 
-    External-review finding #361 (2026-08-13): a single conversation_id
+    External-review finding #361 (2026-08-12): a single conversation_id
     can, rarely but really, have linked raw_items spanning two different
     Projects - the old code silently picked whichever was most recent,
     hiding a real identity contradiction from the caller. Now surfaced

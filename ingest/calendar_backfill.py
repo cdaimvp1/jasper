@@ -62,6 +62,29 @@ from paths import DATA_DIR
 NOT_COUNTERPARTIES = {"gmail", "you", "ind", "mail", "us", "t", "o",
                       "name", "list", "qty", "executive", "strategy"}
 
+#: Subject patterns observed to be real counterparty traffic but NOT work -
+#: a vendor's marketing webinar and a colleague's retirement party both carry
+#: a genuine external attendee, so every party-based filter above passes them.
+#: Both were in the 25-event pilot and both orphaned into their own project
+#: exactly as predicted, which is the evidence for this list:
+#:   "This One's For You! Webinar: Emerging Risks in 2026"  (gartner)
+#:   "Save The Date - Tim Coleman Retirement Reception"      (amazon)
+#: Deliberately scoped to THIS staging tool rather than added to
+#: workgraph_classify's global NOISE gate: these are judgements about what is
+#: worth backfilling, not about what an item fundamentally is, and changing
+#: global classification on two observations would be overreach. Kept as
+#: whole-phrase patterns, not single words, so "webinar" alone cannot silently
+#: drop a real working session that happens to mention one.
+NOT_WORK_SUBJECT_PATTERNS = (
+    "retirement reception", "retirement party", "save the date",
+    "webinar:", "this one's for you",
+)
+
+
+def _looks_like_non_work(subject: str) -> bool:
+    s = (subject or "").lower()
+    return any(p in s for p in NOT_WORK_SUBJECT_PATTERNS)
+
 
 def _external_companies(event: dict) -> set:
     """Normalized external company names on this event's organizer/attendees.
@@ -85,8 +108,9 @@ def select(scan: dict, limit: int, max_per_counterparty: int = 2) -> tuple:
              for r in ws.list_data_point_values_for_definition(wd.FASTTRACK_SUPPLIER_ID)}
     known.discard("")
 
-    stats = {"scanned": 0, "personal": 0, "ooo": 0, "no_external": 0,
-             "external_unknown": 0, "junk_only": 0, "eligible": 0}
+    stats = {"scanned": 0, "personal": 0, "ooo": 0, "not_work": 0,
+             "no_external": 0, "external_unknown": 0, "junk_only": 0,
+             "eligible": 0}
     by_co = defaultdict(list)
     for e in scan.get("events") or []:
         stats["scanned"] += 1
@@ -96,6 +120,9 @@ def select(scan: dict, limit: int, max_per_counterparty: int = 2) -> tuple:
             continue
         if wsig.is_ooo_subject(e.get("subject") or ""):
             stats["ooo"] += 1
+            continue
+        if _looks_like_non_work(e.get("subject") or ""):
+            stats["not_work"] += 1
             continue
         comps = _external_companies(e)
         if not comps:

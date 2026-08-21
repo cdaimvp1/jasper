@@ -21,6 +21,32 @@ DURATION_S = 3.0
 
 
 def test_multiple_processes_never_lose_or_collide_writes(isolated_paths):
+    # Create the schema ONCE, in the parent, before any worker starts.
+    #
+    # Fixed 2026-08-21 after this test failed twice under full-suite load while
+    # passing every time in isolation. The real failure was
+    # "sqlite3.OperationalError: no such table: issues" inside a WORKER, not a
+    # lost write - all four workers were racing to run init_workgraph() against
+    # the same brand-new isolated DB, so one could start writing against a view
+    # another had not finished creating yet. In isolation the machine is idle
+    # enough that the first worker wins comfortably; under load the interleaving
+    # shows up.
+    #
+    # This is test hermeticity, not a production concurrency defect: in real use
+    # the DB already exists and is initialised long before any cohort worker
+    # opens it, so a first-init race cannot occur. The helper still calls
+    # init_workgraph() itself (harmless and idempotent once the schema exists) -
+    # what changes is that it is no longer the FIRST thing to do so. Same class
+    # as the "possibly-uninitialized-DB test dependencies" already noted under
+    # task #385.
+    #
+    # What this test is actually for - zero lost writes, zero id collisions
+    # across genuinely separate OS processes - is unchanged and still exercised.
+    import workgraph_store as ws
+    import bus
+    ws.init_workgraph()
+    bus.init_bus()
+
     procs = []
     for i in range(N_WORKERS):
         p = subprocess.Popen(

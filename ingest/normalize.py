@@ -127,7 +127,24 @@ def _process_calendar(payload: dict) -> list[dict]:
         occurred_ts = _parse_iso_to_epoch(start) if start else time.time()
         thread_key, thread_key_source = _calendar_series_key(ev, eid, subject, organizer, start)
         participants = [organizer] + list(attendees)
-        source_ref = eid
+        # Task #414 (2026-08-21): a RECURRING occurrence's id is not unique to
+        # the occurrence. Measured against a real 210-day COM scan: 1,302 events
+        # carried only 791 distinct ids - one "HOLD" series accounted for 160
+        # events under a single id, "School Drop off" 96, "School Pick up" 64.
+        # Outlook COM returns the SERIES MASTER's EntryID for every occurrence
+        # when IncludeRecurrences is on, so keying stable_key on it alone
+        # collapses a year of a daily meeting into one identity. (The existing
+        # relay-produced calendar rows show the same damage from the other
+        # direction: 77 rows hold only 52 distinct stable_keys.)
+        #
+        # An occurrence is identified by its series PLUS its start, so that is
+        # the key. Applied only when the event is actually recurring - a one-off
+        # appointment's id is already unique and its key shape stays exactly as
+        # before, which is what every existing calendar row and test relies on.
+        # dedupe_key already includes the day and so was never the broken part;
+        # this fixes IDENTITY, which is what thread_key/source_containers and
+        # the (source, stable_key) index depend on.
+        source_ref = f"{eid}:{start}" if (ev.get("recurrence") is not None and start) else eid
         is_organizer = ev.get("isOrganizer")
         meta = {
             k: v for k, v in {
@@ -156,7 +173,9 @@ def _process_calendar(payload: dict) -> list[dict]:
                 meta["full_agenda_text"] = agenda_text
         out.append({
             "source": "calendar",
-            "stable_key": eid,
+            # source_ref, NOT eid - see the occurrence-identity note above.
+            # eid alone is the series master's id for every occurrence.
+            "stable_key": source_ref,
             "thread_key": thread_key,
             "thread_key_source": thread_key_source,
             "dedupe_key": _dedupe_key(occurred_ts, participants, source_ref),

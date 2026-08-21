@@ -86,9 +86,18 @@ try {
             try { $isRecurring = [bool]$appt.IsRecurring } catch { $isRecurring = $false }
 
             $ev = @{
-                # EntryID is stable per occurrence and is what normalize.py uses
-                # as the raw stable_key; GlobalAppointmentID ties occurrences of
-                # one series together and feeds _calendar_series_key.
+                # CORRECTION (task #414, 2026-08-21): an earlier version of this
+                # comment claimed "EntryID is stable per occurrence". That is
+                # FALSE and was measured false on real data - with
+                # IncludeRecurrences on, Outlook returns the SERIES MASTER's
+                # EntryID for every occurrence. A 210-day scan produced 1,302
+                # events carrying only 791 distinct EntryIDs; one "HOLD" series
+                # alone contributed 160 events under a single id.
+                # normalize.py::_process_calendar therefore builds stable_key as
+                # EntryID + occurrence start for recurring events (start below is
+                # per-occurrence and genuinely distinct - verified 160/160 for
+                # that same series). GlobalAppointmentID ties occurrences of one
+                # series together and feeds _calendar_series_key.
                 id                   = $appt.EntryID
                 series_id            = $(try { $appt.GlobalAppointmentID } catch { $null })
                 subject              = $appt.Subject

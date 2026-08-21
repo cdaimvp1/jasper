@@ -406,3 +406,41 @@ def test_process_sharepoint_meta_is_none_when_no_web_url():
     matching the normalizer's convention elsewhere."""
     payload = {"source": "sharepoint", "results": [{"id": "i", "name": "a.xlsx"}]}
     assert normalize._process_sharepoint(payload)[0]["meta"] is None
+
+
+def test_process_calendar_recurring_occurrences_get_distinct_identity():
+    """Task #414: with IncludeRecurrences on, Outlook returns the SERIES
+    MASTER's EntryID for every occurrence. Measured on a real 210-day scan:
+    1,302 events carried only 791 distinct ids, one series contributing 160
+    under a single id. stable_key must be per-OCCURRENCE or a year of a daily
+    meeting collapses into one identity."""
+    ev = lambda start: {"id": "ENTRY1", "subject": "HOLD", "organizer": "a@b.com",
+                        "attendees": [], "start": {"dateTime": start},
+                        "recurrence": {"isRecurring": True}}
+    out = normalize._process_calendar(
+        {"source": "calendar", "events": [ev("2026-01-23T14:00:00"), ev("2026-01-26T14:00:00")]})
+    assert out[0]["stable_key"] != out[1]["stable_key"]
+    assert out[0]["stable_key"] == "ENTRY1:2026-01-23T14:00:00"
+    # ...but they remain ONE series for grouping purposes.
+    assert out[0]["thread_key"] == out[1]["thread_key"]
+
+
+def test_process_calendar_one_off_key_shape_is_unchanged():
+    """Scoped deliberately: a non-recurring appointment's id is already
+    unique, so its key shape stays exactly as it was before #414. Every
+    calendar row already in the DB relies on that."""
+    out = normalize._process_calendar({"source": "calendar", "events": [
+        {"id": "ENTRY2", "subject": "One off", "organizer": "a@b.com", "attendees": [],
+         "start": {"dateTime": "2026-02-01T09:00:00"}, "recurrence": None},
+    ]})
+    assert out[0]["stable_key"] == "ENTRY2"
+
+
+def test_process_calendar_recurring_without_start_falls_back_to_id():
+    """No fabricated identity: a recurring event missing a start cannot be
+    keyed per-occurrence, so it keeps the bare id rather than inventing one."""
+    out = normalize._process_calendar({"source": "calendar", "events": [
+        {"id": "ENTRY3", "subject": "No start", "organizer": "a@b.com",
+         "attendees": [], "recurrence": {"isRecurring": True}},
+    ]})
+    assert out[0]["stable_key"] == "ENTRY3"

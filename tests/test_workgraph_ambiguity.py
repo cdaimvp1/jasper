@@ -500,3 +500,37 @@ def test_provenance_docstring_matches_the_code():
     assert "provenance_reliability COMPUTABLE" not in doc
     abstaining = {c.name for c in amb._abstaining_components()}
     assert "provenance_reliability" in abstaining
+
+
+def test_component_counts_in_docstrings_match_reality():
+    """#386-class drift guard. The header's 'Three of ten compute' and
+    _abstaining_components' 'seven components' are how a reader learns the
+    contract's shape. Both were wrong before 2026-08-21 ('nine' and 'six'),
+    having never been updated when provenance_reliability moved from computable
+    to excluded-by-design. Counted from the code, not asserted as literals, so
+    adding a real component updates the expectation instead of failing."""
+    import inspect
+    import re
+    n_abstain = len(amb._abstaining_components())
+    src = inspect.getsource(amb.measure_project)
+    # Count only the components that enter the SCORED list, i.e. between
+    # `components = [` and the `] + _abstaining_components()` that closes it.
+    # compute_source_mix is also called in this function but is carried
+    # metadata, not a scored component - it must not inflate the count.
+    block = src.split("components = [", 1)[1].split("] + _abstaining_components()", 1)[0]
+    n_compute = len(re.findall(r"compute_\w+", block))
+    assert n_abstain == 7 and n_compute == 3, (
+        f"component mix changed ({n_compute} computable / {n_abstain} abstaining); "
+        "update the header table and the counts in both docstrings")
+    assert f"Three of ten compute" in (amb.__doc__ or "")
+    assert "seven components" in (amb._abstaining_components.__doc__ or "")
+
+
+def test_measure_project_inverts_only_what_it_says_it_inverts():
+    """The docstring named 'freshness and provenance' as the inverted pair
+    until 2026-08-21 - another leftover from the removed trust model, since
+    provenance abstains and is never inverted. `inverted` is the authority."""
+    import inspect
+    src = inspect.getsource(amb.measure_project)
+    assert 'inverted = {"freshness", "state_coherence"}' in src
+    assert "Freshness and provenance are inverted" not in (amb.measure_project.__doc__ or "")

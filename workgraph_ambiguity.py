@@ -104,7 +104,7 @@ of code:
   embedding_dispersion   ABSTAINS      (cdai-kernel's is OpenAI-only, which is
   relevance              ABSTAINS      not viable for Lilly content). See #405.
 
-Three of nine compute. That is a real answer, not a partial failure: the
+Three of ten compute. That is a real answer, not a partial failure: the
 blueprint's aggregation is equal-weighted, so an aggregate over the computable
 subset is well-defined as long as the abstentions travel with it - which they
 do, in `abstained`.
@@ -439,11 +439,11 @@ def compute_state_coherence(claims: list, incoherences: list) -> Component:
 
 
 def _abstaining_components() -> list[Component]:
-    """The six components with no viable data source today.
+    """The seven components with no viable data source today.
 
     Each records WHY, and which task would unblock it. They are returned as
     real components rather than omitted so that a consumer sees the full
-    nine-component contract and cannot mistake a partial score for a whole one.
+    ten-component contract and cannot mistake a partial score for a whole one.
     """
     return [
         Component.abstain(
@@ -736,8 +736,11 @@ def measure_project(
     `ambiguity_score` aggregates the COMPUTABLE components with equal weight
     (blueprint B.9 keeps all components equally weighted so that none can
     dominate or suppress another), and is None if every component abstained.
-    Freshness and provenance are inverted on the way in, since both are
-    reported as goodness while the aggregate is badness.
+    Freshness and state_coherence are inverted on the way in, since both are
+    reported as goodness while the aggregate is badness. (This said "Freshness
+    and provenance" until 2026-08-21 - a leftover from the per-source trust
+    model removed in 0c3de45; provenance_reliability abstains and so is never
+    inverted. The live set is `inverted` below, which is the authority.)
     """
     if now_ts is None:
         now_ts = time.time()

@@ -229,6 +229,12 @@ def enumerate_sources(gap, *, parties: Optional[list] = None,
 
 # --------------------------------------------------------------- #397 types --
 
+#: Sentinel for "this question is worth asking, but Jasper will not choose
+#: which of several external parties to send it to." A real email address here
+#: would be a guess wearing a recipient's name.
+RECIPIENT_UNDECIDED = "<undecided: a human must pick the recipient>"
+
+
 @dataclass(frozen=True)
 class Question:
     """A question worth asking a real person, derived from one gap.
@@ -242,11 +248,20 @@ class Question:
     asked_of: str
     answer_would_close: str
     ref: Optional[str] = None
+    #: Populated only when `asked_of` is RECIPIENT_UNDECIDED - the external
+    #: parties a human could pick from, capped at 10. Never a ranking.
+    recipient_candidates: tuple = ()
+
+    @property
+    def needs_recipient_choice(self) -> bool:
+        return self.asked_of == RECIPIENT_UNDECIDED
 
     def as_dict(self) -> dict:
         return {"gap_kind": self.gap_kind, "text": self.text,
                 "asked_of": self.asked_of,
-                "answer_would_close": self.answer_would_close, "ref": self.ref}
+                "answer_would_close": self.answer_would_close, "ref": self.ref,
+                "recipient_candidates": list(self.recipient_candidates),
+                "needs_recipient_choice": self.needs_recipient_choice}
 
 
 #: One template per gap kind. Deterministic strings, no model call - the same
@@ -301,7 +316,23 @@ def generate_questions(gaps: list, *, parties: Optional[list] = None,
                  if (p.get("affiliation") or "") != "internal" and p.get("primary_email")]
     if not externals:
         return []
-    recipient = externals[0]["primary_email"]
+
+    # RULE 1, second edge - found by running this against the live graph.
+    # proj-1638 has 472 parties, 28 of them external. Taking externals[0] out of
+    # 28 is not "not inventing a recipient", it is picking one arbitrarily and
+    # calling it a choice - the same authored-resolver move in miniature, and
+    # the failure mode is emailing the wrong supplier about a contract.
+    #
+    # So: address the question ONLY when the recipient is unambiguous. With
+    # several candidates the question is still generated - it is a good
+    # question - but `asked_of` says a human must choose, and the candidates
+    # travel with it. Never silently pick.
+    if len(externals) == 1:
+        recipient = externals[0]["primary_email"]
+        candidates = ()
+    else:
+        recipient = RECIPIENT_UNDECIDED
+        candidates = tuple(p["primary_email"] for p in externals[:10])
 
     out: list[Question] = []
     for gap in gaps:
@@ -320,6 +351,7 @@ def generate_questions(gaps: list, *, parties: Optional[list] = None,
             answer_would_close=(closes_tpl.format(ref=ref)
                                 if "{ref}" in closes_tpl else closes_tpl),
             ref=getattr(gap, "ref", None),
+            recipient_candidates=candidates,
         ))
         if len(out) >= max_questions:
             break
@@ -331,8 +363,32 @@ def generate_questions(gaps: list, *, parties: Optional[list] = None,
 def parties_for_project(project_id: str) -> list[dict]:
     """Convenience read so callers do not have to know the store shape. Kept
     OUT of the pure functions above deliberately - they take already-read rows
-    so they stay testable with no DB and cannot surprise a caller with I/O."""
-    return ws.list_parties_for_issue(project_id)
+    so they stay testable with no DB and cannot surprise a caller with I/O.
+
+    IMPORTANT, and found the hard way by running this end-to-end against the
+    live graph: `issue_parties` attaches parties to MEMBER ISSUES, not to the
+    project. Calling list_parties_for_issue(project_id) directly returns ZERO
+    for every real project - measured, proj-1638 has 472 parties via its
+    members and returned 0. So this walks the members and unions, de-duplicated
+    by party id, preserving first-seen order so the recipient chosen by
+    generate_questions is stable rather than set-order-random.
+    """
+    conn = ws._connect()
+    try:
+        member_ids = [r["id"] for r in conn.execute(
+            "SELECT id FROM work_objects WHERE parent_id = ?", (project_id,)).fetchall()]
+    finally:
+        conn.close()
+    seen, out = set(), []
+    # The project id itself first - a work object can carry parties directly.
+    for iid in [project_id] + member_ids:
+        for prow in ws.list_parties_for_issue(iid):
+            pid = prow.get("id") or prow.get("party_id") or prow.get("primary_email")
+            if pid in seen:
+                continue
+            seen.add(pid)
+            out.append(prow)
+    return out
 
 
 def seek_for_signal(signal, *, project_id: Optional[str] = None) -> dict:

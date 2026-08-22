@@ -1,0 +1,39 @@
+{
+  "_README": [
+    "Task #394 - Marc's required-context declaration. COPY THIS to",
+    "config/required_context.json and edit. Until that file exists,",
+    "context_coverage abstains and Jasper's behaviour is unchanged.",
+    "",
+    "This says which data points a category of work should have ON FILE for the",
+    "record to count as complete. It is a COMPLETENESS CHECKLIST, not a claim",
+    "about what is true and not a ranking of sources - a missing field becomes a",
+    "named gap that Jasper goes looking for or asks about, never something it",
+    "fills in by inference.",
+    "",
+    "Field names must match data_point_definitions.name exactly. The seven",
+    "CONFIRMED definitions available today are:",
+    "  Deadline / mentioned date          (119 values on file)",
+    "  Dollar amount                      (646)",
+    "  PR/PO reference number             (297)",
+    "  Product/service description        (74)",
+    "  Stakeholder / named contact        (7732)",
+    "  Subject/topic core                 (1420)",
+    "  Supplier / external company        (2088)",
+    "",
+    "Categories in live use: contract, other, financial, relationship,",
+    "negotiation, rfp-sourcing, onboarding, compliance, performance, savings,",
+    "expense. Any category you omit simply keeps abstaining.",
+    "",
+    "The values below are an ILLUSTRATION of the shape, not a recommendation.",
+    "Jasper deliberately does not propose what your work requires."
+  ],
+  "contract": [
+    "Supplier / external company",
+    "Dollar amount",
+    "PR/PO reference number"
+  ],
+  "negotiation": [
+    "Supplier / external company",
+    "Stakeholder / named contact"
+  ]
+}

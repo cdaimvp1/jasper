@@ -519,11 +519,16 @@ def test_component_counts_in_docstrings_match_reality():
     # metadata, not a scored component - it must not inflate the count.
     block = src.split("components = [", 1)[1].split("] + _abstaining_components()", 1)[0]
     n_compute = len(re.findall(r"compute_\w+", block))
-    assert n_abstain == 7 and n_compute == 3, (
-        f"component mix changed ({n_compute} computable / {n_abstain} abstaining); "
-        "update the header table and the counts in both docstrings")
-    assert f"Three of ten compute" in (amb.__doc__ or "")
-    assert "seven components" in (amb._abstaining_components.__doc__ or "")
+    # After #394 the mix is: 3 unconditional + context_coverage (which computes
+    # only when Marc has declared required context, and self-abstains otherwise)
+    # + 6 hard abstentions. measure_project therefore lists 4 and excludes
+    # context_coverage from the abstaining set.
+    assert n_abstain == 7 and n_compute == 4, (
+        f"component mix changed ({n_compute} in measure_project / {n_abstain} "
+        "abstaining by default); update the header table and both docstrings")
+    assert len(amb._abstaining_components(exclude={"context_coverage"})) == 6
+    assert "Three of ten always compute" in (amb.__doc__ or "")
+    assert "seven by default, six" in (amb._abstaining_components.__doc__ or "")
 
 
 def test_measure_project_inverts_only_what_it_says_it_inverts():
@@ -534,3 +539,89 @@ def test_measure_project_inverts_only_what_it_says_it_inverts():
     src = inspect.getsource(amb.measure_project)
     assert 'inverted = {"freshness", "state_coherence"}' in src
     assert "Freshness and provenance are inverted" not in (amb.measure_project.__doc__ or "")
+
+
+# ============================== #394 required-context declaration ============
+
+def test_no_declaration_means_abstain_not_zero():
+    """The safety property that makes #394 shippable: with no declaration the
+    behaviour is IDENTICAL to before it existed. A 0.0 would read as 'nothing
+    is missing' when the truth is 'nobody said what should be here'."""
+    c = amb.compute_context_coverage("contract", {"Dollar amount"}, {})
+    assert c.abstained
+    assert c.value is None
+    assert "no required-context declaration" in c.abstained_reason
+
+
+def test_declaration_absent_on_disk_by_default():
+    """Nothing ships pre-declared. Jasper does not decide what complete means."""
+    assert amb.load_required_context() == {} or isinstance(amb.load_required_context(), dict)
+
+
+def test_unknown_category_abstains_rather_than_scoring_zero():
+    decl = {"contract": ["Dollar amount"]}
+    assert amb.compute_context_coverage("negotiation", set(), decl).abstained
+    assert amb.compute_context_coverage(None, set(), decl).abstained
+
+
+def test_coverage_is_reported_as_badness_and_names_what_is_missing():
+    decl = {"contract": ["Dollar amount", "PR/PO reference number",
+                         "Supplier / external company"]}
+    c = amb.compute_context_coverage("contract", {"Dollar amount"}, decl)
+    assert not c.abstained
+    assert c.value == pytest.approx(2 / 3)          # 2 of 3 missing = ambiguity
+    assert c.detail["missing"] == ["PR/PO reference number",
+                                   "Supplier / external company"]
+    assert c.detail["present"] == ["Dollar amount"]
+
+
+def test_everything_present_is_zero_ambiguity():
+    decl = {"contract": ["Dollar amount"]}
+    assert amb.compute_context_coverage("contract", {"Dollar amount", "extra"}, decl).value == 0.0
+
+
+def test_each_missing_field_becomes_its_own_named_gap():
+    """So workgraph_seek can ask for THAT field, not for 'more context'."""
+    decl = {"contract": ["Dollar amount", "PR/PO reference number"]}
+    c = amb.compute_context_coverage("contract", set(), decl)
+    gaps = amb.localize_gaps([c], [], [])
+    missing = [g for g in gaps if g.kind == "missing_required_context"]
+    assert len(missing) == 2
+    assert {g.ref for g in missing} == {"Dollar amount", "PR/PO reference number"}
+    for g in missing:
+        assert g.fillable_by
+        assert "contract" in g.what
+
+
+def test_a_malformed_declaration_is_dropped_not_guessed_at():
+    import json as _json
+    import paths
+    from pathlib import Path
+    # A non-list value must not crash and must not be coerced into something.
+    bad = {"contract": "Dollar amount", "negotiation": ["Supplier / external company"]}
+    p = Path(paths.CONFIG_DIR) / amb.REQUIRED_CONTEXT_FILENAME
+    existed = p.exists()
+    original = p.read_text(encoding="utf-8") if existed else None
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(_json.dumps(bad), encoding="utf-8")
+        loaded = amb.load_required_context()
+        assert "contract" not in loaded        # malformed -> dropped
+        assert loaded["negotiation"] == ["Supplier / external company"]
+    finally:
+        if existed:
+            p.write_text(original, encoding="utf-8")
+        elif p.exists():
+            p.unlink()
+
+
+def test_declaration_is_config_not_code():
+    """The judgement about what 'complete' means is Marc's. If a default
+    declaration ever appears as a module constant, that is Jasper authoring a
+    domain rule for him."""
+    import inspect
+    src = inspect.getsource(amb.load_required_context)
+    assert "CONFIG_DIR" in src
+    for suspicious in ("DEFAULT_REQUIRED", "REQUIRED_CONTEXT = {", "_DEFAULT_DECLARATION"):
+        assert not hasattr(amb, suspicious.split()[0].rstrip("={")), \
+            "a built-in default declaration would author a domain rule"

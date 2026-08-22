@@ -290,3 +290,33 @@ def test_escalation_makes_no_model_call_and_no_writes():
     src = inspect.getsource(seek.build_escalation)
     for banned in ("subprocess", "Popen", "claude", "INSERT INTO", "UPDATE ", "commit()"):
         assert banned not in src
+
+
+def test_several_external_parties_means_a_human_picks_the_recipient():
+    """Found by running against the live graph: proj-1638 has 472 parties, 28
+    external. Taking externals[0] out of 28 is not 'not inventing a recipient',
+    it is picking arbitrarily and calling it a choice - and the failure mode is
+    emailing the wrong supplier about a contract."""
+    many = [{"primary_email": f"p{i}@x.com", "affiliation": "external"} for i in range(5)]
+    q = seek.generate_questions([_gap("stale_evidence")], parties=many)[0]
+    assert q.asked_of == seek.RECIPIENT_UNDECIDED
+    assert q.needs_recipient_choice is True
+    assert len(q.recipient_candidates) == 5
+    assert "@" not in q.asked_of.split(":")[0]      # not a fabricated address
+
+
+def test_exactly_one_external_party_is_addressed_directly():
+    q = seek.generate_questions([_gap("stale_evidence")], parties=EXTERNAL)[0]
+    assert q.asked_of == "rep@kinaxis.com"
+    assert q.needs_recipient_choice is False
+    assert q.recipient_candidates == ()
+
+
+def test_parties_for_project_walks_members(ws_db, monkeypatch):
+    """REGRESSION GUARD for a real bug: issue_parties attaches parties to MEMBER
+    ISSUES, not to the project row, so list_parties_for_issue(project_id) alone
+    returned 0 for every real project."""
+    import inspect
+    src = inspect.getsource(seek.parties_for_project)
+    assert "parent_id" in src, "must walk members, not just query the project id"
+    assert "seen" in src, "must de-duplicate across members"

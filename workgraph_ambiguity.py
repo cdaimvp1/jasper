@@ -92,11 +92,14 @@ of code:
                                       guard test.)
   referential_ambiguity  COMPUTABLE - identity_anchors(anchor_type='reference')
                                       + raw_items.pr_number
-  context_coverage       ABSTAINS    - Jasper has no required-context
-                                      declaration; data_point_definitions has
-                                      no category->required mapping. Inventing
-                                      one silently would be worse than
-                                      abstaining. See #394.
+  context_coverage       CONDITIONAL - computes ONLY when Marc has written
+                                      config/required_context.json declaring
+                                      which data points a category must have.
+                                      With no declaration it self-abstains, so
+                                      the default behaviour is identical to
+                                      before #394. Deliberately config, not
+                                      code: even a completeness checklist is a
+                                      domain judgement, and it is his. #394.
   contradiction          ABSTAINS    - claim_edges is EMPTY (0 rows): the #314
   internal_consistency   ABSTAINS      reconciliation taxonomy has never fired.
                                       See #412.
@@ -104,10 +107,11 @@ of code:
   embedding_dispersion   ABSTAINS      (cdai-kernel's is OpenAI-only, which is
   relevance              ABSTAINS      not viable for Lilly content). See #405.
 
-Three of ten compute. That is a real answer, not a partial failure: the
-blueprint's aggregation is equal-weighted, so an aggregate over the computable
-subset is well-defined as long as the abstentions travel with it - which they
-do, in `abstained`.
+Three of ten always compute, a fourth (context_coverage) computes only once
+Marc declares what complete means, and six abstain. That is a real answer, not
+a partial failure: the blueprint's aggregation is equal-weighted, so an
+aggregate over the computable subset is well-defined as long as the abstentions
+travel with it - which they do, in `abstained`.
 
 DETERMINISM
 -----------
@@ -118,12 +122,14 @@ LLM cost to running this.
 """
 from __future__ import annotations
 
+import json
 import math
 import statistics
 import time
 from dataclasses import dataclass, field
 from typing import Optional
 
+import paths
 import workgraph_store as ws
 
 # ---------------------------------------------------------------- constants --
@@ -297,6 +303,110 @@ def _read_project_evidence(project_id: str) -> tuple[list, list]:
         conn.close()
 
 
+#: Task #394. Where Marc's required-context declaration lives. Deliberately in
+#: CONFIG_DIR, not in this repo: it is HIS statement about what a complete
+#: record looks like for his work, not a rule Jasper authored. `config/` is
+#: gitignored, so the real file never ships; the committed
+#: `config/required_context.example.json` shows the shape.
+REQUIRED_CONTEXT_FILENAME = "required_context.json"
+
+
+def load_required_context() -> dict:
+    """Task #394. Marc's declaration: per project category, which data points
+    must be present for the record to count as complete.
+
+    Returns {} when the file is absent or unreadable, and {} means
+    context_coverage KEEPS ABSTAINING exactly as it does today. That default is
+    the whole safety property - this feature is inert until Marc writes the
+    file, so shipping it changes nothing until he decides what "complete" means.
+
+    WHY THIS IS NOT AN AUTHORED RESOLVER. The standing rule is that Jasper never
+    decides what is TRUE or which source WINS. A required-context declaration
+    makes neither kind of claim: it says which FIELDS a category of work should
+    have on file, so a missing one can be NAMED as a gap and gone looking for.
+    It is a completeness checklist, not a truth arbiter - the same posture as
+    localize_gaps itself. The reason it is config rather than code is that even
+    a completeness checklist is a domain judgement, and that judgement is
+    Marc's. This module's own note says inventing one SILENTLY would be worse
+    than abstaining; an explicit, human-owned, reviewable file is the answer to
+    that, not a constant in this file.
+    """
+    path = paths.CONFIG_DIR / REQUIRED_CONTEXT_FILENAME
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    # Normalise: category -> list[str]. Anything malformed is dropped rather
+    # than guessed at, and a dropped entry simply means that category keeps
+    # abstaining.
+    out = {}
+    for category, fields in raw.items():
+        if isinstance(fields, list) and all(isinstance(f, str) for f in fields):
+            out[str(category)] = [f for f in fields if f.strip()]
+    return out
+
+
+def compute_context_coverage(category: Optional[str], present_points: set,
+                             declaration: dict) -> Component:
+    """Task #394. What fraction of the declared-required context is on file?
+
+    Reported as AMBIGUITY (badness), consistent with referential_ambiguity: 0.0
+    means everything required is present, 1.0 means none of it is.
+
+    Abstains - never returns 0.0 - when there is no declaration at all, or none
+    for this category, or the category is unknown. A 0.0 would read as "nothing
+    is missing", when the truth is "nobody has said what should be here."
+    """
+    if not declaration:
+        return Component.abstain(
+            "context_coverage",
+            "no required-context declaration exists (config/required_context.json "
+            "is absent or empty), so 'complete' is undefined - see #394",
+            unblocked_by="Marc writing config/required_context.json",
+        )
+    if not category:
+        return Component.abstain(
+            "context_coverage",
+            "this work object has no category, so no required-context list applies",
+            unblocked_by="categorising the work object",
+        )
+    required = declaration.get(category)
+    if not required:
+        return Component.abstain(
+            "context_coverage",
+            f"the declaration names no required context for category {category!r}",
+            unblocked_by=f"adding a {category!r} entry to config/required_context.json",
+        )
+    missing = [f for f in required if f not in present_points]
+    return Component(
+        name="context_coverage",
+        value=_clamp(len(missing) / len(required)),
+        detail={"category": category, "required": list(required),
+                "present": sorted(present_points & set(required)),
+                "missing": missing},
+    )
+
+
+def _read_present_data_points(project_id: str) -> set:
+    """Which confirmed data-point NAMES have a value on this project or any of
+    its members? Names, not ids, so the declaration can be written in Marc's
+    words rather than in `dp-fasttrack-*` internal keys."""
+    conn = ws._connect()
+    try:
+        ids = [project_id] + [r["id"] for r in conn.execute(
+            "SELECT id FROM work_objects WHERE parent_id = ?", (project_id,)).fetchall()]
+        q = ",".join("?" for _ in ids)
+        rows = conn.execute(
+            f"""SELECT DISTINCT d.name FROM data_point_values v
+                JOIN data_point_definitions d ON d.id = v.definition_id
+                WHERE v.work_object_id IN ({q})""", ids).fetchall()
+        return {r["name"] for r in rows}
+    finally:
+        conn.close()
+
+
 def _read_state_incoherences(project_id: str) -> list:
     """Read-only. Claims on this project flagged as inconsistent with their own
     issue's recorded state - currently the 'issue is closed but this claim is
@@ -438,14 +548,20 @@ def compute_state_coherence(claims: list, incoherences: list) -> Component:
     )
 
 
-def _abstaining_components() -> list[Component]:
-    """The seven components with no viable data source today.
+def _abstaining_components(exclude: Optional[set] = None) -> list[Component]:
+    """The components with no viable data source today - seven by default, six
+    when context_coverage is supplied by the caller (task #394).
+
+    `exclude` (task #394): names the caller is supplying itself because a real
+    source now exists. Only context_coverage can be excluded today, and only
+    when Marc has written a required-context declaration.
 
     Each records WHY, and which task would unblock it. They are returned as
     real components rather than omitted so that a consumer sees the full
     ten-component contract and cannot mistake a partial score for a whole one.
     """
-    return [
+    exclude = exclude or set()
+    return [c for c in [
         Component.abstain(
             "provenance_reliability",
             "EXCLUDED BY DESIGN, not a data gap. Scoring per-source trust is an "
@@ -491,7 +607,7 @@ def _abstaining_components() -> list[Component]:
             "relevance", "requires embeddings; no sanctioned provider.",
             unblocked_by="#405",
         ),
-    ]
+    ] if c.name not in exclude]
 
 
 # --------------------------------------------------------- gap localization --
@@ -534,6 +650,21 @@ def localize_gaps(components: list, raw_items: list, claims: list) -> list:
                       f"still open - its recorded state contradicts its own contents"),
                 fillable_by="confirm whether those claims completed, or reopen the issue",
                 ref=issue_id,
+            ))
+
+    # Task #394: each declared-but-absent field becomes its own named gap, so
+    # workgraph_seek can enumerate sources and ask for that specific thing
+    # rather than for "more context" in the abstract.
+    cov = by_name.get("context_coverage")
+    if cov and not cov.abstained:
+        for field_name in cov.detail.get("missing", []):
+            gaps.append(Gap(
+                kind="missing_required_context",
+                what=(f"{field_name} is declared required for "
+                      f"{cov.detail.get('category')!r} work but is not on file here"),
+                fillable_by=("search this project's evidence, read its documents, "
+                             "or ask the counterparty"),
+                ref=field_name,
             ))
 
     if claims and not raw_items:
@@ -748,11 +879,22 @@ def measure_project(
     claims, raw_items = _read_project_evidence(project_id)
     resolved_refs = _read_reference_anchors(project_id)
 
+    # Task #394: context_coverage becomes REAL only when Marc has declared what
+    # complete means for this category. With no declaration the call abstains
+    # and the component set is byte-identical to what it was before #394.
+    declaration = load_required_context()
+    proj = ws.get_issue_or_cluster(project_id) or {}
+    coverage = compute_context_coverage(
+        proj.get("category"),
+        _read_present_data_points(project_id) if declaration else set(),
+        declaration)
+
     components = [
         compute_freshness(raw_items, now_ts),
         compute_referential_ambiguity(raw_items, resolved_refs),
         compute_state_coherence(claims, _read_state_incoherences(project_id)),
-    ] + _abstaining_components()
+        coverage,
+    ] + _abstaining_components(exclude={"context_coverage"})
 
     # Components reported as goodness must be inverted to contribute to an
     # ambiguity (badness) aggregate.

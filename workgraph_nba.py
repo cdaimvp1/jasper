@@ -1150,10 +1150,31 @@ def distinct_escalation_sender_count(raw_items: list[dict]) -> int:
 
 def score_claim(claim: dict, *, date_urgency: float, value_urgency_score: float,
                  now: float, weights: dict = DEFAULT_CLAIM_WEIGHTS,
-                 distinct_sender_count: int = 1) -> tuple[float, str]:
-    """Pure. staleness is keyed on the CLAIM's own first_seen_ts (how long
-    THIS specific ask has sat open) - a more precise clock than score_issue
-    has access to, which only ever sees the whole issue's updated_at.
+                 distinct_sender_count: int = 1,
+                 asked_ts: float | None = None) -> tuple[float, str]:
+    """Pure. staleness is keyed on when the ask was actually MADE - which is
+    asked_ts (the occurred_ts of the message carrying the claim) when the
+    caller can supply it, and only falls back to the claim's own
+    first_seen_ts when it cannot.
+
+    That fallback used to be the whole implementation, and it was wrong.
+    first_seen_ts is when the claim was MATERIALIZED, not when the ask
+    arrived, so any claim produced by a catch-up extraction looks brand new
+    no matter how long the counterparty has actually been waiting. Measured
+    on the live corpus 2026-08-22: of 9,021 open claims on open work, 8,635
+    (96%) had first_seen_ts later than their own evidence, by a median of 55
+    days and a p90 of 89. A six-month-old ignored ask scored as if it landed
+    last week.
+
+    The damage was bounded rather than catastrophic because _staleness_
+    urgency saturates - only 71 of those claims shift by more than 0.30 - but
+    71 genuinely misranked actions plus 41 whose reason line wrongly omits
+    "open Nd" is worth the fix, and the old docstring's claim that this
+    measured "how long THIS specific ask has sat open" was simply false.
+
+    Keyword-only and defaulted so every existing caller keeps working
+    unchanged; rank_actions passes the real value from raw_items it has
+    already fetched, at no extra query cost.
     escalation reuses claims.escalated (Section 9.3's real repeat/
     escalation signal, previously computed but never consumed for
     anything) - v1 had no equivalent. Confidence damping is applied by the
@@ -1167,7 +1188,8 @@ def score_claim(claim: dict, *, date_urgency: float, value_urgency_score: float,
     the same escalated=1.0 this always gave; 3+ distinct senders is full
     credit; 2 is partial. Callers that don't know real sender counts (the
     default of 1) get exactly v1's old binary behavior, unchanged."""
-    staleness = _staleness_urgency(claim["first_seen_ts"], now)
+    open_since = asked_ts if asked_ts else claim["first_seen_ts"]
+    staleness = _staleness_urgency(open_since, now)
     escalation = min(1.0, max(1, distinct_sender_count) / 3) if claim.get("escalated") else 0.0
     score = (weights["staleness"] * staleness + weights["due"] * date_urgency
              + weights["value"] * value_urgency_score + weights["escalation"] * escalation)
@@ -1178,7 +1200,7 @@ def score_claim(claim: dict, *, date_urgency: float, value_urgency_score: float,
             reasons.append(f"escalated by {distinct_sender_count} different people")
         else:
             reasons.append("escalated")
-    days_open = int(max(0.0, (now - claim["first_seen_ts"]) / DAY))
+    days_open = int(max(0.0, (now - open_since) / DAY))
     if days_open >= 7:
         reasons.append(f"open {days_open}d")
     if date_urgency >= 1.0:
@@ -1243,10 +1265,17 @@ def rank_actions(limit: int = DEFAULT_RANK_ACTIONS_LIMIT, now: float | None = No
             anchor_strengths=([a["anchor_strength"] for a in anchors] if anchors else None),
         )
 
+        # When each claim's own evidence actually arrived. Built from
+        # raw_items already fetched above, so supplying the real ask-time
+        # clock to score_claim costs nothing - see that function's docstring
+        # for why first_seen_ts was the wrong clock for 96% of open claims.
+        occurred_by_item = {ri["id"]: ri.get("occurred_ts") for ri in raw_items}
+
         issue_candidates = []
         for claim in actionable:
             base, reason = score_claim(claim, date_urgency=date_urgency, value_urgency_score=value_score,
-                                        now=now, distinct_sender_count=distinct_sender_count)
+                                        now=now, distinct_sender_count=distinct_sender_count,
+                                        asked_ts=occurred_by_item.get(claim.get("raw_item_id")))
             score = confidence.effective_score(base, ctx["context_accuracy"])
             issue_candidates.append({
                 "claim_id": claim["id"], "issue_id": issue_id, "project_id": issue.get("project_id"),

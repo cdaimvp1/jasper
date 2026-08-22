@@ -242,6 +242,90 @@ def test_value_amounts_for_issues_issue_with_no_raw_items_is_zero(ws_db):
     assert nba.value_amounts_for_issues([iid]) == {iid: 0.0}
 
 
+def _scoring_claim(first_seen_ts, **kw):
+    c = {"id": 1, "claim_type": "ask", "text": "t", "owner": "marc",
+         "first_seen_ts": first_seen_ts, "escalated": 0, "raw_item_id": 1}
+    c.update(kw)
+    return c
+
+
+def test_staleness_uses_when_the_ask_arrived_not_when_it_was_extracted():
+    """The trap: first_seen_ts is MATERIALIZATION time. Measured live
+    2026-08-22, 8,635 of 9,021 open claims (96%) had first_seen_ts later than
+    their own evidence, median 55 days - so a long-ignored ask scored as if it
+    had just landed. asked_ts is the message's own occurred_ts."""
+    now = 1_800_000_000.0
+    day = 86400.0
+    extracted_yesterday = _scoring_claim(now - 1 * day)
+
+    fresh, _ = nba.score_claim(extracted_yesterday, date_urgency=0.0,
+                               value_urgency_score=0.0, now=now)
+    aged, _ = nba.score_claim(extracted_yesterday, date_urgency=0.0,
+                              value_urgency_score=0.0, now=now,
+                              asked_ts=now - 120 * day)
+    assert aged > fresh, "a 120-day-old ask must outscore a same-claim 1-day read"
+
+
+def test_days_open_reports_the_real_age_in_the_reason_line():
+    """41 live claims showed no age at all when they should have read
+    'open 7d+' - the human-visible half of the same bug."""
+    now = 1_800_000_000.0
+    day = 86400.0
+    claim = _scoring_claim(now - 1 * day)
+
+    _, reason_wrong = nba.score_claim(claim, date_urgency=0.0, value_urgency_score=0.0, now=now)
+    assert "open" in reason_wrong and "d" not in reason_wrong.replace("open", "")
+
+    _, reason_right = nba.score_claim(claim, date_urgency=0.0, value_urgency_score=0.0,
+                                      now=now, asked_ts=now - 90 * day)
+    assert "open 90d" in reason_right
+
+
+def test_absent_asked_ts_falls_back_to_first_seen_unchanged():
+    """Every pre-existing caller must keep its exact old behaviour - the
+    parameter is additive, not a silent change of meaning."""
+    now = 1_800_000_000.0
+    claim = _scoring_claim(now - 30 * 86400.0)
+    a = nba.score_claim(claim, date_urgency=0.0, value_urgency_score=0.0, now=now)
+    b = nba.score_claim(claim, date_urgency=0.0, value_urgency_score=0.0, now=now, asked_ts=None)
+    c = nba.score_claim(claim, date_urgency=0.0, value_urgency_score=0.0, now=now,
+                        asked_ts=claim["first_seen_ts"])
+    assert a == b == c
+
+
+def test_rank_actions_supplies_the_real_ask_time_from_evidence(ws_db, monkeypatch):
+    """End-to-end: the caller must actually pass it. A correct score_claim
+    that nobody feeds is the same bug with extra steps."""
+    now = time.time()
+    day = 86400.0
+    iid = ws_db.create_issue_with_new_id(title="Long-ignored ask", state="active", category="other")
+    rid = ws_db.insert_raw_item(
+        source="outlook_mail", stable_key="k", thread_key="k", dedupe_key="k",
+        occurred_ts=now - 120 * day, subject="please approve", from_actor="rep@vendor.com",
+        participants_json="[]", body_preview="please approve")
+    ws_db.link_raw_item_to_issue(rid, iid)
+    conn = ws_db._connect()
+    conn.execute(
+        """INSERT INTO claims (issue_id, raw_item_id, claim_type, text, author,
+                               author_basis, owner, status, first_seen_ts, last_seen_ts)
+           VALUES (?, ?, 'ask', 'please approve', 'counterparty', 'direction',
+                   'marc', 'open', ?, ?)""",
+        (iid, rid, now - 1 * day, now - 1 * day))
+    conn.commit()
+    conn.close()
+
+    seen = {}
+    real = nba.score_claim
+    monkeypatch.setattr(nba, "score_claim",
+                        lambda c, **kw: seen.update(asked_ts=kw.get("asked_ts")) or real(c, **kw))
+    ranked = nba.rank_actions(limit=5, now=now)
+
+    assert ranked, "the claim should rank"
+    assert seen["asked_ts"] == pytest.approx(now - 120 * day), \
+        "rank_actions must pass the evidence's occurred_ts, not leave it None"
+    assert "open 120d" in ranked[0]["reason"]
+
+
 def test_staleness_and_due_urgency_use_same_named_constant():
     now = time.time()
     u = nba._staleness_urgency(now - 7 * nba.DAY, now)

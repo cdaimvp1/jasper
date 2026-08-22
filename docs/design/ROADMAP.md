@@ -96,15 +96,30 @@ and file/line references):
   live by a technical audience. Also missing: an explicit "the ask"
   slide - the pre-read explains Jasper well but never states what
   decision the presentation wants leadership to make.
-- **#385**: reported (not yet independently reproduced here - no Linux
-  environment available in this session) cross-platform test
-  hermeticity gaps distinct from task #368's Windows-focused fixes:
-  missing optional packages (`watchdog`, MCP) in a Linux run, a
-  Windows-absolute-path assumption that may not hold under Linux
-  `pathlib`, and possibly-uninitialized-DB test dependencies in
-  `test_workgraph_projects.py`. Framed correctly by the review as
-  hermeticity issues, not evidence of a real runtime failure on
-  Jasper's actual Windows target.
+- **#385** (RESOLVED 2026-08-21): reported cross-platform test hermeticity
+  gaps distinct from task #368's Windows-focused fixes. Still no Linux
+  environment here, so each claim was traced through the import graph rather
+  than reproduced. Three claims, three different answers:
+  - **MCP missing** - REAL, fixed earlier 2026-08-21. `test_jasper_mcp_server.py`
+    imported `mcp` at module level, so its absence was a collection ERROR that
+    aborted the whole run (which is why the suite had to be invoked with
+    `--ignore`). Now `pytest.importorskip("mcp")`.
+  - **`watchdog` missing** - REAL but narrow, fixed 2026-08-21. `watchers.py` is
+    the ONLY module-level watchdog importer in the repo; `server_lean.py` is its
+    only importer; `test_addin_output_badge_stream.py` is server_lean's only test
+    importer. That file already had a `fastapi` guard, but on a machine with
+    fastapi present and watchdog absent the guard passes and collection then
+    dies on watchdog anyway. Added a second `importorskip("watchdog")`. One line
+    closes the whole path.
+  - **Windows-absolute-path assumption in tests** - NOT REPRODUCIBLE. A grep for
+    `C:\` / `C:/` across `tests/` returns zero hits; the suite gets its paths
+    from pytest's `tmp_path`.
+  - **Uninitialized-DB dependency in `test_workgraph_projects.py`** - NOT A
+    DEFECT. `conftest.py`'s `ws_db` fixture monkeypatches `WORKGRAPH_DB` to a
+    per-test tmp file and calls `init_workgraph()`; every helper in that file
+    takes `ws_db`, so the DB is always initialized and per-test isolated.
+  The review's framing was right that these are hermeticity issues, not
+  evidence of a runtime failure on the Windows target.
 - **#386** (DONE 2026-08-21): pure hygiene - 13 files carried a stale
   `2026-08-13` docstring/comment date inherited from an earlier review
   pass, one day after "today" at the time; it undercut the pre-read's own

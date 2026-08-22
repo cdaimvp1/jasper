@@ -36,6 +36,17 @@ import pytest
 # correct outcome: a clean skip when the optional dependency is missing, a real
 # run when it is present. Must precede the fastapi/server_lean imports.
 pytest.importorskip("fastapi", reason="optional fastapi dependency not installed")
+# Task #385 (2026-08-21), second guard: importing server_lean pulls in
+# `from watchers import start_watchers` (server_lean.py:59), and watchers.py
+# imports `watchdog.observers` at MODULE level. watchdog is one of the product
+# venv's 9 deps, so it is present in the real deployment - but on a machine
+# where fastapi IS installed and watchdog is NOT, the fastapi guard above
+# passes and collection then dies on watchdog with the same abort-the-whole-run
+# ERROR the guard was added to prevent. Traced deliberately rather than added
+# defensively: watchers.py is the ONLY module-level watchdog importer in the
+# repo, server_lean.py is its only importer, and this file is server_lean's
+# only test importer - so this one line closes the entire path.
+pytest.importorskip("watchdog", reason="optional watchdog dependency not installed")
 
 from fastapi.testclient import TestClient  # noqa: E402
 

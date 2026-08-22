@@ -921,3 +921,57 @@ write-up: `GATES_FEDERATION_AND_MECHANISM_TRIAGE.md` section 2.
 
 Marc's own formulation is the whole design: *"federation informs local
 understanding; it does not replace it."*
+
+---
+
+## #416 re-examined: do NOT archive the 38 "ghost" calendar rows (2026-08-21)
+
+#416 was queued as "archive 38 ghost rows; their content is mostly OOO/personal,
+so low loss." **The premise no longer holds, and the archive was not performed.**
+
+What the export recorded vs. what the live DB now says:
+
+- The export (`scratch/_416_ghost_calendar_rows.json`) sampled them as
+  `item_class: NOISE`. Live, only **6 of 38** are still NOISE (all genuine OOO:
+  "Zainab OOO", "Dima OOO Paternity Leave" x4, "Lane - OOO Surgery"). The other
+  **32 are now FYI-EVIDENCE** - they were reclassified after the export.
+- **3 are linked to live issues**: `marc-6394` (MCP vendor list + CMDB),
+  `marc-6395` (Moxo MSSA and pricing proposal), `marc-6396` (MetaCx Next Steps).
+  Archiving those would remove evidence from real, open procurement work.
+- Several unlinked ones are plainly work, not personal: "Introductions to SHI
+  and Business Overview", "Procurement Automation", "Contract Ops",
+  "Theo Connect - II", "Catch Up - Marc/Dennis", "ARIA Hands-On Lab" (x5).
+- The genuinely disposable remainder is personal/blocking: "School Drop off"
+  (x5), "Focus Time" (x2), "HOLD" (x3), "Leave" (x2), a birthday celebration,
+  and 2 blank subjects.
+
+So "mostly OOO/personal" was true of the 6 NOISE rows and false of the 32
+others. Archiving on the original premise would have been real data loss.
+
+**What IS confirmed, and is the useful finding.** These 38 are genuine
+relay-era artifacts. Measured against the deterministic Outlook COM scan
+(1,302 events, 789 distinct identity keys):
+
+    ghost rows whose stable_key appears in the scan:      0 / 38
+    non-ghost calendar rows appearing in the scan:      178 / 235  (76%)
+
+The obvious confound - that the scan simply did not cover their dates - is
+ruled out: the two sets occupy essentially the same window (ghosts
+2026-02-03..2026-08-21, healthy rows 2026-01-26..2026-08-28). The 38 sit
+inside the range where three quarters of everything else matches.
+
+Nor is the "ghost" label about missing fields. Checked directly:
+`body_preview` is empty for 234/235 non-ghost calendar rows too, and
+`entry_id` for 235/235 - so those are properties of calendar ingestion
+generally, not of this subset.
+
+**Conclusion.** These rows were created by the LLM relay and cannot be
+reconciled against any real appointment Jasper can now reach. That is worth
+knowing precisely because three of them are feeding live issues from a source
+that can no longer be verified - which is a stronger argument for finishing
+the deterministic calendar migration than for deleting anything.
+
+**Status: #416 re-scoped, not done.** No rows archived. Revisit only with an
+explicit decision from Marc about the 3 issue-linked rows; the remaining
+personal entries are already handled correctly by the deterministic noise gate
+and cost nothing to leave in place.

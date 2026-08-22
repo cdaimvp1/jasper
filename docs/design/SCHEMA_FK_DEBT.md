@@ -161,3 +161,72 @@ to it either.
 Recorded rather than acted on: changing FK declarations touches schema shape
 across two tables and is Marc's call, not a cleanup to slip into an unrelated
 sweep.
+
+### CORRECTION, same day (2026-08-21): the "62k orphans" are not orphans
+
+The section above stopped too early and I recorded a wrong conclusion in commit
+`d215b02` ("neither option needs a migration subsystem"). Carrying the
+measurement further reverses it.
+
+Per-table `PRAGMA foreign_key_check` (the global form aborts on the 2 view
+declarations, the per-table form does not) reports violations in **12 tables,
+~61,900 rows**. That number looks alarming and is almost entirely meaningless
+as a data-quality signal. Checked directly with LEFT JOINs against the real
+parents:
+
+```
+data_point_values rows with a definition_id missing from definitions : 0
+claims rows with raw_item_id missing from raw_items                  : 0
+issue_parties rows with party_id missing from parties                : 0
+```
+
+**Zero dangling references to real data.** The violations come from the FK
+*declarations*, not the rows. Reading the actual check output rather than the
+count:
+
+```
+PRAGMA foreign_key_check(data_point_values)
+  -> ('data_point_values', 11, 'work_objects_pre_fix4', 0)
+```
+
+`work_objects_pre_fix4` was the backup table from task #339's view/trigger
+repair. **It no longer exists**, and five tables still declare foreign keys to
+it:
+
+    work_object_relationships · work_object_signatures · artifact_lineages
+    evidence_unit_links · data_point_values
+
+Plus the two pointing at the `issues` VIEW (`nba_outcome_log`,
+`pending_issue_state_suggestions`). This is exactly the "columns already point
+at tables renamed away" debt this file recorded in the first place - now
+confirmed live, with the specific dead target named.
+
+### What that does to A vs B, and to #378
+
+The earlier framing said neither option needs a migration subsystem. **That was
+wrong.** SQLite cannot `ALTER` a foreign key: changing one requires the 12-step
+table rebuild (create replacement, copy rows, drop original, rename, recreate
+indexes and triggers). Option A means doing that for **seven-plus tables
+carrying real production data**, in the right order, idempotently, resumably.
+
+That is precisely what task #378 exists to provide. So #378 does have a real,
+concrete customer, and it is this.
+
+And the payoff is now worth having, which it would not have been if the orphans
+were real: because there are **zero** genuine dangling references, once the
+declarations point at `work_objects`, `PRAGMA foreign_keys = ON` would actually
+hold rather than immediately rejecting writes. Enforcement becomes reachable
+*and* safe, in that order.
+
+**Revised recommendation: A, sequenced through #378.**
+  1. #378 first, scoped narrowly to "rebuild a table to change its FK
+     declarations, safely and resumably" - not a general-purpose framework.
+  2. Re-point the 5 `work_objects_pre_fix4` declarations and the 2 `issues`
+     declarations at `work_objects(id)`.
+  3. Re-run per-table `foreign_key_check`; expect zero violations.
+  4. Only then enable `PRAGMA foreign_keys = ON` in `_connect()`.
+Each step is independently verifiable and step 4 is reversible by one line.
+
+Option B (drop the clauses, keep FKs as documentation) remains defensible and
+is strictly cheaper, but it forfeits real enforcement on a database holding
+contract and supplier data when that enforcement is now demonstrably attainable.

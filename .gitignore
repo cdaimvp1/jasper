@@ -35,3 +35,13 @@ tests/_pytest_scratch/
 # OS/editor cruft
 .DS_Store
 Thumbs.db
+
+# Ad-hoc analysis scratch produced while investigating live data (tasks #413-#418
+# and predecessors). These hold REAL calendar/mail content - names, addresses,
+# suppliers - so they must never reach this public repo. Durable findings belong
+# in docs/design/ROADMAP.md; the raw files belong in scratch/ (already ignored).
+_*.json
+_*.py
+_*.txt
+.relay_*.json
+.synthesis_scratch/

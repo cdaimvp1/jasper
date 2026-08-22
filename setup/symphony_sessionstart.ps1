@@ -4,7 +4,10 @@
 $envPs = 'C:\Users\lane_marc@lilly.com\Symphony\body\symphony_env.ps1'
 if (Test-Path $envPs) { . $envPs }
 if ($env:CLAUDE_ENV_FILE) {
-  foreach ($v in 'TEAM_WORKSPACE_ROOT','TEAM_HOME','SYMPHONY_INSTALL_ROOT','TEAM_SCRIPTS_ROOT','TEAM_DATA_DIR','SYMPHONY_SOUL_ROOT','TEAM_PORT','SYMPHONY_PORT','COHORT_BASE','TEAM_PID_FILE','SYMPHONY_BODY_SOURCE') {
+  # NOTE: ANTHROPIC_BASE_URL/ANTHROPIC_API_KEY added by hand for the Lilly Code
+  # fallback feature (body/setup/symphony_llm_profile.ps1). If this file gets
+  # regenerated, re-add these two names to the list below.
+  foreach ($v in 'TEAM_WORKSPACE_ROOT','TEAM_HOME','SYMPHONY_INSTALL_ROOT','TEAM_SCRIPTS_ROOT','TEAM_DATA_DIR','SYMPHONY_SOUL_ROOT','TEAM_PORT','SYMPHONY_PORT','COHORT_BASE','TEAM_PID_FILE','SYMPHONY_BODY_SOURCE','ANTHROPIC_BASE_URL','ANTHROPIC_API_KEY') {
     $val = [Environment]::GetEnvironmentVariable($v)
     if ($val) { Add-Content -LiteralPath $env:CLAUDE_ENV_FILE -Value "export $v=`"$val`"" }
   }

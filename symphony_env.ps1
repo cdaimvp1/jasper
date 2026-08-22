@@ -12,3 +12,7 @@ $env:TEAM_PORT="8700"
 $env:SYMPHONY_PORT="8700"
 $env:COHORT_BASE="http://localhost:8700"
 Remove-Item Env:\SYMPHONY_EL_ROOT -ErrorAction SilentlyContinue
+
+# Lilly Code fallback: picks primary vs. fallback (Lilly Code) LLM credentials.
+# See body/setup/symphony_use_lilly_code.ps1 / symphony_use_primary.ps1 to switch.
+. 'C:\Users\lane_marc@lilly.com\Symphony\body\setup\symphony_llm_profile.ps1'

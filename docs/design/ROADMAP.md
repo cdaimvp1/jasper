@@ -990,3 +990,56 @@ the deterministic calendar migration than for deleting anything.
 explicit decision from Marc about the 3 issue-linked rows; the remaining
 personal entries are already handled correctly by the deterministic noise gate
 and cost nothing to leave in place.
+
+---
+
+## Guardrail change executed: trailing-separator strip in normalize_company_name (2026-08-22)
+
+The 2-point candidate-detection gate's standing rule requires any change touching
+`normalize_company_name` (which produces the `supplier` data point) to be called
+out explicitly and shipped with a regression-corpus before/after plus a live
+backtest. This is that record.
+
+**The defect.** `normalize_company_name` lowercases and strips ONE trailing
+legal-form suffix, anchored at end of string, and no punctuation. So
+`Fullstory, Inc` → the suffix strip removes `Inc` and leaves **`fullstory,`**
+with the comma, which never equals `fullstory`.
+
+**Pre-measurement, before writing the fix.** All 4,052 distinct company-ish
+strings across `parties.company`, `data_point_values.value` and
+`relationships.name` were normalized both ways and their MATCH-SETS compared
+(not group counts - a group count cannot see an existing group growing, which is
+exactly what this fix does, and my first metric got that wrong):
+
+    values whose match-set changes : 8, spanning 2 real suppliers
+      Fullstory: "Fullstory" / "Fullstory Inc" / "Fullstory, Inc" /
+                 "fullstory" / "fullstory," all converge
+      Moxo:      "Moxo" / "moxo" / "moxo," converge
+    incorrect merges introduced    : 0
+    other punctuation-tail strings : 34, none of them company names - they are
+                                     dates and deadline phrases ("September
+                                     (initial work start)") which end in ")"
+                                     and are untouched by this strip
+
+**Verification after the change.**
+
+    regression corpus + pipeline2 + projects + signals + suppliers
+        235 tests, all pass
+    live backtest, all 16 currently-ungrouped clusters, DB-wide
+        candidate pairs      527 -> 527   (delta 0)
+        candidate id sets    identical for every cluster
+        matched-signal sets  identical for every cluster
+
+Zero delta is the CORRECT and safest outcome, not a null result: neither
+Fullstory nor Moxo appears among the 16 clusters awaiting grouping today, so the
+fix changes nothing now and only helps the next time either supplier is seen. It
+demonstrably does not loosen the gate in general.
+
+(An earlier read of the backtest reported "16 clusters changed" - that was an
+artifact of comparing tuples against JSON-round-tripped lists in the comparison
+script, not a real difference. Re-checked normalized: 0 real differences.)
+
+**Contrast with #388**, which is why this discipline exists: a plausible-sounding
+supplier+stakeholder correlation rule was measured before building and turned out
+to drop 16 genuine siblings below the gate. Same procedure, opposite verdict.
+The rule is the measurement, not the plausibility.

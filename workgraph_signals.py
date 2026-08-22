@@ -470,16 +470,49 @@ _COMPANY_SUFFIX_RE = re.compile(
     r"\b(?:inc|incorporated|llc|l\.l\.c|ltd|limited|corp|corporation|co)\.?\s*$", re.I)
 
 
+#: Task #379/#415 (2026-08-21): trailing separator characters left behind once
+#: the legal-form suffix is removed. "Fullstory, Inc" -> the suffix strip takes
+#: "Inc" and leaves "fullstory," WITH the comma, which then fails to equal
+#: "fullstory". Only these separators, and only trailing - no interior
+#: punctuation is touched, so "Johnson & Johnson" and "AT&T" are unaffected.
+_TRAILING_SEPARATORS = " .,;:-&"
+
+
 def normalize_company_name(name: Optional[str]) -> str:
     """Lowercases and strips a trailing corporate suffix (INC/LLC/CORP/...)
     so a party's tracked company name ("Authenticx") and a system's own
     formal field value ("AUTHENTICX INC") compare equal as the same real
     vendor - see workgraph_projects._matched_data_points' "supplier"
     point. ""/None in, "" out - never fabricates a name to compare
-    against."""
+    against.
+
+    GROUPING-GUARDRAIL CHANGE, 2026-08-21. This function feeds the `supplier`
+    data point in candidate detection, so it sits under the ROADMAP's standing
+    2-point gate rule. The trailing-separator strip below was added under that
+    discipline, with the effect measured BEFORE the change rather than argued:
+
+      * 4,052 distinct company-ish strings across parties.company,
+        data_point_values.value and relationships.name were normalized both
+        ways and their match-sets compared.
+      * Exactly 8 values change match-set, spanning 2 real suppliers:
+        Fullstory ("Fullstory" / "Fullstory Inc" / "Fullstory, Inc" /
+        "fullstory" / "fullstory,") and Moxo ("Moxo" / "moxo" / "moxo,").
+      * Every one of those 8 is CORRECT - same company. Zero cases join two
+        different companies.
+      * 34 other strings normalize to a punctuation tail but are not company
+        names at all (dates, deadline phrases like "September (initial work
+        start)"); they end in ")" and are untouched by this strip.
+
+    So this is a two-supplier fix with no false-merge surface, not a loosening
+    of the gate in general. Contrast task #388, where a plausible-sounding
+    supplier+stakeholder correlation rule turned out on measurement to drop 16
+    genuine siblings below the gate and was abandoned. The rule is the same in
+    both cases: measure the delta on the live corpus first.
+    """
     if not name:
         return ""
-    return _COMPANY_SUFFIX_RE.sub("", name.lower().strip()).strip()
+    stripped = _COMPANY_SUFFIX_RE.sub("", name.lower().strip()).strip()
+    return stripped.rstrip(_TRAILING_SEPARATORS).strip()
 
 
 _RELATIONSHIP_KEYWORDS = (

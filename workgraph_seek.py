@@ -361,3 +361,157 @@ def seek_for_signal(signal, *, project_id: Optional[str] = None) -> dict:
                                    if (p.get("affiliation") or "") != "internal"]),
         "advisory_only": True,
     }
+
+
+# ============================================================ #398: answers ==
+
+#: Evidence type for an answer a human gave to one of Jasper's questions. A
+#: distinct type on purpose: it must be visibly distinguishable from ingested
+#: mail/calendar/sharepoint forever, both for provenance and because it is the
+#: only evidence class that exists because Jasper ASKED.
+HUMAN_ANSWER_EVIDENCE_TYPE = "human_answer"
+
+
+def record_answer(*, issue_id: str, question, answer_text: str,
+                  answered_by: str, now_ts: Optional[float] = None) -> dict:
+    """#398. Persist a human's answer as EVIDENCE in the graph. Nothing else.
+
+    WHAT THIS DELIBERATELY DOES NOT DO, and why each one matters:
+
+      * It does not close the gap. The gap disappears (or does not) the next
+        time `measure_project` runs over the new evidence. If this function
+        marked the gap closed, Jasper would be deciding that an answer was
+        sufficient - which is the measurement's job, not the recorder's.
+      * It does not resolve any claim. That is the suggest-only discipline
+        from #155/#319: semantic text, including a human's prose, never
+        auto-closes a tracked commitment.
+      * It does not overwrite anything. An answer is an ADDITION to the record.
+        If a later answer contradicts an earlier one, both stay, and the
+        contradiction becomes a gap for a human - never something Jasper
+        silently reconciles.
+
+    PROMPT-INJECTION BOUNDARY (design doc s12.10). `answer_text` frequently
+    comes from an EXTERNAL party - a supplier answering a question about their
+    own contract. It is stored as DATA and must never be executed as
+    instruction. This function only ever concatenates it into a summary string;
+    it does not parse it for commands, and no caller should hand it to a model
+    as anything but quoted third-party content.
+
+    Returns the created evidence id plus what was recorded, so a caller can
+    show Marc exactly what entered the graph.
+    """
+    if not str(answer_text or "").strip():
+        raise ValueError("answer_text is empty - refusing to record a blank answer")
+    if not str(answered_by or "").strip():
+        # Provenance is the whole value of this row. An answer with no author
+        # is worse than no answer, because it looks authoritative.
+        raise ValueError("answered_by is required - an answer with no author is not evidence")
+
+    gap_kind = getattr(question, "gap_kind", None) or "unknown"
+    ref = getattr(question, "ref", None)
+    asked = getattr(question, "text", "") or ""
+
+    # Structured, greppable, and honest about who said it. Quoting the answer
+    # keeps the boundary between Jasper's framing and the human's words visible
+    # in the stored text itself.
+    summary = (
+        f"[human answer] {answered_by} answered Jasper's question"
+        + (f" about {ref}" if ref else "")
+        + f" (gap: {gap_kind}).\n"
+        f"Q: {asked}\n"
+        f"A: \"{str(answer_text).strip()}\""
+    )
+
+    ev_id = ws.add_evidence(issue_id=issue_id, type=HUMAN_ANSWER_EVIDENCE_TYPE,
+                            summary=summary)
+    return {
+        "evidence_id": ev_id,
+        "issue_id": issue_id,
+        "type": HUMAN_ANSWER_EVIDENCE_TYPE,
+        "gap_kind": gap_kind,
+        "ref": ref,
+        "answered_by": answered_by,
+        "gap_closed": False,          # never, here - see the docstring
+        "claims_resolved": 0,         # never, here - #155/#319
+        "note": ("recorded as evidence only; the next measure_project pass "
+                 "decides whether the gap is actually closed"),
+    }
+
+
+# ======================================================== #399: escalation ===
+
+@dataclass(frozen=True)
+class EscalationPackage:
+    """#399. What reaches Marc when Jasper cannot close a gap itself.
+
+    The shape enforces the R3 rule from the Two Gates convention
+    (docs/design/GATES_FEDERATION_AND_MECHANISM_TRIAGE.md s1): escalation
+    carries EVIDENCE, the NAMED GAP, and the ALTERNATIVES - never Jasper's
+    recommendation of what is true. There is deliberately no `recommendation`,
+    `best_guess`, or `likely_answer` field, and a test asserts none appears.
+
+    `what_jasper_tried` is the part that makes this respectful of Marc's time:
+    it shows the work already done, so he is not asked to redo it.
+    """
+    project_id: str
+    gap_kind: str
+    what_is_missing: str
+    ref: Optional[str]
+    evidence_seen: tuple = ()
+    what_jasper_tried: tuple = ()
+    open_options: tuple = ()
+    unreachable_options: tuple = ()
+    measurement: dict = field(default_factory=dict)
+
+    def as_dict(self) -> dict:
+        return {
+            "project_id": self.project_id,
+            "gap_kind": self.gap_kind,
+            "what_is_missing": self.what_is_missing,
+            "ref": self.ref,
+            "evidence_seen": list(self.evidence_seen),
+            "what_jasper_tried": list(self.what_jasper_tried),
+            "open_options": list(self.open_options),
+            "unreachable_options": list(self.unreachable_options),
+            "measurement": dict(self.measurement),
+        }
+
+
+def build_escalation(*, project_id: str, gap, sources: list,
+                     questions_asked: Optional[list] = None,
+                     answers_received: Optional[list] = None,
+                     evidence_summaries: Optional[list] = None,
+                     measurement: Optional[dict] = None) -> EscalationPackage:
+    """#399. Assemble the decision package for one unclosed gap.
+
+    Escalate when a gap survives the seek step - either nothing available could
+    close it, or a question was asked and the answer did not resolve it.
+
+    Everything here is already-known material, re-presented. No new inference,
+    no LLM call, and specifically no verdict: the package tells Marc what is
+    missing, what was already attempted, and which paths remain open, then
+    stops. Deciding is his.
+    """
+    tried: list[str] = []
+    for q in (questions_asked or []):
+        who = getattr(q, "asked_of", None) or "someone"
+        tried.append(f"asked {who}: {getattr(q, 'text', '')}")
+    for a in (answers_received or []):
+        who = a.get("answered_by") if isinstance(a, dict) else getattr(a, "answered_by", "?")
+        tried.append(f"{who} answered, and the gap did not close")
+    if not tried:
+        tried.append("nothing was asked - see unreachable_options for why")
+
+    return EscalationPackage(
+        project_id=project_id,
+        gap_kind=getattr(gap, "kind", "unknown"),
+        what_is_missing=getattr(gap, "what", ""),
+        ref=getattr(gap, "ref", None),
+        evidence_seen=tuple(evidence_summaries or ()),
+        what_jasper_tried=tuple(tried),
+        open_options=tuple(s.what for s in sources if s.available),
+        unreachable_options=tuple(
+            f"{s.what} - NOT AVAILABLE: {s.why_unavailable}"
+            for s in sources if not s.available and s.why_unavailable),
+        measurement=dict(measurement or {}),
+    )

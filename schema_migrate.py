@@ -243,3 +243,105 @@ if __name__ == "__main__":
     print()
     print(json.dumps([{k: v for k, v in r.items() if k != "new_ddl"} for r in results],
                      indent=2))
+
+
+# ===================================================== general DDL rebuild ===
+
+def rebuild_table_with_ddl(table: str, new_ddl_body: str, *, apply: bool = False,
+                           reason: str = "") -> dict:
+    """Rebuild ONE table to an explicitly-supplied new DDL. Same verified
+    12-step machinery as rebuild_table_fk_targets, but the caller states the
+    target schema instead of it being derived from FK_RETARGETS.
+
+    Added 2026-08-22 for a SECOND, genuinely different customer: widening the
+    CHECK constraint on `evidence_units.type` so task #398 can store a
+    `human_answer` evidence type. That is the bar this module set for itself -
+    do not generalize without a second real caller - and CHECK widening is the
+    case docs/design/SCHEMA_FK_DEBT.md already flagged as needing a full
+    rebuild (tasks #44/#55).
+
+    `new_ddl_body` must be a complete CREATE TABLE statement for `table`; the
+    table name inside it is rewritten to the temp name automatically. Column
+    ORDER and COUNT must match the original, because the copy is a bare
+    `INSERT INTO tmp SELECT * FROM orig` - verified here rather than trusted.
+    """
+    c = ws._connect()
+    row = c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                    (table,)).fetchone()
+    if row is None:
+        return {"table": table, "error": "no such table"}
+
+    indexes = [r[0] for r in c.execute(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name=? AND sql IS NOT NULL",
+        (table,))]
+    triggers = [r[0] for r in c.execute(
+        "SELECT sql FROM sqlite_master WHERE type='trigger' AND tbl_name=?", (table,))]
+    views_before = {r[0]: r[1] for r in c.execute(
+        "SELECT name, sql FROM sqlite_master WHERE type='view'")}
+    dependent_views = {n: s for n, s in views_before.items() if s and table in s}
+
+    cols_before = [x[1] for x in c.execute(f'PRAGMA table_info("{table}")')]
+    rows_before = c.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+
+    tmp = f"{table}__ddlfix"
+    new_ddl = re.sub(r'^(\s*CREATE\s+TABLE\s+)"?' + re.escape(table) + r'"?',
+                     r'\1"' + tmp + r'"', new_ddl_body, count=1, flags=re.I)
+
+    report = {"table": table, "rows": rows_before, "indexes": len(indexes),
+              "triggers": len(triggers), "dependent_views": sorted(dependent_views),
+              "reason": reason, "applied": False}
+    if triggers:
+        report["error"] = f"{len(triggers)} trigger(s) - refusing (see the FK variant's note)"
+        return report
+    if new_ddl == new_ddl_body:
+        report["error"] = f"could not find 'CREATE TABLE {table}' in the supplied DDL"
+        return report
+    if not apply:
+        report["new_ddl"] = new_ddl
+        return report
+
+    try:
+        c.execute("PRAGMA legacy_alter_table=ON")
+        c.execute("BEGIN")
+        c.execute(new_ddl)
+        # Column shape must match BEFORE any data moves - a mismatched SELECT *
+        # would silently shift values between columns.
+        cols_new = [x[1] for x in c.execute(f'PRAGMA table_info("{tmp}")')]
+        if cols_new != cols_before:
+            c.execute("ROLLBACK")
+            report["error"] = (f"column shape differs: {cols_before} -> {cols_new}; "
+                               "refusing to copy with SELECT *")
+            return report
+        c.execute(f'INSERT INTO "{tmp}" SELECT * FROM "{table}"')
+        moved = c.execute(f'SELECT COUNT(*) FROM "{tmp}"').fetchone()[0]
+        if moved != rows_before:
+            c.execute("ROLLBACK")
+            report["error"] = f"row count mismatch: {rows_before} -> {moved}"
+            return report
+        c.execute(f'DROP TABLE "{table}"')
+        c.execute(f'ALTER TABLE "{tmp}" RENAME TO "{table}"')
+        for idx in indexes:
+            c.execute(idx)
+        for vname, vsql in dependent_views.items():
+            now = c.execute("SELECT sql FROM sqlite_master WHERE type='view' AND name=?",
+                            (vname,)).fetchone()
+            if now is None or now[0] != vsql:
+                c.execute("ROLLBACK")
+                report["error"] = f"view {vname} was lost or rewritten during rebuild"
+                return report
+        after = c.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+        if after != rows_before:
+            c.execute("ROLLBACK")
+            report["error"] = f"post-rename count mismatch: {rows_before} -> {after}"
+            return report
+        c.execute("COMMIT")
+        report["applied"] = True
+    except Exception as e:
+        try:
+            c.execute("ROLLBACK")
+        except Exception:
+            pass
+        report["error"] = f"{type(e).__name__}: {e}"
+    finally:
+        c.execute("PRAGMA legacy_alter_table=OFF")
+    return report

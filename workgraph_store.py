@@ -341,7 +341,15 @@ def init_workgraph() -> None:
                     id          INTEGER PRIMARY KEY AUTOINCREMENT,
                     issue_id    TEXT NOT NULL REFERENCES issues(id),
                     raw_item_id INTEGER,
-                    type        TEXT NOT NULL CHECK (type IN ('email','teams','calendar','sharepoint','worker_action')),
+                    type        TEXT NOT NULL CHECK (type IN ('email','teams','calendar','sharepoint','worker_action','human_answer')),
+                    -- 'human_answer' added 2026-08-22 for task #398: an answer a
+                    -- person gave to a question Jasper asked. A DISTINCT type on
+                    -- purpose - it must stay visibly separable from ingested
+                    -- evidence forever, because it is the only class that exists
+                    -- because Jasper ASKED rather than because something arrived.
+                    -- Widening this CHECK on the live DB needed a full table
+                    -- rebuild (schema_migrate.rebuild_table_with_ddl); a fresh DB
+                    -- gets it from here.
                     summary     TEXT NOT NULL,
                     ts          REAL NOT NULL
                 )
@@ -2661,7 +2669,15 @@ def init_workgraph() -> None:
                 CREATE TABLE IF NOT EXISTS evidence_units (
                     id          INTEGER PRIMARY KEY AUTOINCREMENT,
                     raw_item_id INTEGER,
-                    type        TEXT NOT NULL CHECK (type IN ('email','teams','calendar','sharepoint','worker_action')),
+                    type        TEXT NOT NULL CHECK (type IN ('email','teams','calendar','sharepoint','worker_action','human_answer')),
+                    -- 'human_answer' added 2026-08-22 for task #398: an answer a
+                    -- person gave to a question Jasper asked. A DISTINCT type on
+                    -- purpose - it must stay visibly separable from ingested
+                    -- evidence forever, because it is the only class that exists
+                    -- because Jasper ASKED rather than because something arrived.
+                    -- Widening this CHECK on the live DB needed a full table
+                    -- rebuild (schema_migrate.rebuild_table_with_ddl); a fresh DB
+                    -- gets it from here.
                     summary     TEXT NOT NULL,
                     ts          REAL NOT NULL
                 )

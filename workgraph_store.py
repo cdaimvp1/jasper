@@ -3904,6 +3904,42 @@ def list_issue_state_history_for_issues(issue_ids: list[str]) -> dict[str, list[
     return out
 
 
+def list_issue_state_changes_since(ts: float) -> list[dict]:
+    """Task #372. Every state transition at/after ts, oldest first, joined to
+    the issue's title and parent project so a caller needs no second lookup.
+
+    Exists because list_issue_ids_updated_since CANNOT answer "what changed
+    while I was away": it filters to state IN ('active','waiting','blocked'),
+    so an issue that CLOSED during the window - the single thing a returning
+    human most wants to know - is invisible to it. That filter is correct for
+    its own caller (the settlement pass only rescores open work), so this is a
+    second reader rather than a change to that one.
+
+    Reading issue_state_history directly is also what makes it truthful about
+    transitions the current row can no longer show: two moves inside one
+    window (active -> waiting -> active) leave no trace in issues.state, and
+    this returns both.
+
+    Full scan by design. The index is (issue_id, changed_ts), so a filter on
+    changed_ts alone cannot use it - the same deliberate tradeoff, at the same
+    corpus scale, that list_raw_items_since documents for occurred_ts."""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                """SELECT h.issue_id, h.from_state, h.to_state, h.changed_ts,
+                          w.title, w.parent_id AS project_id
+                   FROM issue_state_history h
+                   LEFT JOIN work_objects w ON w.id = h.issue_id
+                   WHERE h.changed_ts >= ?
+                   ORDER BY h.changed_ts ASC""",
+                (ts,),
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
 # --- membership_state / exposure_state (design doc Section 12.8) ----------
 # Bypass the issues/projects views entirely (same reasoning as add_evidence,
 # Section 12.2) - these two columns live on work_objects directly and don't

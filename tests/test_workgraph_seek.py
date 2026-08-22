@@ -320,3 +320,28 @@ def test_parties_for_project_walks_members(ws_db, monkeypatch):
     src = inspect.getsource(seek.parties_for_project)
     assert "parent_id" in src, "must walk members, not just query the project id"
     assert "seen" in src, "must de-duplicate across members"
+
+
+def test_parties_are_ordered_by_first_seen_not_join_order():
+    """list_parties_for_issue has no ORDER BY, so an unordered JOIN made "the
+    first party" vary between identical runs. workgraph_projects and
+    workgraph_suppliers both fixed this with first_seen_ts ascending in the
+    2026-07-30 hardening pass; this matches that rather than inventing a second
+    ordering for the same hazard."""
+    import inspect
+    src = inspect.getsource(seek.parties_for_project)
+    assert "first_seen_ts" in src
+    assert "sort" in src
+
+
+def test_recipient_choice_is_deterministic_across_runs():
+    """The practical consequence: two identical runs must name the same
+    recipient, or Jasper emails a different person each cycle."""
+    parties = [{"primary_email": "late@x.com", "affiliation": "external", "first_seen_ts": 200},
+               {"primary_email": "early@x.com", "affiliation": "external", "first_seen_ts": 100}]
+    # generate_questions receives already-sorted rows from parties_for_project;
+    # with several externals it must refuse to pick regardless of order.
+    a = seek.generate_questions([_gap("stale_evidence")], parties=parties)
+    b = seek.generate_questions([_gap("stale_evidence")], parties=list(reversed(parties)))
+    assert a[0].asked_of == b[0].asked_of == seek.RECIPIENT_UNDECIDED
+    assert sorted(a[0].recipient_candidates) == sorted(b[0].recipient_candidates)

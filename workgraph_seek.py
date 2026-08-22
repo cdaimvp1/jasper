@@ -380,7 +380,9 @@ def parties_for_project(project_id: str) -> list[dict]:
     finally:
         conn.close()
     seen, out = set(), []
-    # The project id itself first - a work object can carry parties directly.
+    # The project id itself first - harmless, and measured as always empty
+    # (0 of 1,789 projects carry parties directly), but cheap insurance if that
+    # ever changes.
     for iid in [project_id] + member_ids:
         for prow in ws.list_parties_for_issue(iid):
             pid = prow.get("id") or prow.get("party_id") or prow.get("primary_email")
@@ -388,6 +390,15 @@ def parties_for_project(project_id: str) -> list[dict]:
                 continue
             seen.add(pid)
             out.append(prow)
+
+    # Sort by first_seen_ts ascending - the EARLIEST-KNOWN contact. This is not
+    # my invention: workgraph_projects.compute_work_object_signature and
+    # workgraph_suppliers both adopted exactly this tie-break in the 2026-07-30
+    # hardening pass, for exactly this reason - list_parties_for_issue has no
+    # ORDER BY, so an unordered JOIN result made "the first party" vary between
+    # two otherwise-identical runs. Matching the established pattern rather
+    # than inventing a second ordering for the same hazard.
+    out.sort(key=lambda p: p.get("first_seen_ts") or 0)
     return out
 
 

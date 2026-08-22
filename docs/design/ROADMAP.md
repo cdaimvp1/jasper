@@ -1075,3 +1075,49 @@ stable_keys appear in the deterministic Outlook COM scan, against 178/235 for
 healthy calendar rows over the same date window. They are relay-era artifacts
 whose source cannot be verified. That argues for finishing the deterministic
 calendar migration, which batch 3 continues.
+
+---
+
+## Backlog re-word pass (#419), 2026-08-22 — premises re-measured against live code
+
+Marc's ask, after four premise checks in one session came back materially
+different from what the task titles said: *"the backlog's task titles have
+drifted from reality in a way that's costing us both time... cheaper than
+rediscovering it one task at a time."*
+
+The task list itself is not git-tracked, so the substantive measurements are
+recorded here.
+
+### Premises that did NOT survive measurement
+
+| Task | Title said | Measured |
+|---|---|---|
+| **#379** | build canonical Entity layer | payoff is **1 relationship row / 4 edges**. Phases 1-4 not built. |
+| **#380** | consolidate one-off reconciliation sweeps | the 8 sweeps do different things; the duplication is **6 near-identical `*_daily_if_due` wrappers** whose own docstrings say "gated the exact same way". ~36 lines -> ~10. |
+| **#403** | build cross-project secondary informing | 115 of 115 relationships span >1 project -> **49,276 project pairs**. Shared-supplier is far too coarse to be a trigger. |
+| **#392** | wire remaining ~26 skills into add-in | **cannot verify**: no `skills_registry` table, no `%skill%` table at all, no `addin/` directory. Storage moved or the count is stale. |
+| **#390** | run judge_candidates system-wide | **largely subsumed** by the calendar batches; ungrouped population is now 45, not large. Re-count after batch 3 and scope from the residue. |
+| **#415** | junk feeds the supplier vocabulary | of 18 short values most are REAL (bms, pwc, sap, shi, wns); genuinely junk is ~7. Harm already overstated once — each bad label maps 1:1 to one domain, so grouping stayed coherent. |
+| **#417** | root cause is the party precondition | **my own earlier diagnosis, and it was wrong.** Real cause was empty body text, same as #414. |
+
+### Premises that DID survive, verified rather than assumed
+
+- **#400** (defer autonomy gating) and **#406** (parked governance): `prepared_actions` 0 rows, `pending_actions` 0 rows, no dispatch table. Still nothing consequential to gate. Correctly parked.
+- **#404**, **#383**: still gated on a second user existing. Unchanged.
+- **#387**: 645 clusters carry 3+ uncited claims — but #389 is marked complete as the one-time catch-up for *654*. That near-identity says #389 likely did not finish, or the same clusters keep failing. **Diagnose which before spending LLM budget**, because a recurring sweep over a backlog a one-time pass already failed to clear will fail the same way. The diagnosis is free.
+
+### Not re-measured this pass
+
+**#371**, **#372** (feature builds) and **#381**, **#384**, **#407** (VP / Big Bet
+document work, which needs Marc's content decisions, not measurement). Their
+premises are unverified rather than verified — stated so nobody reads their
+absence from the table above as a clean bill.
+
+### The pattern worth keeping
+
+Seven of roughly a dozen checked premises were materially wrong, and every one
+was cheap to check against the live DB or a grep. The habit that pays: **measure
+the premise before building the thing**, and when the measurement contradicts a
+plausible story, believe the measurement. That is the same discipline that
+stopped #388, #379 and #382, and it is what turned #378 from "no customer" into
+a completed 17-table fix.

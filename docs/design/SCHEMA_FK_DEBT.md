@@ -230,3 +230,65 @@ Each step is independently verifiable and step 4 is reversible by one line.
 Option B (drop the clauses, keep FKs as documentation) remains defensible and
 is strictly cheaper, but it forfeits real enforcement on a database holding
 contract and supplier data when that enforcement is now demonstrably attainable.
+
+---
+
+## Option A executed 2026-08-21: steps 1-3 succeeded, step 4 is blocked by CODE
+
+Snapshot first: `backup.create_labeled_snapshot('pre-fk-rewrite-378')`.
+
+Built `schema_migrate.py` - deliberately not a migration framework, just
+"rebuild a table to change its FK declarations," which is #378's one real
+customer. It follows SQLite's 12-step recipe with the two footguns that recipe
+warns about handled explicitly (`legacy_alter_table=ON` for the RENAME so
+SQLite does not silently rewrite other objects' references; dependent views
+captured before and re-asserted after, since `evidence` is a real view over
+`evidence_unit_links`). Every step verifies rather than assumes - row counts
+before/after must match and per-table `foreign_key_check` must be clean inside
+the transaction, or it rolls back.
+
+**A second dead target was found only by running it.** The first pass fixed 7
+tables and left 28,298 violations. Cause: `issues_pre_workobjects` - an
+**empty, 0-row husk table that still exists**, so a finder checking only "does
+the target exist" skipped it. Verified the child ids were fine before touching
+anything: `claims.issue_id` 9,141 non-null / **0** missing from work_objects;
+`issue_parties` 10,583 / **0**; `issue_state_history` 5,077 / **0**. The finder
+now flags existing-but-known-stale targets too.
+
+**Result across 17 tables:**
+
+```
+DB-wide foreign_key_check   ~61,900 violations  ->  0
+dead FK targets remaining                       ->  none
+row counts                  every table exactly preserved
+evidence view               6,546 rows, intact
+issues view                 5,046 rows, intact
+PRAGMA integrity_check      ok
+```
+
+### Step 4 failed, and the reason matters
+
+With the declarations correct and zero violations, `PRAGMA foreign_keys=ON`
+went into `_connect()`. **A large fraction of the test suite failed
+immediately.** Reverted the same minute; the suite is green again.
+
+The data is clean. **The code is not ordered for enforcement** - many write
+paths insert a child row before its parent exists, which SQLite has silently
+tolerated for this project's entire life and would now reject. That is a real,
+much larger piece of work than a schema change: it means auditing and
+reordering inserts across the store layer.
+
+So the honest state:
+
+  * **Steps 1-3: done and worth keeping on their own.** The schema no longer
+    asserts relationships to tables that do not exist, and `foreign_key_check`
+    now RUNS instead of aborting - so it is usable as a genuine diagnostic for
+    the first time. Any real dangling reference introduced from here on will be
+    detectable.
+  * **Step 4: blocked, pragma line left commented in place** with the reason,
+    so the next person does not repeat the experiment blind.
+  * **#378 is DONE as scoped.** `schema_migrate.py` did its one job. It is not
+    a general framework and should not become one without a second customer.
+
+The remaining question - whether to fix insert ordering so enforcement can be
+switched on - is genuinely open and much larger. It is not queued.

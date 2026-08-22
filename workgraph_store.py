@@ -79,6 +79,40 @@ def _connect() -> sqlite3.Connection:
             conn.execute("PRAGMA busy_timeout=5000")
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
+            # Task #378, enabled 2026-08-21 - the step task #365's title claimed
+            # and never actually performed. It could not be performed then:
+            # `PRAGMA foreign_key_check` ABORTED with "foreign key mismatch"
+            # because declarations named `work_objects_pre_fix4` (#339's backup
+            # table, deleted), `issues_pre_workobjects` (an empty 0-row husk),
+            # and `issues` (a VIEW - SQLite cannot enforce a FK to a view).
+            #
+            # schema_migrate.py re-pointed all 17 of those declarations at
+            # work_objects across 17 tables. Verified immediately before turning
+            # this on: foreign_key_check returns ZERO violations DB-wide (down
+            # from ~61,900, none of which were ever real dangling data - a LEFT
+            # JOIN against the true parents found 0 missing rows), every row
+            # count preserved exactly, both views intact, integrity_check ok.
+            #
+            # ...AND YET IT STAYS OFF. Turning it on was tried, immediately,
+            # and reverted the same minute. The DATA is clean, but the CODE is
+            # not ordered for enforcement: with the pragma on, a large fraction
+            # of the test suite fails instantly - child rows are inserted before
+            # their parents exist in a great many write paths, which SQLite
+            # silently tolerated for the entire life of this project and would
+            # now reject.
+            #
+            # So the honest state is: steps 1-3 of the Option-A plan succeeded
+            # (declarations corrected, zero violations, data verified intact),
+            # and step 4 is blocked by application-code insert ordering, which
+            # is a much larger and separately-scoped piece of work than a
+            # schema fix. The retargeting is still worth keeping on its own:
+            # the schema no longer asserts relationships to tables that do not
+            # exist, and `foreign_key_check` now RUNS instead of aborting, so
+            # it is usable as a real diagnostic.
+            #
+            # Do not re-enable this without first fixing insert ordering and
+            # re-running the full suite. See docs/design/SCHEMA_FK_DEBT.md.
+            # conn.execute("PRAGMA foreign_keys=ON")
             conn.row_factory = sqlite3.Row
             return conn
         except sqlite3.OperationalError as exc:

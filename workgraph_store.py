@@ -5295,7 +5295,31 @@ def resolve_required_approval(action_type: str) -> int:
     codebase produces today are few, fixed, and already fully covered by
     the table; a genuinely new, ambiguous action_type would be a deliberate
     product decision (add a row here), not something to route through a
-    fresh model call on every dispatch."""
+    fresh model call on every dispatch.
+
+    TWO GATES CONVENTION (task #410, adopted 2026-08-21). This function is
+    GATE B - Action Authority. GATE A - Contextual Sufficiency is
+    workgraph_ambiguity.py. Both must pass; neither substitutes for the
+    other. See docs/design/GATES_FEDERATION_AND_MECHANISM_TRIAGE.md s1.
+
+    Gate B is NOT an authority model, and the difference is load-bearing.
+    An authority model adjudicates EVIDENCE - it ranks which source wins,
+    which is a claim about the world Jasper is not permitted to make. This
+    function adjudicates JASPER'S OWN PERMISSIONS against a table a human
+    maintains. That is why a dict lookup is the right shape and an inferred
+    or scored answer is not.
+
+    Two rules this function must keep:
+      * It never inspects evidence quality, confidence, or ambiguity. It
+        does not care how sure Jasper is; it is keyed on action_type alone
+        (already true, and already enforced against message content by
+        create_prepared_action's Section 12.10 note below).
+      * It only ever BLOCKS or ESCALATES. Do not add a path where a low
+        ambiguity score, a high confidence, or any measured quantity flips
+        a 1 to a 0. That is the exact line that turns a measurement into an
+        authority - see R1/R2 in workgraph_ambiguity.py's header.
+
+    Restated: `low ambiguity != automatic action`."""
     return PREPARED_ACTION_APPROVAL_TABLE.get(action_type, 1)
 
 

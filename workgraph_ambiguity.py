@@ -22,6 +22,47 @@ the part of a system which is unsure must never be the part that signs off,
 and Jasper already reached this independently via suggest-only claim
 resolution (#155/#319) and the no-write `ambiguous` verdict.
 
+THE TWO GATES CONVENTION (task #410, adopted 2026-08-21)
+--------------------------------------------------------
+This module is GATE A - Contextual Sufficiency. There is a second,
+INDEPENDENT gate: GATE B - Action Authority, which is
+workgraph_store.resolve_required_approval() (task #317). Both must pass.
+Neither can substitute for the other. Full statement, including why each
+is a distinct kind of question, in
+docs/design/GATES_FEDERATION_AND_MECHANISM_TRIAGE.md section 1.
+
+The distinction that keeps Gate B from becoming an authority model: an
+authority model adjudicates EVIDENCE ("which source wins"). Gate B
+adjudicates JASPER'S OWN PERMISSIONS ("may I act unattended"). One is a
+claim about the world; the other is a claim about what this software is
+allowed to do on the user's behalf. Gate B must never acquire opinions
+about the first, and this module must never acquire the power to do the
+second.
+
+Three rules that make the convention enforceable, not decorative:
+
+  R1  NO SCORE-TO-ACTION MAPPING, EVER. There must be no threshold of the
+      form `if ambiguity < X: auto_approve()`. That single line is how a
+      measurement becomes an authority. This module's only outputs are a
+      measurement and a set of NAMED GAPS. A gap is closed by seeking
+      evidence or by asking a person - never by clearing a bar.
+  R2  GATES SUBTRACT, NEVER ADD. Each gate may only block or escalate.
+      Neither GRANTS permission; passing both is the minimum for an action
+      already configured as permitted. No combination of measurements can
+      promote an action to permitted.
+  R3  ESCALATION CARRIES EVIDENCE, NOT A VERDICT. What reaches the human is
+      the assembled evidence, the named gap, and the alternatives - not
+      Jasper's recommendation of what is true.
+
+Written down because today it is true BY ACCIDENT, not by construction:
+this module is advisory only because nothing consumes it yet, and Gate B
+ignores evidence only because nothing hands it any. The moment the two are
+wired together the natural implementation violates R1 and R2 at once and
+would read like a sensible refactor. This comment exists so that it reads
+as a violation instead.
+
+`low ambiguity != automatic action.`
+
 Corollary, and the reason ABSTENTION is the centrepiece rather than a
 footnote: a component with no data source MUST abstain, not return 0.0.
 Returning 0.0 for contradiction would read as "no contradictions found"
@@ -35,7 +76,20 @@ Verified against the live schema 2026-08-20, not assumed from the presence
 of code:
 
   freshness              COMPUTABLE - raw_items.occurred_ts
-  provenance_reliability COMPUTABLE - raw_items.source + declared trust map
+  provenance_reliability ABSTAINS    - EXCLUDED BY DESIGN, not a data gap.
+                                      An earlier draft scored per-source trust
+                                      (sharepoint .90 / calendar .80 / mail .60
+                                      / teams .40); that is an authority model
+                                      in floats and was removed in 0c3de45.
+                                      Provenance is CARRIED with the evidence,
+                                      never scored. Two regression tests in
+                                      tests/test_workgraph_ambiguity.py assert
+                                      it cannot come back. (This line read
+                                      "COMPUTABLE - raw_items.source + declared
+                                      trust map" until 2026-08-21, describing
+                                      the removed design and contradicting both
+                                      _abstaining_components() and its own
+                                      guard test.)
   referential_ambiguity  COMPUTABLE - identity_anchors(anchor_type='reference')
                                       + raw_items.pr_number
   context_coverage       ABSTAINS    - Jasper has no required-context

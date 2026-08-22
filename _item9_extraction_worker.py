@@ -1,4 +1,4 @@
-"""Worker subprocess for run_item9_backlog_catchup.py (task #389, 2026-08-13,
+"""Worker subprocess for run_item9_backlog_catchup.py (task #389, 2026-08-20,
 Marc's explicit go-ahead). Processes an explicit, pre-computed shard of
 project ids - never re-derives its own candidate list. Unlike
 _backfill_parallel_worker.py (which gates on compute_new_evidence_bytes

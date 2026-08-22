@@ -435,3 +435,68 @@ def test_forecast_is_advisory_only_and_carries_a_reason():
 def test_forecast_is_deterministic_and_calls_no_model():
     hist = [_obs(0.7), _obs(0.6)]
     assert amb.forecast_next_pass(hist, 0.5) == amb.forecast_next_pass(hist, 0.5)
+
+
+# ------------------------------------------ the Two Gates convention (#410)
+# Adopted 2026-08-21. docs/design/GATES_FEDERATION_AND_MECHANISM_TRIAGE.md s1.
+# These guard the ONE line that would turn measurement into authority:
+# `if ambiguity < threshold: auto_approve()`. Before this convention was
+# written down, both gates were independent BY ACCIDENT - Gate A because
+# nothing consumed it, Gate B because nothing fed it. Wiring them is a
+# natural-looking refactor, which is exactly why it needs a guard.
+
+def test_gate_a_takes_no_write_path_and_grants_no_approval():
+    """R1/R2: this module may block or name a gap; it may never authorize.
+    An approval/authorize/dispatch entry point here is the violation."""
+    import inspect
+    for name in dir(amb):
+        if name.startswith("_"):
+            continue
+        low = name.lower()
+        assert not any(w in low for w in ("approve", "authorize", "authorise",
+                                          "dispatch", "execute", "commit")), (
+            f"workgraph_ambiguity.{name} looks like an authorization path; "
+            "Gate A measures and abstains, it never authorizes (R2)")
+    src = inspect.getsource(amb)
+    for banned in ("INSERT INTO", "UPDATE ", "DELETE FROM"):
+        assert banned not in src.upper().replace("UPDATED", "XXXXXXX"), (
+            f"Gate A must stay signal-only; found {banned!r}")
+
+
+def test_gate_b_never_consults_evidence_quality():
+    """R1 from the other side. resolve_required_approval is Gate B: it decides
+    Jasper's PERMISSIONS from a human-maintained table, never from how sure
+    Jasper feels. If it ever grows an ambiguity/confidence parameter, the two
+    gates have been fused and the authority model is back."""
+    import inspect
+    import workgraph_store as ws
+    sig = inspect.signature(ws.resolve_required_approval)
+    assert list(sig.parameters) == ["action_type"], (
+        "Gate B gained a parameter; if it is an ambiguity/confidence score "
+        "this is the score-to-action mapping R1 forbids")
+    # Strip the docstring first: it DISCUSSES ambiguity deliberately (it names
+    # Gate A and the R1 rule). What must stay clean is the executable body.
+    src = inspect.getsource(ws.resolve_required_approval)
+    body = src.replace(ws.resolve_required_approval.__doc__ or "", "").lower()
+    for banned in ("ambiguity", "confidence", "sufficiency", "trust_score"):
+        assert banned not in body, (
+            f"Gate B references {banned!r} - it must not read evidence quality")
+
+
+def test_gate_b_defaults_to_requiring_approval():
+    """R2: gates subtract. An unknown action_type must escalate, not pass."""
+    import workgraph_store as ws
+    assert ws.resolve_required_approval("some_action_never_seen_before") == 1
+
+
+def test_provenance_docstring_matches_the_code():
+    """The header's computable/abstains table is load-bearing documentation -
+    it is how the next reader learns what this module can actually do. It
+    listed provenance_reliability as COMPUTABLE 'via declared trust map'
+    until 2026-08-21, describing a design removed in 0c3de45 and contradicting
+    both _abstaining_components() and test_no_source_trust_table_exists_
+    anywhere. Keep them in agreement."""
+    doc = amb.__doc__ or ""
+    assert "provenance_reliability COMPUTABLE" not in doc
+    abstaining = {c.name for c in amb._abstaining_components()}
+    assert "provenance_reliability" in abstaining

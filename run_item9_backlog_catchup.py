@@ -1,4 +1,4 @@
-"""Task #389 (2026-08-13, Marc's explicit go-ahead): one-time backlog
+"""Task #389 (2026-08-20, Marc's explicit go-ahead): one-time backlog
 catch-up for the 654 is_raw_cluster=1 work_objects DB-wide carrying 3+
 real claims never cited into a tracked issue (the marc-649/Sodalis
 finding this whole session traced back to). Re-derives the exact target

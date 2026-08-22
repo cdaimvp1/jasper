@@ -105,11 +105,22 @@ and file/line references):
   `test_workgraph_projects.py`. Framed correctly by the review as
   hermeticity issues, not evidence of a real runtime failure on
   Jasper's actual Windows target.
-- **#386**: pure hygiene - exactly 13 files (confirmed via direct grep)
-  carry a stale `2026-08-13` docstring/comment date inherited from an
-  earlier review pass, one day after "today" at the time; undercuts
-  the pre-read's own "traceable as of 2026-08-12" claim. Also general,
-  not-yet-itemized ROADMAP.md drift against already-shipped fixes.
+- **#386** (DONE 2026-08-21): pure hygiene - 13 files carried a stale
+  `2026-08-13` docstring/comment date inherited from an earlier review
+  pass, one day after "today" at the time; it undercut the pre-read's own
+  "traceable as of 2026-08-12" claim. Eleven were corrected on 2026-08-20.
+  The last two were `run_item9_backlog_catchup.py` and
+  `_item9_extraction_worker.py`, both of which dated Marc's #389 go-ahead
+  to 2026-08-13; `git log --diff-filter=A` puts their real creation at
+  2026-08-20 (`4d6739e`), so they were corrected to that rather than
+  guessed at - a date attached to "Marc's explicit go-ahead" is a claim
+  about a real human decision and needs a source, not a plausible value.
+  One further hit was `_relay_write_sp.py`, where the string is not a
+  stale comment at all but a real SharePoint `lastModifiedDateTime` inside
+  captured data; that file has been moved to `scratch/` (it held real
+  business content and never belonged at the repo root).
+  This line intentionally still contains the literal date, because it is
+  the record OF the bug.
 
 **Trigger to revisit any of #382-386**: Marc's own explicit go-ahead,
 same as everything else on this roadmap. None of these were built as
@@ -811,3 +822,102 @@ this is not a blocked task awaiting approval.
 
 **Trigger to revisit:** Marc's go-ahead on the remaining ~226 calendar
 events, and separately on #417 if documents ever become worth the cost.
+
+---
+
+## Mechanism triage: which parts need a model, and which are standing in for a missing API (2026-08-21)
+
+Taken from Marc's "Jasper Ingestion Flow & Federated Work Graph" diagram,
+which drew a category most architecture pictures do not have. Full write-up:
+`docs/design/GATES_FEDERATION_AND_MECHANISM_TRIAGE.md` section 3.
+
+The useful distinction is between *"this needs a frontier model's judgment"*
+and *"we are using an LLM as a connector because we have no API."* Those look
+identical on a diagram and have completely different remedies.
+
+| Category | Meaning | Remedy |
+|---|---|---|
+| Deterministic | rules, queries, indexes, exact matching, state machines | none needed |
+| Local-model-sufficient | narrow language work a small model handles with a structured prompt | cost optimisation |
+| LLM-required | genuine judgment, nuance, high-stakes comparison | keep the frontier model |
+| **LLM-mediated, shouldn't be** | an LLM standing in for missing integration | **replace with real integration - a tracked defect, not an architecture choice** |
+
+The fourth row earns its place because it converts a permanent-looking
+architectural fact into a fixable one, and it has a worked example from the
+same day it was written:
+
+- **Calendar - LEFT this bucket 2026-08-21.** The relay was an LLM
+  transcribing appointments into drop files, and it silently lost data: 1,302
+  events reachable via Outlook COM against 77 ingested, with dead-lettered
+  payloads whose entire content was the string `"21 messages fetched"`.
+  Replaced with deterministic COM enumeration (`ingest/outlook_calendar_scan.ps1`).
+  No model remains in that data path.
+- **Teams - still in this bucket, and stuck.** No COM interface exists and
+  Graph API access is permanently unavailable at Lilly (see the standing
+  constraint elsewhere in this file). Stays until that changes; not a defect
+  anyone can currently close.
+- **SharePoint - still in this bucket, but now addressable.** Measured
+  2026-08-21: 41 of 130 distinct stored SharePoint filenames are present on
+  the local OneDrive sync, so real document content is reachable
+  deterministically with no credentials. This is the substitution path.
+
+**The boundary that must hold.** This taxonomy classifies **capabilities**,
+never **facts**. It answers "should this code path use a model?" It must never
+answer "should I believe this row?" The moment it is used to rank evidence -
+"LLM-derived claims are less reliable than deterministic ones" - it has become
+`DEFAULT_SOURCE_TRUST` wearing different labels, which was removed in `0c3de45`
+and is guarded by two regression tests.
+
+### #375 closed as should-not-build (2026-08-21)
+
+#375 was *"add named epistemic-status tiers for evidence."* Measured against
+the standing rule that Jasper never decides which source wins, that is the
+forbidden artifact: a named ranking of believability is an authority model
+whose tiers are words instead of floats. Renaming `0.90 / 0.60 / 0.40` to
+`authoritative / reported / informal` changes nothing about what it does.
+
+The legitimate need underneath it - *"how did we come to know this, and how
+solid is the basis?"* - is already served, and served without ranking, by:
+
+- `evidence.type` plus the three-tier timeline (what kind of record this is),
+- `identity_anchors.anchor_strength` (a property of an **identifier**, not a
+  truth claim - which is why it is legitimate where a source-trust float is not),
+- `workgraph_ambiguity`'s components and named gaps (measured properties of
+  the data: freshness, referential ambiguity, state coherence),
+- provenance **carried**, never scored - see that module's own
+  "provenance_reliability ABSTAINS - EXCLUDED BY DESIGN" entry.
+
+The distinction to keep: **describing evidence is fine; ordering it is not.**
+
+---
+
+## Federation commitments - recorded before the code exists (2026-08-21)
+
+Constrains #403 (single-user analogue, buildable now) and #404 (gated on a
+second user ever existing). Recorded now precisely *because* federation is
+unbuilt: these bound the design space before anyone occupies it. Full
+write-up: `GATES_FEDERATION_AND_MECHANISM_TRIAGE.md` section 2.
+
+- **C1 Individualized by design.** Each user's graph is theirs. No merged
+  global graph, no canonical cross-user record, no "the" answer. Two users may
+  understand the same artifact differently, indefinitely, and that is a correct
+  end state - not an inconsistency awaiting repair.
+- **C2 Context, not data dumping.** What crosses a boundary is evidence with
+  provenance, scoped to the shared thing - not replication of one graph into
+  another. It arrives as input to local understanding, with no elevated standing.
+- **C3 No automatic propagation.** Context flows only where there is
+  demonstrated shared work: a shared artifact, meeting, or tracked relationship.
+  It is not transitive - A and B sharing a document gives B nothing about A and C.
+  The unit of federation is the shared object, not the user pair, which also
+  bounds blast radius for procurement and legal material.
+- **C4 Federation never reconciles disagreement.** The commitment that keeps
+  C1-C3 from collapsing into an authority model. When two graphs disagree about
+  a shared artifact, the answer is NOT "the more recent one" / "the more
+  authoritative source" / "the owner's" / "the higher-confidence one" - every
+  one of those is the authority model re-derived in a new context. The correct
+  behaviour is the single-user behaviour: measure the ambiguity, localize the
+  gap, escalate to the human with both positions attributed. A conflicting
+  federated claim is a **gap, not a fact**, and gaps go to people.
+
+Marc's own formulation is the whole design: *"federation informs local
+understanding; it does not replace it."*

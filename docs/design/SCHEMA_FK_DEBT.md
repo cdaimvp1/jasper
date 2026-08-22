@@ -99,3 +99,65 @@ real, known gap, not an oversight to quietly work around.
 
 None of this is scheduled. This note exists so the gap is visible instead
 of silent.
+
+---
+
+## Re-measured 2026-08-21, while sizing task #378 — and the finding changed
+
+Task #365 is recorded as *"FK/invariant audit + repair, then enable
+`PRAGMA foreign_keys=ON`."* **The live state does not match the second half of
+that title, and it cannot.** Measured directly:
+
+```
+PRAGMA foreign_keys                     -> 0     (never set; _connect() sets
+                                                  busy_timeout, journal_mode,
+                                                  synchronous, and nothing else)
+PRAGMA foreign_key_check                -> RAISES
+    sqlite3.OperationalError: foreign key mismatch -
+    "nba_outcome_log" referencing "issues"
+```
+
+`git log -S foreign_keys -- workgraph_store.py` returns one commit, and it is
+#370's, not #365's. So the pragma was never turned on.
+
+### Why it cannot simply be turned on
+
+`issues` and `projects` are **VIEWS**, not tables — the corrected-pipeline
+migration made `work_objects` the real table and left `issues`/`projects` as
+views over it:
+
+```
+issues        -> view
+projects      -> view
+work_objects  -> table
+```
+
+SQLite cannot enforce a foreign key whose parent is a view. Two tables still
+declare `REFERENCES issues(...)`, so `foreign_key_check` aborts on a schema
+mismatch before it ever examines a single row. This is not a data-quality
+problem that an audit-and-repair pass can clear; it is a structural one.
+
+### What this means for #378 (formalize a schema-migration subsystem)
+
+#378's stated justification is the FK-target debt. But a migration subsystem is
+a better way to *run* schema changes — it does not decide *what* the schema
+should be, and it would not have prevented or fixed this. The real question
+underneath the debt is a design decision nobody has made yet:
+
+  **Option A** — re-point the 2 `REFERENCES issues(...)` declarations at
+  `work_objects(id)`, then `foreign_key_check` can actually run and
+  `PRAGMA foreign_keys=ON` becomes reachable. Small, concrete, and it makes the
+  remaining FK declarations honest.
+  **Option B** — accept permanently that declared FKs are documentation, drop
+  the `REFERENCES` clauses that point at views so the schema stops asserting
+  something untrue, and keep integrity where it already lives (procedural
+  checks + the #365 invariant audit).
+
+Either is defensible. Neither needs a migration subsystem. **Recommendation:
+decide A vs B before building #378**, because if the answer is B then #378 has
+lost its stated customer, and if it is A then #378 is not on the critical path
+to it either.
+
+Recorded rather than acted on: changing FK declarations touches schema shape
+across two tables and is Marc's call, not a cleanup to slip into an unrelated
+sweep.

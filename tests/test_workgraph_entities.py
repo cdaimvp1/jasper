@@ -133,3 +133,31 @@ def test_slashed_legal_form_folds_rather_than_deleting_the_letters():
     assert ent.entity_key("Novo Nordisk A/S") == "novo nordisk"
     # 'ab' is a legal form too, so a name that is ONLY a slashed form is empty
     assert ent.entity_key("A/S") == ""
+
+
+# ---------------------------------- FK enforcement reality check (#378) -----
+
+def test_fk_enforcement_is_off_and_the_reason_is_structural():
+    """Documents-as-code a finding from 2026-08-21 that resizes task #378.
+
+    Task #365's title says it enabled PRAGMA foreign_keys=ON. It did not, and
+    it could not: `issues` and `projects` are VIEWS over `work_objects`, and
+    SQLite cannot enforce a foreign key whose parent is a view - so
+    `PRAGMA foreign_key_check` aborts with "foreign key mismatch" before
+    examining any row.
+
+    This test exists so nobody spends a day trying to turn the pragma on and
+    rediscovers why it fails. If it ever starts FAILING, that is good news:
+    someone re-pointed the REFERENCES clauses and FK enforcement became
+    reachable. Update docs/design/SCHEMA_FK_DEBT.md when that happens.
+    """
+    import sqlite3
+    import workgraph_store as ws
+    c = ws._connect()
+    assert c.execute("PRAGMA foreign_keys").fetchone()[0] == 0, (
+        "foreign_keys is now ON - see SCHEMA_FK_DEBT.md, this is a real change")
+    kinds = {n: (c.execute("SELECT type FROM sqlite_master WHERE name=?", (n,))
+                 .fetchone() or ["absent"])[0]
+             for n in ("issues", "projects", "work_objects")}
+    assert kinds["issues"] == "view" and kinds["projects"] == "view", kinds
+    assert kinds["work_objects"] == "table", kinds

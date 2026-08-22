@@ -96,8 +96,7 @@ def run_dormant_sweep_daily_if_due(now: Optional[float] = None) -> Optional[dict
     cycle, but daily is plenty for something measured in weeks."""
     if now is None:
         now = time.time()
-    today = time.strftime("%Y-%m-%d", time.localtime(now))
-    if not ws.claim_daily_run("dormant_sweep", today):
+    if not ws.due_for_daily_run("dormant_sweep", now):
         return None
     return run_dormant_sweep(now=now)
 

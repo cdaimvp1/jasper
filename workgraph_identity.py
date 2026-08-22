@@ -164,8 +164,7 @@ def run_backfill_daily_if_due(now: float | None = None) -> dict | None:
     that isn't the day's first claim."""
     if now is None:
         now = time.time()
-    today = time.strftime("%Y-%m-%d", time.localtime(now))
-    if not ws.claim_daily_run("identity_anchor_backfill", today):
+    if not ws.due_for_daily_run("identity_anchor_backfill", now):
         return None
     return backfill_identity_anchors(now=now)
 

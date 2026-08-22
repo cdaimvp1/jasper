@@ -5120,6 +5120,34 @@ def claim_daily_run(source: str, today: str) -> bool:
             conn.close()
 
 
+def due_for_daily_run(source: str, now: Optional[float] = None) -> bool:
+    """Task #380. The once-a-day gate every periodic sweep needs, in one
+    place instead of seventeen.
+
+    Measured 2026-08-22: 17 separate run_*_daily_if_due() wrappers across 13
+    modules each opened with the SAME five lines - default `now` to
+    time.time(), format it as a local-time %Y-%m-%d, call claim_daily_run,
+    return None if it came back False. Byte-identical every time. That's what
+    #380 actually was; the task's own earlier note said "6 daily-gate
+    wrappers", which was simply wrong - counted by hand instead of by AST.
+
+    Deliberately NOT folded into claim_daily_run itself: that function's
+    contract is the atomic (source, date-string) claim, and it is called
+    directly by callers that compute their own period key - notably
+    workgraph_discovery.run_monthly_sweep_if_due, which keys by calendar
+    MONTH. Keeping the primitive period-agnostic and putting the
+    "today, in local time" convention here means the monthly sweep does not
+    have to pretend to be daily to reuse the atomicity.
+
+    Local time, not UTC, is the pre-existing behaviour of all 17 sites and is
+    preserved exactly - "daily" here means Marc's day, which is the point.
+    """
+    if now is None:
+        now = time.time()
+    today = time.strftime("%Y-%m-%d", time.localtime(now))
+    return claim_daily_run(source, today)
+
+
 # --- worker_status ---------------------------------------------------------
 
 def set_worker_status(worker: str, *, state: str, current_task: Optional[str] = None, detail: Optional[str] = None) -> None:
@@ -5320,8 +5348,7 @@ def reconcile_stale_pending_actions(*, now: Optional[float] = None) -> dict:
 def run_pending_action_reconciliation_daily_if_due(now: Optional[float] = None) -> Optional[dict]:
     if now is None:
         now = time.time()
-    today = time.strftime("%Y-%m-%d", time.localtime(now))
-    if not claim_daily_run("pending_action_reconciliation", today):
+    if not due_for_daily_run("pending_action_reconciliation", now):
         return None
     return reconcile_stale_pending_actions(now=now)
 
@@ -5625,8 +5652,7 @@ def run_prepared_action_expiry_daily_if_due(now: Optional[float] = None) -> Opti
     the sibling gates' own convention), or the number of rows expired."""
     if now is None:
         now = time.time()
-    today = time.strftime("%Y-%m-%d", time.localtime(now))
-    if not claim_daily_run("prepared_action_expiry", today):
+    if not due_for_daily_run("prepared_action_expiry", now):
         return None
     return expire_stale_prepared_actions(PREPARED_ACTION_STALE_AFTER_SECONDS, now=now)
 

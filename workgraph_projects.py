@@ -701,8 +701,7 @@ def run_party_and_supplier_resync_if_due(now: Optional[float] = None) -> Optiona
     approval. This function only ever does the two deterministic halves."""
     if now is None:
         now = time.time()
-    today = time.strftime("%Y-%m-%d", time.localtime(now))
-    if not ws.claim_daily_run("party_and_supplier_resync", today):
+    if not ws.due_for_daily_run("party_and_supplier_resync", now):
         return None
     changed_ids = ws.list_issue_ids_updated_since(now - 90000)
     parties_result = workgraph_parties.run(changed_ids)

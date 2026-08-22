@@ -364,10 +364,7 @@ def backfill_evidence_fts(*, limit: int | None = None) -> dict:
 
 
 def run_backfill_daily_if_due(now: float | None = None) -> dict | None:
-    if now is None:
-        now = time.time()
-    today = time.strftime("%Y-%m-%d", time.localtime(now))
-    if not ws.claim_daily_run("claims_and_fts_backfill", today):
+    if not ws.due_for_daily_run("claims_and_fts_backfill", now):
         return None
     return {
         "claims": backfill_claims(),

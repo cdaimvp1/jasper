@@ -692,10 +692,7 @@ def run_choice_log_expiry_daily_if_due(now: float | None = None) -> Optional[dic
     offer that was no longer live. Reuses STALENESS_SATURATION_DAYS (this
     file's own "two weeks" window) as the default TTL rather than inventing
     a second unrelated staleness constant."""
-    if now is None:
-        now = time.time()
-    today = time.strftime("%Y-%m-%d", time.localtime(now))
-    if not ws.claim_daily_run("nba_choice_log_expiry", today):
+    if not ws.due_for_daily_run("nba_choice_log_expiry", now):
         return None
     ttl_days = config.get("nba", "choice_log_ttl_days") or STALENESS_SATURATION_DAYS
     expired = ws.expire_stale_nba_choice_logs(ttl_days)
@@ -833,8 +830,7 @@ def run_rewrite_judgment_daily_if_due(now: float | None = None) -> Optional[dict
     correlation more than once a day buys nothing real."""
     if now is None:
         now = time.time()
-    today = time.strftime("%Y-%m-%d", time.localtime(now))
-    if not ws.claim_daily_run("nba_rewrite_judgment", today):
+    if not ws.due_for_daily_run("nba_rewrite_judgment", now):
         return None
     return attempt_rewrite_judgment(now=now)
 

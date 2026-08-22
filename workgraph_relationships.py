@@ -158,10 +158,7 @@ def run_relationship_sweep() -> dict:
 
 
 def run_relationship_sweep_daily_if_due(now: float | None = None) -> dict | None:
-    if now is None:
-        now = time.time()
-    today = time.strftime("%Y-%m-%d", time.localtime(now))
-    if not ws.claim_daily_run("relationship_sweep", today):
+    if not ws.due_for_daily_run("relationship_sweep", now):
         return None
     return run_relationship_sweep()
 
@@ -289,10 +286,7 @@ def run_supplier_entity_sweep() -> dict:
 
 
 def run_supplier_entity_sweep_daily_if_due(now: float | None = None) -> dict | None:
-    if now is None:
-        now = time.time()
-    today = time.strftime("%Y-%m-%d", time.localtime(now))
-    if not ws.claim_daily_run("supplier_entity_sweep", today):
+    if not ws.due_for_daily_run("supplier_entity_sweep", now):
         return None
     return run_supplier_entity_sweep()
 

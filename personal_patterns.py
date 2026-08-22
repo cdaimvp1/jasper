@@ -205,8 +205,11 @@ def run_daily_if_due(now: Optional[float] = None) -> Optional[dict]:
         surfaces = {}
     if not any(surfaces.values()):
         return None  # master on, but no individual surface enabled yet - don't consume the day's claim
-    today = time.strftime("%Y-%m-%d", time.localtime(now))
-    if not ws.claim_daily_run("personal_learning", today):
+    # Only the CLAIM moves to the shared helper (#380), not the `now` default
+    # above: the two config checks between them must run BEFORE the claim, or
+    # a day with the master toggle on but no surface enabled would consume
+    # that day's claim and suppress a real run once a surface got turned on.
+    if not ws.due_for_daily_run("personal_learning", now):
         return None
 
     result: dict = {}

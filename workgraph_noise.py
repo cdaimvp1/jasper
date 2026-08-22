@@ -125,9 +125,6 @@ def run_noise_sweep_daily_if_due(now: float | None = None) -> Optional[dict]:
     scheduled_refresh.py cycle, but a daily cadence is plenty for
     something this low-urgency, and keeps this mechanism's own cursor
     independent of any other sweep's."""
-    if now is None:
-        now = time.time()
-    today = time.strftime("%Y-%m-%d", time.localtime(now))
-    if not ws.claim_daily_run("noise_sweep", today):
+    if not ws.due_for_daily_run("noise_sweep", now):
         return None
     return run_noise_sweep()

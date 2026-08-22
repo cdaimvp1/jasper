@@ -573,8 +573,7 @@ def run_self_audit_sweep_daily_if_due(now: Optional[float] = None) -> Optional[d
     keeps this mechanism's own cursor independent of any other sweep's."""
     if now is None:
         now = time.time()
-    today = time.strftime("%Y-%m-%d", time.localtime(now))
-    if not ws.claim_daily_run("self_audit_sweep", today):
+    if not ws.due_for_daily_run("self_audit_sweep", now):
         return None
     return run_self_audit_sweep(now=now)
 

@@ -429,8 +429,7 @@ def run_daily_if_due(now: float | None = None) -> dict | None:
     on (each call overwrites "yesterday's" baseline with "just now")."""
     if now is None:
         now = time.time()
-    today = time.strftime("%Y-%m-%d", time.localtime(now))
-    if not ws.claim_daily_run("health_check", today):
+    if not ws.due_for_daily_run("health_check", now):
         return None
     result = run(now=now)
     ws.set_cursor(_LAST_RESULT_SOURCE, _LAST_RESULT_KEY, json.dumps(result))

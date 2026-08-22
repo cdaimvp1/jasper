@@ -1140,7 +1140,7 @@ def test_sweep_defaults_to_dry_run(monkeypatch):
     assert p2.run_extraction_catchup_sweep()["dry_run"] is True
 
 
-def test_sweep_respects_the_per_cycle_limit(monkeypatch):
+def test_sweep_respects_the_per_cycle_limit(ws_db, monkeypatch):
     calls = {}
 
     def fake_due(limit=None):
@@ -1153,7 +1153,7 @@ def test_sweep_respects_the_per_cycle_limit(monkeypatch):
     assert r["due_considered"] == 4
 
 
-def test_sweep_never_spends_in_dry_run(monkeypatch):
+def test_sweep_never_spends_in_dry_run(ws_db, monkeypatch):
     """The LLM entry point must not be reached at all when dry_run is on."""
     monkeypatch.setattr(p2, "find_projects_needing_extraction",
                         lambda limit=None: [{"project_id": "proj-1", "marker": "m"}])
@@ -1166,7 +1166,7 @@ def test_sweep_never_spends_in_dry_run(monkeypatch):
     assert r["extracted"][0]["would_extract"] is True
 
 
-def test_sweep_isolates_a_failing_project(monkeypatch):
+def test_sweep_isolates_a_failing_project(ws_db, monkeypatch):
     """One project's failure must never abort the sweep - same discipline as
     every other sweep in this codebase."""
     monkeypatch.setattr(p2, "find_projects_needing_extraction",
@@ -1182,3 +1182,44 @@ def test_sweep_isolates_a_failing_project(monkeypatch):
     r = p2.run_extraction_catchup_sweep(limit=2, dry_run=False)
     assert len(r["errors"]) == 1 and r["errors"][0]["project_id"] == "bad"
     assert any(e.get("project_id") == "good" for e in r["extracted"])
+
+
+def test_daily_wrapper_actually_spends_and_caps_at_the_documented_limit(ws_db, monkeypatch):
+    """Task #387 wired live 2026-08-22. The wrapper is the ONE place that opts
+    into spending, so pin both halves of that: dry_run really is False (a
+    wrapper that silently stayed inert would look wired and do nothing), and
+    the limit really is the documented per-cycle cap and not None."""
+    seen = {}
+
+    def fake_sweep(limit=None, *, model=None, dry_run=True):
+        seen["limit"] = limit
+        seen["dry_run"] = dry_run
+        return {"dry_run": dry_run, "due_considered": 0, "limit": limit,
+                "extracted": [], "skipped_by_forecast": [], "errors": []}
+
+    monkeypatch.setattr(p2, "run_extraction_catchup_sweep", fake_sweep)
+    assert p2.run_extraction_catchup_daily_if_due() is not None
+    assert seen["dry_run"] is False, "the live wrapper must actually spend"
+    assert seen["limit"] == p2._EXTRACTION_DAILY_LIMIT == 15
+
+
+def test_daily_wrapper_is_really_gated_to_once_a_day(ws_db, monkeypatch):
+    """Second call the same day must be a no-op, or a 5x/day cadence would
+    spend 5x the intended per-day budget."""
+    calls = []
+    monkeypatch.setattr(p2, "run_extraction_catchup_sweep",
+                        lambda limit=None, *, model=None, dry_run=True: calls.append(1) or {"ok": True})
+    first = p2.run_extraction_catchup_daily_if_due(now=1_800_000_000.0)
+    second = p2.run_extraction_catchup_daily_if_due(now=1_800_000_000.0)
+    assert first is not None and second is None
+    assert len(calls) == 1
+
+
+def test_daily_wrapper_runs_again_the_next_day(ws_db, monkeypatch):
+    """The gate must not be a one-shot - the backlog drains across days."""
+    calls = []
+    monkeypatch.setattr(p2, "run_extraction_catchup_sweep",
+                        lambda limit=None, *, model=None, dry_run=True: calls.append(1) or {"ok": True})
+    assert p2.run_extraction_catchup_daily_if_due(now=1_800_000_000.0) is not None
+    assert p2.run_extraction_catchup_daily_if_due(now=1_800_000_000.0 + 86_400) is not None
+    assert len(calls) == 2

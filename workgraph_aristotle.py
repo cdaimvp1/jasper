@@ -188,10 +188,7 @@ def detect_and_log_candidates_daily_if_due(now: Optional[float] = None) -> Optio
     as retention/health_check/personal_learning (source='aristotle_detection').
     Returns None - a real 'did not run' result, not a silent no-op - if
     already run today."""
-    if now is None:
-        now = time.time()
-    today = time.strftime("%Y-%m-%d", time.localtime(now))
-    if not ws.claim_daily_run("aristotle_detection", today):
+    if not ws.due_for_daily_run("aristotle_detection", now):
         return None
     candidates = detect_candidate_rules()
     logged = 0

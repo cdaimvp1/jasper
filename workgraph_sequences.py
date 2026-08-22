@@ -241,10 +241,7 @@ def recompute_daily_if_due(now: Optional[float] = None) -> Optional[dict]:
     as retention/health_check/personal_learning/aristotle_detection
     (source='sequence_patterns_detection'). Returns None - a real 'did not
     run' result, never a silent no-op - when this already ran today."""
-    if now is None:
-        now = time.time()
-    today = time.strftime("%Y-%m-%d", time.localtime(now))
-    if not ws.claim_daily_run("sequence_patterns_detection", today):
+    if not ws.due_for_daily_run("sequence_patterns_detection", now):
         return None
     return recompute_and_store()
 

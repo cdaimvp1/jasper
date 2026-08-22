@@ -780,6 +780,28 @@ def run() -> dict:
     except Exception as e:
         party_supplier_resync_result = {"error": str(e)}
 
+    # Item 6b / task #387 - the piece the step above deliberately excluded,
+    # now wired on Marc's explicit approval (2026-08-22). THE ONLY once/day
+    # sweep in this whole function that SPENDS LLM MONEY, hence the extra
+    # care in its own wrapper's docstring.
+    #
+    # Placed AFTER claims_backfill (step 15) on purpose, and that ordering is
+    # the entire point of the task. Extraction already fires at grouping
+    # time, but claims are materialized later by that backfill - measured
+    # 2026-08-22, all 446 never-extracted projects (unanimous) got their
+    # claims AFTER being grouped, so the group-time trigger found nothing,
+    # returned 'no_claims_yet' before stamping a marker, and nothing ever
+    # re-ran it. Running here means a project whose claims landed earlier in
+    # THIS cycle is already eligible in this same cycle.
+    #
+    # Change-triggered, not level-triggered: the queue is whatever no longer
+    # matches its extracted_from_marker, so an already-examined project is
+    # never re-paid for. Capped at 15/cycle inside the wrapper.
+    try:
+        extraction_catchup_result = workgraph_pipeline2.run_extraction_catchup_daily_if_due()
+    except Exception as e:
+        extraction_catchup_result = {"error": str(e)}
+
     # Deterministic, no LLM calls - same "keep it entirely separate" discipline as the
     # relationship sweep above; reads raw_items/claims only, never touches grouping/merge
     # decisions, writes only projects.status via the pre-existing noise-archived value (task
@@ -892,6 +914,7 @@ def run() -> dict:
         "relationship_sweep": relationship_sweep_result,
         "supplier_entity_sweep": supplier_entity_sweep_result,
         "party_supplier_resync": party_supplier_resync_result,
+        "extraction_catchup": extraction_catchup_result,
         "noise_sweep": noise_sweep_result,
         "dormant_sweep": dormant_sweep_result,
         "self_audit_sweep": self_audit_result,

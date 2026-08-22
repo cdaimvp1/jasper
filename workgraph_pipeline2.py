@@ -891,6 +891,49 @@ def run_extraction_catchup_sweep(limit: int = _EXTRACTION_SWEEP_LIMIT,
             "extracted": extracted, "skipped_by_forecast": skipped, "errors": errors}
 
 
+_EXTRACTION_DAILY_LIMIT = 15
+
+
+def run_extraction_catchup_daily_if_due(now: Optional[float] = None) -> Optional[dict]:
+    """Task #387, wired live 2026-08-22 on Marc's explicit approval. THE ONLY
+    once-a-day gate in this codebase that SPENDS LLM MONEY, so unlike every
+    other sweep behind ws.due_for_daily_run this one deserves its numbers
+    written down.
+
+    dry_run=False here is the deliberate, approved part. The default on
+    run_extraction_catchup_sweep stays True precisely so that calling it by
+    hand costs nothing; this wrapper is the one place that opts in.
+
+    Why 15/cycle rather than draining the queue in one pass. Measured against
+    the live corpus 2026-08-22, the queue was 449 projects: 446 with NO
+    extraction marker at all plus 3 whose evidence genuinely changed. The 446
+    are not marginal work - all 446 of them (unanimous, not a majority) got
+    their claims materialized AFTER the project was grouped. Extraction fires
+    at grouping time, claims are materialized later by the separate
+    claims-backfill sweep, and run_project_extraction returns 'no_claims_yet'
+    BEFORE it stamps a marker - so on a fresh project extraction reliably
+    found nothing, never stamped, and nothing ever re-ran it. That is the real
+    defect #387 turned out to describe, and this sweep is its remedy.
+
+    Not stamping on no_claims_yet is CORRECT and must stay that way: stamping
+    would mark the project looked-at and permanently suppress the re-run once
+    its claims did land. The missing piece was only ever the re-run.
+
+    15/cycle at 5 cycles/day drains ~450 in roughly six days of real cadence
+    while keeping any single day's spend small and observable, and the marker
+    guarantees each project is paid for exactly ONCE - this cannot loop. Once
+    the backlog clears, steady state is the handful whose evidence actually
+    changed (3 on the day this was measured).
+
+    Deliberately NOT a threshold on claim count. #389 used a 3+-claims filter
+    to bound a one-off batch, and re-reading that as a quality signal was my
+    own error: the count only reflects how far the claims backfill had gotten,
+    not whether the project holds real work."""
+    if not ws.due_for_daily_run("extraction_catchup_sweep", now):
+        return None
+    return run_extraction_catchup_sweep(limit=_EXTRACTION_DAILY_LIMIT, dry_run=False)
+
+
 def _build_claims_text(all_claims: list, char_budget: int = _MAX_TEXT_CHARS) -> tuple:
     """Task #408. Assembles the CLAIMS block whole-claim-at-a-time and returns
     (text, shown_claims, n_omitted).

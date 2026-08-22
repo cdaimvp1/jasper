@@ -2414,18 +2414,52 @@ def init_workgraph() -> None:
             # already exists". The desired end state (a correctly-defined
             # `issues` view) is reached either way - whichever process's
             # CREATE actually won already put the SAME definition in place.
-            try:
-                conn.execute("DROP VIEW IF EXISTS issues")
-                conn.execute("""
-                    CREATE VIEW issues AS
-                    SELECT id, title, category, status AS state, priority, priority_score,
-                           nba_action_kind, nba_reason, owner, due, opened_at, updated_at,
-                           confidence_tier, parent_id AS project_id, lesson_id_cited,
-                           has_unmet_prerequisite, claims_revision
-                    FROM work_objects WHERE object_type = 'request' AND is_raw_cluster = 0
-                """)
-            except sqlite3.OperationalError:
-                pass
+            # ...EXCEPT the claim on line 2401 that "the INSTEAD OF triggers
+            # below are untouched" is FALSE, and this block's own repair path
+            # further down already says so correctly: SQLite auto-drops every
+            # trigger defined ON a view the instant that view is dropped. So
+            # an UNCONDITIONAL DROP+CREATE here destroyed all 3 issues
+            # triggers on EVERY init_workgraph() call, leaving a window where
+            # `issues` existed as a trigger-less view - any concurrent writer
+            # landing in it got "cannot modify issues because it is a view".
+            # Caught 2026-08-22 by test_multiprocess_concurrency.py under full
+            # -suite timing (1 of 4 workers), and NOT reproducible running that
+            # file alone (5/5 green) - the window is only microseconds wide.
+            #
+            # Same discipline the repair path below already settled on: only
+            # touch it when it is ACTUALLY stale. Comparing the stored view SQL
+            # against the definition we want is one sqlite_master read, so in
+            # the steady state (essentially always) there is no DROP at all,
+            # hence no cascade, no window, and no race. The is_raw_cluster
+            # filter still gets re-applied on an already-migrated install,
+            # because a view missing it does not match and so does get rebuilt
+            # - which was the whole reason this wasn't CREATE VIEW IF NOT
+            # EXISTS in the first place.
+            # Gates on the real INVARIANTS, deliberately NOT on an exact SQL
+            # string match: sqlite_master stores the literal CREATE text, so a
+            # text compare would depend on this file's own indentation and
+            # would silently rebuild (reopening the race) on every call the
+            # moment anyone reformatted the statement. What actually has to
+            # hold is: the view exists, it carries the is_raw_cluster filter,
+            # and it does not point at a renamed rebuild table. If all three
+            # hold, leave it completely alone.
+            _iv = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='view' AND name='issues'"
+            ).fetchone()
+            _iv_sql = (_iv["sql"] or "") if _iv else ""
+            if (not _iv_sql) or ("is_raw_cluster = 0" not in _iv_sql) or ("work_objects_pre_" in _iv_sql):
+                try:
+                    conn.execute("DROP VIEW IF EXISTS issues")
+                    conn.execute("""
+                        CREATE VIEW issues AS
+                        SELECT id, title, category, status AS state, priority, priority_score,
+                               nba_action_kind, nba_reason, owner, due, opened_at, updated_at,
+                               confidence_tier, parent_id AS project_id, lesson_id_cited,
+                               has_unmet_prerequisite, claims_revision
+                        FROM work_objects WHERE object_type = 'request' AND is_raw_cluster = 0
+                    """)
+                except sqlite3.OperationalError:
+                    pass
             conn.execute("""
                 CREATE TRIGGER IF NOT EXISTS trg_issues_insert INSTEAD OF INSERT ON issues
                 BEGIN

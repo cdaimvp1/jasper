@@ -3597,6 +3597,68 @@ def test_init_workgraph_self_heals_a_rename_corrupted_projects_view(ws_db):
     assert any(p["id"] == pid for p in ws_db.list_projects())
 
 
+def test_reinit_does_not_drop_and_recreate_an_already_correct_issues_view(ws_db):
+    """The `issues` view used to be DROPped and recreated unconditionally on
+    every init_workgraph() call. Dropping a view cascades to every trigger
+    defined ON it, so each call briefly left `issues` trigger-less - and a
+    concurrent writer landing in that window got "cannot modify issues
+    because it is a view". Caught 2026-08-22 by test_multiprocess_
+    concurrency.py under full-suite timing, 1 worker of 4.
+
+    Probes the drop DIRECTLY rather than trying to lose a timing race: a
+    sentinel trigger of our own on the view survives if and only if the view
+    was never dropped. Asserting "the 3 real triggers still exist" would NOT
+    catch this - the buggy version recreated those immediately afterward, so
+    they look fine by the time init returns."""
+    conn = ws_db._connect()
+    try:
+        conn.execute("""
+            CREATE TRIGGER sentinel_on_issues INSTEAD OF DELETE ON issues
+            BEGIN
+                SELECT 1;
+            END""")
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='sentinel_on_issues'"
+        ).fetchone() is not None
+    finally:
+        conn.close()
+
+    ws_db.init_workgraph()
+
+    conn = ws_db._connect()
+    try:
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='sentinel_on_issues'"
+        ).fetchone() is not None, (
+            "init_workgraph() dropped the already-correct `issues` view - that "
+            "cascade is the concurrency bug, not a harmless rebuild")
+        for name in ("trg_issues_insert", "trg_issues_update", "trg_issues_delete"):
+            assert conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?", (name,)
+            ).fetchone() is not None, name
+    finally:
+        conn.close()
+
+    # Still fully writable through the view afterwards.
+    iid = ws_db.create_issue_with_new_id(title="After reinit", category="other")
+    assert ws_db.get_issue(iid)["title"] == "After reinit"
+
+
+# DELIBERATELY NOT TESTED: "a rename-corrupted `issues` view is self-healed
+# by the next init_workgraph()". Written, run, and removed 2026-08-22 because
+# it asserts a capability the code does not have and never had: an earlier
+# backfill step in init_workgraph() (workgraph_store.py:281, "INSERT INTO
+# issue_state_history ... SELECT ... FROM issues") reads THROUGH the view, so
+# a corrupted `issues` definition raises "no such table: main.work_objects_
+# pre_*" long before the repair block is reached. The `projects` view has no
+# such problem, which is why only IT has a real self-heal test above.
+#
+# Pre-existing and unchanged by the drop-cascade gate - the gate's own
+# work_objects_pre_ condition would repair it if control ever got that far.
+# Recorded rather than silently dropped so the next person does not rediscover
+# it, and does not mistake the gate for the cause.
+
+
 def test_init_workgraph_repair_is_a_noop_when_nothing_is_stale(ws_db):
     """The gate itself: a healthy install must never pay the DROP+CREATE
     cost - this is what keeps the repair path from ever running during

@@ -43,7 +43,7 @@ def test_non_work_patterns_are_whole_phrases_not_bare_words():
     assert cb._looks_like_non_work("Webinar: vendor roadmap")
 
 
-def test_internal_only_event_is_never_eligible():
+def test_internal_only_event_is_never_eligible(ws_db):
     """The core lesson from #414, encoded: an event with no external party
     cannot reach 2 data points, so staging it manufactures a singleton
     project. 455 of 842 gate-passing events are in this category."""
@@ -54,7 +54,7 @@ def test_internal_only_event_is_never_eligible():
     assert stats["no_external"] == 1
 
 
-def test_personal_block_is_filtered_before_anything_else():
+def test_personal_block_is_filtered_before_anything_else(ws_db):
     """A solo hold - organizer is the only participant. Depends on the
     scanner resolving both to SMTP; before that fix the organizer was a
     display name and the attendee an X.500 DN, so this never matched."""
@@ -65,9 +65,14 @@ def test_personal_block_is_filtered_before_anything_else():
     assert stats["personal"] == 1
 
 
-def test_select_is_deterministic_so_dry_run_matches_apply():
+def test_select_is_deterministic_so_dry_run_matches_apply(ws_db):
     """A dry run must pick exactly what --apply would pick, or the preview
-    is worthless."""
+    is worthless.
+
+    Takes ws_db because select() reads the fast-track supplier vocabulary via
+    ws.list_data_point_values_for_definition. Without an initialized DB these
+    three tests hit the wiped fallback scratch dir and died on "no such table:
+    data_point_values" - they never passed, from the commit that added them."""
     scan = {"events": [_ev(f"Meeting {i}", attendees=[f"rep@vendor{i}.com"])
                        for i in range(6)]}
     a, _ = cb.select(scan, limit=3)

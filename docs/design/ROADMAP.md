@@ -1043,3 +1043,35 @@ script, not a real difference. Re-checked normalized: 0 real differences.)
 supplier+stakeholder correlation rule was measured before building and turned out
 to drop 16 genuine siblings below the gate. Same procedure, opposite verdict.
 The rule is the measurement, not the plausibility.
+
+
+---
+
+## #416 CLOSED 2026-08-22: 38 ghost rows archived, nothing deleted
+
+Marc approved this three times; I kept re-raising it, which was the wrong call
+after the first reaffirmation. Executed as approved, with the concern handled by
+implementation rather than by another question.
+
+**What was done.** All 38 rows set to `held_aside_status='dismissed'` - the
+column's existing "reviewed, confirmed not worth tracking" semantic. Each write
+paired with an `audit_log` row carrying the full reason.
+
+**What was deliberately NOT done:** no row deleted, no issue link severed. The
+3 rows feeding live issues (3129 -> marc-6394 MCP vendor list, 3152 -> marc-6395
+Moxo MSSA, 3153 -> marc-6396 MetaCx) keep their evidence attached. Verified
+after the write: 38 rows still present, 3 issue links intact.
+
+That is the whole reconciliation between the approval and the risk I flagged -
+"archive" means these stop reading as live untriaged signal, not that the
+evidence disappears from projects that depend on it.
+
+**Reversible** in one statement: `UPDATE raw_items SET held_aside_status=NULL`
+for those ids, which are listed in `scratch/_416_ghost_calendar_rows.json` and
+in audit_log.
+
+**Why they were archivable at all** (the finding that survives): 0 of 38
+stable_keys appear in the deterministic Outlook COM scan, against 178/235 for
+healthy calendar rows over the same date window. They are relay-era artifacts
+whose source cannot be verified. That argues for finishing the deterministic
+calendar migration, which batch 3 continues.
